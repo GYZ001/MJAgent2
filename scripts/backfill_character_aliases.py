@@ -7,12 +7,12 @@
 调用方：负责从 DB 读出项目的 bible_json 与全部 chapters、调用回填/复核、把结果
 写回 DB。
 
-用法：
-    .venv/bin/python scripts/backfill_character_aliases.py --dry-run
-    .venv/bin/python scripts/backfill_character_aliases.py
+用法（--project 必填，无默认值——历史默认项目 proj_3ac0b627fa46 已随项目重建
+失效，写死一次就要再踩一次）：
     .venv/bin/python scripts/backfill_character_aliases.py --project proj_xxx --dry-run
-    .venv/bin/python scripts/backfill_character_aliases.py --reverify --dry-run
-    .venv/bin/python scripts/backfill_character_aliases.py --reverify
+    .venv/bin/python scripts/backfill_character_aliases.py --project proj_xxx
+    .venv/bin/python scripts/backfill_character_aliases.py --project proj_xxx --reverify --dry-run
+    .venv/bin/python scripts/backfill_character_aliases.py --project proj_xxx --reverify
 
 --dry-run 只调用模型 + 核验 + 打印将要登记/移除的别名（含证据/理由），不写库；
 不带 --dry-run 时才会把核验结果落库（bible_version 乐观并发 CAS，写入前检查该
@@ -46,7 +46,6 @@ from app import db  # noqa: E402
 from app.schemas import Bible  # noqa: E402
 from app.stages import backfill_character_aliases, reverify_character_aliases  # noqa: E402
 
-DEFAULT_PROJECT_ID = "proj_3ac0b627fa46"
 LOG_PATH = ROOT / "logs" / "backfill_character_aliases.log"
 
 # 判定"该项目当前有并发活动"的活跃状态集合——覆盖大小写是因为不同子系统的
@@ -350,8 +349,8 @@ def main() -> int:
         description="人物别名回填 / 复核（层一，一次性历史人物谱回填与历史批次复核）"
     )
     parser.add_argument(
-        "--project", default=DEFAULT_PROJECT_ID,
-        help=f"project_id（默认当前回归项目 {DEFAULT_PROJECT_ID}）",
+        "--project", default=None,
+        help="project_id（必填，无默认值——历史默认项目已随重建失效）",
     )
     parser.add_argument("--dry-run", action="store_true", help="只报告将登记/移除的别名，不写库")
     parser.add_argument(
@@ -360,6 +359,15 @@ def main() -> int:
              "（含裁决闸），不通过的移除并写库",
     )
     args = parser.parse_args()
+
+    if not args.project:
+        print(
+            "用法：.venv/bin/python scripts/backfill_character_aliases.py "
+            "--project <project_id> [--dry-run] [--reverify]\n"
+            "缺少 --project：历史默认项目 id 已随项目重建失效，必须显式指定目标项目。",
+            file=sys.stderr,
+        )
+        return 2
 
     logger = _setup_logging()
     mode = "reverify" if args.reverify else "backfill"

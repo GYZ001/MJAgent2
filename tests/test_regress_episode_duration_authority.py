@@ -95,7 +95,6 @@ def test_run_regression_copies_committed_wal_snapshot_before_mutation(
             "replay",
             lambda **_kwargs: {
                 "authoritative_target_duration_s": 60,
-                "authoritative_first_pass_budget_cny": 1.5,
                 "story_event_coverage": {"covered": 2, "total": 2},
                 "information_coverage": {"covered": 1, "total": 1},
                 "source_coverage": {"covered": 3, "total": 3},
@@ -116,7 +115,6 @@ def test_run_regression_copies_committed_wal_snapshot_before_mutation(
                 project_id="project-1",
                 copy_path=copy_db,
                 expected_duration_s=60,
-                expected_cost_cny=1.5,
                 expected_story_events=2,
                 expected_source_segments=3,
             )

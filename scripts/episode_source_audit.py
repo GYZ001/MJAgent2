@@ -70,10 +70,11 @@ scene_references、chapters 原文——重新核验一遍。
 输出：每集一张差异表（A 类逐条 + B 类逐条 + 通过项计数），末尾全局汇总。
 exit code：0=全清；1=存在 A 类（无论 B 类如何）；2=A 类全清但存在 B 类疑似。
 
-用法：
-    py scripts/episode_source_audit.py                       # 默认项目 EP1-10
+用法（--project 必填，无默认值——历史默认项目 proj_3ac0b627fa46 已随项目重建
+失效，写死一次就要再踩一次）：
+    py scripts/episode_source_audit.py --project P                    # EP1-10
     py scripts/episode_source_audit.py --project P --start 1 --end 20
-    py scripts/episode_source_audit.py --json out.json       # 附加写结构化结果
+    py scripts/episode_source_audit.py --project P --json out.json    # 附加写结构化结果
 """
 from __future__ import annotations
 
@@ -102,7 +103,6 @@ sys.path.insert(0, str(ROOT))
 from app.source_excerpt import SourceSegment, index_source_segments  # noqa: E402
 
 DEFAULT_DB_PATH = ROOT / "data" / "manju.db"
-DEFAULT_PROJECT_ID = "proj_3ac0b627fa46"
 DEFAULT_START_EPISODE = 1
 DEFAULT_END_EPISODE = 10
 DEFAULT_EVIDENCE_SAMPLE = 5
@@ -1457,7 +1457,10 @@ def _result_to_dict(result: EpisodeAuditResult) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="准备包 vs 小说原文 逐集对照审计（只读）")
-    parser.add_argument("--project", default=DEFAULT_PROJECT_ID, help="project_id")
+    parser.add_argument(
+        "--project", default=None,
+        help="project_id（必填，无默认值——历史默认项目已随重建失效）",
+    )
     parser.add_argument("--start", type=int, default=DEFAULT_START_EPISODE, help="起始集号（含）")
     parser.add_argument("--end", type=int, default=DEFAULT_END_EPISODE, help="结束集号（含）")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH, help="manju.db 路径")
@@ -1467,6 +1470,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json", type=Path, default=None, help="可选：把结构化结果写入该 JSON 文件")
     args = parser.parse_args(argv)
+
+    if not args.project:
+        print(
+            "用法：py scripts/episode_source_audit.py --project <project_id> "
+            "[--start N] [--end N] [--json out.json]\n"
+            "缺少 --project：历史默认项目 id 已随项目重建失效，必须显式指定目标项目。",
+            file=sys.stderr,
+        )
+        return 2
 
     conn = readonly_connection(args.db)
     try:

@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""「我欲封天」EP1→EP10 严格串行剧本生成驱动。
+"""EP1→EP10 严格串行剧本生成驱动（原为「我欲封天」专用，2026-09-01 起按项目名
+运行时解析，不再硬编码单一项目）。
 
-用法:
-    py scripts/yyft_serial10.py status
-    py scripts/yyft_serial10.py clear                # 仅清空本项目 EP1-EP10 的剧本数据
-    py scripts/yyft_serial10.py run                  # 默认=自动循环模式，见下
-    py scripts/yyft_serial10.py run --from EP4       # 首轮起点；仅对第 1 轮生效——
+用法（--project 必填，无默认值——模块内 EPISODES 是随某个已重建项目失效的历史
+硬编码值，见 resolve_project_episodes() docstring）:
+    py scripts/yyft_serial10.py status --project 我欲封天
+    py scripts/yyft_serial10.py clear --project 我欲封天    # 仅清空本项目 EP1-EP10 的剧本数据
+    py scripts/yyft_serial10.py run --project 我欲封天      # 默认=自动循环模式，见下
+    py scripts/yyft_serial10.py run --project 我欲封天 --from EP4
+                                                      # 首轮起点；仅对第 1 轮生效——
                                                       # 自动循环触发的每一轮之后都固定
                                                       # 从 EP1 重跑（协议要求），不续用
                                                       # 这个 --from
-    py scripts/yyft_serial10.py run --single-pass    # 退回旧的单轮语义：一集失败即停轮
+    py scripts/yyft_serial10.py run --project 我欲封天 --single-pass
+                                                      # 退回旧的单轮语义：一集失败即停轮
                                                       # 等人工 RCA，不自动重启/清库/重跑
                                                       # （测试、以及需要人工先看一眼再决定
                                                       # 要不要继续时用）
@@ -77,7 +81,11 @@ BASE = "http://127.0.0.1:8230"
 # 当 X-Manju-Session 头发出。已用新旧两个 token 分别对只读端点
 # （GET /api/system/jobs、/screenplay/status）验证过 200，写操作（含审批）的
 # 验证按约定留给正式回归的 clear 步骤。
-PROJECT_ID = "proj_3ac0b627fa46"
+# 历史硬编码值，随某个已重建项目失效（当前库零命中）；`tests/test_yyft_serial10_
+# *.py` 直接调用 cmd_run/classify_failure_family 等纯函数、从不经过 main()，
+# 保留这份常量不影响那些测试。真正要跑这个驱动时必须显式传 `--project`，
+# main() 会用 resolve_project_episodes() 的运行时解析结果整体替换这个列表
+# （同模块 global 重绑定，见该函数与 main() 里的 `global EPISODES`）。
 EPISODES = [
     ("EP1", "ep_3d523ff4d0a4"),
     ("EP2", "ep_94fc1dd627f5"),
@@ -202,6 +210,41 @@ def _readonly_conn(db_path: Path | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def resolve_project_episodes(selector: str, count: int = 10) -> list[tuple[str, str]]:
+    """按项目名（或 id）运行时解析该项目前 ``count`` 集，供 ``main()`` 的
+    ``--project`` 用来替换模块级 ``EPISODES`` 硬编码。
+
+    模块顶部硬编码的 ``proj_3ac0b627fa46`` 及其 10 个 ``ep_*`` id 已随项目重建
+    全部失效（当前库里零命中，见 docs/dead_code_locations_2026-08-30.md 的
+    2026-09-01 复核附录），直接跑 `main()` 会在第一次 HTTP 调用就打空。这里
+    按名字解析、绝不新写死一份 id：命中 0 个或多个都直接退出，避免猜错项目
+    悄悄跑掉几小时。
+    """
+    conn = _readonly_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, name FROM projects WHERE id=? OR (name=? AND deleted_at IS NULL)"
+            " ORDER BY id",
+            (selector, selector),
+        ).fetchall()
+        if not rows:
+            raise SystemExit(f"库里找不到项目：{selector!r}")
+        if len(rows) > 1:
+            matched = "、".join(f"{r['id']}({r['name']})" for r in rows)
+            raise SystemExit(f"项目 {selector!r} 命中多个，请改用 id：{matched}")
+        project_id = rows[0]["id"]
+        episodes = conn.execute(
+            "SELECT id, episode_no FROM episodes WHERE project_id=? AND episode_no<=? "
+            "ORDER BY episode_no",
+            (project_id, count),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not episodes:
+        raise SystemExit(f"项目 {selector!r}（{project_id}）没有任何分集")
+    return [(f"EP{row['episode_no']}", row["id"]) for row in episodes]
 
 
 def recent_failure_evidence(eid: str, since: float) -> str:
@@ -1147,7 +1190,23 @@ def main() -> int:
         help="run 命令退回旧的单轮语义：失败即停轮，不自动重启后端/清库/重跑"
              "（默认=自动循环模式，见 cmd_run docstring）。",
     )
+    parser.add_argument(
+        "--project", default=None,
+        help="项目名或 id（必填，无默认值）。模块内 EPISODES 是随某个已重建项目"
+             "失效的历史硬编码值，此参数运行时解析目标项目的 EP1-EP10 并整体替换它。",
+    )
     args = parser.parse_args()
+    if not args.project:
+        print(
+            "用法：.venv/bin/python scripts/yyft_serial10.py "
+            "<status|clear|run|verify> --project <项目名或 id>\n"
+            "缺少 --project：模块内硬编码的历史项目/分集 id 已随项目重建失效，"
+            "必须显式指定目标项目。",
+            file=sys.stderr,
+        )
+        return 2
+    global EPISODES
+    EPISODES = resolve_project_episodes(args.project)
     return {
         "status": cmd_status, "clear": cmd_clear,
         "run": cmd_run, "verify": cmd_verify,

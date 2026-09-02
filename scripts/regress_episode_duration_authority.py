@@ -38,7 +38,6 @@ from app.storyboard_authority import (
     persist_storyboard_outline_authority,
     resolve_storyboard_outline_authority,
 )
-from app.video_plan import authoritative_storyboard_plan_cost
 from scripts.replay_episode_artifact import replay
 
 # app.db.init_db() (called below) looks up its per-table bootstrap steps by
@@ -204,7 +203,6 @@ def run_regression(
     project_id: str | None,
     copy_path: Path | None,
     expected_duration_s: int,
-    expected_cost_cny: float,
     expected_story_events: int,
     expected_source_segments: int,
 ) -> dict:
@@ -225,8 +223,6 @@ def run_regression(
     checks = {
         "duration": replay_result["authoritative_target_duration_s"]
         == expected_duration_s,
-        "cost": replay_result["authoritative_first_pass_budget_cny"]
-        == expected_cost_cny,
         "story_events": replay_result["story_event_coverage"]
         == {"covered": expected_story_events, "total": expected_story_events},
         "source_segments": (
@@ -435,22 +431,17 @@ def run_regression(
         contract_version=contract_version,
         qa_profile_version="storyboard-full-gate-2",
     )
-    cost_basis = authoritative_storyboard_plan_cost(
-        episode_id,
-        conn=conn,
-    )
-    grant, _token = issue_video_completion_grant(
+    # Grant issuance is exercised for its own regression value (must not
+    # raise); no field of the returned grant feeds into a check any more
+    # (cost/budget gating retired — see CLAUDE.md「Retiring Features」).
+    issue_video_completion_grant(
         episode_id=episode_id,
         project_id=str(episode_before["project_id"]),
         storyboard_artifact_id=publish_result["artifact_id"],
         shots_total=len(board.shots),
     )
-    if (
-        restarted.authoritative_duration_s != expected_duration_s
-        or cost_basis["estimated_cost_cny"] != expected_cost_cny
-        or grant.budget_cap_cny != expected_cost_cny
-    ):
-        raise RuntimeError("copied DB authority/cost/grant regression mismatch")
+    if restarted.authoritative_duration_s != expected_duration_s:
+        raise RuntimeError("copied DB authority regression mismatch")
     provider_calls_made = int(conn.execute(
         "SELECT COUNT(*) FROM provider_calls WHERE id>?",
         (snapshot_validation["provider_call_max_id"],),
@@ -479,9 +470,7 @@ def run_regression(
         "authoritative_duration_s": restarted.authoritative_duration_s,
         "outline_revision": restarted.revision,
         "outline_fingerprint": restarted.fingerprint,
-        "shot_count": cost_basis["shot_count"],
-        "video_plan_cost_cny": cost_basis["estimated_cost_cny"],
-        "grant_budget_cap_cny": grant.budget_cap_cny,
+        "shot_count": len(board.shots),
         "story_event_coverage": replay_result["story_event_coverage"],
         "information_coverage": replay_result["information_coverage"],
         "source_coverage": {
@@ -499,7 +488,6 @@ def main() -> None:
     parser.add_argument("--project-id")
     parser.add_argument("--copy", type=Path)
     parser.add_argument("--expected-duration-s", type=int, required=True)
-    parser.add_argument("--expected-cost-cny", type=float, required=True)
     parser.add_argument("--expected-story-events", type=int, required=True)
     parser.add_argument("--expected-source-segments", type=int, required=True)
     args = parser.parse_args()
@@ -509,7 +497,6 @@ def main() -> None:
         project_id=args.project_id,
         copy_path=args.copy,
         expected_duration_s=args.expected_duration_s,
-        expected_cost_cny=args.expected_cost_cny,
         expected_story_events=args.expected_story_events,
         expected_source_segments=args.expected_source_segments,
     )

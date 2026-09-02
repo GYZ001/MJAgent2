@@ -266,6 +266,59 @@
 - `app/domain/storyboard_ops/episode_detail.py:229`：注释提及已删的 `compute_narrative_metrics`。
 - `app/media_exec/run_job.py:670`：注释提及已删的 `VIDEO_POLL_BUDGET`。
 
+---
+
+## 七、2026-09-01 复核：第三节「团队标注误判保留」/「观察项」脚本处置
+
+复核第三节列出的 `scripts/yyft_serial10.py`（团队标注误判保留）、
+`scripts/verify_episode_binding.py`（团队标注误判保留）、
+`scripts/backfill_character_aliases.py`（观察项），以及本文档 6.3 已记录的
+`scripts/episode_source_audit.py`，四者都硬编码失效的 `proj_3ac0b627fa46`
+（或该项目下的 `ep_*` id）。本轮逐一核实并处置：
+
+- **`scripts/yyft_serial10.py`：确认「团队标注误判保留」成立，不删。** 全仓 grep
+  发现 `tests/test_yyft_serial10_failure_triage.py`、
+  `tests/test_yyft_serial10_auto_cycle.py`、
+  `tests/test_yyft_serial10_code_fingerprint.py`、
+  `tests/test_yyft_serial10_retry_grant.py` 四个文件、合计 1504 行，直接
+  `from scripts import yyft_serial10` 并调用其纯逻辑（`classify_failure_family`
+  失败三族分诊、`cmd_run` 的重试阶梯/自动重启循环、`restart_backend` 的代码指纹
+  自愈护栏、`is_retry_grant_category`），全部通过 `monkeypatch` 隔离，与
+  `PROJECT_ID`/`EPISODES` 的具体取值无关——这与派单原假设「完全跑不起来、
+  run_first10_videos.py 已现役替代、可整文件删除」矛盾：删除会打断这 1504 行
+  测试（且这些测试不在本轮任何代理的文件所有权范围内），而 `run_first10_videos.py`
+  也不具备 yyft_serial10.py 的失败分诊三族/自动重启+清库+重跑循环/
+  GEN-RETRY-GRANT 识别这套协议，二者并非同类替代关系。真正的缺陷范围更窄：
+  未使用的 `PROJECT_ID` 常量（已删，全仓零引用）、以及 `main()` 里没有
+  `--project` 覆盖入口（已加：新增 `resolve_project_episodes()` 运行时按项目名/id
+  解析 EP1-EP10，`main()` 用同模块 `global EPISODES` 重绑定整体替换模块级硬编码
+  列表；`--project` 现为必填，缺省时打印中文用法说明并 `SystemExit(2)`）。四个
+  测试文件全部通过 `cmd_run(SimpleNamespace(...))` 直接调用、不经过 `main()`，
+  改动不影响它们。
+- **`scripts/verify_episode_binding.py`：删除 `DEFAULT_PROJECT_ID`，`--project`
+  改为必填**（缺省时打印中文用法说明 + `SystemExit(2)`）。`--episodes`/`--expect`
+  的默认值（EP1/EP2/EP5/EP6、许清/李富贵）仍是历史项目的人设，已在 docstring
+  标注换项目时需一并用 `--episodes`/`--expect` 覆盖，本轮不改这两个默认值本身
+  （不在派单范围内，且它们本身不是「失效硬编码」，只是与失效项目绑定的示例值）。
+- **`scripts/backfill_character_aliases.py`：删除 `DEFAULT_PROJECT_ID`，`--project`
+  改为必填**，观察项状态解除。
+- **`scripts/episode_source_audit.py`：同上处置**，`DEFAULT_PROJECT_ID` 已删、
+  `--project` 改为必填。
+- **`scripts/run_ep1_all_projects.py`：硬编码的四组
+  `(项目名, project_id, episode_id)` 全部失效**（"王六郎"/"罗刹海市"/"黄英"
+  在当前库里完全不存在，"我欲封天" 的 id 也已随重建改变），派单要求「若脚本
+  其余逻辑依赖已删符号无法运行，则整文件删除」，但实测脚本主体逻辑（人物谱→
+  定妆→场景库→场景图→映射台→分镜台→生成台七阶段驱动、限流分类重试、状态文件
+  合并）不依赖任何已删的 app 符号，只是入口处的项目/分集列表写死——因此改为
+  运行时按项目名/id 解析（新增 `resolve_projects()`），`run`/`status`/`report`
+  三个子命令的 `--projects` 均改为必填（无默认值，避免再写死一份「当前四个
+  项目」）。已用现役项目 `我欲封天`（`proj_f8cf2eeb2e66`）实测 `status` 子命令
+  端到端跑通。
+- **`scripts/yyft_serial10.py`（补充）与 `scripts/watch_bible_run.py`**：
+  `watch_bible_run.py:11` 的 `DB_PATH = "data/manju.db"` 改为
+  `from app.config import DB_PATH`，不再另起一份硬编码路径；已用现役项目实测
+  `python scripts/watch_bible_run.py proj_f8cf2eeb2e66` 正常输出。
+
 ### 说明：本轮重构未发现新增死代码的范围
 
 软删除/回收站（后端路由+handler+core+自动清理 loop+前端 Studio 回收站按钮全链路接线完整）、架构度量与三道闸门工具（`arch_graph.py`/`check_file_conventions.py` 均由 `verify.py --full` 可达）、四个 domain 真包拆分（`bible_ops`/`screenplay_ops`/`storyboard_ops`/`video_ops` 共 495 个 re-export 两轮 AST 扫描 0 孤儿）、费用确认弹窗前端下线（后端两段式报价确认端点仍在用，前端替代逻辑已接线）——均未产生新死代码。

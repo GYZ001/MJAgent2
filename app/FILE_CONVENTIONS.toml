@@ -61,59 +61,55 @@ max_lines_tests = 500
 
 [baseline.line_count]
 "app/agent/orchestrator.py" = 616
-"app/api.py" = 1087
+"app/api.py" = 1085
 "app/artifacts.py" = 1375
 "app/capabilities/bus.py" = 560
-"app/capabilities/preflight.py" = 1388
-"app/compiler.py" = 1781
-"app/config.py" = 613
+"app/capabilities/preflight.py" = 1308
+"app/compiler.py" = 1664
+"app/config.py" = 612
 "app/continuity.py" = 1795
 # 2026-08-30 +25：新增 payment_orders 迁移（微信/支付宝订单表，见
 # app/payments/ 模块文档）。MIGRATIONS 是只增不减的历史迁移账本，行数增长
 # 是这类文件的正常形态，不是需要拆解的膨胀——与"巨型函数分解"那类因为拒绝拆
 # 解而上调基线的情况不是同一性质，不违反棘轮"只降不升"守的是设计质量维度。
 "app/db.py" = 3535
-"app/delivery.py" = 1954
-"app/domain/__init__.py" = 1092
-"app/domain/bible_ops/precheck.py" = 543
+"app/delivery.py" = 1460
+"app/domain/__init__.py" = 1090
+"app/domain/bible_ops/precheck.py" = 517
 "app/domain/bible_ops/view_redo.py" = 534
 "app/domain/common.py" = 1023
-"app/domain/review_wall.py" = 1080
+"app/domain/review_wall.py" = 1078
 "app/domain/screenplay_ops/activation.py" = 529
 "app/domain/screenplay_ops/edit.py" = 527
-"app/domain/screenplay_ops/status_snapshot.py" = 498
 "app/domain/storyboard_ops/clear_apply.py" = 507
 "app/domain/storyboard_ops/evidence.py" = 504
 "app/domain/storyboard_ops/task_body.py" = 560
-"app/domain/video_ops/completion_core.py" = 576
-"app/domain/video_ops/confirm_episode.py" = 561
-"app/domain/video_ops/confirmation_eval.py" = 550
-"app/domain/video_ops/generate.py" = 547
-"app/domain/video_ops/project_queue_complete.py" = 526
-"app/evidence/media.py" = 563
+"app/domain/video_ops/completion_core.py" = 562
+"app/domain/video_ops/confirm_episode.py" = 558
+"app/domain/video_ops/confirmation_eval.py" = 548
+"app/domain/video_ops/generate.py" = 545
+"app/evidence/media.py" = 559
 "app/evidence/repository.py" = 1242
 "app/final_edit.py" = 574
 "app/harness/model_gateway.py" = 980
-"app/hiagent.py" = 3150
+"app/hiagent.py" = 3149
 "app/identity_adjudication.py" = 758
 "app/identity_contracts.py" = 806
 "app/loops/base.py" = 547
-"app/media_exec/__init__.py" = 509
 "app/media_exec/checkpoints.py" = 517
 "app/media_exec/concat.py" = 1416
-"app/media_exec/enqueue.py" = 2255
+"app/media_exec/enqueue.py" = 1566
 "app/media_exec/input_first_frame_last.py" = 565
 "app/media_exec/input_reference.py" = 507
-"app/media_exec/run_job.py" = 1060
+"app/media_exec/run_job.py" = 871
 "app/minimax_h3.py" = 1581
-"app/multiview.py" = 2251
+"app/multiview.py" = 2195
 "app/narrative_blueprint/models_core.py" = 552
 "app/narrative_outline.py" = 792
 "app/narrative_priority.py" = 1078
 "app/narrative_repair.py" = 1136
-"app/observability/api.py" = 2418
-"app/orchestration/api.py" = 1762
-"app/orchestration/media_scheduler.py" = 527
+"app/observability/api.py" = 2334
+"app/orchestration/api.py" = 1744
 # 2026-08-30 +1：本文件是全包唯一稳定入口，docstring 自己要求"新增符号必须
 # 显式再导出"——新增 current_portrait_ref（映射台/分镜台/生成台按集解析当前
 # 定妆照，与生成侧 portrait_for_episode 共用同一份判据）必然让这里净增 1 行
@@ -127,23 +123,22 @@ max_lines_tests = 500
 # 见该文件 docstring），腾出空间给 K/N/F 显式形状示例，修复 ERR-20260901-
 # cfff07 / ERR-20260901-dded96。
 "app/portraits/discovery_legacy.py" = 857
-"app/portraits/identity_response_projection.py" = 722
+"app/portraits/identity_response_projection.py" = 720
 "app/portraits/portrait_drift.py" = 548
 "app/portraits/portrait_io.py" = 600
 "app/portraits/resolution_apply_screenplay.py" = 591
 "app/portraits/structural_coverage.py" = 575
-"app/portraits/structural_coverage_audit.py" = 838
 "app/portraits/structural_coverage_ensure.py" = 556
-"app/production/certificate.py" = 780
+"app/production/certificate.py" = 757
 "app/production/patch.py" = 1072
 "app/production/prep_pack/contracts.py" = 1128
 "app/production/prep_pack/resolve_assets.py" = 1043
-"app/production/publish.py" = 820
-"app/production/revision.py" = 1987
-"app/production/screenplay_authority.py" = 2529
+"app/production/publish.py" = 814
+"app/production/revision.py" = 1977
+"app/production/screenplay_authority.py" = 2502
 "app/production/screenplay_document.py" = 1704
 "app/production/screenplay_repair/llm_field_patch.py" = 593
-"app/production/storyboard_pack.py" = 2085
+"app/production/storyboard_pack.py" = 2073
 # 2.1.0（对白台账/必保台词/受控画外音/镜头数放宽）：方言约束两段指令文本 +
 # _dialect_for_target_video_model 拆到新模块 app.production.storyboard_dialects，
 # 腾出的行数让本文件净减 1 行（2087→2086）——棘轮只降不升，收紧后如实记账。
@@ -151,25 +146,22 @@ max_lines_tests = 500
 # storyboard_dialogue_ledger.py，本文件只加一条 changelog、压缩几处旧注释
 # 腾行数，净变化后实测再降 1 行（2086→2085）。
 "app/quota.py" = 559
-"app/refs.py" = 548
-"app/scenes.py" = 1791
+"app/refs.py" = 542
+"app/scenes.py" = 1741
 "app/screenplay_ir/prompt_context.py" = 517
 "app/screenplay_scene_shards/generate_shards.py" = 603
 "app/screenplay_scene_shards/input_contracts.py" = 599
 "app/screenplay_scene_shards/semantic_review.py" = 619
 "app/spoken_contract.py" = 619
-"app/stages/alias_backfill.py" = 599
 "app/stages/alias_verdict.py" = 508
 "app/stages/blueprint_budget.py" = 545
 "app/stages/blueprint_generate_sharded.py" = 652
 "app/stages/blueprint_repair.py" = 545
-"app/stages/roster_recurring.py" = 627  # 2026-08-31 棘轮收紧（650→627）：准入门槛与
 # 分块规划拆到 roster_admission.py / roster_chunk_plan.py
-"app/stages/screenplay_generate.py" = 612
-"app/storyboard_authority.py" = 583
-"app/storyboard_supervisor.py" = 1622
-"app/storyboard_workspace.py" = 973
-"app/system_api.py" = 2410
+"app/storyboard_authority.py" = 555
+"app/storyboard_supervisor.py" = 1620
+"app/storyboard_workspace.py" = 947
+"app/system_api.py" = 2282
 "app/validators/dialogue_chains.py" = 553
 "app/validators/outline_dialogue.py" = 566
 "app/validators/prep_pack_ledger.py" = 647
@@ -179,11 +171,11 @@ max_lines_tests = 500
 # 措辞（受控画外音），净变化后实测降到 675（676→675）——棘轮只降不升。
 "app/validators/storyboard_delivery.py" = 526
 "app/video_modes/seedance_pack.py" = 523
-"app/video_plan/generate.py" = 689
+"app/video_plan/generate.py" = 685
 "app/video_prompt_ai.py" = 603
-"app/video_supervisor/run_loop.py" = 604
+"app/video_supervisor/run_loop.py" = 514
 "frontend/src/App.tsx" = 1525
-"frontend/src/api/projects.ts" = 407
+"frontend/src/api/projects.ts" = 398
 # 2026-08-30 +10：用户拍板"映射台/分镜台/生成台按身份实时解析当前定妆照"，
 # PrepPackCharacterAsset 新增 current_portrait_id/current_portrait_image_url
 # 两个展示字段（后端 app/domain/storyboard_ops/current_portraits.py 现算，不
@@ -196,13 +188,12 @@ max_lines_tests = 500
 
 # 2026-09-01 340 -> 166：映射包（EpisodePrepPack / PrepPack*）契约类型整体拆到
 # 同目录 prepPack.ts（195 行，默认阈值内，不进基线），棘轮随拆分收紧。
-"frontend/src/api/screenplay.ts" = 166
 "frontend/src/components/EpisodeCrumb.tsx" = 301
-"frontend/src/components/observability/TraceDrawer.tsx" = 834
+"frontend/src/components/observability/TraceDrawer.tsx" = 827
 # 2026-08-31 棘轮收紧（1772→1766）：占位四态改造把 characterIsFitting 从本文件
 # 挪到 lib/bibleAssets.ts（跨页复用改成共享同一份判据，不留第二份实现），本文件
 # 改重新导出，净减少 6 行——拆小了就把数字调小。
-"frontend/src/pages/BiblePage.tsx" = 1766
+"frontend/src/pages/BiblePage.tsx" = 1765
 # 2026-08-31「传入素材」展示重做：StoryboardPackResourceRoster 的四态测试搬到
 # components/SegmentResourcePanel.test.ts（两页共用一份组件，不再各测一遍），
 # 407 -> 363，棘轮收紧。
@@ -212,42 +203,41 @@ max_lines_tests = 500
 # 调用点，1374 -> 1243，棘轮收紧。
 "frontend/src/pages/BoardPage.tsx" = 1243
 "frontend/src/pages/CinemaPage.tsx" = 931
-"frontend/src/pages/EpisodesPage.tsx" = 741
+"frontend/src/pages/EpisodesPage.tsx" = 736
 "frontend/src/pages/MonitorPage.test.ts" = 313
 "frontend/src/pages/MonitorPage.tsx" = 874
-"frontend/src/pages/ScenesPage.tsx" = 1066
-"frontend/src/pages/ScriptPage.render.test.ts" = 523
+"frontend/src/pages/ScenesPage.tsx" = 1065
+"frontend/src/pages/ScriptPage.render.test.ts" = 521
 # 2026-08-31 +50：PrepPackView 定妆照占位四态新增测试覆盖，同 BoardPage.test.ts 注释。
-"frontend/src/pages/ScriptPage.test.ts" = 1162
+"frontend/src/pages/ScriptPage.test.ts" = 1090
 # 2026-08-31：映射台入口审计——预检弹窗拆到 components/script/PrepPackPreviewDialog.tsx，
 # 净减少的行数换来给"发现新资源/索引历史资源"补文案和结果摘要的空间，950→926。
-"frontend/src/pages/ScriptPage.tsx" = 926
+"frontend/src/pages/ScriptPage.tsx" = 920
 "frontend/src/pages/Studio.tsx" = 430
 # 2026-08-31「传入素材」展示重做：SegmentResourceRoster 的四态测试搬到
 # components/SegmentResourcePanel.test.ts，同 BoardPage.test.ts 注释，390 -> 345。
-"frontend/src/pages/WallPage.test.ts" = 345
+"frontend/src/pages/WallPage.test.ts" = 304
 # 2026-08-31「传入素材」展示重做（用户拍板）：素材条/素材详情合并进
 # components/SegmentResourcePanel.tsx，「视频下方参考图带标签」拆到
 # components/GenerationReferenceGallery.tsx，referenceImageLabel 挪到
 # lib/bibleAssets.ts，964 -> 837，棘轮收紧。
-"frontend/src/pages/WallPage.tsx" = 837
+"frontend/src/pages/WallPage.tsx" = 788
 "frontend/src/pages/monitor/CallsSection.tsx" = 397
-"frontend/src/pages/monitor/JobDrawer.tsx" = 318
+"frontend/src/pages/monitor/JobDrawer.tsx" = 317
 "frontend/src/pages/monitor/JobsSection.tsx" = 384
 "frontend/src/pages/monitor/SettingsSection.tsx" = 376
 "frontend/src/pages/monitor/models/useModelCenterState.ts" = 333
-"frontend/src/pages/monitor/shared.tsx" = 381
+"frontend/src/pages/monitor/shared.tsx" = 377
 
 [baseline.function_lines]
 "app/agent/orchestrator.py" = 67
-"app/agent_api.py" = 61
 "app/artifacts.py" = 125
 "app/auth/admin_api.py" = 67
 "app/benchmarks.py" = 100
 "app/capabilities/bus.py" = 96
-"app/capabilities/catalog.py" = 164
+"app/capabilities/catalog.py" = 155
 "app/capabilities/commands/account.py" = 66
-"app/capabilities/commands/bible.py" = 122
+"app/capabilities/commands/bible.py" = 81
 "app/capabilities/commands/delivery.py" = 73
 "app/capabilities/commands/project.py" = 72
 "app/capabilities/commands/scene.py" = 75
@@ -258,7 +248,7 @@ max_lines_tests = 500
 "app/capabilities/handlers/delivery.py" = 60
 "app/capabilities/handlers/project.py" = 100
 "app/capabilities/handlers/screenplay.py" = 56
-"app/capabilities/handlers/video.py" = 86
+"app/capabilities/handlers/video.py" = 84
 "app/capabilities/idempotency.py" = 65
 "app/capabilities/preflight.py" = 172
 "app/compiler.py" = 461
@@ -267,24 +257,23 @@ max_lines_tests = 500
 # line_count 条目已删除：8 个子模块最大 463 行，全部在默认 500 以内。
 # 每条仍是欠账不是许可——grants_issue.py 的 205 就是原来那个最大函数
 # （issue_video_completion_grant），只是不再拖着 2400 行陪葬。
-"app/completion_grant/budget_authority.py" = 73
-"app/completion_grant/budget_claims.py" = 141
-"app/completion_grant/grants_api.py" = 128
-"app/completion_grant/grants_issue.py" = 205
+"app/completion_grant/budget_claims.py" = 121
+"app/completion_grant/grants_api.py" = 103
+"app/completion_grant/grants_issue.py" = 161
 "app/completion_grant/ledger.py" = 100
 "app/completion_grant/qualification.py" = 103
 "app/completion_grant/reconcile.py" = 128
 "app/continuity.py" = 138
 "app/db.py" = 266
-"app/delivery.py" = 689
+"app/delivery.py" = 317
 "app/domain/bible_ops/auto_change.py" = 213
 "app/domain/bible_ops/edit.py" = 125
 "app/domain/bible_ops/portrait_candidates.py" = 68
-"app/domain/bible_ops/precheck.py" = 120
+"app/domain/bible_ops/precheck.py" = 110
 "app/domain/bible_ops/refs_generation.py" = 85
-"app/domain/bible_ops/scene_assets.py" = 79
+"app/domain/bible_ops/scene_assets.py" = 69
 "app/domain/bible_ops/scene_bible_prep.py" = 70
-"app/domain/bible_ops/scene_refs.py" = 62
+"app/domain/bible_ops/scene_refs.py" = 60
 "app/domain/bible_ops/style_and_drafts.py" = 117
 "app/domain/bible_ops/task_recovery.py" = 73
 "app/domain/bible_ops/task_run.py" = 99
@@ -292,7 +281,7 @@ max_lines_tests = 500
 "app/domain/common.py" = 134
 "app/domain/projects/bible_attachments.py" = 100
 "app/domain/projects/create.py" = 69
-"app/domain/projects/detail.py" = 201
+"app/domain/projects/detail.py" = 183
 "app/domain/projects/episode_delete.py" = 56
 "app/domain/projects/episode_renumber.py" = 98
 "app/domain/projects/evidence.py" = 159
@@ -305,7 +294,6 @@ max_lines_tests = 500
     # 12），基线随函数一起转移，不是新增欠账
 "app/domain/screenplay_ops/delete.py" = 120
 "app/domain/screenplay_ops/edit.py" = 334
-"app/domain/screenplay_ops/guarded.py" = 52
 "app/domain/screenplay_ops/preflight.py" = 91
 "app/domain/screenplay_ops/repair.py" = 238
 "app/domain/screenplay_ops/run_control.py" = 101
@@ -317,12 +305,12 @@ max_lines_tests = 500
 "app/domain/storyboard_ops/clear_apply.py" = 253
 "app/domain/storyboard_ops/clear_preview.py" = 55
 "app/domain/storyboard_ops/edit_shot.py" = 395
-"app/domain/storyboard_ops/episode_detail.py" = 286
+"app/domain/storyboard_ops/episode_detail.py" = 272
 "app/domain/storyboard_ops/evidence.py" = 186
 "app/domain/storyboard_ops/public_shot_versions.py" = 124
-"app/domain/storyboard_ops/resume_state.py" = 113
+"app/domain/storyboard_ops/resume_state.py" = 112
 "app/domain/storyboard_ops/scene_projection.py" = 72
-"app/domain/storyboard_ops/shot_edit_session.py" = 81
+"app/domain/storyboard_ops/shot_edit_session.py" = 77
 "app/domain/storyboard_ops/spoken_contract.py" = 54
 "app/domain/storyboard_ops/staleness.py" = 69
 "app/domain/storyboard_ops/start_resume.py" = 149
@@ -335,25 +323,25 @@ max_lines_tests = 500
 "app/domain/video_ops/adopt.py" = 93
 "app/domain/video_ops/capability.py" = 98
 "app/domain/video_ops/completion_contract.py" = 144
-"app/domain/video_ops/completion_core.py" = 415
-"app/domain/video_ops/confirm_episode.py" = 320
-"app/domain/video_ops/confirmation_eval.py" = 237
+"app/domain/video_ops/completion_core.py" = 403
+"app/domain/video_ops/confirm_episode.py" = 317
+"app/domain/video_ops/confirmation_eval.py" = 235
 "app/domain/video_ops/confirmation_gate.py" = 87
-"app/domain/video_ops/generate.py" = 310
-"app/domain/video_ops/misc.py" = 76
+"app/domain/video_ops/generate.py" = 308
+"app/domain/video_ops/misc.py" = 71
 "app/domain/video_ops/plan.py" = 89
-"app/domain/video_ops/project_queue_complete.py" = 477
+"app/domain/video_ops/project_queue_complete.py" = 401
 "app/domain/video_ops/project_queue_core.py" = 61
-"app/domain/video_ops/project_queue_run.py" = 97
-"app/domain/video_ops/resume_episode.py" = 68
+"app/domain/video_ops/project_queue_run.py" = 86
+"app/domain/video_ops/resume_episode.py" = 63
 "app/downstream_authority.py" = 98
 "app/errors.py" = 64
-"app/evidence/media.py" = 89
+"app/evidence/media.py" = 88
 "app/evidence/repository.py" = 120
 "app/final_edit.py" = 82
 "app/harness/model_gateway.py" = 326
-"app/hiagent.py" = 224
-"app/identity_adjudication.py" = 293
+"app/hiagent.py" = 211
+"app/identity_adjudication.py" = 292
 "app/identity_authority.py" = 189
 "app/identity_contracts.py" = 159
 "app/ingest.py" = 60
@@ -363,20 +351,19 @@ max_lines_tests = 500
 "app/media_exec/checkpoints.py" = 78
 "app/media_exec/concat.py" = 335
 "app/media_exec/dispatch.py" = 179
-"app/media_exec/enqueue.py" = 743
+"app/media_exec/enqueue.py" = 195
 "app/media_exec/input_boundary.py" = 57
 "app/media_exec/input_first_frame_last.py" = 409
 "app/media_exec/input_reference.py" = 423
 "app/media_exec/input_video_mode.py" = 98
-"app/media_exec/job_recovery.py" = 147
+"app/media_exec/job_recovery.py" = 145
 "app/media_exec/reference_progress.py" = 56
-"app/media_exec/retry_scheduling.py" = 51
-"app/media_exec/run_job.py" = 727
+"app/media_exec/run_job.py" = 544
 "app/media_exec/worker_loop.py" = 54
 "app/media_pipeline/reference_store.py" = 169
 "app/media_pipeline/scheduler.py" = 74
 "app/media_pipeline/stage_state.py" = 68
-"app/media_pipeline/status.py" = 195
+"app/media_pipeline/status.py" = 193
 "app/minimax_h3.py" = 225
 "app/model_migration.py" = 80
 "app/monitoring.py" = 63
@@ -418,15 +405,15 @@ max_lines_tests = 500
 "app/observability/api.py" = 404
 "app/orchestration/api.py" = 116
 "app/orchestration/engine.py" = 77
-"app/orchestration/media_runs.py" = 80
+"app/orchestration/media_runs.py" = 76
 "app/orchestration/media_scheduler.py" = 195
 "app/planning.py" = 75
-"app/portraits/cards.py" = 238
+"app/portraits/cards.py" = 232
 "app/portraits/cards_ensure.py" = 213
 # 2026-09-01 新增：从 discovery_legacy.py 拆出的 current-identity schema+
 # prompt 组装函数，同 future_identity_prompt.py 一样是「一个大 prompt 模板
 # 字符串」，超默认单函数 50 行是这类纯组装函数的固有形态，不是逻辑复杂度。
-"app/portraits/current_identity_prompt.py" = 122
+"app/portraits/current_identity_prompt.py" = 85
 "app/portraits/discovery.py" = 217
 "app/portraits/discovery_fragments.py" = 89
 # 2026-09-01 棘轮收紧（696→591）：prompt 组装段拆出后，本文件最长函数
@@ -441,7 +428,7 @@ max_lines_tests = 500
 "app/portraits/future_identity_resolution.py" = 133
 "app/portraits/future_identity_response_contract.py" = 141
 "app/portraits/future_identity_response_decisions.py" = 102
-"app/portraits/identity_response_projection.py" = 502
+"app/portraits/identity_response_projection.py" = 499
 "app/portraits/identity_schemas.py" = 53
 "app/portraits/portrait_drift.py" = 211
 "app/portraits/portrait_io.py" = 154
@@ -450,7 +437,7 @@ max_lines_tests = 500
 "app/portraits/resolution_errors.py" = 101
 "app/portraits/resolution_store.py" = 178
 "app/portraits/structural_coverage.py" = 70
-"app/portraits/structural_coverage_audit.py" = 771
+"app/portraits/structural_coverage_audit.py" = 100
 "app/portraits/structural_coverage_ensure.py" = 475
 "app/production/certificate.py" = 140
 "app/production/grant.py" = 57
@@ -486,8 +473,8 @@ max_lines_tests = 500
 "app/production/screenplay_repair/preflight.py" = 154
 "app/production/screenplay_repair/qa.py" = 217
 "app/production/screenplay_repair/revalidate_resume.py" = 328
-"app/production/storyboard_pack.py" = 182
-"app/provider_task_clearance.py" = 258  # _provider_task_clearance_evaluation，
+"app/production/storyboard_pack.py" = 155
+"app/provider_task_clearance.py" = 257  # _provider_task_clearance_evaluation，
     # 从 app/completion_grant.py 按原样搬移（2026-08-30，层号治理，见
     # app/LAYERS.toml 组 5），基线随函数一起转移，不是新增欠账。
     # 2026-08-30 由 324 降到 258：作用域构建（四种范围翻译成 SQL 子句）抽到了
@@ -549,9 +536,7 @@ max_lines_tests = 500
 "app/spoken_contract.py" = 71
 "app/stages/alias_backfill.py" = 97
 "app/stages/alias_verdict.py" = 87
-"app/stages/bible_generate.py" = 91
-"app/stages/bible_paratext.py" = 56
-"app/stages/bible_supplement.py" = 97
+"app/stages/bible_generate.py" = 54
 "app/stages/blueprint_budget.py" = 186
 "app/stages/blueprint_budget_trace.py" = 103
 "app/stages/blueprint_checkpoint.py" = 331
@@ -576,20 +561,12 @@ max_lines_tests = 500
 "app/stages/blueprint_semantic_review_round.py" = 85
 "app/stages/blueprint_shard_structure.py" = 100
 "app/stages/common.py" = 306
-"app/stages/ir_complete.py" = 388
-"app/stages/ir_patch.py" = 142
-"app/stages/ir_snapshot.py" = 156
-"app/stages/roster_merge.py" = 120
-"app/stages/roster_personhood.py" = 71
-"app/stages/roster_recurring.py" = 319
-"app/stages/roster_truename.py" = 87
-"app/stages/screenplay_generate.py" = 445
 "app/stages/status_facts_backfill.py" = 132
 "app/stages/status_facts_verdict.py" = 62
 "app/storyboard_authority.py" = 157
 "app/storyboard_supervisor.py" = 501
-"app/storyboard_workspace.py" = 117
-"app/system_api.py" = 505
+"app/storyboard_workspace.py" = 115
+"app/system_api.py" = 450
 "app/validators/continuity_gate.py" = 66
 "app/validators/dialogue_chains.py" = 299
 "app/validators/ending_hook.py" = 55
@@ -604,9 +581,8 @@ max_lines_tests = 500
 "app/validators/storyboard_core.py" = 485
 "app/validators/storyboard_delivery.py" = 182
 "app/video_command_operations.py" = 115
-"app/video_cost_model.py" = 55
 "app/video_crop.py" = 81
-"app/video_issues.py" = 151
+"app/video_issues.py" = 132
 "app/video_modes/asset_lookup.py" = 72
 "app/video_modes/continuity_tail.py" = 96
 "app/video_modes/keyframe_contract.py" = 120
@@ -616,28 +592,28 @@ max_lines_tests = 500
 "app/video_modes/reference_prompt.py" = 151
 "app/video_modes/seedance_pack.py" = 139
 "app/video_plan/capability_snapshot.py" = 88
-"app/video_plan/generate.py" = 591
+"app/video_plan/generate.py" = 587
 "app/video_plan/normalize.py" = 112
 "app/video_plan/publication_service.py" = 62
-"app/video_plan/publish.py" = 104
+"app/video_plan/publish.py" = 103
 "app/video_plan/release_manifest.py" = 155
 "app/video_plan/replan.py" = 166
 "app/video_plan/submission_authority.py" = 140
-"app/video_plan/validate.py" = 311
+"app/video_plan/validate.py" = 304
 "app/video_prompt_ai.py" = 127
 "app/video_repair_router.py" = 135
-"app/video_supervisor/adoption.py" = 73
+"app/video_supervisor/adoption.py" = 72
 "app/video_supervisor/assets.py" = 108
 "app/video_supervisor/authority.py" = 101
 "app/video_supervisor/checkpoint.py" = 131
 "app/video_supervisor/closeout.py" = 132
 "app/video_supervisor/coverage.py" = 259
-"app/video_supervisor/dispatch.py" = 167
+"app/video_supervisor/dispatch.py" = 157
 "app/video_supervisor/issues_cascade.py" = 56
 "app/video_supervisor/job_control.py" = 81
 "app/video_supervisor/ops.py" = 168
 "app/video_supervisor/resilience.py" = 58
-"app/video_supervisor/run_loop.py" = 468
+"app/video_supervisor/run_loop.py" = 390
 "app/video_supervisor/storyboard_repair.py" = 123
 "app/video_supervisor/watchdog.py" = 134
 
@@ -654,33 +630,31 @@ max_lines_tests = 500
 # 不是许可。新增测试文件按 defaults.max_lines_tests（500）严格执行，不许进这张表。
 # ---------------------------------------------------------------------------
 [baseline.test_line_count]
-"tests/test_character_discovery.py" = 11700
+"tests/test_character_discovery.py" = 11394
 "tests/test_screenplay_scene_shards.py" = 11017
 "tests/test_prep_pack_asset_discovery.py" = 5631
 "tests/test_narrative_blueprint.py" = 4925
 "tests/test_blueprint_shard_budget.py" = 4125
-"tests/test_screenplay_ir.py" = 3834
+"tests/test_screenplay_ir.py" = 3507
 "tests/test_screenplay_controls.py" = 3563
-"tests/test_production_repair.py" = 3253
-"tests/test_storyboard_workspace_prd.py" = 3241
+"tests/test_production_repair.py" = 2818
+"tests/test_storyboard_workspace_prd.py" = 3237
 "tests/test_storyboard_pack.py" = 3160
 "tests/test_provider_call_lifecycle.py" = 3141
 "tests/test_screenplay_authority.py" = 2827
-"tests/test_video_supervisor_integration.py" = 2158
-"tests/test_media_job_recovery.py" = 1998
-"tests/test_narrative_continuity.py" = 1796
+"tests/test_video_supervisor_integration.py" = 1979
+"tests/test_media_job_recovery.py" = 1853
+"tests/test_narrative_continuity.py" = 1795
 "tests/test_narrative_outline_projection.py" = 1605
-"tests/test_review_wall_prd.py" = 1528
+"tests/test_review_wall_prd.py" = 1522
 "tests/test_run_2470cc8c594e_identity_group_fix.py" = 1439
-"tests/test_bible_parallelism.py" = 1389
 "tests/test_episode_source_audit.py" = 1323
 "tests/test_startup_recovery.py" = 1311
-"tests/test_bible_prompt_and_precheck.py" = 1299
 "tests/test_screenplay_stage.py" = 1295
-"tests/test_generation_station_asset_clear.py" = 1277
+"tests/test_generation_station_asset_clear.py" = 1276
 "tests/test_screenplay_workspace_prd.py" = 1213
 "tests/test_episode_partial_concat.py" = 1201
-"tests/test_character_alias.py" = 1170
+"tests/test_character_alias.py" = 1148
 "tests/test_video_modes.py" = 1147
 "tests/test_character_status_facts.py" = 1135
 # 2026-09-01 1112 -> 1144：app/schemas.py 拆包按 CLAUDE.md 要求补 patch_schemas_everywhere
@@ -688,10 +662,10 @@ max_lines_tests = 500
 # tests/ 的基线本就是当天纳入闸门时的快照，这里一并按同一次改动的最终状态重取。
 "tests/conftest.py" = 1144
 "tests/test_screenplay_scene_repair.py" = 1066
-"tests/test_core_regressions.py" = 1057
+"tests/test_core_regressions.py" = 1051
 "tests/test_minimax_h3.py" = 1037
 "tests/test_video_plan_reconcile.py" = 983
-"tests/test_initial_multiview_bootstrap.py" = 955
+"tests/test_initial_multiview_bootstrap.py" = 953
 "tests/test_run_2eb70bae74e4_recovery.py" = 947
 "tests/test_screenplay_structured_runner.py" = 875
 "tests/test_seedance_continuity_prd.py" = 873
@@ -699,15 +673,15 @@ max_lines_tests = 500
 "tests/test_check_file_conventions.py" = 860
 "tests/test_storyboard_repair_v2.py" = 859
 "tests/test_narrative_identity_contracts.py" = 826
-"tests/test_video_stall_recovery.py" = 823
+"tests/test_video_stall_recovery.py" = 785
 "tests/test_prep_pack_coverage.py" = 766
 "tests/test_delivery.py" = 765
 "tests/test_rbac_project_isolation.py" = 761
 "tests/test_narrative_hard_gates.py" = 759
-"tests/test_video_completion_authority.py" = 756
-"tests/test_workspace_payload_views.py" = 749
-"tests/test_bible_impact_and_concurrency.py" = 670
-"tests/test_worker_reference_gallery.py" = 632
+"tests/test_video_completion_authority.py" = 643
+"tests/test_workspace_payload_views.py" = 748
+"tests/test_bible_impact_and_concurrency.py" = 668
+"tests/test_worker_reference_gallery.py" = 551
 "tests/test_hiagent_response_format.py" = 631
 "tests/test_agent_loop.py" = 623
 "tests/test_arch_graph_layers.py" = 612
@@ -719,8 +693,8 @@ max_lines_tests = 500
 "tests/test_video_shot_mutex.py" = 570
 "tests/test_model_gateway_contracts.py" = 566
 "tests/test_yyft_serial10_auto_cycle.py" = 563
-"tests/test_capability_registry.py" = 563
-"tests/test_video_completion_command_receipts.py" = 555
+"tests/test_capability_registry.py" = 562
+"tests/test_video_completion_command_receipts.py" = 551
 "tests/test_harness_orchestration.py" = 551
 "tests/test_project_observability.py" = 543
 "tests/test_chapter_cognition_card.py" = 543

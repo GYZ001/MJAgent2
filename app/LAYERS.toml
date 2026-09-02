@@ -320,7 +320,6 @@ allowed_exceptions = []
 "app.video_crop" = 4
 "app.video_issues" = 4
 "app.video_modes" = 4
-"app.video_modes_pkg" = 4  # 前缀：video_modes 拆包中的半成品，见上方说明 6
 "app.video_plan" = 4
 "app.video_playback" = 4
 "app.video_prompt_ai" = 4
@@ -329,8 +328,6 @@ allowed_exceptions = []
 # ---- 新增 L5 编排与入口 ----
 "app.agent" = 5  # 前缀：覆盖 .api/.approvals/.events/.orchestrator/.redaction/
                  # .resources/.schemas/.store/.tools
-"app.agent_api" = 5  # 与 app.agent 包同名但不是它的子模块（dot-boundary 不会
-                      # 误吃），独立顶层文件，单独声明
 "app.delivery" = 5
 "app.delivery_package_build" = 5  # build_delivery_package 拆出的 helper：工作目录/
                                    # 快照/媒体拷贝/manifest 组装，仅 app.delivery 消费，
@@ -365,7 +362,6 @@ allowed_exceptions = []
 "app.auth.admin_api" = 5 # 同上
 
 "app.video_supervisor" = 5
-"app.video_supervisor_pkg" = 5  # 前缀：video_supervisor 拆包中的半成品，见说明 6
 
 # ============================================================================
 # 2026-08-30：消剩余上行边（44→20 之后的第二批，docs/layer_violations_

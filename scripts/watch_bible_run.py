@@ -7,8 +7,14 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+from pathlib import Path
 
-DB_PATH = "data/manju.db"
+ROOT = Path(__file__).resolve().parent.parent
+
+# 直接 `python scripts/x.py` 运行时 sys.path[0] 是 scripts/，不是仓库根。
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from app.config import DB_PATH  # noqa: E402
 
 
 def _meta_stage(meta_raw: str | None) -> str:

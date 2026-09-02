@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
-"""四个项目第一集全链路驱动：人物谱→定妆→场景库→场景图→映射台→分镜台→生成台。
+"""N 个项目第一集全链路驱动：人物谱→定妆→场景库→场景图→映射台→分镜台→生成台。
 
 与 `scripts/yyft_pipeline10.py`（单项目严格串行、失败即停做 RCA）的定位相反：
-本脚本要的是**一次跑完四个项目、把失败摊开看**，所以失败策略反过来——
+本脚本要的是**一次跑完多个项目、把失败摊开看**，所以失败策略反过来——
 
-  * 某项目某阶段失败 → 只记录，该项目就地停住，**不影响另外三个项目继续跑**；
+  * 某项目某阶段失败 → 只记录，该项目就地停住，**不影响其它项目继续跑**；
   * 供应商限流（结构化 HTTP 429 或白名单文案）不算失败，等一轮再试，
     每阶段最多重试 RATE_LIMIT_RETRIES 次，避免限流把一次回归拖成无限循环；
-  * 全部四个项目都到达终态（ready 或 failed）才退出。
+  * 全部目标项目都到达终态（ready 或 failed）才退出。
 
-四个项目并行跑：阶段几乎都是等模型，串行等于把四份等待时间相加。并行的代价是
+多个项目并行跑：阶段几乎都是等模型，串行等于把各份等待时间相加。并行的代价是
 供应商侧竞争，用 STAGGER_S 错开启动来削峰，真撞上限流由上面的重试兜住。
 
 状态写 `logs/ep1_all_state.json`，每个阶段结束都落盘，中途看进度或重跑续跑都读它。
 重跑时已经 ok 的阶段直接跳过（判据取自服务端真实状态，不是本文件的记账）。
 
-用法：
-    py scripts/run_ep1_all_projects.py run          # 跑到四个项目都终态
-    py scripts/run_ep1_all_projects.py run --only 王六郎
-    py scripts/run_ep1_all_projects.py status       # 只看当前状态，不驱动
-    py scripts/run_ep1_all_projects.py report       # 打印汇总
+项目按**名字（或 id）运行时解析**，不写死 id——历史上写死的
+"王六郎"/"罗刹海市"/"黄英"/"我欲封天" 四组 (项目名, project_id, episode_id)
+已随项目重建全部失效（当前库零命中），写死一次就要再踩一次。EP1 的
+episode_id 同样运行时按 episode_no=1 查询。
+
+用法（--projects 必填，无默认值）：
+    py scripts/run_ep1_all_projects.py run --projects 我欲封天
+    py scripts/run_ep1_all_projects.py run --projects 我欲封天 橘座在上
+    py scripts/run_ep1_all_projects.py status --projects 我欲封天   # 只看当前状态，不驱动
+    py scripts/run_ep1_all_projects.py report --projects 我欲封天   # 打印汇总
 """
 from __future__ import annotations
 
@@ -46,14 +51,6 @@ LOG = ROOT / "logs" / os.environ.get("EP1_LOG_NAME", "ep1_all.log")
 # 补跑某个项目时要开第二个进程，与主进程并存。状态文件是读-改-写，两个进程共用
 # 同一份会丢更新，所以补跑走独立文件，report 时再合并。
 STATE = ROOT / "logs" / os.environ.get("EP1_STATE_NAME", "ep1_all_state.json")
-
-# (项目名, project_id, EP1 的 episode_id)。清库后 ID 不变，写死避免每次去查。
-PROJECTS = [
-    ("王六郎", "proj_177d147e16c7", "ep_17fb1391f17f"),
-    ("罗刹海市", "proj_1a3a92a9b248", "ep_1d4e66fc5f64"),
-    ("黄英", "proj_6ba5043d1217", "ep_cae1ede1c62f"),
-    ("我欲封天", "proj_195be7df1fd6", "ep_bf9051d167a7"),
-]
 
 STAGES = ("bible", "refs", "scene_bible", "scene_refs", "screenplay", "storyboard", "video")
 
@@ -127,6 +124,40 @@ def _readonly_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def resolve_projects(selectors: list[str]) -> list[tuple[str, str, str]]:
+    """把项目名/id 列表解析成 (项目名, project_id, EP1 episode_id) 三元组。
+
+    绝不硬编码历史 id：命中 0 个或多个都直接退出，宁可停下来也不要猜错项目跑
+    掉几小时。回收站项目（deleted_at 非空）不参与按名字匹配，避免重名的软删
+    项目把解析变成"命中多个"；显式给 id 时仍按给的来。
+    """
+    conn = _readonly_conn()
+    try:
+        out: list[tuple[str, str, str]] = []
+        for selector in selectors:
+            rows = conn.execute(
+                "SELECT id, name FROM projects WHERE id=? OR (name=? AND deleted_at IS NULL)"
+                " ORDER BY id",
+                (selector, selector),
+            ).fetchall()
+            if not rows:
+                raise SystemExit(f"库里找不到项目：{selector!r}")
+            if len(rows) > 1:
+                matched = "、".join(f"{r['id']}({r['name']})" for r in rows)
+                raise SystemExit(f"项目 {selector!r} 命中多个，请改用 id：{matched}")
+            project_id, name = rows[0]["id"], rows[0]["name"]
+            ep = conn.execute(
+                "SELECT id FROM episodes WHERE project_id=? AND episode_no=1",
+                (project_id,),
+            ).fetchone()
+            if not ep:
+                raise SystemExit(f"项目 {name!r}（{project_id}）没有 EP1 分集")
+            out.append((name, project_id, ep["id"]))
+        return out
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -723,7 +754,7 @@ def drive_project(name: str, pid: str, eid: str, delay_s: float) -> None:
 # ---------------------------------------------------------------------------
 
 def cmd_run(args) -> int:
-    targets = [p for p in PROJECTS if not args.only or p[0] in args.only]
+    targets = args.targets
     log("驱动", f"本轮 {len(targets)} 个项目：{'、'.join(p[0] for p in targets)}")
     threads = []
     for index, (name, pid, eid) in enumerate(targets):
@@ -735,12 +766,12 @@ def cmd_run(args) -> int:
         threads.append(thread)
     for thread in threads:
         thread.join()
-    log("驱动", "=== 四个项目全部到达终态 ===")
+    log("驱动", f"=== {len(targets)} 个项目全部到达终态 ===")
     return cmd_report(args)
 
 
-def cmd_status(_args) -> int:
-    for name, pid, eid in PROJECTS:
+def cmd_status(args) -> int:
+    for name, pid, eid in args.targets:
         proj = project_status(pid)
         sp = screenplay_status(eid)
         sb = storyboard_status(eid)
@@ -780,13 +811,13 @@ def load_merged_state() -> dict:
     return merged
 
 
-def cmd_report(_args) -> int:
+def cmd_report(args) -> int:
     state = load_merged_state()
     print("\n" + "=" * 78)
-    print("四个项目第一集全链路结果")
+    print(f"{len(args.targets)} 个项目第一集全链路结果")
     print("=" * 78)
     rc = 0
-    for name, _pid, _eid in PROJECTS:
+    for name, _pid, _eid in args.targets:
         entry = state.get(name) or {}
         stages = entry.get("stages") or {}
         done = bool(entry.get("done"))
@@ -808,12 +839,23 @@ def cmd_report(_args) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
-    run = sub.add_parser("run")
-    run.add_argument("--only", nargs="*", default=None, help="只跑指定项目名")
-    run.set_defaults(func=cmd_run)
-    sub.add_parser("status").set_defaults(func=cmd_status, only=None)
-    sub.add_parser("report").set_defaults(func=cmd_report, only=None)
+    for name, func in (("run", cmd_run), ("status", cmd_status), ("report", cmd_report)):
+        subparser = sub.add_parser(name)
+        subparser.add_argument(
+            "--projects", nargs="+", default=None,
+            help="项目名或 id 列表（必填，无默认值——历史硬编码的四个项目已随重建失效）",
+        )
+        subparser.set_defaults(func=func)
     args = parser.parse_args()
+    if not args.projects:
+        print(
+            "用法：py scripts/run_ep1_all_projects.py <run|status|report> "
+            "--projects <项目名或 id> [<项目名或 id> ...]\n"
+            "缺少 --projects：历史硬编码的四个项目已随重建失效，必须显式指定目标项目。",
+            file=sys.stderr,
+        )
+        return 2
+    args.targets = resolve_projects(args.projects)
     return args.func(args)
 
 

@@ -59,31 +59,34 @@ scripts/yyft_serial10.py。
   EP2  李富贵在此集原本就已正确绑定——回归对照，确保改动没有把原本正确的绑
        定搞坏。
 
-用法：
-    # 默认：EP1/EP2/EP5/EP6，角色 许清/李富贵，先清除+重新生成，再判定
-    .venv/bin/python scripts/verify_episode_binding.py
+用法（--project 必填，无默认值——历史默认项目 proj_3ac0b627fa46 已随项目重建
+失效，写死一次就要再踩一次；--episodes/--expect 的默认值 EP1/EP2/EP5/EP6 与
+许清/李富贵仍是该历史项目的人设，换项目时请一并用 --episodes/--expect 覆盖）：
+    # EP1/EP2/EP5/EP6，角色 许清/李富贵，先清除+重新生成，再判定
+    .venv/bin/python scripts/verify_episode_binding.py --project proj_xxx
 
     # 只跑 EP1
-    .venv/bin/python scripts/verify_episode_binding.py --episodes 1 --expect 许清 李富贵
+    .venv/bin/python scripts/verify_episode_binding.py --project proj_xxx \\
+        --episodes 1 --expect 许清 李富贵
 
     # 不清除/不重新生成，只读当前已有数据判定
     # （app/ 正被改动、此刻新生成的结果不可信时用这个模式）
-    .venv/bin/python scripts/verify_episode_binding.py --no-regen
+    .venv/bin/python scripts/verify_episode_binding.py --project proj_xxx --no-regen
 
     # 附加跨集一致性检查：默认组 许清:EP1,EP5,EP6 / 李富贵:EP1,EP2 的
     # visual_entity_id 是否完全一致（可用 --consistency-groups 覆盖）
-    .venv/bin/python scripts/verify_episode_binding.py --consistency
+    .venv/bin/python scripts/verify_episode_binding.py --project proj_xxx --consistency
 
-    # 换一批集号/角色/项目，一致性分组也可自定义
+    # 换一批集号/角色，一致性分组也可自定义
     .venv/bin/python scripts/verify_episode_binding.py --project proj_xxx \\
         --episodes 3 4 --expect 张三 --consistency --consistency-groups "张三:3,4"
 
     # 并发模式：清除仍串行，生成+轮询并发跑（不带值用保守默认并发数）；
     # 仅用于定点验证，不得用于十集最终验收，见上方警告与 --help
-    .venv/bin/python scripts/verify_episode_binding.py --concurrent
+    .venv/bin/python scripts/verify_episode_binding.py --project proj_xxx --concurrent
 
     # 并发模式，显式指定最大并发数
-    .venv/bin/python scripts/verify_episode_binding.py --concurrent 4
+    .venv/bin/python scripts/verify_episode_binding.py --project proj_xxx --concurrent 4
 
 出场判据（零模型调用，确定性；2026-08-25 修订，见下方"判据修订说明"）：角色
 在某集"未绑定"时，脚本判定它是"在场但未绑定"（FAIL）还是"本集确实不出场"
@@ -144,7 +147,6 @@ from scripts.session_token import session_token  # noqa: E402
 BASE = "http://127.0.0.1:8230"
 LOG = ROOT / "logs" / "verify_episode_binding.log"
 
-DEFAULT_PROJECT_ID = "proj_3ac0b627fa46"
 DEFAULT_EPISODES = [1, 2, 5, 6]
 DEFAULT_EXPECT = ["许清", "李富贵"]
 DEFAULT_CONSISTENCY_GROUPS = "许清:1,5,6;李富贵:1,2"
@@ -612,7 +614,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="定点验证指定集里指定角色是否正确绑定人物谱、拿到定妆照。",
     )
-    parser.add_argument("--project", default=DEFAULT_PROJECT_ID, help="项目 id")
+    parser.add_argument(
+        "--project", default=None,
+        help="项目 id（必填，无默认值——历史默认项目已随重建失效）",
+    )
     parser.add_argument(
         "--episodes", type=int, nargs="+", default=list(DEFAULT_EPISODES),
         help="目标集号（纯数字，如 1 5 6）",
@@ -648,6 +653,14 @@ def main() -> int:
         help='一致性分组，格式 "name:ep,ep,...;name:ep,ep,..."，仅在 --consistency 时生效',
     )
     args = parser.parse_args()
+
+    if not args.project:
+        log(
+            "用法：.venv/bin/python scripts/verify_episode_binding.py "
+            "--project <project_id> [--episodes N ...] [--expect NAME ...]\n"
+            "缺少 --project：历史默认项目 id 已随项目重建失效，必须显式指定目标项目。"
+        )
+        return 2
 
     if args.concurrent is not None and args.concurrent < 1:
         log(f"参数错误：--concurrent 必须 >= 1，收到 {args.concurrent}")

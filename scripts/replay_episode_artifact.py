@@ -32,7 +32,6 @@ from app.validators import (  # noqa: E402
     outline_key_line_speaker_errors,
     outline_scene_coverage_errors,
 )
-from app.video_cost_model import initial_shot_generation_cost  # noqa: E402
 
 
 def _readonly_connection(path: Path) -> sqlite3.Connection:
@@ -105,10 +104,6 @@ def replay(
         for decision in projected.source_coverage
     }
     duration_s = authoritative_outline_duration_s(outline)
-    first_pass_cost = round(sum(
-        initial_shot_generation_cost(float(shot.duration_s or 0))
-        for shot in outline.shots
-    ), 6)
     event_ids = {
         event_id
         for shot in outline.shots
@@ -162,7 +157,6 @@ def replay(
         "merged_delivery_beat_count": len(
             audit["beat_merge_changes"]
         ),
-        "authoritative_first_pass_budget_cny": first_pass_cost,
         "screenplay_errors": screenplay_errors,
         "outline_errors": list(dict.fromkeys(outline_errors)),
     }
