@@ -35,7 +35,7 @@ async def reconcile_stale_video_supervisors() -> int:
         episode_id = row["id"]
         cp = load_latest_checkpoint(episode_id)
         if cp is None or cp.phase in TERMINAL_SUPERVISOR_PHASES or cp.phase in {
-            "PAUSED_EXTERNAL", "PAUSED_BUDGET", "WAITING_AUTHORIZATION", "WAITING_HUMAN",
+            "PAUSED_EXTERNAL", "WAITING_AUTHORIZATION", "WAITING_HUMAN",
         }:
             return False
         heartbeat = max(float(cp.last_heartbeat_at or 0), float(row["run_updated_at"] or 0))

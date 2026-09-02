@@ -99,7 +99,7 @@ def test_scene_bible_preview_accepts_scene_list_return(monkeypatch) -> None:
         "compute_scene_cost_precheck",
         lambda project_id, **kwargs: {"project_id": project_id, **kwargs},
     )
-    patch_api_everywhere(monkeypatch, "_issue_payment_quote", lambda quote: {"quote_id": "quote-scene", **quote})
+    patch_api_everywhere(monkeypatch, "_issue_scope_quote", lambda quote: {"quote_id": "quote-scene", **quote})
 
     result = asyncio.run(bible_ops.preview_scene_bible("p"))
 

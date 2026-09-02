@@ -234,16 +234,6 @@ def _dispatch(
         entry.last_issue_codes = [i.code for i in issues]
         return False
 
-    if result.get("paused_budget"):
-        issues = issues_from_enqueue_error(
-            ValueError("预算不足，任务暂停"), shot_id=entry.shot_id, shot_no=entry.shot_no,
-        )
-        persist_shot_issue(
-            episode_id=episode_id, shot_id=entry.shot_id, shot_no=entry.shot_no,
-            issues=issues, source="supervisor_budget", run_id=run_id,
-        )
-        entry.last_issue_codes = [i.code for i in issues]
-        return False
     if result.get("reused"):
         return bool(result.get("resumed"))
     if degrade:
@@ -423,18 +413,3 @@ def _requeue_no_charge_job(
     )
     conn.commit()
     return str(job["id"]) if changed.rowcount == 1 else None
-
-
-def _budget_paused_job_id(
-    conn,
-    *,
-    shot_id: str,
-) -> str | None:
-    row = conn.execute(
-        """SELECT id FROM jobs WHERE shot_id=? AND kind='video'
-           AND status='paused_budget'
-           AND cancellation_requested=0 AND abandoned=0
-           ORDER BY created_at DESC LIMIT 1""",
-        (shot_id,),
-    ).fetchone()
-    return str(row["id"]) if row else None

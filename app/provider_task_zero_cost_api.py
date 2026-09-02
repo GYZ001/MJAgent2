@@ -47,7 +47,7 @@ def zero_cost_candidates(
 @router.get("/system/provider-tasks/zero-cost-candidates/{job_id}")
 def zero_cost_candidate_detail(job_id: str, _admin=Depends(require_system_admin)):
     """单任务判定——给 JobDrawer 用：加载详情时顺带查一次，决定要不要展示
-    「释放零扣费预留」按钮，以及确认文案里要写的金额与理由。"""
+    「释放供应商侧未产生调用的阻塞」按钮，以及确认文案里要写的理由。"""
     conn = get_conn()
     evidence = load_zero_cost_evidence(conn, job_id)
     if evidence is None:
@@ -57,7 +57,6 @@ def zero_cost_candidate_detail(job_id: str, _admin=Depends(require_system_admin)
         "job_id": job_id,
         "eligible": eligible,
         "reason": reason,
-        "reserved_amount_cny": float(evidence.get("reserved_amount_cny") or 0),
     }
 
 
@@ -80,7 +79,6 @@ def _verify_release_preview(conn, job_ids: list[str]) -> list[dict]:
             "job_id": job_id,
             "shot_id": evidence.get("shot_id"),
             "episode_id": evidence.get("episode_id"),
-            "reserved_amount_cny": float(evidence.get("reserved_amount_cny") or 0),
             "reason": reason,
         })
     return preview
@@ -103,7 +101,7 @@ def zero_cost_release(
         raise HTTPException(422, {
             "code": "confirmation_required",
             "message": (
-                f"将把 {len(preview)} 个供应商终态拒绝任务的预留预算结算为 0 元，"
+                f"将确认 {len(preview)} 个供应商终态拒绝任务确凿未产生任何调用，"
                 "并解除对清空/重做等操作的阻塞。请带 confirm=true 重试。"
             ),
             "items": preview,

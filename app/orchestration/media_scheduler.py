@@ -24,11 +24,9 @@ def reserve_budget(
 ) -> bool:
     """Record one payable job's reservation against the episode ledger.
 
-    金额已不构成生成拦截：本产品现行计费是会员分档时长制（HiAgent 自有服务，
-    模型/视频调用不按金额计费），``limit_cny`` 不再用于比较——保留形参只是
-    为了不必改动全部调用点签名。历史上这里会在 spent+reserved+amount 超过
-    limit_cny 时把 job 打成 ``paused_budget`` 并回滚，那条拦截分支已删除；
-    见 CLAUDE.md「Retiring Features」与本次「成本预算拦截体系退场」。"""
+    金额已不构成生成拦截（会员分档时长制），``limit_cny`` 不再用于比较，
+    保留形参只是为了不必改动全部调用点签名；超限即拦截并把 job 打成
+    ``paused_budget`` 的那条分支已删除（见 CLAUDE.md「Retiring Features」）。"""
     db = conn or get_conn()
     owns_transaction = not db.in_transaction
     amount = max(0.0, float(amount_cny))
@@ -61,59 +59,6 @@ def reserve_budget(
     except Exception:
         if owns_transaction:
             db.rollback()
-        raise
-
-
-def extend_budget_reservation(
-    job_id: str,
-    episode_id: str,
-    additional_cny: float,
-    limit_cny: float,
-    *,
-    conn: sqlite3.Connection | None = None,
-) -> bool:
-    """Atomically enlarge one active reservation before an intentional paid resubmit.
-
-    金额不再构成拦截，见 ``reserve_budget`` 同一处说明；``limit_cny`` 保留仅为
-    兼容既有调用签名，本函数只做幂等的余额记账，不再据此回滚/拒绝。"""
-    db = conn or get_conn()
-    additional = max(0.0, float(additional_cny))
-    try:
-        db.execute("BEGIN IMMEDIATE")
-        existing = db.execute(
-            """SELECT amount_cny, status FROM budget_reservations
-               WHERE job_id=?""",
-            (job_id,),
-        ).fetchone()
-        current = (
-            float(existing["amount_cny"] or 0)
-            if existing and existing["status"] in ACTIVE_RESERVATIONS
-            else 0.0
-        )
-        target = current + additional
-        if existing:
-            db.execute(
-                """UPDATE budget_reservations
-                   SET amount_cny=?, status='reserved', settled_at=NULL,
-                       actual_cost_cny=NULL
-                   WHERE job_id=?""",
-                (target, job_id),
-            )
-        else:
-            db.execute(
-                """INSERT INTO budget_reservations(
-                       id, job_id, scope_type, scope_id, amount_cny, status, created_at
-                   ) VALUES(?,?, 'episode', ?, ?, 'reserved', ?)""",
-                (new_id("budget"), job_id, episode_id, target, now()),
-            )
-        db.execute(
-            "UPDATE jobs SET reserved_cost_cny=?, updated_at=? WHERE id=?",
-            (target, now(), job_id),
-        )
-        db.commit()
-        return True
-    except Exception:
-        db.rollback()
         raise
 
 
@@ -237,7 +182,7 @@ def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") 
     if not row:
         raise KeyError(job_id)
     cancellable = {
-        "queued", "running", "paused_budget", "waiting_provider", "waiting_retry",
+        "queued", "running", "waiting_provider", "waiting_retry",
         "waiting", "waiting_human",
     }
     if row["status"] not in cancellable:
@@ -265,7 +210,7 @@ def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") 
                       lease_owner=NULL,lease_expires_at=NULL,next_retry_at=?,
                       updated_at=?
                 WHERE id=? AND status IN (
-                    'queued','running','paused_budget','waiting_provider',
+                    'queued','running','waiting_provider',
                     'waiting_retry','waiting','waiting_human'
                 )""",
             (message, now(), now(), job_id),
@@ -335,7 +280,7 @@ def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") 
                                                 ELSE provider_non_cancellable END,
                   updated_at=?
            WHERE id=? AND status IN (
-               'queued','running','paused_budget','waiting_provider','waiting_retry','waiting','waiting_human'
+               'queued','running','waiting_provider','waiting_retry','waiting','waiting_human'
            )""",
         (
             int(status == "abandoned"),
@@ -364,7 +309,7 @@ def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") 
         db.execute(
             """UPDATE shot_versions
                   SET status=?,error=?,video_slot_active=0
-                WHERE id=? AND status IN ('queued','running','paused_budget')""",
+                WHERE id=? AND status IN ('queued','running')""",
             (status, reason, row["version_id"]),
         )
     provider_claim_released = False

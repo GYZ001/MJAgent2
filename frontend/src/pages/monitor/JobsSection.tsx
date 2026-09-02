@@ -134,7 +134,7 @@ export default function JobsSection({
             <option value="running,queued,recovering">
               正在运行（合并）
             </option>
-            <option value="waiting_human,paused_budget,paused_external">
+            <option value="waiting_human,paused_external">
               待我处理（合并）
             </option>
             <option value="failed,partial">系统异常（合并）</option>

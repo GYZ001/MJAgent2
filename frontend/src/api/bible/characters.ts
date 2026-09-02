@@ -182,7 +182,7 @@ export function refsPrecheck(
     resume?: boolean;
     view_role?: string;
   },
-): Promise<import("./core").RefsCostPrecheck> {
+): Promise<import("./core").RefsPrecheck> {
   return request("POST", `/projects/${projectId}/refs/precheck`, body || {});
 }
 
@@ -190,7 +190,7 @@ export function refsGaps(projectId: string): Promise<{
   missing_count: number;
   image_count: number;
   items: Array<Record<string, unknown>>;
-  precheck: import("./core").RefsCostPrecheck;
+  precheck: import("./core").RefsPrecheck;
 }> {
   return request("GET", `/projects/${projectId}/refs/gaps`);
 }
@@ -291,9 +291,4 @@ export function regenerateCharacterView(
     `/projects/${projectId}/characters/${encodeURIComponent(characterName)}/portraits/${portraitId}/views/${encodeURIComponent(viewRole)}/regenerate`,
     body || {},
   );
-}
-
-/** 提名一个原文称呼：命中已有角色就登记别名，否则按建卡判据尝试新建（见后端 nominate.py）。*/
-export function nominateCharacter(projectId: string, label: string, fromEpisodeNo?: number) {
-  return mutate("POST", `/projects/${projectId}/characters/nominate`, { label, from_episode_no: fromEpisodeNo });
 }

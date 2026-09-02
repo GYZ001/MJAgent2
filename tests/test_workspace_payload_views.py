@@ -62,7 +62,6 @@ def _patch_storyboard_db(monkeypatch, conn: sqlite3.Connection) -> None:
     patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(storyboard_workspace, "get_conn", lambda: conn)
     patch_api_everywhere(monkeypatch, "get_setting", lambda _key: "100")
-    monkeypatch.setattr(storyboard_ops.worker, "episode_cost", lambda _episode_id: 0.0)
 
 
 def test_workspace_episode_views_do_not_expand_historical_inputs(monkeypatch) -> None:

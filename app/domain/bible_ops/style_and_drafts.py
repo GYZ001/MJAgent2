@@ -33,16 +33,16 @@ from fastapi import (
 
 from .precheck import (
     _bible_conflict_detail,
-    compute_refs_cost_precheck,
+    compute_refs_precheck,
 )
 from .primitives import (
     _consume_payment_quote,
     _ensure_character_payment_quotes,
-    _issue_payment_quote,
+    _issue_scope_quote,
     _normalize_visual_style_name,
     _payment_confirm_required,
     _supports_bible_style_name,
-    _validate_payment_quote,
+    _validate_scope_quote,
     _visual_style_prompt_or_default,
 )
 from .refs_generation import (
@@ -54,31 +54,25 @@ from .scene_bible_prep import _start_scene_refs_generation
 
 
 def _compute_style_regen_quote(project_id: str) -> dict:
-    """风格切换后「人物定妆照 + 场景图」两条腿一并全量重生成的合并报价。
+    """风格切换后「人物定妆照 + 场景图」两条腿一并全量重生成的合并范围预检。
 
-    两条腿的费用都必须在用户确认前一次性摆出来——只报其中一条腿的价、让另一
-    条腿在确认后悄悄免费启动，等于变相绕过费用确认。场景清单未就绪时
-    ``scenes`` 为 None，合并报价里只有人物这一条腿（金额诚实反映范围，不假装
-    有场景费用）。
+    两条腿的范围都必须在用户确认前一次性摆出来——只报其中一条腿的范围、让另一
+    条腿在确认后悄悄启动，等于变相绕过范围确认。场景清单未就绪时
+    ``scenes`` 为 None，合并预检里只有人物这一条腿（如实反映范围，不假装
+    有场景图）。
     """
     p = _project_or_404(project_id)
     if not p.get("bible_json"):
         raise HTTPException(409, "请先生成角色圣经")
     bible = json.loads(p["bible_json"])
     scene_bible_ready = bool(bible.get("scenes"))
-    refs_quote = compute_refs_cost_precheck(project_id, resume=False)
+    refs_quote = compute_refs_precheck(project_id, resume=False)
     scenes_quote = (
         compute_scene_cost_precheck(project_id, scenes=None, resume=False)
         if scene_bible_ready else None
     )
-    total_cost = float(refs_quote["estimated_cost_cny"]) + (
-        float(scenes_quote["estimated_cost_cny"]) if scenes_quote else 0.0
-    )
     total_images = int(refs_quote["image_count"]) + (
         int(scenes_quote["image_count"]) if scenes_quote else 0
-    )
-    total_max_retry = float(refs_quote["max_retry_budget_cny"]) + (
-        float(scenes_quote["max_retry_budget_cny"]) if scenes_quote else 0.0
     )
     computed_at = now()
     scope_fingerprint = fingerprint({
@@ -90,7 +84,7 @@ def _compute_style_regen_quote(project_id: str) -> dict:
     })
     return {
         # 同 precheck.py 的同类注释：未签发前不叫 quote_id，调用方必须先经
-        # _issue_payment_quote 落库才能拿到可确认的真值（本函数的两处调用方
+        # _issue_scope_quote 落库才能拿到可确认的真值（本函数的两处调用方
         # 都已经这样做——见下方 set_bible_visual_style）。
         "scope_fingerprint": scope_fingerprint,
         "action": "style_regen_all",
@@ -101,8 +95,6 @@ def _compute_style_regen_quote(project_id: str) -> dict:
         "scenes": scenes_quote,
         "scene_bible_ready": scene_bible_ready,
         "total_image_count": total_images,
-        "total_estimated_cost_cny": round(total_cost, 2),
-        "total_max_retry_budget_cny": round(total_max_retry, 2),
         "idempotency_hint": "同一报价重复确认只受理一次，人物与场景两条线都不会重复启动",
         "stop_policy": "确认后人物与场景两条生成线独立运行，可分别在人物谱/场景库停止；已完成的图片保留",
     }
@@ -121,11 +113,11 @@ async def set_bible_visual_style(project_id: str, body: dict | None = Body(None)
     「重新生成人物谱并更换画风」按钮的既有职责，这里不动它。
 
     画风未实际变化（重复确认同一风格）时直接返回 changed=False、不写库、不
-    进入报价/确认流程，保证反复点击的幂等性、不产生任何费用。
+    进入报价/确认流程，保证反复点击的幂等性、不重复发起生成。
 
     画风确有变化时走标准的「预检 → 显式确认 → 消费报价」两段式（与本文件
-    其它付费端点同构）：第一次调用（无 confirm/quote_id）返回 409 + 合并报价
-    （见 _compute_style_regen_quote，人物 + 场景两条腿的费用一次性摆出来）；
+    其它范围确认端点同构）：第一次调用（无 confirm/quote_id）返回 409 + 合并报价
+    （见 _compute_style_regen_quote，人物 + 场景两条腿的范围一次性摆出来）；
     带着 confirm=true 与 quote_id 的确认调用里，落定风格字段之后，在**同一次
     请求内**依次发起人物定妆照与场景图两条全量重生成——不是把「要不要触发
     场景图」这件事丢给前端等用户以后访问场景库页面才做，那样『两条线都要
@@ -188,12 +180,12 @@ async def set_bible_visual_style(project_id: str, body: dict | None = Body(None)
     quote = _compute_style_regen_quote(project_id)
     if payload.get("confirm") is not True:
         # 精确/确认合一在同一个路由里：未带 confirm 的调用必须先把报价持久化
-        # （_issue_payment_quote 签发服务端 quote_id 并写入 character_payment_quotes），
-        # 否则随后带着这个 quote_id 来确认时 _validate_payment_quote 查不到行，
+        # （_issue_scope_quote 签发服务端 quote_id 并写入 character_payment_quotes），
+        # 否则随后带着这个 quote_id 来确认时 _validate_scope_quote 查不到行，
         # 会被误判为过期报价——两次调用用的必须是同一份已签发凭证。
-        raise _payment_confirm_required(_issue_payment_quote(quote))
+        raise _payment_confirm_required(_issue_scope_quote(quote))
     quote_id = payload.get("quote_id")
-    quote_row = _validate_payment_quote(project_id, quote_id, quote)
+    quote_row = _validate_scope_quote(project_id, quote_id, quote)
     if quote_row["consumed_at"] is not None:
         return {
             "project_id": project_id,
@@ -280,7 +272,7 @@ async def set_bible_visual_style(project_id: str, body: dict | None = Body(None)
 @router.get("/projects/{project_id}/refs/gaps")
 async def refs_gaps(project_id: str):
     """扫描定妆缺口：按角色/视角列出缺失原因。"""
-    quote = _issue_payment_quote(compute_refs_cost_precheck(project_id, resume=True))
+    quote = _issue_scope_quote(compute_refs_precheck(project_id, resume=True))
     return {
         "project_id": project_id,
         "missing_count": len(quote.get("scope") or []),

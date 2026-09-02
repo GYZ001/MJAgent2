@@ -152,15 +152,12 @@ from .enqueue import (
     _usable_reference_dicts,
     _video_path,
     enqueue_shot,
-    episode_cost,
     pause_episode_video_tasks,
     reconcile_episode_generation_status,
     recover_equivalent_stale_provider_jobs,
     resume_episode_video_tasks,
     stop_shot_video_tasks,
 )
-
-from .legacy_keyframes import decommission_legacy_keyframe_jobs
 
 from .run_job import (
     ProviderCreateUnresolved,
@@ -202,7 +199,6 @@ from .run_job import (
     _ensure_ai_video_prompt,
     _image_dimensions,
     _load_boundary_asset,
-    _maybe_auto_qa,
     _narrative_keyframe_candidate_progress,
     _normalize_boundary_pair,
     _paid_video_attempt_count,
@@ -245,7 +241,6 @@ from .run_job import (
     reconcile_stalled_video_jobs,
     recover_and_start,
     recover_media_jobs,
-    retry_paused,
     start_stale_lease_sweeper,
     stop,
 )
@@ -369,7 +364,6 @@ __all__ = [
     "_load_reference_gallery",
     "_load_shot_model",
     "_mark_video_preflight_failure",
-    "_maybe_auto_qa",
     "_media_sha256",
     "_narrative_keyframe_candidate_progress",
     "_normalize_boundary_pair",
@@ -452,7 +446,6 @@ __all__ = [
     "concat",
     "concatenate_episode",
     "config",
-    "decommission_legacy_keyframe_jobs",
     "delete_episode_shots",
     "delete_project_episodes",
     "delete_video_version",
@@ -461,7 +454,6 @@ __all__ = [
     "ensure_media_trace",
     "ensure_source_excerpt_in_prompt",
     "ensure_workers",
-    "episode_cost",
     "episode_mix_status",
     "episode_video_budget_limit",
     "errors",
@@ -472,7 +464,6 @@ __all__ = [
     "invalidate_episode_final",
     "invalidate_shot_video_derivatives",
     "json",
-    "legacy_keyframes",
     "log_provider_call",
     "make_idem_key",
     "mark_media_job_state",
@@ -492,7 +483,6 @@ __all__ = [
     "recover_media_jobs",
     "release_concat_operation",
     "resume_episode_video_tasks",
-    "retry_paused",
     "rows_to_dicts",
     "run_job",
     "run_write_transaction",

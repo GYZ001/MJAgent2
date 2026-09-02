@@ -1,11 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
-  api, ApiError, Bible, BibleImpactPreview, Character, Portrait, PortraitView, RefsCostPrecheck,
+  api, ApiError, Bible, BibleImpactPreview, Character, Portrait, PortraitView, RefsPrecheck,
 } from '../api'
 import { useNav, usePoll, useProject } from '../App'
 import SearchField from '../components/SearchField'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
-import type { ImpactSummary } from '../components/harness/ImpactDialog'
 import GenerationParamsDialog from '../components/GenerationParamsDialog'
 import QueryState from '../components/QueryState'
 import PrepSubnav from '../components/PrepSubnav'
@@ -39,7 +38,7 @@ function trackBible(name: string, projectId: string, dimensions: Record<string, 
 }
 
 type RefsProgress = Awaited<ReturnType<typeof api.refsProgress>>
-type PaymentQuote = RefsCostPrecheck & {
+type PaymentQuote = RefsPrecheck & {
   estimated_duration_min?: number[]
   estimate_note?: string
   character_names?: string[]
@@ -629,7 +628,7 @@ export default function BiblePage() {
    */
   const openPayment = async (
     precheckBody: { character?: string; characters?: string[]; resume?: boolean; view_role?: string },
-    action: (quote: RefsCostPrecheck) => Promise<void>,
+    action: (quote: RefsPrecheck) => Promise<void>,
     precheckLoader?: () => Promise<PaymentQuote>,
   ) => {
     await act(async () => {
@@ -776,7 +775,7 @@ export default function BiblePage() {
       }) as {
         style_changed?: boolean
         purged?: { versions: number } | null
-        impact?: ImpactSummary
+        impact?: BibleImpactPreview
       }
       setEditing(null)
       setEditBaseVersion(null)
@@ -1406,7 +1405,7 @@ function PortraitBlock({ projectId, character: c, disabled, onChanged, regenerat
           </div>
           {restoreConfirm && (
             <div className="inline-reset-confirm" role="status">
-              <span><b>恢复系统默认提示词？</b>系统会根据内部角色设定与统一画风重新生成默认值，不生成图片、不扣费。</span>
+              <span><b>恢复系统默认提示词？</b>系统会根据内部角色设定与统一画风重新生成默认值，不生成图片。</span>
               <div>
                 <button className="btn small ghost" type="button" disabled={saving}
                   onClick={() => setRestoreConfirm(false)}>取消</button>
@@ -1478,7 +1477,7 @@ function CharacterPortraitGallery({ projectId, character, fitting, disabled, onC
   onChanged?: () => void
   onPayRequest: (
     precheckBody: { character?: string; characters?: string[]; resume?: boolean; view_role?: string },
-    action: (quote: RefsCostPrecheck) => Promise<void>,
+    action: (quote: RefsPrecheck) => Promise<void>,
   ) => Promise<void>
 }) {
   const { toast } = useNav()

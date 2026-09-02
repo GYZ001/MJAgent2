@@ -45,7 +45,7 @@ def _collect_issues(
         failed = conn.execute(
             """SELECT * FROM jobs
                WHERE shot_id=? AND kind='video'
-                 AND status IN ('failed','paused_budget','waiting_human')
+                 AND status IN ('failed','waiting_human')
                  AND (
                      provider_create_state='model_rejected'
                      OR provider_failure_disposition='external_terminal'
@@ -131,7 +131,7 @@ def _apply_cascade(entry: ShotCoverageEntry, ledger: CoverageLedger, cp: VideoSu
 
 
 def _adopt_fallback(entry: ShotCoverageEntry, *, episode_id: str, run_id: str | None) -> bool:
-    result = select_best_video_candidate(entry.shot_id, force_best=True)
+    result = select_best_video_candidate(entry.shot_id)
     if not result:
         return False
     entry.grade = result.get("grade") or "B"  # type: ignore[assignment]

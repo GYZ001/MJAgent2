@@ -208,7 +208,7 @@ def recover_video_completion_runs() -> int:
                 )
                 if result.phase == "SUCCEEDED_COVERED":
                     rec.succeed(result.outcome or "SUCCEEDED_COVERED", conn=None)
-                elif result.phase in {"WAITING_AUTHORIZATION", "WAITING_HUMAN", "PAUSED_EXTERNAL", "PAUSED_BUDGET"}:
+                elif result.phase in {"WAITING_AUTHORIZATION", "WAITING_HUMAN", "PAUSED_EXTERNAL"}:
                     rec.partial(result.outcome or result.phase, conn=None)
                 elif result.phase == "CANCELLED":
                     rec.cancel(conn=None)

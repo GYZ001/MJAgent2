@@ -111,7 +111,7 @@ def _start_scene_refs_generation(
                     ),
                 )
             conn.commit()
-        raise ValueError("场景图任务未能启动，原状态和费用凭证已保留，请重试") from exc
+        raise ValueError("场景图任务未能启动，原状态和范围凭证已保留，请重试") from exc
     return True
 
 def _start_scene_bible_preparation(
@@ -121,7 +121,7 @@ def _start_scene_bible_preparation(
     requested_by: str = "system",
     trigger_type: str = "automatic",
 ) -> bool:
-    """后台准备免费场景清单；图片生成仍必须经过独立费用确认。"""
+    """后台准备场景清单；图片生成仍必须经过独立范围确认。"""
     if _scene_assets_task_active(project_id):
         return False
     conn = get_conn()
@@ -183,7 +183,7 @@ async def _scene_bible_task(
     requested_by: str = "system",
     trigger_type: str = "automatic",
 ) -> None:
-    """生成并落库场景清单，不绕过费用确认自动生成图片。"""
+    """生成并落库场景清单，不绕过范围确认自动生成图片。"""
     from app.stages import generate_scene_bible
     conn = get_conn()
     recorder = WorkflowRecorder.create(
@@ -223,7 +223,7 @@ async def _scene_bible_task(
             (json.dumps(data, ensure_ascii=False), project_id),
         )
         conn.commit()
-        recorder.succeed("场景设定已准备，场景图等待费用确认", conn=None)
+        recorder.succeed("场景设定已准备，场景图等待范围确认", conn=None)
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
             recorder.pause_external("服务重启，场景设定任务等待自动恢复", conn=None)

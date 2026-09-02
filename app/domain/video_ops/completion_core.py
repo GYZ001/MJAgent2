@@ -48,7 +48,6 @@ async def _recorded_video_completion_task(
     *,
     resume: bool,
     grant_id: str | None,
-    budget_cap_cny: float | None = None,
     wall_clock_cap_s: float | None = None,
     allow_fallback_adopt: bool = True,
     max_fallback_shots: int | None = None,
@@ -65,7 +64,6 @@ async def _recorded_video_completion_task(
                 resume=resume,
                 grant_id=grant_id,
                 run_id=recorder.run_id,
-                budget_cap_cny=budget_cap_cny,
                 wall_clock_cap_s=wall_clock_cap_s,
                 allow_fallback_adopt=allow_fallback_adopt,
                 max_fallback_shots=max_fallback_shots,
@@ -142,18 +140,16 @@ async def _complete_episode_core(
     trigger_type: str = "manual",
 ) -> dict:
     from app.completion_grant import (
-        DEFAULT_VIDEO_BUDGET_CAP_CNY,
         DEFAULT_VIDEO_WALL_CLOCK_CAP_S,
         GrantValidationError,
         default_max_fallback_shots,
         issue_video_completion_grant,
-        bump_video_grant_budget,
+        bump_video_grant_wall_clock,
         revoke_grant,
         validate_video_grant,
     )
     from app.orchestration.engine import WorkflowRecorder, fingerprint
     from app.video_supervisor import (
-        FIRST_PASS_BUDGET_FRACTION,
         MAX_ATTEMPTS_PER_SHOT,
         MAX_CHAIN_CASCADE_DEPTH,
         MAX_REPAIR_EPOCHS,
@@ -182,9 +178,11 @@ async def _complete_episode_core(
     if int(shots_total or 0) <= 0:
         raise HTTPException(409, "本集尚无分镜")
 
-    budget_cap = _review_validate_authorization_number(
-        body.get("budget_cap_cny"), field="budget_cap_cny", minimum=1, maximum=100000,
-    )
+    if body.get("budget_cap_cny") is not None:
+        raise HTTPException(422, {
+            "code": "BUDGET_FIELD_RETIRED",
+            "message": "本产品已改为会员分档时长制，不再按金额授权，请勿传 budget_cap_cny",
+        })
     wall_cap = _review_validate_authorization_number(
         body.get("wall_clock_cap_s"), field="wall_clock_cap_s", minimum=60, maximum=604800,
     )
@@ -210,14 +208,16 @@ async def _complete_episode_core(
             "action": "start_fresh",
         })
 
-    # resume + 追加预算
-    add_budget = _review_validate_authorization_number(
-        body.get("add_budget_cny"), field="add_budget_cny", minimum=1, maximum=100000,
-    )
+    # resume + 追加授权（只剩时长，不再有预算）
+    if body.get("add_budget_cny") is not None:
+        raise HTTPException(422, {
+            "code": "BUDGET_FIELD_RETIRED",
+            "message": "本产品已改为会员分档时长制，不再按金额授权，请勿传 add_budget_cny",
+        })
     add_wall = _review_validate_authorization_number(
         body.get("add_wall_clock_s"), field="add_wall_clock_s", minimum=60, maximum=604800,
     )
-    if (add_budget is not None or add_wall is not None) and not (mode == "resume" and grant_id):
+    if add_wall is not None and not (mode == "resume" and grant_id):
         raise HTTPException(422, "追加授权只能用于带 completion_grant_id 的 resume 模式")
     existing = None
     if mode == "resume" and grant_id:
@@ -227,11 +227,10 @@ async def _complete_episode_core(
                 episode_id=episode_id,
                 storyboard_artifact_id=ep["storyboard_artifact_id"],
             )
-            if add_budget is not None or add_wall is not None:
-                existing = bump_video_grant_budget(
+            if add_wall is not None:
+                existing = bump_video_grant_wall_clock(
                     grant_id,
-                    add_cny=float(add_budget or 0),
-                    add_wall_s=float(add_wall or 0),
+                    add_wall_s=float(add_wall),
                     idempotency_key=grant_idempotency_key,
                 )
         except GrantValidationError as exc:
@@ -248,11 +247,6 @@ async def _complete_episode_core(
             episode_id=episode_id,
             project_id=ep["project_id"],
             storyboard_artifact_id=ep["storyboard_artifact_id"] or "",
-            budget_cap_cny=(
-                float(budget_cap)
-                if budget_cap is not None
-                else None
-            ),
             wall_clock_cap_s=float(wall_cap) if wall_cap is not None else DEFAULT_VIDEO_WALL_CLOCK_CAP_S,
             allow_fallback_adopt=bool(allow_fallback),
             max_fallback_shots=(
@@ -270,18 +264,15 @@ async def _complete_episode_core(
         )
         issued_new_grant = bool(_token)
         grant_id = grant.grant_id
-        budget_cap = grant.budget_cap_cny
         wall_cap = grant.wall_clock_cap_s
         max_fallback = grant.max_fallback_shots
     else:
         if existing:
-            budget_cap = existing.budget_cap_cny
             wall_cap = existing.wall_clock_cap_s
             max_fallback = existing.max_fallback_shots
             allow_fallback = existing.allow_fallback_adopt
             allow_edit = existing.allow_storyboard_edit
 
-    cap = float(budget_cap if budget_cap is not None else DEFAULT_VIDEO_BUDGET_CAP_CNY)
     resolved_wall_cap = float(
         wall_cap if wall_cap is not None else DEFAULT_VIDEO_WALL_CLOCK_CAP_S
     )
@@ -290,9 +281,7 @@ async def _complete_episode_core(
     )
     workflow_policy_snapshot = {
         "supervisor": "video_completion",
-        "budget_cap_cny": cap,
         "wall_clock_cap_s": resolved_wall_cap,
-        "first_pass_budget_fraction": FIRST_PASS_BUDGET_FRACTION,
         "min_attempts_per_shot": MIN_ATTEMPTS_PER_SHOT,
         "max_attempts_per_shot": MAX_ATTEMPTS_PER_SHOT,
         "max_repair_epochs": MAX_REPAIR_EPOCHS,
@@ -306,7 +295,7 @@ async def _complete_episode_core(
 
     active_run_states = {
         "CREATED", "RUNNING", "WAITING_RETRY", "WAITING_HUMAN",
-        "WAITING_AUTHORIZATION", "PAUSED_BUDGET", "PAUSED_EXTERNAL",
+        "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL",
     }
     start_claim = f"starting:{int(now())}:{new_id('video_completion')}"
     reusable_run_id: str | None = None
@@ -410,7 +399,6 @@ async def _complete_episode_core(
                     input_fingerprint=workflow_input_fingerprint,
                     requested_by="user",
                     trigger_type=trigger_type,
-                    budget_limit_cny=cap,
                     deadline_at=now() + resolved_wall_cap,
                     policy_snapshot=workflow_policy_snapshot,
                     parent_run_id=parent_run_id,
@@ -476,7 +464,6 @@ async def _complete_episode_core(
                     "project_id": ep["project_id"],
                     "resume": mode == "resume",
                     "grant_id": grant_id,
-                    "budget_cap_cny": cap,
                     "wall_clock_cap_s": (
                         float(wall_cap) if wall_cap is not None else None
                     ),
@@ -496,7 +483,6 @@ async def _complete_episode_core(
         episode_id, recorder,
         resume=(mode == "resume"),
         grant_id=grant_id,
-        budget_cap_cny=cap,
         wall_clock_cap_s=float(wall_cap) if wall_cap is not None else None,
         allow_fallback_adopt=bool(allow_fallback),
         max_fallback_shots=int(max_fallback) if max_fallback is not None else None,

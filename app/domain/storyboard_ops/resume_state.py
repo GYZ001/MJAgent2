@@ -294,8 +294,7 @@ def _storyboard_start_preflight_payload(episode_id: str) -> dict:
             else "从空白开始生成本集分镜"
         ),
         "estimated_wait_minutes": [max(1, (remaining or planned or 1)), max(2, (remaining or planned or 1) * 3)],
-        "estimated_cost_cny": None,
-        "estimate_note": "文本生成费用按实际调用结算；不会自动提交付费视频生成",
+        "estimate_note": "分镜文本生成后不会自动提交视频生成，需人工确认",
         "baseline_fingerprint": episode_fingerprint(episode_id),
     }
 

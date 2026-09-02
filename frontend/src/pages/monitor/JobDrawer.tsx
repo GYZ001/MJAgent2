@@ -87,7 +87,7 @@ export default function JobDrawer({
       }
       track("job_action", { action: endpointAction, object_status: job.status }, job.id);
       setActionMessage(
-        `${jobWorkLabel(job)}：${endpointAction === "cancel" ? "取消请求已接受" : allowNewSubmission ? "已确认重新提交，正在重新校验预算" : endpointAction === "resume" ? "恢复请求已接受，正在从检查点继续" : "重试请求已接受，正在排队"}`,
+        `${jobWorkLabel(job)}：${endpointAction === "cancel" ? "取消请求已接受" : allowNewSubmission ? "已确认重新提交，正在重新校验授权" : endpointAction === "resume" ? "恢复请求已接受，正在从检查点继续" : "重试请求已接受，正在排队"}`,
       );
       onChanged();
       await load();
@@ -116,7 +116,6 @@ export default function JobDrawer({
   const canRetry = job.source !== "screenplay" && ["failed", "partial", "cancelled"].includes(job.status);
   const canResume = [
     "paused_external",
-    "paused_budget",
     "waiting_retry",
     "waiting_human",
   ].includes(job.status);
@@ -277,7 +276,7 @@ export default function JobDrawer({
         {confirmAction && (
           <div className="monitor-inline-confirm">
             {confirmAction === "cancel"
-              ? "取消会中止当前任务，已产生的上游费用仍会保留。"
+              ? "取消会中止当前任务。"
               : confirmAction === "confirm_new_submission"
                 ? PROVIDER_RESUBMISSION_WARNING
               : confirmAction === "resume"

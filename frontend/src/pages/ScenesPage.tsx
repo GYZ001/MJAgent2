@@ -144,7 +144,7 @@ export default function ScenesPage() {
     try {
       const result = await api.sceneRefsGaps(p.id)
       setGapScan(result)
-      toast(`只读扫描完成：发现 ${result.total} 项；未生成图片、未扣费`)
+      toast(`只读扫描完成：发现 ${result.total} 项；未生成图片`)
     } catch (e: unknown) { toast(e instanceof Error ? e.message : String(e), true) }
     finally { setBusy(false) }
   }
@@ -258,7 +258,6 @@ export default function ScenesPage() {
             {progress.current_view ? ` / ${sceneViewPresentation(progress.current_view).label}` : ''}
             {progress.phase ? ` · 阶段：${scenePhaseLabel(progress.phase)}` : ''}
             {progress.attempt ? ` · 第 ${progress.attempt} 次尝试` : ''}
-            {typeof progress.spent_cny === 'number' ? ` · 已发生约 ¥${progress.spent_cny.toFixed(2)}` : ''}
             {Array.isArray(progress.refs_target) && progress.refs_target.length ? ` · 当前范围：${progress.refs_target.join('、')}` : ''}
           </div>
         )}
@@ -414,7 +413,7 @@ export default function ScenesPage() {
           summary={progress
             ? `已完成 ${progress.ready}/${progress.total}，剩余 ${progress.remaining}`
             : '当前场景图任务仍在运行'}
-          message="系统会停止本地生成队列并保留已落盘场景图；当前已提交给图片服务的请求可能仍会完成并产生费用。"
+          message="系统会停止本地生成队列并保留已落盘场景图；当前已提交给图片服务的请求可能仍会完成。"
           details={[
             progress?.current_scene
               ? `当前处理：${progress.current_scene}${progress.current_view ? ` / ${sceneViewPresentation(progress.current_view).label}` : ''}`
@@ -850,7 +849,7 @@ function SceneAnchorBlock({ projectId, scene, expectedVersion, disabled, onChang
                 expected_version: expectedVersion, ...draft,
                 landmarks: split(draft.landmarks),
               })
-              toast('场景固定信息已保存；现有图片已标记待重绘（未生成、未扣费）')
+              toast('场景固定信息已保存；现有图片已标记待重绘（未生成）')
               setDiscardConfirm(false); setEditing(false); onChanged()
             } catch (e: unknown) { toast(e instanceof Error ? e.message : String(e), true) }
             finally { setSaving(false) }
@@ -967,7 +966,7 @@ function ScenePromptBlock({ projectId, scene: s, disabled, onChanged, regenerate
           </div>
           {restoreConfirm && (
             <div className="inline-reset-confirm" role="status">
-              <span><b>恢复「{s.name}」的默认场景描述？</b>只恢复由画风和场景固定信息合成的默认描述，不生成图片、不扣费。</span>
+              <span><b>恢复「{s.name}」的默认场景描述？</b>只恢复由画风和场景固定信息合成的默认描述，不生成图片。</span>
               <div>
                 <button className="btn small ghost" type="button" disabled={saving}
                   onClick={() => setRestoreConfirm(false)}>取消</button>

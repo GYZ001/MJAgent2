@@ -1,11 +1,11 @@
-"""映射台预检的图片费用预估：只对结构上可判定的部分给出确切数字。
+"""映射台预检的出图范围预估：只对结构上可判定的部分给出确切数字。
 
 背景（2026-08-31）：出图入口全部收敛到映射台之后，`_discover_new_characters` /
 `_discover_new_scenes`（app/production/prep_pack/discovery.py 106/151 行）一旦
 把人物或场景映射进本集就会自动出图——这是既定行为，不是可选步骤（已有参考图的
-走复用、不重复计费）。本模块回答"这次映射预检时，有多少张图是结构上已经能算准
+走复用、不重复出图）。本模块回答"这次映射预检时，有多少张图是结构上已经能算准
 的"：人物谱/场景库里已登记、本集原文逐字命中、但还没有覆盖本集参考图的条目——
-按上面那条既定行为，这些一旦被映射进本集就会真出图，费用可以算准。本集真正
+按上面那条既定行为，这些一旦被映射进本集就会真出图，数量可以算准。本集真正
 新出现、尚未进人物谱/场景库的角色/场景，具体数量取决于模型读完原文报出什么，
 生成前结构上无法确知，本模块不猜、如实交给调用方标记为不可预知
 （CLAUDE.md「不得兜底填充」「诚实的不确定优于精确的假数字」）。
@@ -75,12 +75,11 @@ def _prep_pack_known_pending_images(
 ) -> dict:
     """本集"已知会出图"的确切部分：人物谱/场景库里已登记、本集原文逐字命中、
     但还没有覆盖本集参考图的条目——按既定行为这些一旦被映射进本集就会触发真实
-    出图，所以这部分费用是可以算准的。已有参考图的条目走复用，不计费，不计入
-    这里的数量。本集真正新角色/新场景的数量在生成前结构上无法确知（取决于模型
-    读完原文实际报出什么），不在这里估算——``estimated_cost_cny`` 恒为 None，
-    调用方据此判断"完整费用"这部分是否可信，不得当作 0 或任何默认值使用。
+    出图，所以这部分数量是可以算准的。已有参考图的条目走复用，不重复出图，不
+    计入这里的数量。本集真正新角色/新场景的数量在生成前结构上无法确知（取决于
+    模型读完原文实际报出什么），不在这里估算——``estimated_images`` 恒为
+    None，调用方据此判断"完整范围"这部分是否可信，不得当作 0 或任何默认值使用。
     """
-    from app.config import IMAGE_PRICE_PER_UNIT
     from app.multiview import CHARACTER_REQUIRED_VIEWS, SCENE_REQUIRED_VIEWS
 
     kwargs = dict(
@@ -96,7 +95,6 @@ def _prep_pack_known_pending_images(
         len(pending_characters) * views_per_character
         + len(pending_scenes) * views_per_scene
     )
-    unit = float(IMAGE_PRICE_PER_UNIT)
     return {
         "deferred": False,
         "views_per_character": views_per_character,
@@ -104,15 +102,12 @@ def _prep_pack_known_pending_images(
         "known_pending_characters": pending_characters,
         "known_pending_scenes": pending_scenes,
         "known_image_count": known_image_count,
-        "known_cost_cny": round(known_image_count * unit, 2),
-        "unit_price_cny": unit,
         "estimated_images": None,
-        "estimated_cost_cny": None,
         "note": (
             "已登记角色/场景中本集原文命中且缺参考图的部分按既定行为必然出图，"
-            "已算入 known_cost_cny；本集若出现尚未登记的新角色/新场景，映射台会"
+            "已算入 known_image_count；本集若出现尚未登记的新角色/新场景，映射台会"
             "自动建卡/登记并生成参考图，这是既定行为、不是可选步骤——具体新增"
-            "数量在生成前无法确知，取决于模型读完原文实际报出什么，完整费用以"
+            "数量在生成前无法确知，取决于模型读完原文实际报出什么，完整范围以"
             "生成后为准"
         ),
     }

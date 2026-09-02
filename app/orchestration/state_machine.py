@@ -10,13 +10,12 @@ RUN_TRANSITIONS: dict[str, set[str]] = {
     "CREATED": {"RUNNING", "CANCELLED"},
     "RUNNING": {
         "WAITING_RETRY", "WAITING_HUMAN", "WAITING_AUTHORIZATION",
-        "PAUSED_BUDGET", "PAUSED_EXTERNAL",
+        "PAUSED_EXTERNAL",
         "SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED",
     },
     "WAITING_RETRY": {"RUNNING", "WAITING_HUMAN", "FAILED", "CANCELLED"},
     "WAITING_HUMAN": {"RUNNING", "PARTIAL", "FAILED", "CANCELLED"},
     "WAITING_AUTHORIZATION": {"RUNNING", "WAITING_HUMAN", "PARTIAL", "FAILED", "CANCELLED"},
-    "PAUSED_BUDGET": {"RUNNING", "WAITING_HUMAN", "PARTIAL", "FAILED", "CANCELLED"},
     "PAUSED_EXTERNAL": {"RUNNING", "WAITING_RETRY", "WAITING_HUMAN", "FAILED", "CANCELLED"},
     "SUCCEEDED": set(),
     "PARTIAL": set(),
@@ -121,7 +120,7 @@ def transition_run(
         # active non-terminal states in the Run dock.
         "failure_message": reason if to in {
             "FAILED", "PARTIAL", "WAITING_RETRY", "WAITING_HUMAN",
-            "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL", "PAUSED_BUDGET",
+            "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL",
         } else None,
     }
     if to == "RUNNING":

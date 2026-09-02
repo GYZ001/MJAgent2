@@ -139,7 +139,6 @@ from app.domain.projects.detail import (
     chapter_preview as chapter_preview,
     evidence_repository as evidence_repository,
     project_detail as project_detail,
-    worker as worker,
 )
 
 from app.domain.projects.episode_renumber import (

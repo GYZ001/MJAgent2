@@ -121,7 +121,6 @@ class PlannerShotAnalysis(BaseModel):
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     unknown_dimensions: list[str] = Field(default_factory=list)
     estimated_latency_ms: int = Field(default=0, ge=0)
-    estimated_cost: float = Field(default=0.0, ge=0.0)
 
 
 SHOT_RELATION_ENUM_CONTRACT: dict[str, list[str]] = {
@@ -169,10 +168,8 @@ class ShotVideoGenerationPlan(BaseModel):
     unknown_dimensions: list[str] = Field(default_factory=list)
     fallback_order: list[VideoGenerationMode] = Field(default_factory=list)
     max_attempts: int = Field(default=2, ge=1, le=8)
-    max_cost: float = Field(default=0.0, ge=0.0)
     timeout_s: float = Field(default=7200.0, ge=30.0)
     estimated_latency_ms: int = Field(default=0, ge=0)
-    estimated_cost: float = Field(default=0.0, ge=0.0)
     critical_path_group: str | None = None
     capability_snapshot_id: str
     input_revision_fingerprints: dict[str, str] = Field(default_factory=dict)
@@ -208,7 +205,6 @@ class EpisodeVideoGenerationPlan(BaseModel):
     shots: list[ShotVideoGenerationPlan] = Field(default_factory=list)
     blockers: list[dict[str, Any]] = Field(default_factory=list)
     estimated_latency_ms: int = 0
-    estimated_cost: float = 0.0
     critical_path_latency_ms: int = 0
     safe_parallelism_ratio: float = 1.0
     created_at: float = Field(default_factory=time.time)

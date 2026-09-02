@@ -117,9 +117,8 @@ export default function ProjectOverviewSection({
               label: "待我处理",
               count:
                 (counts.waiting_human || 0) +
-                (counts.paused_budget || 0) +
                 (counts.paused_external || 0),
-              status: "waiting_human,paused_budget,paused_external",
+              status: "waiting_human,paused_external",
             },
             {
               label: "系统异常",

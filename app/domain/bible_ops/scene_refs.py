@@ -7,7 +7,6 @@ from __future__ import annotations
 import json
 
 from app import (
-    config,
     task_registry,
 )
 from app.db import (
@@ -32,11 +31,11 @@ from fastapi import HTTPException
 from .primitives import (
     _SCENE_CANONICAL_LENGTH_MESSAGE,
     _consume_payment_quote,
-    _issue_payment_quote,
+    _issue_scope_quote,
     _parse_json_value,
     _payment_confirm_required,
     _scene_canonical_length_ok,
-    _validate_payment_quote,
+    _validate_scope_quote,
 )
 from .scene_assets import (
     _normalize_scene_selection,
@@ -56,7 +55,7 @@ async def scene_refs_gaps(project_id: str):
 @router.post("/projects/{project_id}/scene-refs/precheck")
 async def scene_refs_precheck(project_id: str, body: dict | None = None):
     payload = _as_body_dict(body)
-    return _issue_payment_quote(compute_scene_cost_precheck(
+    return _issue_scope_quote(compute_scene_cost_precheck(
         project_id,
         scenes=_normalize_scene_selection(payload.get("scenes")),
         resume=bool(payload.get("resume", False)),
@@ -96,26 +95,17 @@ def _scene_refs_progress_payload(project_id: str) -> dict:
                         if step.get("status") in {"queued", "running", "waiting"}), None)
     latest_step = active_step or (steps[-1] if steps else None)
     latest_call = None
-    successful_images = 0
     if run_id:
         conn = get_conn()
         calls = rows_to_dicts(conn.execute(
             "SELECT * FROM provider_calls WHERE run_id=? ORDER BY id", (run_id,),
         ).fetchall())
-        successful_images = sum(
-            1 for call in calls
-            if call.get("status") in {"SUCCEEDED", "succeeded", "success"}
-            and "image" in str(call.get("kind") or "").lower()
-        )
         latest_call = calls[-1] if calls else None
     call_meta = _parse_json_value((latest_call or {}).get("meta"), {})
     if not isinstance(call_meta, dict):
         call_meta = {}
     fallback_scene = target[0] if isinstance(target, list) and target else (target if isinstance(target, str) else None)
     configured = (run or {}).get("config_snapshot") or {}
-    spent = float((run or {}).get("cost_cny") or 0)
-    if spent <= 0 and successful_images:
-        spent = successful_images * float(config.IMAGE_PRICE_PER_UNIT)
     return {
         "project_id": project_id, "total": total, "ready": ready, "failed": failed,
         "missing": missing, "unverified": unverified, "remaining": max(0, total - ready),
@@ -125,7 +115,6 @@ def _scene_refs_progress_payload(project_id: str) -> dict:
         "current_scene": call_meta.get("scene_name") or configured.get("scene_name") or fallback_scene,
         "current_view": call_meta.get("view_role") or configured.get("view_role"),
         "attempt": int((latest_call or {}).get("attempt_no") or 0),
-        "spent_cny": round(spent, 2),
         "items": items, "updated_at": now(),
     }
 
@@ -149,7 +138,7 @@ async def preview_scene_bible(project_id: str):
     ).fetchall())
     scenes = await generate_scene_bible(chapters, bible, project_id=project_id)
     scene_payloads = [scene.model_dump(mode="json") for scene in scenes]
-    quote = _issue_payment_quote(compute_scene_cost_precheck(
+    quote = _issue_scope_quote(compute_scene_cost_precheck(
         project_id,
         scenes=[scene["name"] for scene in scene_payloads],
         action="generate_bible_and_refs",
@@ -190,7 +179,7 @@ async def scene_bible_precheck(project_id: str, body: dict | None = None):
     if validation_errors:
         raise HTTPException(422, "；".join(validation_errors))
     normalized_scenes = [scene.model_dump(mode="json") for scene in instance.scenes]
-    return _issue_payment_quote(compute_scene_cost_precheck(
+    return _issue_scope_quote(compute_scene_cost_precheck(
         project_id, scenes=names, action="generate_bible_and_refs", scene_payloads=normalized_scenes,
     ))
 
@@ -217,7 +206,7 @@ async def start_scene_bible(project_id: str, body: dict | None = None):
     if not isinstance(confirmed_scenes, list) or not confirmed_scenes:
         raise HTTPException(409, detail={
             "code": "SCENE_PREVIEW_REQUIRED",
-            "message": "必须先预览并确认场景清单，再执行费用确认",
+            "message": "必须先预览并确认场景清单，再执行范围确认",
         })
     names = [str(item.get("name") or "").strip() for item in confirmed_scenes if isinstance(item, dict)]
     if not names or len(names) != len(set(names)):
@@ -239,8 +228,8 @@ async def start_scene_bible(project_id: str, body: dict | None = None):
     if payload.get("confirm") is not True:
         # 见 task_run.py 同类注释：未签发的报价不能作为 409 里的 quote_id 递
         # 出去，否则调用方按响应指引确认必然 QUOTE_STALE。
-        raise _payment_confirm_required(_issue_payment_quote(quote))
-    quote_row = _validate_payment_quote(project_id, payload.get("quote_id"), quote)
+        raise _payment_confirm_required(_issue_scope_quote(quote))
+    quote_row = _validate_scope_quote(project_id, payload.get("quote_id"), quote)
     if quote_row["consumed_at"] is not None:
         return {
             "status": "accepted", "idempotent_replay": True,
@@ -293,8 +282,8 @@ async def start_scene_refs(project_id: str, body: dict | None = None):
     if payload.get("confirm") is not True:
         # 见 task_run.py 同类注释：未签发的报价不能作为 409 里的 quote_id 递
         # 出去，否则调用方按响应指引确认必然 QUOTE_STALE。
-        raise _payment_confirm_required(_issue_payment_quote(quote))
-    quote_row = _validate_payment_quote(project_id, payload.get("quote_id"), quote)
+        raise _payment_confirm_required(_issue_scope_quote(quote))
+    quote_row = _validate_scope_quote(project_id, payload.get("quote_id"), quote)
     if quote_row["consumed_at"] is not None:
         return {
             "status": "accepted", "idempotent_replay": True,

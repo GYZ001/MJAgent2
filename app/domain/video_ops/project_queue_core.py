@@ -29,7 +29,6 @@ _PROJECT_VIDEO_CHILD_WAIT_STATUSES = {
     "WAITING_RETRY",
     "WAITING_HUMAN",
     "WAITING_AUTHORIZATION",
-    "PAUSED_BUDGET",
     "PAUSED_EXTERNAL",
 }
 
@@ -164,12 +163,3 @@ def _finish_project_video_completion_queue(plan: list[dict], recorder) -> None:
     recorder.partial(
         f"项目补齐队列已结束，{len(unsuccessful)} 集未成功完成", conn=None
     )
-
-def _project_video_spent(project_id: str, *, conn=None) -> float:
-    from app.completion_grant import project_video_budget_snapshot
-
-    snapshot = project_video_budget_snapshot(
-        project_id,
-        conn=conn or get_conn(),
-    )
-    return float(snapshot["used_cny"])

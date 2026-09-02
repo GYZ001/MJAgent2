@@ -24,7 +24,6 @@ const EPISODE_STATUS: Record<string, Omit<ProductionStatusMeta, 'known'>> = {
   script_failed: { label: '分镜生成失败', tone: 'red' },
   confirmed: { label: '分镜已确认', tone: 'green' },
   generating: { label: '视频生成中', tone: 'gold' },
-  paused_budget: { label: '视频因预算暂停', tone: 'red' },
   mixed: { label: '视频处理中', tone: 'gold' },
   done: { label: '本集已成片', tone: 'green' },
 }

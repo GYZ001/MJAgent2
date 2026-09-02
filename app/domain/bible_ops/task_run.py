@@ -46,11 +46,11 @@ from .precheck import (
 )
 from .primitives import (
     _consume_payment_quote,
-    _issue_payment_quote,
+    _issue_scope_quote,
     _normalize_visual_style_name,
     _payment_confirm_required,
     _supports_bible_style_name,
-    _validate_payment_quote,
+    _validate_scope_quote,
     _visual_style_prompt_or_default,
 )
 from .refs_generation import _start_refs_generation
@@ -145,9 +145,9 @@ async def _bible_task(
         # 变化」（旧定妆照已被上面的 _purge_for_style_change 判定失效，需要
         # 按新画风重出）时才触发定妆任务。画风未变时，世界观判定不产生任何
         # 角色内容变化，已有定妆照依旧成立——不该被这次调用无差别打回重做，
-        # 那会把「只是重新判定了一次年代/题材」变成一次隐藏的、真实产生图片
-        # 费用的批量重出图（回归：previous_bible 带出角色后，characters 不再
-        # 恒为空，旧的「无条件触发」假设不再成立）。
+        # 那会把「只是重新判定了一次年代/题材」变成一次隐藏的批量重出图
+        # （回归：previous_bible 带出角色后，characters 不再恒为空，旧的
+        # 「无条件触发」假设不再成立）。
         if trigger_full_refs and not residual and (not old_bible or (old_style and bible.world.visual_style_canonical != old_style)):
             try:
                 # 显式传全部具备定妆资格的角色名单，不能让 _start_refs_generation
@@ -157,7 +157,7 @@ async def _bible_task(
                 # 表刚被清空而查到零个已建卡角色，把整批当空选中悄悄早退——一个
                 # 角色都不会重新出图，refs_status 却仍会走向 ready（实战撞到：
                 # 我欲封天换画风后 5 个角色只剩 1 个有图）。名单口径与
-                # compute_refs_cost_precheck 的整包生成分支同源，不重写第二份。
+                # compute_refs_precheck 的整包生成分支同源，不重写第二份。
                 _start_refs_generation(project_id, None, only_characters=[c.name for c in bible.characters if character_is_portrait_eligible(c)])
             except Exception as exc:  # noqa: BLE001 bible remains deliverable
                 public = errors.record_and_format(
@@ -316,9 +316,9 @@ async def _start_bible_core(
         # quote_id（其实是 scope_fingerprint）原样递给调用方——那个值从未写进
         # character_payment_quotes，调用方按响应指引带它来确认必然 QUOTE_STALE
         # 死循环（实测 ERR：POST /bible 不带 confirm → 409 里的 quote_id 是
-        # scope_fingerprint 的 64 位 hash，无法通过 _validate_payment_quote）。
-        raise _payment_confirm_required(_issue_payment_quote(precheck))
-    quote_row = _validate_payment_quote(project_id, quote_id, precheck)
+        # scope_fingerprint 的 64 位 hash，无法通过 _validate_scope_quote）。
+        raise _payment_confirm_required(_issue_scope_quote(precheck))
+    quote_row = _validate_scope_quote(project_id, quote_id, precheck)
     if quote_row["consumed_at"] is not None:
         return {
             "status": "accepted", "idempotent_replay": True,
@@ -389,7 +389,7 @@ async def _start_bible_core(
                 pass
         raise HTTPException(503, {
             "code": "BIBLE_START_FAILED",
-            "message": "人物谱任务未能启动，项目原状态和费用凭证均已保留，请重试",
+            "message": "人物谱任务未能启动，项目原状态和范围凭证均已保留，请重试",
             "action": "retry_generate",
         }) from exc
     _consume_payment_quote(

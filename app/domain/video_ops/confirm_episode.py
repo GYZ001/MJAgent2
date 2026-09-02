@@ -387,7 +387,6 @@ def _confirm_episode_core_impl(
     board = evaluation.board
     normalized_fields_changed = board.model_dump(mode="json") != original_board_payload
     compact_target = evaluation.compact_target
-    est = evaluation.estimated_cost_cny
     shots = board.shots
 
     # 人工镜头编辑会产生新的 shot artifact，但不会变更旧的
@@ -465,7 +464,6 @@ def _confirm_episode_core_impl(
                 return {
                     "confirmed": True,
                     "idempotent": True,
-                    "estimated_cost_cny": est,
                     "shot_count": len(shots),
                     "total_duration_s": sum(s.duration_s for s in shots),
                     "target_duration_s": compact_target,
@@ -536,7 +534,6 @@ def _confirm_episode_core_impl(
         pass
     return {
         "confirmed": True,
-        "estimated_cost_cny": est,
         "shot_count": len(shots),
         "total_duration_s": sum(s.duration_s for s in shots),
         "target_duration_s": compact_target,

@@ -11,10 +11,9 @@ def release_orphan_quarantined_versions(conn, limit: int) -> int:
     采用候选。判据因此从数据推导，不看隔离文案：本镜存在 succeeded 版本时
     一律不动（那才是真正的重复产出）；只有当本镜**一个可用版本都没有**、而
     隔离版的视频文件确实躺在盘上时，才说明这是成本预算退场前那套
-    ``video_slot_active=0 → adoptable=False`` 机器扔掉的好素材（见
-    ``retry_scheduling.retry_paused`` 的注释）——用户已经等了 6 次生成却拿不到
-    任何能用的东西，继续隔离纯粹是为已废止概念服务的拦路石。每镜只放行最新
-    的一版，避免一次冒出多个候选。
+    ``video_slot_active=0 → adoptable=False`` 机器扔掉的好素材——用户已经等了
+    6 次生成却拿不到任何能用的东西，继续隔离纯粹是为已废止概念服务的拦路石。
+    每镜只放行最新的一版，避免一次冒出多个候选。
     """
     rows = conn.execute(
         """SELECT v.id, v.shot_id, v.video_path

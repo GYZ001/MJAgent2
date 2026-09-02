@@ -52,7 +52,7 @@ def _persist_checkpoint_transaction(
                SET updated_at=?, deadline_at=COALESCE(deadline_at, ?)
                WHERE id=? AND status IN (
                    'CREATED','RUNNING','WAITING_RETRY','WAITING_HUMAN',
-                   'WAITING_AUTHORIZATION','PAUSED_BUDGET','PAUSED_EXTERNAL'
+                   'WAITING_AUTHORIZATION','PAUSED_EXTERNAL'
                )""",
             (cp.last_heartbeat_at, cp.deadline_at, rid),
         )
@@ -66,7 +66,7 @@ def _persist_checkpoint_transaction(
     ).fetchone()
     durable_every_time = TERMINAL_SUPERVISOR_PHASES | {
         "DEADLINE_CLOSING", "RECOVERING_CONTROL_PLANE", "FAILED_CLOSED",
-        "WAITING_AUTHORIZATION", "WAITING_HUMAN", "PAUSED_EXTERNAL", "PAUSED_BUDGET",
+        "WAITING_AUTHORIZATION", "WAITING_HUMAN", "PAUSED_EXTERNAL",
     }
     if existing and cp.phase not in durable_every_time:
         try:

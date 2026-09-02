@@ -796,7 +796,7 @@ def test_regex_planner_rolls_back_to_old_plan_and_keeps_media(
     assert project["plan_error"]
 
 
-def test_replan_blocks_durable_run_and_paused_budget_job(
+def test_replan_blocks_durable_run(
     tmp_path, monkeypatch,
 ) -> None:
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "replan-blockers.db")
@@ -822,11 +822,6 @@ def test_replan_blocks_durable_run_and_paused_budget_job(
              id,workflow_type,scope_type,scope_id,status,input_fingerprint,updated_at
            ) VALUES('run_old','storyboard','episode','old','PAUSED_EXTERNAL','fp',1)"""
     )
-    conn.execute(
-        """INSERT INTO jobs(
-             id,kind,episode_id,project_id,status,created_at,updated_at
-           ) VALUES('job_old','video','old','p1','paused_budget',1,1)"""
-    )
     conn.commit()
     old_media = project_root / "p1" / "episodes" / "1" / "old.mp4"
     old_media.parent.mkdir(parents=True)
@@ -838,7 +833,6 @@ def test_replan_blocks_durable_run_and_paused_budget_job(
     error = exc_info.value
     assert getattr(error, "status_code", None) == 409
     assert error.detail["code"] == "REPLAN_ACTIVE_WORK"
-    assert error.detail["active_media_jobs"] == 1
     assert error.detail["active_runs"][0]["id"] == "run_old"
 
     asyncio.run(planning.run_regex_plan("p1"))

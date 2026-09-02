@@ -5,7 +5,6 @@ import json
 
 from fastapi import HTTPException
 
-from app import worker
 from app.db import get_conn, rows_to_dicts
 from app.domain.common import _project_or_404, router
 from app.domain.projects.bible_attachments import (
@@ -381,20 +380,6 @@ def project_detail(
     else:
         p["episodes"] = rows_to_dicts(conn.execute(
             "SELECT * FROM episodes WHERE project_id=? ORDER BY episode_no", (project_id,)).fetchall())
-    page_costs: dict[str, float] = {}
-    if view == "episodes" and p["episodes"]:
-        episode_ids = [ep["id"] for ep in p["episodes"]]
-        marks = ",".join("?" for _ in episode_ids)
-        cost_rows = conn.execute(
-            f"""SELECT s.episode_id, COALESCE(SUM(v.cost_cny), 0) AS cost_cny
-                 FROM shots s
-                 JOIN shot_versions v ON v.shot_id=s.id
-                 WHERE s.episode_id IN ({marks})
-                   AND v.status IN ('succeeded', 'running', 'queued')
-                 GROUP BY s.episode_id""",
-            episode_ids,
-        ).fetchall()
-        page_costs = {row["episode_id"]: float(row["cost_cny"] or 0) for row in cost_rows}
     for ep in p["episodes"]:
         ep["source_chapters"] = json.loads(ep["source_chapters"] or "[]")
         if ep.get("screenplay_json"):
@@ -412,10 +397,6 @@ def project_detail(
         except (TypeError, ValueError):
             _outline = None
         ep["storyboard_planned_shots"] = len(_outline["shots"]) if _outline and _outline.get("shots") else None
-        ep["cost_cny"] = (
-            page_costs.get(ep["id"], 0.0)
-            if view == "episodes" else worker.episode_cost(ep["id"])
-        )
     if view == "episodes":
         chapter_ids = sorted({
             int(ep["source_chapters"][0])

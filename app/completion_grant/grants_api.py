@@ -11,9 +11,6 @@ from app.provider_task_clearance import (
     assert_provider_tasks_clearable as assert_provider_tasks_clearable,
     prepare_provider_tasks_for_clear as prepare_provider_tasks_for_clear,
 )
-from app.completion_grant.budget_authority import (
-    authorize_episode_video_budget_absolute,
-)
 from app.completion_grant.grants_issue import (
     _idempotent_video_grant,
     _record_video_budget_authority_event,
@@ -182,29 +179,25 @@ def bind_video_grant_generation_plan(
     )
 
 
-def bump_video_grant_budget(
+def bump_video_grant_wall_clock(
     grant_id: str,
     *,
-    add_cny: float,
-    add_wall_s: float = 0,
+    add_wall_s: float,
     idempotency_key: str | None = None,
 ) -> VideoCompletionGrant:
-    """Atomically top up a grant, its budget authority and audit ledger."""
+    """Atomically extend a grant's wall-clock cap and its audit ledger.
+
+    金额不再构成生成拦截（会员分档时长制，非按金额计费）：追加授权只延长
+    ``wall_clock_cap_s``，不再有 ``add_cny``——见 CLAUDE.md「Retiring
+    Features」与本次「成本预算拦截体系退场」。调用点原名
+    ``bump_video_grant_budget`` 已改名，语义从"追加预算"收窄为"追加时长"。
+    """
     ensure_completion_grants_table(get_conn())
-    add_cny = float(add_cny)
     add_wall_s = float(add_wall_s)
-    # 金额不再构成生成拦截（会员分档时长制，非按金额计费）：add_cny 只做非负
-    # 有限数的基本输入校验，不再设 100000 上限——那是历史"预算"概念的残留。
-    # add_wall_s 是单次生成运行的时长墙，不是会员分档时长配额，其上限原样保留。
-    if not math.isfinite(add_cny) or add_cny < 0:
-        raise GrantValidationError("INVALID_BUDGET", "追加预算必须是非负有限数")
-    if not math.isfinite(add_wall_s) or add_wall_s < 0 or add_wall_s > 604800:
-        raise GrantValidationError("INVALID_WALL_CLOCK", "追加时长必须是 0–604800 秒的有限数")
-    if add_cny == 0 and add_wall_s == 0:
-        raise GrantValidationError("EMPTY_TOPUP", "追加预算和时长不能同时为 0")
+    if not math.isfinite(add_wall_s) or add_wall_s <= 0 or add_wall_s > 604800:
+        raise GrantValidationError("INVALID_WALL_CLOCK", "追加时长必须是大于 0 且不超过 604800 秒的有限数")
     request_fingerprint = _content_fingerprint({
         "grant_id": grant_id,
-        "add_cny": add_cny,
         "add_wall_s": add_wall_s,
     })
     operation_id = _video_budget_authority_operation_id(
@@ -242,7 +235,6 @@ def bump_video_grant_budget(
                 "GRANT_REVOKED",
                 "视频补齐授权已撤销",
             )
-        new_cap = float(grant.budget_cap_cny) + add_cny
         new_wall = float(grant.wall_clock_cap_s) + add_wall_s
         if new_wall > 604800:
             raise GrantValidationError(
@@ -252,29 +244,17 @@ def bump_video_grant_budget(
         stamp = now()
         new_deadline = float(grant.issued_at) + new_wall
         new_expires = max(float(grant.expires_at), stamp + GRANT_TTL_S)
-        prior_authority = conn.execute(
-            """SELECT cap_cny FROM episode_video_budget_authorities
-               WHERE episode_id=?""",
-            (grant.episode_id,),
-        ).fetchone()
-        prior_authority_cap = (
-            float(prior_authority["cap_cny"])
-            if prior_authority is not None
-            else None
-        )
         updated = conn.execute(
             """UPDATE completion_grants
-                  SET budget_cap_cny=?,wall_clock_cap_s=?,deadline_at=?,
+                  SET wall_clock_cap_s=?,deadline_at=?,
                       expires_at=?,consumed_at=NULL
-                WHERE id=? AND budget_cap_cny=? AND wall_clock_cap_s=?
+                WHERE id=? AND wall_clock_cap_s=?
                   AND deadline_at=? AND expires_at=? AND revoked_at IS NULL""",
             (
-                new_cap,
                 new_wall,
                 new_deadline,
                 new_expires,
                 grant_id,
-                grant.budget_cap_cny,
                 grant.wall_clock_cap_s,
                 grant.deadline_at,
                 grant.expires_at,
@@ -283,14 +263,9 @@ def bump_video_grant_budget(
         if updated.rowcount != 1:
             raise GrantValidationError(
                 "GRANT_CONCURRENTLY_CHANGED",
-                "视频补齐授权在追加预算时已被并发修改",
+                "视频补齐授权在追加时长时已被并发修改",
             )
-        authority_cap = authorize_episode_video_budget_absolute(
-            grant.episode_id,
-            new_cap,
-            source=f"completion_grant_topup:{grant_id}",
-            conn=conn,
-        )
+        # video_budget_authority_ledger 同时承担幂等去重职责，金额字段固定写 0。
         _record_video_budget_authority_event(
             conn,
             operation_id=operation_id,
@@ -299,11 +274,11 @@ def bump_video_grant_budget(
             grant_id=grant_id,
             episode_id=grant.episode_id,
             project_id=grant.project_id,
-            requested_add_cny=add_cny,
-            prior_grant_cap_cny=grant.budget_cap_cny,
-            grant_cap_cny=new_cap,
-            prior_authority_cap_cny=prior_authority_cap,
-            authority_cap_cny=authority_cap,
+            requested_add_cny=0.0,
+            prior_grant_cap_cny=None,
+            grant_cap_cny=0.0,
+            prior_authority_cap_cny=None,
+            authority_cap_cny=0.0,
             prior_wall_clock_cap_s=grant.wall_clock_cap_s,
             wall_clock_cap_s=new_wall,
             created_at=stamp,
@@ -353,22 +328,3 @@ def revoke_active_video_grants_for_episode(episode_id: str) -> int:
     )
     conn.commit()
     return int(cur.rowcount or 0)
-
-
-def active_video_grant_budget_cap(episode_id: str) -> float | None:
-    """若本集有未撤销的视频 grant，返回其 budget_cap_cny，供 enqueue 优先读取。"""
-    ensure_completion_grants_table(get_conn())
-    row = get_conn().execute(
-        """SELECT budget_cap_cny FROM completion_grants
-           WHERE episode_id=? AND kind='video' AND revoked_at IS NULL
-             AND (consumed_at IS NULL OR consumed_at=0)
-             AND expires_at > ?
-           ORDER BY issued_at DESC LIMIT 1""",
-        (episode_id, now()),
-    ).fetchone()
-    if not row:
-        return None
-    try:
-        return float(row["budget_cap_cny"]) if row["budget_cap_cny"] is not None else None
-    except (TypeError, ValueError, KeyError):
-        return None

@@ -260,7 +260,6 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
             "plan_revision": plan.plan_revision,
             "mode_distribution": {},
             "critical_path_latency_ms": plan.critical_path_latency_ms,
-            "estimated_cost": plan.estimated_cost,
             "enqueued": recovered_results,
             "skipped_completed": 0,
             "selected_shots": len(bound_selected_ids),
@@ -417,7 +416,6 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
             )
         },
         "critical_path_latency_ms": plan.critical_path_latency_ms,
-        "estimated_cost": plan.estimated_cost,
         "enqueued": results,
         "skipped_completed": completed_count,
         "selected_shots": len(selected),

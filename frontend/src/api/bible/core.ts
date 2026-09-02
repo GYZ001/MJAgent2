@@ -19,12 +19,9 @@ export interface BibleImpactPreview {
   }>;
   stale_assets_truncated?: boolean;
   by_artifact_type?: Record<string, number>;
-  paid_assets?: { character_portraits?: number; scene_references?: number };
+  generated_assets?: { character_portraits?: number; scene_references?: number };
   rebuild?: {
     image_count: number;
-    unit_price_cny: number;
-    estimated_cost_cny: number;
-    max_retry_budget_cny: number;
     note?: string;
   };
   requires_reconfirm?: boolean;
@@ -32,7 +29,7 @@ export interface BibleImpactPreview {
   old_asset_policy?: string;
 }
 
-export interface RefsCostPrecheck {
+export interface RefsPrecheck {
   quote_id: string;
   computed_at: number;
   quote_expires_at: number;
@@ -43,10 +40,6 @@ export interface RefsCostPrecheck {
   character_count: number;
   views_per_character: number;
   image_count: number;
-  unit_price_cny: number;
-  estimated_cost_cny: number;
-  max_retry_budget_cny: number;
-  budget_cap_cny: number;
   scope: Array<Record<string, unknown>>;
   old_asset_policy?: string;
   idempotency_hint?: string;
@@ -163,7 +156,7 @@ export function bibleGeneratePrecheck(
   projectId: string,
   body?: { style_name?: string },
 ): Promise<
-  RefsCostPrecheck & {
+  RefsPrecheck & {
     estimated_duration_min?: number[];
     estimate_note?: string;
     character_names?: string[];

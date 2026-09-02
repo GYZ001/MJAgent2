@@ -3,6 +3,12 @@ from the database.
 
 Moved verbatim out of the pre-split ``app/video_plan.py`` (see
 ``app/video_plan/__init__.py`` for the package-split rationale).
+
+2026-09-01 成本预算拦截体系退场：``episode_video_generation_plans.estimated_cost``
+与 ``shot_video_generation_plans.max_cost``/``estimated_cost`` 三列不再被
+``EpisodeVideoGenerationPlan``/``ShotVideoGenerationPlan`` 携带（字段已从
+Pydantic 模型删除），INSERT 不再写这三列——DB 列本身留着不迁移（均
+``NOT NULL DEFAULT 0``），历史列，纯遗留，不参与任何拦截/展示。
 """
 from __future__ import annotations
 
@@ -32,8 +38,8 @@ def publish_plan(plan: EpisodeVideoGenerationPlan, *, conn=None) -> EpisodeVideo
                release_qualification_hash,
                capability_snapshot_id,status,planner_provider,planner_model,
                planner_prompt_fingerprint,blockers_json,estimated_latency_ms,
-               estimated_cost,critical_path_latency_ms,safe_parallelism_ratio,created_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               critical_path_latency_ms,safe_parallelism_ratio,created_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             plan.episode_video_plan_id, plan.episode_id, plan.plan_revision,
             plan.source_storyboard_revision_id,
@@ -46,7 +52,7 @@ def publish_plan(plan: EpisodeVideoGenerationPlan, *, conn=None) -> EpisodeVideo
             plan.capability_snapshot_id,
             plan.status, plan.planner_provider, plan.planner_model,
             plan.planner_prompt_fingerprint, _json(plan.blockers),
-            plan.estimated_latency_ms, plan.estimated_cost,
+            plan.estimated_latency_ms,
             plan.critical_path_latency_ms, plan.safe_parallelism_ratio,
             plan.created_at,
         ),
@@ -73,11 +79,11 @@ def publish_plan(plan: EpisodeVideoGenerationPlan, *, conn=None) -> EpisodeVideo
                    id,episode_video_plan_id,shot_id,shot_no,planned_mode,actual_mode,
                    video_input_intent,depends_on_shot_id,relations_json,state_dependency,
                    motion_dependency,required_assets_json,reason_codes_json,confidence,
-                   unknown_dimensions_json,fallback_order_json,max_attempts,max_cost,
-                   timeout_s,estimated_latency_ms,estimated_cost,critical_path_group,
+                   unknown_dimensions_json,fallback_order_json,max_attempts,
+                   timeout_s,estimated_latency_ms,critical_path_group,
                    capability_snapshot_id,input_fingerprints_json,status,
                    degraded_from_mode,degraded_to_mode,degraded_reason,created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 item.shot_plan_id, plan.episode_video_plan_id, item.shot_id, item.shot_no,
                 item.mode.value, item.actual_mode.value if item.actual_mode else None,
@@ -87,8 +93,7 @@ def publish_plan(plan: EpisodeVideoGenerationPlan, *, conn=None) -> EpisodeVideo
                 _json([asset.model_dump(mode="json") for asset in item.required_assets]),
                 _json(item.reason_codes), item.confidence, _json(item.unknown_dimensions),
                 _json([mode.value for mode in item.fallback_order]), item.max_attempts,
-                item.max_cost, item.timeout_s, item.estimated_latency_ms,
-                item.estimated_cost, item.critical_path_group,
+                item.timeout_s, item.estimated_latency_ms, item.critical_path_group,
                 item.capability_snapshot_id, _json(item.input_revision_fingerprints),
                 item.status, item.degraded_from_mode.value if item.degraded_from_mode else None,
                 item.degraded_to_mode.value if item.degraded_to_mode else None,
@@ -145,10 +150,8 @@ def _shot_plan_from_row(row: Any, parent: Any) -> ShotVideoGenerationPlan:
         "unknown_dimensions": json.loads(row["unknown_dimensions_json"] or "[]"),
         "fallback_order": json.loads(row["fallback_order_json"] or "[]"),
         "max_attempts": row["max_attempts"],
-        "max_cost": row["max_cost"],
         "timeout_s": row["timeout_s"],
         "estimated_latency_ms": row["estimated_latency_ms"],
-        "estimated_cost": row["estimated_cost"],
         "critical_path_group": row["critical_path_group"],
         "capability_snapshot_id": row["capability_snapshot_id"],
         "input_revision_fingerprints": json.loads(row["input_fingerprints_json"] or "{}"),
@@ -185,7 +188,6 @@ def _load_plan_parent(parent, *, db) -> EpisodeVideoGenerationPlan | None:
         planner_prompt_fingerprint=parent["planner_prompt_fingerprint"] or "",
         blockers=json.loads(parent["blockers_json"] or "[]"),
         estimated_latency_ms=parent["estimated_latency_ms"],
-        estimated_cost=parent["estimated_cost"],
         critical_path_latency_ms=parent["critical_path_latency_ms"],
         safe_parallelism_ratio=parent["safe_parallelism_ratio"],
         created_at=parent["created_at"],

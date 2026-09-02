@@ -20,7 +20,6 @@ from .project_queue_core import (
     _finish_project_video_completion_queue,
     _persist_project_video_queue,
     _project_video_queue_pause_requests,
-    _project_video_spent,
     _propagate_project_video_child_status,
 )
 
@@ -72,20 +71,9 @@ async def _run_project_video_completion_queue(
                     continue
             except Exception:  # noqa: BLE001
                 pass
-            room_now = max(
-                0.0,
-                float(state["global_budget_cap_cny"]) - _project_video_spent(project_id),
-            )
-            if room_now < 5:
-                item["status"] = "skipped_budget"
-                item["allocated_cny"] = 0
-                _persist_project_video_queue(recorder.run_id, state)
-                continue
-            item["allocated_cny"] = min(float(item["allocated_cny"]), room_now)
             try:
                 result = await _complete_episode_core(episode_id, {
                     "mode": "fresh",
-                    "budget_cap_cny": item["allocated_cny"],
                     "wall_clock_cap_s": state["wall_clock_cap_s"],
                     "allow_fallback_adopt": state["allow_fallback_adopt"],
                     "allow_storyboard_edit": state["allow_storyboard_edit"],

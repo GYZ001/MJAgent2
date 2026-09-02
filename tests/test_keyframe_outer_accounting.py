@@ -78,7 +78,9 @@ def test_completed_reference_slots_includes_all_timeline_keyframe_slots() -> Non
     assert run_job._completed_reference_slots(raw) == 3
 
 
-def test_video_cost_model_uses_full_timeline_generation_estimate(monkeypatch) -> None:
+def test_initial_shot_generation_cost_uses_full_timeline_generation_estimate(monkeypatch) -> None:
+    """金额已退场：video_cost_model 只剩 initial_shot_generation_cost，只服务
+    budget_reservations/provider_video_budget_claims 的记账写入，不参与拦截。"""
     monkeypatch.setattr(video_cost_model, "shot_cost_cny", lambda _duration: 5.0)
     monkeypatch.setattr(video_cost_model, "IMAGE_PRICE_PER_UNIT", 0.2)
     monkeypatch.setattr(
@@ -86,17 +88,10 @@ def test_video_cost_model_uses_full_timeline_generation_estimate(monkeypatch) ->
         "estimated_keyframe_generation_count",
         lambda: 9,
     )
-    monkeypatch.setattr(video_cost_model, "historical_attempt_stats", lambda **_kwargs: {
-        "samples": 0.0,
-        "avg_cost_per_paid_version": 0.0,
-        "avg_paid_attempts_per_shot": 1.0,
-        "success_rate": 1.0,
-    })
 
-    estimate = video_cost_model.predict_shot_completion_cost(5, retry_factor=1.0)
+    estimate = video_cost_model.initial_shot_generation_cost(5)
 
-    assert estimate["unit_cny"] == 6.8
-    assert estimate["expected_cny"] == 6.8
+    assert estimate == 6.8
 
 
 def test_reference_cohort_limit_uses_full_timeline_generation_estimate(monkeypatch) -> None:

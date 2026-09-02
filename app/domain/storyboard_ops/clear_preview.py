@@ -29,7 +29,7 @@ def _assert_storyboard_clear_not_running(episode_id: str, ep: dict) -> None:
     )
     checkpoint = load_latest_checkpoint(episode_id)
     stopped_phases = {
-        "PAUSED_EXTERNAL", "PAUSED_BUDGET", "WAITING_HUMAN",
+        "PAUSED_EXTERNAL", "WAITING_HUMAN",
         "WAITING_AUTHORIZATION", "CANCELLED", "SUCCEEDED",
     }
     task_is_live = task_registry.active("storyboard", episode_id)

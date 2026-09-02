@@ -32,7 +32,7 @@ from fastapi import HTTPException
 from pathlib import Path
 
 from .primitives import (
-    _issue_payment_quote,
+    _issue_scope_quote,
     _normalize_character_selection,
     _normalize_visual_style_name,
     _visual_style_prompt_or_default,
@@ -210,7 +210,6 @@ def compute_bible_impact_preview(
     expected_version=None,
 ) -> dict:
     """定稿前只读影响预检：不写库、不失效下游。"""
-    from app.config import IMAGE_PRICE_PER_UNIT
     from app.multiview import CHARACTER_REQUIRED_VIEWS
 
     p = _project_or_404(project_id)
@@ -270,9 +269,6 @@ def compute_bible_impact_preview(
             if (oc.get("appearance_canonical") or "") != (c.get("appearance_canonical") or ""):
                 affected += 1
         rebuild_images = affected * views_per
-    unit = float(IMAGE_PRICE_PER_UNIT)
-    estimated = round(rebuild_images * unit, 2)
-    max_retry = round(estimated * 1.5, 2)
     computed_at = now()
     fingerprint_payload = {
         "project_id": project_id,
@@ -297,23 +293,19 @@ def compute_bible_impact_preview(
         "stale_assets_truncated": len(stale_ids) > 100,
         "stale_count": len(stale_ids),
         "by_artifact_type": by_type,
-        "paid_assets": {
+        "generated_assets": {
             "character_portraits": int(portraits or 0),
             "scene_references": int(scenes or 0),
         },
         "rebuild": {
             "image_count": rebuild_images,
-            "unit_price_cny": unit,
-            "estimated_cost_cny": estimated,
-            "max_retry_budget_cny": max_retry,
-            "note": "费用来自服务端口径；实际生成以任务账单为准",
         },
         "requires_reconfirm": bool(stale_ids),
         "paid_media_invalidated": bool(style_changed or stale_ids),
         "old_asset_policy": "定稿后下游证据标记失效；画风变更会作废旧定妆/场景图",
     }
 
-def compute_refs_cost_precheck(
+def compute_refs_precheck(
     project_id: str,
     *,
     character: str | None = None,
@@ -321,8 +313,7 @@ def compute_refs_cost_precheck(
     resume: bool = False,
     view_role: str | None = None,
 ) -> dict:
-    """人物定妆/单视角付费预检（只读）。"""
-    from app.config import IMAGE_PRICE_PER_UNIT
+    """人物定妆/单视角范围预检（只读）。"""
     from app.multiview import CHARACTER_REQUIRED_VIEWS
 
     p = _project_or_404(project_id)
@@ -400,9 +391,6 @@ def compute_refs_cost_precheck(
                 "views": list(CHARACTER_REQUIRED_VIEWS) if not view_role else [view_role],
                 "reason": "整包生成",
             })
-    unit = float(IMAGE_PRICE_PER_UNIT)
-    estimated = round(image_count * unit, 2)
-    max_retry = round(estimated * 1.5, 2)
     computed_at = now()
     scope_fingerprint = fingerprint({
         "project_id": project_id,
@@ -411,11 +399,10 @@ def compute_refs_cost_precheck(
         "resume": resume,
         "view_role": view_role,
         "image_count": image_count,
-        "unit": unit,
         "bible_version": p.get("bible_version"),
     })
     return {
-        # 不设 quote_id：未签发的范围指纹按它确认会 QUOTE_STALE，真值由 _issue_payment_quote() 落库后签发。
+        # 不设 quote_id：未签发的范围指纹按它确认会 QUOTE_STALE，真值由 _issue_scope_quote() 落库后签发。
         "scope_fingerprint": scope_fingerprint,
         "computed_at": computed_at,
         "quote_expires_at": computed_at + 300,
@@ -430,10 +417,6 @@ def compute_refs_cost_precheck(
         "character_count": len(bible_characters),
         "views_per_character": views_per,
         "image_count": image_count,
-        "unit_price_cny": unit,
-        "estimated_cost_cny": estimated,
-        "max_retry_budget_cny": max_retry,
-        "budget_cap_cny": max_retry,
         "scope": missing_roles,
         "old_asset_policy": (
             "已落盘且可读取的视角保留；技术失败不替换当前采用包"
@@ -441,7 +424,7 @@ def compute_refs_cost_precheck(
             "使用最新角色设定与全局画风生成；新包三视角文件齐全并可读取后替换旧包，质量评分只作提示"
         ),
         "idempotency_hint": "同一 quote_id 重复确认不会扩大范围；服务端仍做最终校验",
-        "stop_policy": "可停止；已扣费步骤不退款，已完成成品保留",
+        "stop_policy": "可停止；已开始步骤不可撤回，已完成成品保留",
     }
 
 @router.post("/projects/{project_id}/bible/impact-preview")
@@ -453,10 +436,10 @@ async def bible_impact_preview(project_id: str, body: dict):
     )
 
 @router.post("/projects/{project_id}/refs/precheck")
-async def refs_cost_precheck(project_id: str, body: dict | None = None):
-    """定妆照/造型包付费预检。"""
+async def refs_precheck(project_id: str, body: dict | None = None):
+    """定妆照/造型包范围预检。"""
     payload = body or {}
-    return _issue_payment_quote(compute_refs_cost_precheck(
+    return _issue_scope_quote(compute_refs_precheck(
         project_id,
         character=payload.get("character"),
         characters=_normalize_character_selection(payload.get("characters")),
@@ -465,15 +448,13 @@ async def refs_cost_precheck(project_id: str, body: dict | None = None):
     ))
 
 def _compute_bible_generate_precheck(project_id: str, *, style_name: str | None = None) -> dict:
-    """POST /bible 只判定世界观（不点名角色）的真实成本预检：只有请求画风与
+    """POST /bible 只判定世界观（不点名角色）的真实范围预检：只有请求画风与
     当前画风不同才触发角色批量重出定妆照（判据须与 _bible_task 的
-    style_changed 同口径），首次生成或画风未变时无图片费用，不报假价。"""
-    from app.config import IMAGE_PRICE_PER_UNIT
+    style_changed 同口径），首次生成或画风未变时不生成图片，不报假范围。"""
     from app.multiview import CHARACTER_REQUIRED_VIEWS
 
     style_name = _normalize_visual_style_name(style_name)
     p = _project_or_404(project_id)
-    unit = float(IMAGE_PRICE_PER_UNIT)
     views_per = len(CHARACTER_REQUIRED_VIEWS)
     bible = json.loads(p["bible_json"]) if p.get("bible_json") else None
     current_style = ((bible or {}).get("world") or {}).get("visual_style_canonical")
@@ -484,19 +465,16 @@ def _compute_bible_generate_precheck(project_id: str, *, style_name: str | None 
     if style_changing:
         estimate_note = "画风将发生变化，按当前人物谱角色数重新生成全部角色定妆照"
     elif bible:
-        estimate_note = "本次只判定世界观，画风未变化，不会重新生成角色定妆照，无图片费用"
+        estimate_note = "本次只判定世界观，画风未变化，不会重新生成角色定妆照"
     else:
-        estimate_note = "首次生成只判定年代/题材/画风（世界观），本身不产生角色或图片，无费用；角色改在映射台按需生成"
+        estimate_note = "首次生成只判定年代/题材/画风（世界观），本身不产生角色或图片；角色改在映射台按需生成"
     image_count = char_count * views_per
-    estimated = round(image_count * unit, 2)
-    max_retry = round(estimated * 1.5, 2)
     computed_at = now()
     scope_fingerprint = fingerprint({
         "project_id": project_id,
         "action": "generate_bible_and_refs",
         "character_count": char_count,
         "image_count": image_count,
-        "unit": unit,
         "bible_version": p.get("bible_version"),
         "style_name": style_name,
     })
@@ -512,14 +490,10 @@ def _compute_bible_generate_precheck(project_id: str, *, style_name: str | None 
         "character_names": names,
         "views_per_character": views_per,
         "image_count": image_count,
-        "unit_price_cny": unit,
-        "estimated_cost_cny": estimated,
-        "max_retry_budget_cny": max_retry,
-        "budget_cap_cny": max_retry,
         "estimated_duration_min": [max(3, char_count), max(8, char_count * 3)],
         "estimate_note": estimate_note,
         "old_asset_policy": "停止后保留已落盘成品；未开始项可稍后补齐",
-        "stop_policy": "可按阶段停止谱写或定妆；已扣费步骤不退款",
+        "stop_policy": "可按阶段停止谱写或定妆；已开始步骤不可撤回",
         "scope": [
             {"character": n or f"角色{i+1}", "views": list(CHARACTER_REQUIRED_VIEWS), "reason": "首次/重生"}
             for i, n in enumerate(names or [None] * char_count)
@@ -528,9 +502,9 @@ def _compute_bible_generate_precheck(project_id: str, *, style_name: str | None 
 
 @router.post("/projects/{project_id}/bible/generate-precheck")
 async def bible_generate_precheck(project_id: str, body: dict | None = None):
-    """签发首次生成人物谱+定妆的服务端费用凭证。"""
+    """签发首次生成人物谱+定妆的服务端范围凭证。"""
     payload = body or {}
-    return _issue_payment_quote(_compute_bible_generate_precheck(
+    return _issue_scope_quote(_compute_bible_generate_precheck(
         project_id, style_name=payload.get("style_name"),
     ))
 

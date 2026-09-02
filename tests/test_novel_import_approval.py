@@ -248,7 +248,7 @@ def test_import_reports_paid_asset_bootstrap_as_waiting_confirmation(
     assert asset["status"] == "awaiting_confirmation"
     assert asset["retryable"] is True
     assert asset["precheck"]["estimated_cost_cny"] == 12.0
-    assert "等待费用确认" in imported.json()["summary"]
+    assert "等待确认" in imported.json()["summary"]
 
 
 @pytest.mark.asyncio

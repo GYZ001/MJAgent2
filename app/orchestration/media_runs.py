@@ -67,7 +67,7 @@ def mark_media_job_state(run_id: str | None, step_id: str | None, status: str, m
             return
         reason = (message or status)[:1000]
         if status == "running":
-            if run["status"] in {"WAITING_RETRY", "PAUSED_BUDGET", "PAUSED_EXTERNAL"}:
+            if run["status"] in {"WAITING_RETRY", "PAUSED_EXTERNAL"}:
                 transition_run(run_id, run["status"], "RUNNING", "媒体任务继续执行", conn=None)
             if step["status"] == "READY":
                 transition_step(step_id, "READY", "RUNNING", "恢复后的媒体任务开始执行", conn=None)
@@ -75,10 +75,6 @@ def mark_media_job_state(run_id: str | None, step_id: str | None, status: str, m
         if status == "queued":
             if run["status"] == "RUNNING":
                 transition_run(run_id, "RUNNING", "WAITING_RETRY", reason, conn=None)
-            return
-        if status == "paused_budget":
-            if run["status"] == "RUNNING":
-                transition_run(run_id, "RUNNING", "PAUSED_BUDGET", reason, conn=None)
             return
         if status == "paused":
             if run["status"] in {"RUNNING", "WAITING_RETRY"}:
@@ -89,7 +85,7 @@ def mark_media_job_state(run_id: str | None, step_id: str | None, status: str, m
             return
         if status == "waiting_human":
             if run["status"] in {
-                "RUNNING", "WAITING_RETRY", "PAUSED_BUDGET", "PAUSED_EXTERNAL",
+                "RUNNING", "WAITING_RETRY", "PAUSED_EXTERNAL",
             }:
                 transition_run(
                     run_id,
@@ -115,13 +111,13 @@ def mark_media_job_state(run_id: str | None, step_id: str | None, status: str, m
             if step["status"] == "RUNNING":
                 transition_step(step_id, "RUNNING", "CANCELLED", reason, decision="cancel", conn=None)
             current = conn.execute("SELECT status FROM workflow_runs WHERE id=?", (run_id,)).fetchone()["status"]
-            if current in {"RUNNING", "WAITING_RETRY", "PAUSED_BUDGET", "PAUSED_EXTERNAL"}:
+            if current in {"RUNNING", "WAITING_RETRY", "PAUSED_EXTERNAL"}:
                 transition_run(run_id, current, "CANCELLED", reason, conn=None)
         elif status == "failed":
             if step["status"] == "RUNNING":
                 transition_step(step_id, "RUNNING", "FAILED", reason, decision="escalate", error_code="MEDIA_FAILED", conn=None)
             current = conn.execute("SELECT status FROM workflow_runs WHERE id=?", (run_id,)).fetchone()["status"]
-            if current in {"RUNNING", "WAITING_RETRY", "PAUSED_BUDGET", "PAUSED_EXTERNAL"}:
+            if current in {"RUNNING", "WAITING_RETRY", "PAUSED_EXTERNAL"}:
                 transition_run(run_id, current, "FAILED", reason, failure_code="MEDIA_FAILED", conn=None)
         if status in {"succeeded", "cancelled", "abandoned", "failed"}:
             # 这条运行的整个生命周期都走这个函数而不是 WorkflowRecorder 实例方法，

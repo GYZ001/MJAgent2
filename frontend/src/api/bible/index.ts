@@ -29,9 +29,6 @@ export const api_bible = {
   adoptPortraitCandidate: characters.adoptPortraitCandidate,
   rollbackPortraitCandidate: characters.rollbackPortraitCandidate,
   // scenes
-  sceneBiblePreview: scenes.sceneBiblePreview,
-  sceneBiblePrecheck: scenes.sceneBiblePrecheck,
-  genSceneBible: scenes.genSceneBible,
   sceneRefsPrecheck: scenes.sceneRefsPrecheck,
   sceneRefsGaps: scenes.sceneRefsGaps,
   sceneRefsProgress: scenes.sceneRefsProgress,

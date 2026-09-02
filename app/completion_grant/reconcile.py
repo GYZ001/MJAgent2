@@ -18,6 +18,21 @@ from app.provider_task_clearance import (
 )
 from app.completion_grant.ledger import ensure_video_budget_authority_tables
 
+
+def _claimed_amount_cny(db, operation_id: str) -> float:
+    """真源查询：``provider_video_budget_claims.amount_cny``（主键 operation_id）。
+
+    结算写进 shot_versions.cost_cny/budget_reservations.actual_cost_cny 两张
+    纯审计台账，不再随 provider_task_clearance 的 blocker 展示结构传递（那个
+    结构面向 UI，已退场金额展示）。
+    """
+    row = db.execute(
+        "SELECT amount_cny FROM provider_video_budget_claims WHERE operation_id=?",
+        (operation_id,),
+    ).fetchone()
+    return max(0.0, float((row["amount_cny"] if row else 0) or 0))
+
+
 async def reconcile_provider_tasks_for_clear(
     *,
     project_id: str | None = None,
@@ -99,14 +114,14 @@ async def reconcile_provider_tasks_for_clear(
         if status not in {"succeeded", "failed"}:
             continue
         stamp = now()
-        amount_cny = max(0.0, float(blocker.get("amount_cny") or 0))
+        amount_cny = _claimed_amount_cny(db, operation_id)
         # 通用措辞：这条路径既服务整项目删除也服务分集清空（storyboard/videos
         # clear 撞上 PROVIDER_TASKS_NOT_TERMINAL 后的恢复入口），不能预设是
         # 哪一种触发场景；具体触发点交给下面的 evidence_source 后缀记录。
         terminal_message = (
-            "已核对供应商任务成功终态；费用已结算，结果保持隔离且不可采用"
+            "已核对供应商任务成功终态；账目已结清，结果保持隔离且不可采用"
             if status == "succeeded"
-            else "已核对供应商任务失败终态；费用责任已结算"
+            else "已核对供应商任务失败终态；账目已结清"
         )
         if evidence_source:
             terminal_message += f"；核对证据={evidence_source}"
@@ -216,10 +231,11 @@ def close_superseded_unclaimed_video_jobs(
     never asked. Closing it mirrors the existing stale-supersession pattern in
     ``app/video_plan.py::reconcile_adopted_revision`` (jobs.status='stale',
     cancellation_requested=1, abandoned=1), just generalized from
-    ``status='paused'`` to any non-terminal status so a ``paused_budget``
-    orphan left behind by budget contention does not sit stuck forever once
-    its shot has moved on. This never touches a job that still has any
-    provider footprint or any non-released claim.
+    ``status='paused'`` to any non-terminal status so a historical
+    ``paused_budget`` orphan (money no longer gates dispatch, see
+    CLAUDE.md「Retiring Features」) does not sit stuck forever once its shot
+    has moved on. This never touches a job that still has any provider
+    footprint or any non-released claim.
     """
     db = conn
     ensure_video_budget_authority_tables(db)

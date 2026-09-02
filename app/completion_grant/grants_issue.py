@@ -15,10 +15,6 @@ from app.provider_task_clearance import (
     assert_provider_tasks_clearable as assert_provider_tasks_clearable,
     prepare_provider_tasks_for_clear as prepare_provider_tasks_for_clear,
 )
-from app.completion_grant.budget_authority import (
-    _episode_video_budget_floor,
-    authorize_episode_video_budget_absolute,
-)
 from app.completion_grant.ledger import ensure_video_budget_authority_tables
 from app.completion_grant.models import (
     DEFAULT_FALLBACK_QUOTA_FRACTION,
@@ -187,7 +183,6 @@ def issue_video_completion_grant(
     episode_id: str,
     project_id: str,
     storyboard_artifact_id: str,
-    budget_cap_cny: float | None = None,
     wall_clock_cap_s: float | None = None,
     allow_fallback_adopt: bool = True,
     max_fallback_shots: int | None = None,
@@ -198,13 +193,18 @@ def issue_video_completion_grant(
     impact_snapshot: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
 ) -> tuple[VideoCompletionGrant, str]:
-    """Atomically issue one completion grant and its payable budget authority."""
+    """Atomically issue one completion grant.
+
+    金额不再构成生成拦截（会员分档时长制，非按金额计费）：签发不再接受或
+    计算 ``budget_cap_cny``——见 CLAUDE.md「Retiring Features」与本次「成本
+    预算拦截体系退场」。``video_budget_authority_ledger`` 的写入原样保留，
+    但不再是这个函数的续接口——见下方 ``_record_video_budget_authority_event``
+    调用：那张表同时承担着 ``_idempotent_video_grant`` 的幂等去重职责，不能
+    随金额一起退场，只是记录的金额字段固定写 0。
+    """
     conn = get_conn()
     ensure_completion_grants_table(conn)
     ensure_video_budget_authority_tables(conn)
-    requested_budget = (
-        float(budget_cap_cny) if budget_cap_cny is not None else None
-    )
     requested_wall = (
         float(wall_clock_cap_s)
         if wall_clock_cap_s is not None
@@ -219,7 +219,6 @@ def issue_video_completion_grant(
         "episode_id": episode_id,
         "project_id": project_id,
         "storyboard_artifact_id": storyboard_artifact_id or "",
-        "budget_cap_cny": requested_budget,
         "wall_clock_cap_s": requested_wall,
         "allow_fallback_adopt": bool(allow_fallback_adopt),
         "max_fallback_shots": requested_quota,
@@ -276,19 +275,12 @@ def issue_video_completion_grant(
             )
         generation_plan = qualification["generation_plan"]
         issued_at = now()
-        # 金额不再构成生成拦截（会员分档时长制，非按金额计费）：历史上这里会在
-        # cap 低于 episode_video_completion_budget_requirement 算出的
-        # required_cap、或 cap 不在 1–100000 区间时拒发 grant
-        # （VIDEO_BUDGET_BELOW_AUTHORITY_PLAN / INVALID_BUDGET）。两条拦截分支
-        # 已删除——见 CLAUDE.md「Retiring Features」与本次「成本预算拦截体系
-        # 退场」。cap 仍然计算并写入审计台账（completion_grants.budget_cap_cny /
-        # video_budget_authority_ledger），只是不再据此阻止授权签发。
-        cap = float(requested_budget) if requested_budget is not None else 1.0
-        if not math.isfinite(cap) or cap < 0:
-            raise GrantValidationError(
-                "INVALID_BUDGET",
-                "视频补齐预算必须是非负有限数",
-            )
+        # 金额不再构成生成拦截（会员分档时长制，非按金额计费）：历史上这里会算
+        # 一个 cap 并在低于 episode_video_completion_budget_requirement 算出的
+        # required_cap、或不在 1–100000 区间时拒发 grant——见 CLAUDE.md
+        # 「Retiring Features」与本次「成本预算拦截体系退场」。
+        # completion_grants.budget_cap_cny 是历史列（NULLable，留着不迁移），
+        # INSERT 不再把它列进列清单，写入即取列默认值 NULL。
         wall = requested_wall
         if not math.isfinite(wall) or not 60 <= wall <= 604800:
             raise GrantValidationError(
@@ -297,31 +289,21 @@ def issue_video_completion_grant(
             )
         deadline_at = issued_at + wall
         expires_at = issued_at + max(60, int(ttl_s), int(wall) + 3600)
-        prior_authority = conn.execute(
-            """SELECT cap_cny FROM episode_video_budget_authorities
-               WHERE episode_id=?""",
-            (episode_id,),
-        ).fetchone()
-        prior_authority_cap = (
-            float(prior_authority["cap_cny"])
-            if prior_authority is not None
-            else None
-        )
         conn.execute(
             """INSERT INTO completion_grants(
                 id, episode_id, project_id, screenplay_artifact_id, bible_artifact_id,
                 permission, token_hash, issued_by, issued_at, expires_at, consumed_at, revoked_at,
-                impact_snapshot_json, kind, storyboard_artifact_id, budget_cap_cny, wall_clock_cap_s, deadline_at,
+                impact_snapshot_json, kind, storyboard_artifact_id, wall_clock_cap_s, deadline_at,
                 allow_fallback_adopt, max_fallback_shots, allow_storyboard_edit,
                 release_qualification_json, release_qualification_hash,
                 episode_video_plan_id, episode_video_plan_revision,
                 video_plan_release_hash, capability_snapshot_id
-            ) VALUES(?,?,?,?,NULL,?,?,?,?,?,NULL,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ) VALUES(?,?,?,?,NULL,?,?,?,?,?,NULL,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 grant_id, episode_id, project_id, "",
                 VIDEO_PERMISSION, _hash_token(token), issued_by, issued_at,
                 expires_at, json.dumps(impact_snapshot or {}, ensure_ascii=False),
-                "video", storyboard_artifact_id or "", cap, wall, deadline_at,
+                "video", storyboard_artifact_id or "", wall, deadline_at,
                 1 if allow_fallback_adopt else 0, requested_quota,
                 1 if allow_storyboard_edit else 0,
                 _canonical_json(qualification), qualification_hash,
@@ -331,20 +313,9 @@ def issue_video_completion_grant(
                 generation_plan.get("capability_snapshot_id"),
             ),
         )
-        # cap 是**本轮**批准的额度，而分集授权存的是累计上限，两者不是同一个量。
-        # 首轮已承诺责任为 0 时恰好相等，长期掩盖了这个区别；重跑时旧责任已经
-        # 占满上限，直接把 cap 当绝对总额写进去就等于零余量——扣款侧按
-        # used = baseline + claimed 判断，第一次供应商调用就超限。实测
-        # ep_0a70ec56e8e9：96 元历史 settled 认领 + 本轮批准 96，写进去的上限
-        # 仍是 96，八个镜头全部 paused_budget、整集停在 WAITING_AUTHORIZATION。
-        # 加上已承诺责任后，可用 = 上限 - 已用 = cap，正好是用户这次批的数。
-        # _episode_video_budget_floor 的第二个返回值就是已承诺责任。
-        authority_cap = authorize_episode_video_budget_absolute(
-            episode_id,
-            _episode_video_budget_floor(episode_id, conn=conn)[1] + cap,
-            source=f"completion_grant:{grant_id}",
-            conn=conn,
-        )
+        # video_budget_authority_ledger 同时承担着上面 _idempotent_video_grant
+        # 的幂等去重职责，不能随金额一起退场；金额字段固定写 0，只保留
+        # operation_id/request_fingerprint 的幂等语义。
         _record_video_budget_authority_event(
             conn,
             operation_id=operation_id,
@@ -353,11 +324,11 @@ def issue_video_completion_grant(
             grant_id=grant_id,
             episode_id=episode_id,
             project_id=project_id,
-            requested_add_cny=cap,
+            requested_add_cny=0.0,
             prior_grant_cap_cny=None,
-            grant_cap_cny=cap,
-            prior_authority_cap_cny=prior_authority_cap,
-            authority_cap_cny=authority_cap,
+            grant_cap_cny=0.0,
+            prior_authority_cap_cny=None,
+            authority_cap_cny=0.0,
             prior_wall_clock_cap_s=None,
             wall_clock_cap_s=wall,
             created_at=issued_at,
@@ -377,7 +348,6 @@ def issue_video_completion_grant(
             capability_snapshot_id=generation_plan.get(
                 "capability_snapshot_id"
             ),
-            budget_cap_cny=cap,
             wall_clock_cap_s=wall,
             deadline_at=deadline_at,
             allow_fallback_adopt=allow_fallback_adopt,

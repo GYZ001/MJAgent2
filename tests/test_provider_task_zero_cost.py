@@ -124,9 +124,8 @@ def test_zero_output_terminal_rejection_is_eligible_and_releasable() -> None:
 
     receipts = release_zero_cost_terminal_jobs(conn, ["j1"])
     assert receipts == [{
-        "job_id": "j1", "amount_cny": 0.0,
-        "reason": "供应商已确认终态失败（轮询接口返回 failed），且未记录任何已产生费用",
-        "reserved_amount_cny": 12.0,
+        "job_id": "j1",
+        "reason": "供应商已确认终态失败（轮询接口返回 failed），且未记录任何历史结算数据",
     }]
     reservation = conn.execute(
         "SELECT status,actual_cost_cny FROM budget_reservations WHERE job_id='j1'"
@@ -262,7 +261,7 @@ def test_list_candidates_reports_both_eligible_and_blocked_with_reasons() -> Non
     item = candidates[0]
     assert item["job_id"] == "j1"
     assert item["eligible"] is True
-    assert item["reserved_amount_cny"] == 12.0
+    assert "reserved_amount_cny" not in item
     assert "copyright" in item["reason_text"]
 
 

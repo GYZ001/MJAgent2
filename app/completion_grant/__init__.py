@@ -36,12 +36,9 @@ from app.provider_task_clearance import (
 
 from app.completion_grant.models import (
     DEFAULT_FALLBACK_QUOTA_FRACTION as DEFAULT_FALLBACK_QUOTA_FRACTION,
-    DEFAULT_VIDEO_BUDGET_CAP_CNY as DEFAULT_VIDEO_BUDGET_CAP_CNY,
     DEFAULT_VIDEO_WALL_CLOCK_CAP_S as DEFAULT_VIDEO_WALL_CLOCK_CAP_S,
-    EPISODE_VIDEO_BUDGET_HARD_CAP_CNY as EPISODE_VIDEO_BUDGET_HARD_CAP_CNY,
     GRANT_TTL_S as GRANT_TTL_S,
     GrantValidationError as GrantValidationError,
-    VIDEO_BUDGET_RETRY_MARGIN_MULTIPLIER as VIDEO_BUDGET_RETRY_MARGIN_MULTIPLIER,
     VIDEO_PERMISSION as VIDEO_PERMISSION,
     VideoBudgetAuthorizationError as VideoBudgetAuthorizationError,
     VideoCompletionGrant as VideoCompletionGrant,
@@ -69,13 +66,6 @@ from app.completion_grant.reconcile import (
 )
 
 from app.completion_grant.budget_authority import (
-    _apply_video_budget_retry_margin as _apply_video_budget_retry_margin,
-    _episode_video_budget_floor as _episode_video_budget_floor,
-    authorize_episode_video_budget_absolute as authorize_episode_video_budget_absolute,
-    authorize_episode_video_budget_increment as authorize_episode_video_budget_increment,
-    episode_video_budget_snapshot as episode_video_budget_snapshot,
-    episode_video_completion_budget_requirement as episode_video_completion_budget_requirement,
-    preview_episode_video_budget_authorization_cap as preview_episode_video_budget_authorization_cap,
     project_video_budget_snapshot as project_video_budget_snapshot,
 )
 
@@ -107,9 +97,8 @@ from app.completion_grant.grants_issue import (
 )
 
 from app.completion_grant.grants_api import (
-    active_video_grant_budget_cap as active_video_grant_budget_cap,
     bind_video_grant_generation_plan as bind_video_grant_generation_plan,
-    bump_video_grant_budget as bump_video_grant_budget,
+    bump_video_grant_wall_clock as bump_video_grant_wall_clock,
     consume_grant as consume_grant,
     get_video_grant as get_video_grant,
     revoke_active_video_grants_for_episode as revoke_active_video_grants_for_episode,
@@ -129,24 +118,19 @@ _register_table("legacy_video_liabilities_migration", migrate_legacy_video_liabi
 
 __all__ = [
     "DEFAULT_FALLBACK_QUOTA_FRACTION",
-    "DEFAULT_VIDEO_BUDGET_CAP_CNY",
     "DEFAULT_VIDEO_WALL_CLOCK_CAP_S",
-    "EPISODE_VIDEO_BUDGET_HARD_CAP_CNY",
     "GRANT_TTL_S",
     "GrantValidationError",
     "ProviderTasksNotTerminalError",
     "RELEASE_QUALIFICATION_VERSION",
-    "VIDEO_BUDGET_RETRY_MARGIN_MULTIPLIER",
     "VIDEO_PERMISSION",
     "VideoBudgetAuthorizationError",
     "VideoCompletionGrant",
     "VideoPlanGenerationError",
     "_PROVIDER_CLAIM_LEDGER_COLUMNS",
-    "_apply_video_budget_retry_margin",
     "_canonical_json",
     "_content_fingerprint",
     "_create_provider_claim_ledger_table",
-    "_episode_video_budget_floor",
     "_generation_plan_material",
     "_hash_token",
     "_historical_video_liability",
@@ -163,12 +147,9 @@ __all__ = [
     "_storyboard_release_material",
     "_unowned_historical_video_liabilities",
     "_video_budget_authority_operation_id",
-    "active_video_grant_budget_cap",
     "assert_provider_tasks_clearable",
-    "authorize_episode_video_budget_absolute",
-    "authorize_episode_video_budget_increment",
     "bind_video_grant_generation_plan",
-    "bump_video_grant_budget",
+    "bump_video_grant_wall_clock",
     "close_provider_video_budget_claim_liability",
     "close_superseded_unclaimed_video_jobs",
     "consume_grant",
@@ -176,13 +157,10 @@ __all__ = [
     "default_max_fallback_shots",
     "ensure_completion_grants_table",
     "ensure_video_budget_authority_tables",
-    "episode_video_budget_snapshot",
-    "episode_video_completion_budget_requirement",
     "get_video_grant",
     "issue_video_completion_grant",
     "migrate_legacy_video_liabilities",
     "prepare_provider_tasks_for_clear",
-    "preview_episode_video_budget_authorization_cap",
     "project_video_budget_snapshot",
     "provider_task_clearance_snapshot",
     "reconcile_project_provider_tasks_for_clear",

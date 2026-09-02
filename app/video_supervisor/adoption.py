@@ -62,7 +62,7 @@ def _adopt_ready_candidates(
             continue
         if not entry.best_version_id:
             continue
-        result = select_best_video_candidate(entry.shot_id, force_best=False)
+        result = select_best_video_candidate(entry.shot_id)
         if not result:
             continue
         entry.adopted_version_id = result.get("version_id")
@@ -165,7 +165,6 @@ def _write_coverage_report(
         "missing_shots": cp.missing_shots,
         "closeout_adoptions": cp.closeout_adoptions,
         "cost_spent_cny": ledger.cost_spent,
-        "budget_cap_cny": (cp.budget or {}).get("cap_cny"),
         "shots": [
             {
                 "shot_no": e.shot_no,

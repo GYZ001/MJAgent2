@@ -328,10 +328,6 @@ def _generation_plan_material(
         "planner_model": plan.planner_model,
         "planner_prompt_fingerprint": plan.planner_prompt_fingerprint,
         "authoritative_shot_count": len(plan.shots),
-        "authoritative_estimated_cost_cny": round(
-            sum(float(shot.estimated_cost or 0) for shot in plan.shots),
-            6,
-        ),
         "shot_execution_contracts": [
             {
                 "shot_id": shot.shot_id,

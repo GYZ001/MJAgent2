@@ -329,13 +329,13 @@ def validate_episode_plan(
     if issues:
         raise VideoPlanValidationError(issues)
 
-    from app.video_cost_model import initial_shot_generation_cost
-
-    for item in normalized:
-        duration_s = float(by_id[item.shot_id]["duration_s"] or 5)
-        authoritative_cost = initial_shot_generation_cost(duration_s)
-        item.estimated_cost = authoritative_cost
-        item.max_cost = max(float(item.max_cost or 0), authoritative_cost)
+    # 金额不再构成生成拦截（会员分档时长制，非按金额计费）：这里原本用
+    # app.video_cost_model（现只剩 initial_shot_generation_cost 一个纯记账
+    # 函数，供 enqueue.py/system_api.py 算预留金额，未整文件删除）重算
+    # estimated_cost/max_cost 覆盖 AI 生成阶段给出的估算值——那只是一个不再
+    # 有下游消费者的记账数字，见 CLAUDE.md「Retiring Features」与本次
+    # 「成本预算拦截体系退场」。estimated_cost/max_cost 字段本身已从
+    # ShotVideoGenerationPlan/EpisodeVideoGenerationPlan 删除。
 
     from app import video_providers
 
@@ -364,7 +364,6 @@ def validate_episode_plan(
         )
         item.critical_path_group = f"depth-{depths[item.shot_id]}"
     plan.estimated_latency_ms = sum(item.estimated_latency_ms for item in normalized)
-    plan.estimated_cost = round(sum(item.estimated_cost for item in normalized), 4)
     plan.critical_path_latency_ms = (
         plan.estimated_latency_ms
         if serial_provider

@@ -208,23 +208,11 @@ def _mark_job_stage_queued(conn, job_id: str) -> None:
 
 
 def _reserve_or_pause_budget(conn, *, job_id, version_id, episode_id, estimate, budget_limit) -> bool:
-    reserved = media_scheduler.reserve_budget(job_id, episode_id, estimate, budget_limit, conn=conn)
-    if not reserved:
-        conn.execute(
-            """UPDATE jobs
-                  SET video_slot_active=0,lease_owner=NULL,lease_expires_at=NULL,
-                      updated_at=?
-                WHERE id=?""",
-            (now(), job_id),
-        )
-        conn.execute(
-            """UPDATE shot_versions
-                  SET status='paused_budget',video_slot_active=0,
-                      error='集预算不足，任务已暂停'
-                WHERE id=?""",
-            (version_id,),
-        )
-    return reserved
+    """记账预扣：金额不再构成生成拦截，``reserve_budget`` 恒返回 True，保留
+    调用只为维持 ``budget_reservations`` 审计台账写入；「失败→paused_budget」
+    分支已删除。``version_id`` 形参不再被本函数使用，保留只为了不改动调用点签名。
+    """
+    return media_scheduler.reserve_budget(job_id, episode_id, estimate, budget_limit, conn=conn)
 
 
 def _bind_new_operation_if_requested(
@@ -238,8 +226,6 @@ def _bind_new_operation_if_requested(
     domain_result: dict[str, Any] = {
         "reused": False, "version_id": version_id, "job_id": job_id, "task_accepted": True,
     }
-    if not reserved:
-        domain_result["paused_budget"] = True
     bind_video_command_operation(
         command=operation_command,
         idempotency_key=operation_idempotency_key,

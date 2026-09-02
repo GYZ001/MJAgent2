@@ -107,7 +107,7 @@ def test_pending_scene_missing_reference_is_counted(_db):
     assert pending == ["宗门广场"]
 
 
-def test_known_pending_images_computes_credible_known_cost(_db):
+def test_known_pending_images_computes_credible_known_count(_db):
     conn = _db
     bible = _bible(
         characters=[_character("李富贵", aliases=["小胖子"])],
@@ -121,11 +121,10 @@ def test_known_pending_images_computes_credible_known_cost(_db):
     assert result["known_pending_characters"] == ["李富贵"]
     assert result["known_pending_scenes"] == ["宗门广场"]
     assert result["known_image_count"] == expected_images
-    assert result["known_cost_cny"] == pytest.approx(expected_images * result["unit_price_cny"])
     assert result["deferred"] is False
 
 
-# ---- 已有参考图的角色/场景必须走复用，不重复计费 ----
+# ---- 已有参考图的角色/场景必须走复用，不重复出图 ----
 
 def test_character_with_existing_portrait_is_not_double_charged(_db):
     conn = _db
@@ -173,7 +172,6 @@ def test_new_character_beyond_bible_keeps_estimate_honestly_unknown(_db):
         conn, project_id="p1", episode_no=3, source_text=source_text, bible=bible,
     )
     assert result["estimated_images"] is None
-    assert result["estimated_cost_cny"] is None
     assert "无法确知" in result["note"]
 
 
@@ -190,7 +188,6 @@ def test_screenplay_cast_impact_never_fakes_a_precise_total(_db):
     ep = dict(conn.execute("SELECT * FROM episodes WHERE id='e1'").fetchone())
     impact = _screenplay_cast_impact(conn, ep, "全新的一集，出现了从未记录过的角色。")
     stage = impact["portrait_asset_stage"]
-    assert stage["estimated_cost_cny"] is None
     assert stage["estimated_images"] is None
 
 
@@ -205,7 +202,6 @@ def test_zero_pending_assets_report_zero_not_a_default(_db):
     assert result["known_pending_characters"] == []
     assert result["known_pending_scenes"] == []
     assert result["known_image_count"] == 0
-    assert result["known_cost_cny"] == 0.0
 
 
 def test_zero_pending_when_everything_already_has_reference_images(_db):
@@ -221,4 +217,3 @@ def test_zero_pending_when_everything_already_has_reference_images(_db):
         conn, project_id="p1", episode_no=3, source_text=source_text, bible=bible,
     )
     assert result["known_image_count"] == 0
-    assert result["known_cost_cny"] == 0.0

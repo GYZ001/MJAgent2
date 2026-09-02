@@ -84,7 +84,6 @@ def _resume_prepared_complete_episode_operation(
                 recorder,
                 resume=bool(spawn.get("resume")),
                 grant_id=spawn.get("grant_id"),
-                budget_cap_cny=spawn.get("budget_cap_cny"),
                 wall_clock_cap_s=spawn.get("wall_clock_cap_s"),
                 allow_fallback_adopt=bool(spawn.get("allow_fallback_adopt", True)),
                 max_fallback_shots=spawn.get("max_fallback_shots"),
@@ -102,7 +101,7 @@ def _resume_prepared_complete_episode_operation(
                 raise
     elif status not in {
         "RUNNING", "WAITING_RETRY", "WAITING_HUMAN", "WAITING_AUTHORIZATION",
-        "PAUSED_BUDGET", "PAUSED_EXTERNAL", "SUCCEEDED", "PARTIAL",
+        "PAUSED_EXTERNAL", "SUCCEEDED", "PARTIAL",
     }:
         raise HTTPException(409, "视频补齐原运行已失效，不得伪造恢复成功")
 
@@ -193,7 +192,7 @@ def _video_completion_user_contract(
             str(active_run_id).startswith("starting:")
             or active_run_status in {
                 "CREATED", "RUNNING", "WAITING_RETRY", "WAITING_HUMAN",
-                "WAITING_AUTHORIZATION", "PAUSED_BUDGET", "PAUSED_EXTERNAL",
+                "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL",
             }
         )
     ):
@@ -241,14 +240,14 @@ def _video_completion_user_contract(
         }
     if running:
         return running_contract()
-    if phase in {"WAITING_AUTHORIZATION", "PAUSED_BUDGET"}:
+    if phase == "WAITING_AUTHORIZATION":
         return {
             "user_state": "waiting_authorization",
-            "message": "任务已暂停，需要追加授权或预算后继续",
+            "message": "任务已暂停，需要追加时长后继续",
             "next_actions": [{
-                **action("authorize_continue", "追加授权并继续", "POST", base, True),
-                "required_fields": ["add_budget_cny", "add_wall_clock_s"],
-                "required_rule": "至少填写一项",
+                **action("authorize_continue", "追加时长并继续", "POST", base, True),
+                "required_fields": ["add_wall_clock_s"],
+                "required_rule": "必须填写",
                 "request_body": {
                     "mode": "resume",
                     "completion_grant_id": grant_id,
@@ -317,7 +316,6 @@ def get_video_completion(episode_id: str):
         public_checkpoint_projection,
         rebuild_coverage_ledger,
     )
-    from app.video_cost_model import predict_episode_completion_cost
     cp = load_latest_checkpoint(episode_id)
     try:
         ledger = rebuild_coverage_ledger(episode_id, cp=cp)
@@ -342,17 +340,9 @@ def get_video_completion(episode_id: str):
             "coverage_rate": ledger.coverage_rate,
             "fallback_quota": ledger.fallback_quota,
         }
-        try:
-            uncovered_ids = [e.shot_id for e in ledger.entries if not e.adopted_version_id]
-            proj["cost_forecast"] = predict_episode_completion_cost(
-                episode_id, uncovered_shot_ids=uncovered_ids,
-            )
-        except Exception:  # noqa: BLE001
-            proj["cost_forecast"] = None
     except Exception as exc:  # noqa: BLE001 — 台账失败时仍返回 checkpoint，避免面板整页 500
         proj = public_checkpoint_projection(cp) or {}
         proj["ledger"] = {"shots_total": 0, "grades": {}, "coverage_rate": 0.0, "entries": []}
-        proj["cost_forecast"] = None
         proj["ledger_error"] = str(exc)
     conn = get_conn()
     ep = conn.execute(

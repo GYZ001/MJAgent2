@@ -13,8 +13,6 @@ import { formatBookTitle } from '../lib/bookTitle'
 import { storyboardTaskNotice } from '../lib/productionNotices'
 
 const PAGE_SIZE = 15
-export const FIRST_THREE_VIDEO_GLOBAL_BUDGET_CAP_CNY = 450
-export const FIRST_THREE_VIDEO_PER_EPISODE_CAP_CNY = 150
 export const FIRST_THREE_VIDEO_WALL_CLOCK_CAP_S = 4 * 60 * 60
 type BatchAction = 'replan' | 'screenplay' | 'storyboard'
 
@@ -54,8 +52,6 @@ export async function generateFirstThreeEpisodeVideos(
 
   await client.projectVideoCompletion(projectId, {
     episode_ids: episodeIds,
-    global_budget_cap_cny: FIRST_THREE_VIDEO_GLOBAL_BUDGET_CAP_CNY,
-    per_episode_cap_cny: FIRST_THREE_VIDEO_PER_EPISODE_CAP_CNY,
     wall_clock_cap_s: FIRST_THREE_VIDEO_WALL_CLOCK_CAP_S,
     allow_fallback_adopt: true,
     allow_storyboard_edit: false,
@@ -439,7 +435,7 @@ export default function EpisodesPage() {
           const preview = (chapterPreview.get(firstCh) ?? ep.synopsis ?? '').trim()
           const storyboardNotice = storyboardTaskNotice(ep, ep.storyboard_status?.state)
           const destination = ep.status === 'done' ? 'cinema'
-            : ['confirmed', 'generating', 'paused_budget'].includes(ep.status) ? 'wall'
+            : ['confirmed', 'generating'].includes(ep.status) ? 'wall'
               : ep.screenplay_status === 'ready' ? 'board' : 'script'
           const destinationLabel = destination === 'cinema' ? '查看成片' : destination === 'wall' ? '进入生成台' : destination === 'board' ? '继续分镜' : '继续映射包'
           const targetDurationEditable = ['pending', 'failed'].includes(ep.screenplay_status)
@@ -483,7 +479,6 @@ export default function EpisodesPage() {
                     }}
                   />
                 </span>
-                <span>已耗 ¥{ep.cost_cny.toFixed(1)}</span>
               </div>
               <div className="ep-stamps">
                 <ScreenplayStatusStamp status={ep.screenplay_status} />

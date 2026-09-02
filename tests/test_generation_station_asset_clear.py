@@ -360,7 +360,6 @@ def _assert_provider_clear_blocked(
             ),
             "provider_create_state": create_state,
             "claim_status": claim_status,
-            "amount_cny": 4.0,
             "recovery_status": recovery_status,
             "recovery_action": (
                 "continue_provider_poll"
@@ -507,7 +506,7 @@ def test_project_delete_reconcile_settles_remote_terminal_without_download(
         "status": "quarantined",
         "video_path": None,
         "error": (
-            "已核对供应商任务成功终态；费用已结算，"
+            "已核对供应商任务成功终态；账目已结清，"
             "结果保持隔离且不可采用；核对证据=sha256:test-snapshot"
         ),
     }

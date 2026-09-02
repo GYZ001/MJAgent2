@@ -315,7 +315,7 @@ def rebuild_coverage_ledger(
         if grade == "C" and not best and not persisted:
             fail_job = conn.execute(
                 """SELECT * FROM jobs WHERE shot_id=? AND kind='video'
-                   AND status IN ('failed','paused_budget','waiting_human')
+                   AND status IN ('failed','waiting_human')
                    AND (? IS NULL OR owner_run_id=?)
                    ORDER BY created_at DESC LIMIT 1""",
                 (sid, supervisor_run_id, supervisor_run_id),

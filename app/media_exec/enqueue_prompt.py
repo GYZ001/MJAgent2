@@ -238,7 +238,7 @@ def _lookup_reusable_version_row(conn, shot_id: str, key: str, supervisor_run_id
     # 永远指回同一个卡死版本（见 CLAUDE.md「Gates and Criteria」）。
     reusable_statuses = [
         "succeeded", "queued", "running", "waiting_provider",
-        "waiting_retry", "paused_budget", "paused",
+        "waiting_retry", "paused",
     ]
     if supervisor_run_id:
         reusable_statuses.append("abandoned")

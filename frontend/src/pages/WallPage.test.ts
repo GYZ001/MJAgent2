@@ -56,7 +56,7 @@ function packShot(overrides: Partial<Shot> = {}, segmentOverrides: Partial<Story
 
 function version(overrides: Partial<ShotVersion> = {}): ShotVersion {
   return {
-    id: 'v1', version_no: 1, prompt_text: '', status: 'succeeded', cost_cny: 12, latency_s: 5.2,
+    id: 'v1', version_no: 1, prompt_text: '', status: 'succeeded', latency_s: 5.2,
     ...overrides,
   }
 }

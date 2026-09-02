@@ -7,10 +7,7 @@ from __future__ import annotations
 
 import json
 
-from app.compiler import (
-    compile_prompt,
-    shot_cost_cny,
-)
+from app.compiler import compile_prompt
 from app.domain.storyboard_ops.mutation_primitives import _board_from_shot_rows
 from app.episode_target import _compact_episode_target
 from app.schemas import (
@@ -50,7 +47,7 @@ class ConfirmationEvaluation:
         issues: list,
         board: Storyboard,
         compact_target: int,
-        estimated_cost_cny: float,
+        estimated_cost_cny: float = 0.0,
     ):
         self.passed = passed
         self.errors = errors
@@ -58,6 +55,11 @@ class ConfirmationEvaluation:
         self.issues = issues
         self.board = board
         self.compact_target = compact_target
+        # 金额不再构成生成拦截（会员分档时长制，非按金额计费）：本字段不再
+        # 被计算（见下方两处构造调用），默认 0.0 只是为了不必改动仍显式传参
+        # 构造它的既有测试 fake 的签名——见 CLAUDE.md「Retiring Features」与
+        # 本次「成本预算拦截体系退场」。confirm_episode.py 的 /confirm 响应体
+        # 已不再回显这个字段。
         self.estimated_cost_cny = estimated_cost_cny
 
 def _is_storyboard_terminal_for_confirmation(
@@ -273,7 +275,6 @@ def _evaluate_storyboard_pack_for_confirmation(
         subject=f"episode:{episode['id']}",
         severity=IssueSeverity.WARNING,
     )
-    est = sum(shot_cost_cny(s.duration_s) for s in board.shots)
     return ConfirmationEvaluation(
         passed=not structural_errors,
         errors=structural_errors,
@@ -281,7 +282,6 @@ def _evaluate_storyboard_pack_for_confirmation(
         issues=issues,
         board=board,
         compact_target=compact_target,
-        estimated_cost_cny=round(est, 2),
     )
 
 def evaluate_storyboard_for_confirmation(
@@ -538,7 +538,6 @@ def evaluate_storyboard_for_confirmation(
         subject=f"episode:{ep_id}",
         severity=IssueSeverity.WARNING,
     )
-    est = sum(shot_cost_cny(s.duration_s) for s in board.shots)
     return ConfirmationEvaluation(
         passed=not structural_errors,
         errors=structural_errors,
@@ -546,5 +545,4 @@ def evaluate_storyboard_for_confirmation(
         issues=issues,
         board=board,
         compact_target=compact_target,
-        estimated_cost_cny=round(est, 2),
     )

@@ -49,7 +49,7 @@ describe('分集页码跳转', () => {
 })
 
 describe('生成前三集视频', () => {
-  it('按 episode_no 提交前三个 ID，并显式携带预算、时限和授权参数', async () => {
+  it('按 episode_no 提交前三个 ID，并显式携带时限和授权参数', async () => {
     const get = vi.fn(async () => ({
       episodes: [
         { id: 'episode-3', episode_no: 3 },
@@ -70,8 +70,6 @@ describe('生成前三集视频', () => {
     )
     expect(projectVideoCompletion).toHaveBeenCalledWith('project-1', {
       episode_ids: ['episode-1', 'episode-2', 'episode-3'],
-      global_budget_cap_cny: 450,
-      per_episode_cap_cny: 150,
       wall_clock_cap_s: 4 * 60 * 60,
       allow_fallback_adopt: true,
       allow_storyboard_edit: false,

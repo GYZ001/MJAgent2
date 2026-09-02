@@ -62,9 +62,6 @@ export const api = {
   getReviewContext: videoApi.api_video.getReviewContext,
 
   /* ── 人物谱域 ── */
-  sceneBiblePreview: bibleApi.api_bible.sceneBiblePreview,
-  sceneBiblePrecheck: bibleApi.api_bible.sceneBiblePrecheck,
-  genSceneBible: bibleApi.api_bible.genSceneBible,
   sceneRefsPrecheck: bibleApi.api_bible.sceneRefsPrecheck,
   sceneRefsGaps: bibleApi.api_bible.sceneRefsGaps,
   sceneRefsProgress: bibleApi.api_bible.sceneRefsProgress,
@@ -95,7 +92,6 @@ export const api = {
   cancelRefsGeneration: bibleApi.cancelRefsGeneration,
   updateBible: bibleApi.updateBible,
   setCharacterPortraitPrompt: bibleApi.setCharacterPortraitPrompt,
-  nominateCharacter: bibleApi.nominateCharacter,
   addManualCharacter: bibleApi.addManualCharacter,
   replaceCharacterPortraitImage: bibleApi.replaceCharacterPortraitImage,
   addManualScene: bibleApi.addManualScene,

@@ -445,7 +445,7 @@ export default function ScriptPage() {
       case 'stop_screenplay':
         return <button className="btn ghost danger" disabled={busy}
           aria-label={busy ? '停止映射包任务，暂不可用：正在处理上一项操作' : '停止映射包任务'}
-          title={busy ? '正在处理上一项操作' : '停止前会说明费用和保留范围'} onClick={() => setStopConfirmOpen(true)}>停止映射包任务</button>
+          title={busy ? '正在处理上一项操作' : '停止前会说明保留范围'} onClick={() => setStopConfirmOpen(true)}>停止映射包任务</button>
       case 'resume_screenplay':
         return <ScreenplayResumeButton
           production={ep.screenplay_production}
@@ -602,7 +602,7 @@ export default function ScriptPage() {
           message="系统会停止当前映射包生成或局部修复；已写入的工作副本会保留，尚未发布的内容不会进入分镜。"
           details={[
             '停止可能需要等待当前模型请求返回，界面不会提前宣称已终止',
-            '已经发生的模型调用费用不会退回；停止后可从工作副本恢复或重新发起',
+            '停止后可从工作副本恢复或重新发起',
           ]}
           confirmLabel="确认停止映射包任务"
           cancelLabel="继续生成"

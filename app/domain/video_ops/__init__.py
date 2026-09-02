@@ -8,6 +8,13 @@
 """
 from __future__ import annotations
 
+# shot_cost_cny 曾经过 .confirmation_eval 转手再导出；成本预算拦截体系退场
+# 后 confirmation_eval.py 不再需要它（estimated_cost_cny 字段已随之删除），
+# 但这里仍是既有对外 API 面的一部分，改成直接从权威定义处导入——见
+# CLAUDE.md「再导出门面...写 from x import y as y，不要借道某个碰巧 import
+# 了它的子模块转手」。
+from app.compiler import shot_cost_cny as shot_cost_cny
+
 from .confirmation_eval import (
     Bible as Bible,
     ConfirmationEvaluation as ConfirmationEvaluation,
@@ -29,7 +36,6 @@ from .confirmation_eval import (
     normalize_continuity as normalize_continuity,
     normalize_offbible_characters as normalize_offbible_characters,
     normalize_transition_visuals as normalize_transition_visuals,
-    shot_cost_cny as shot_cost_cny,
     validate_storyboard as validate_storyboard,
     validate_storyboard_preserves_key_content as validate_storyboard_preserves_key_content,
     validate_storyboard_soundtrack as validate_storyboard_soundtrack,
@@ -78,7 +84,6 @@ from .project_queue_core import (
     _finish_project_video_completion_queue as _finish_project_video_completion_queue,
     _persist_project_video_queue as _persist_project_video_queue,
     _project_video_queue_pause_requests as _project_video_queue_pause_requests,
-    _project_video_spent as _project_video_spent,
     _propagate_project_video_child_status as _propagate_project_video_child_status,
     clear_project_video_queue_pause as clear_project_video_queue_pause,
     request_project_video_queue_pause as request_project_video_queue_pause,

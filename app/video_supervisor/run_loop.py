@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 
 from app.completion_grant import (
-    DEFAULT_VIDEO_BUDGET_CAP_CNY,
     GrantValidationError,
     VideoCompletionGrant,
     VideoPlanGenerationError,
@@ -25,8 +24,6 @@ from .authority import (
     _verify_supervisor_paid_authority_async,
 )
 from .budget import (
-    _budget_view,
-    _has_dispatch_budget_capacity,
     _merge_shot_state,
     _rebuild_budgeted_coverage_ledger_async,
     _rebuild_coverage_ledger_async,
@@ -34,14 +31,12 @@ from .budget import (
 from .checkpoint import _save_checkpoint_async, load_latest_checkpoint
 from .closeout import _deadline_closeout_async, _finalize_covered_async
 from .constants import (
-    FIRST_PASS_BUDGET_FRACTION,
     MAX_REPAIR_EPOCHS,
-    SHOT_BUDGET_MULTIPLIER,
     SUPERVISOR_TICK_INTERVAL_S,
     SUPERVISOR_TICK_MAX_INTERVAL_S,
     TERMINAL_SUPERVISOR_PHASES,
 )
-from .dispatch import _budget_paused_job_id, _dispatch_with_heartbeat_async, _requeue_no_charge_job
+from .dispatch import _dispatch_with_heartbeat_async, _requeue_no_charge_job
 from .issues_cascade import _adopt_fallback, _apply_cascade, _collect_issues
 from .job_control import _reconcile_terminal_continuity_blocks
 from .models import VideoSupervisorCheckpoint
@@ -83,7 +78,6 @@ async def run_video_completion_supervisor(
     resume: bool = True,
     grant_id: str | None = None,
     run_id: str | None = None,
-    budget_cap_cny: float | None = None,
     wall_clock_cap_s: float | None = None,
     allow_fallback_adopt: bool = True,
     max_fallback_shots: int | None = None,
@@ -102,7 +96,6 @@ async def run_video_completion_supervisor(
         ).fetchone()["c"]
         from app.completion_grant import default_max_fallback_shots
         quota = max_fallback_shots if max_fallback_shots is not None else default_max_fallback_shots(int(shots_total or 0))
-        cap = float(budget_cap_cny if budget_cap_cny is not None else DEFAULT_VIDEO_BUDGET_CAP_CNY)
         cp = VideoSupervisorCheckpoint(
             episode_id=episode_id,
             run_id=run_id,
@@ -111,12 +104,7 @@ async def run_video_completion_supervisor(
             deadline_at=None,
             grant_id=grant_id,
             storyboard_artifact_id=ep["storyboard_artifact_id"],
-            budget={
-                "cap_cny": cap,
-                "spent_cny": 0.0,
-                "first_pass_soft_cap_cny": cap * FIRST_PASS_BUDGET_FRACTION,
-                "per_shot_cap_cny": (cap / max(1, int(shots_total or 1))) * SHOT_BUDGET_MULTIPLIER,
-            },
+            budget={},
             coverage={"fallback_quota": quota, "A": 0, "B": 0, "C": int(shots_total or 0), "total": int(shots_total or 0)},
         )
     else:
@@ -124,8 +112,6 @@ async def run_video_completion_supervisor(
             cp.run_id = run_id
         if grant_id:
             cp.grant_id = grant_id
-        if budget_cap_cny is not None:
-            cp.budget["cap_cny"] = float(budget_cap_cny)
 
     if cp.phase in TERMINAL_SUPERVISOR_PHASES:
         return cp
@@ -150,7 +136,6 @@ async def run_video_completion_supervisor(
                 episode_id=episode_id,
                 storyboard_artifact_id=ep["storyboard_artifact_id"],
             )
-            cp.budget["cap_cny"] = float(grant.budget_cap_cny)
             cp.coverage["fallback_quota"] = int(grant.max_fallback_shots)
             allow_fallback_adopt = grant.allow_fallback_adopt
             allow_storyboard_edit = grant.allow_storyboard_edit
@@ -247,7 +232,6 @@ async def run_video_completion_supervisor(
                 cp, exc, run_id=run_id, stage="supervisor_tick",
             )
         if g:
-            cp.budget["cap_cny"] = float(g.budget_cap_cny)
             wall_cap = float(g.wall_clock_cap_s)
             cp.deadline_at = float(g.deadline_at)
             cp.budget["wall_clock_cap_s"] = wall_cap
@@ -258,13 +242,11 @@ async def run_video_completion_supervisor(
         cp.tick_no += 1
         cp.phase = "PLANNING_COVERAGE"
         _reconcile_terminal_continuity_blocks(episode_id, run_id=run_id)
-        cap = float(cp.budget.get("cap_cny") or DEFAULT_VIDEO_BUDGET_CAP_CNY)
         fallback_quota = int(cp.coverage.get("fallback_quota") or 0)
         ledger = await _rebuild_budgeted_coverage_ledger_async(
             episode_id,
             cp=cp,
             fallback_quota=fallback_quota,
-            budget_cap_cny=cap,
         )
         adopted_ready = (
             await asyncio.to_thread(
@@ -280,7 +262,6 @@ async def run_video_completion_supervisor(
                 episode_id,
                 cp=cp,
                 fallback_quota=fallback_quota,
-                budget_cap_cny=cap,
             )
         _merge_shot_state(cp, ledger)
         await _save_checkpoint_async(cp, run_id=run_id)
@@ -288,11 +269,6 @@ async def run_video_completion_supervisor(
         if ledger.covered_within_quota():
             return await _finalize_covered_async(cp, ledger, run_id=run_id)
 
-        spent = float(ledger.cost_spent)
-        if spent >= cap:
-            return await _deadline_closeout_async(
-                cp, run_id=run_id, reason="VIDEO_BUDGET_EXHAUSTED_FALLBACK",
-            )
         if cp.deadline_at and now() >= cp.deadline_at:
             return await _deadline_closeout_async(
                 cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED",
@@ -310,48 +286,9 @@ async def run_video_completion_supervisor(
 
         cp.phase = "EVALUATING"
         progressed = False
-        budget_capacity_reached = False
-        soft_cap = cap * FIRST_PASS_BUDGET_FRACTION
-        per_shot_cap = (cap / max(1, ledger.shots_total)) * SHOT_BUDGET_MULTIPLIER
 
         for entry in ledger.actionable():
-            budget_paused_job_id = _budget_paused_job_id(
-                conn,
-                shot_id=entry.shot_id,
-            )
-            if budget_paused_job_id:
-                cp.phase = "WAITING_AUTHORIZATION"
-                cp.outcome = "VIDEO_BUDGET_PAUSED"
-                cp.last_plan = {
-                    "shot_no": entry.shot_no,
-                    "level": "L6",
-                    "strategy": "handoff_human",
-                    "reason": "预算暂停仅允许通过页面显式继续",
-                    "issue_codes": ["VIDEO_BUDGET_PAUSED"],
-                    "job_id": budget_paused_job_id,
-                }
-                _merge_shot_state(cp, ledger)
-                await _save_checkpoint_async(cp, run_id=run_id)
-                return cp
-
-            # 单镜上限
-            if entry.cost_spent_cny >= per_shot_cap and entry.grade == "C":
-                if allow_fallback_adopt and entry.best_version_id:
-                    if _adopt_fallback(entry, episode_id=episode_id, run_id=run_id):
-                        progressed = True
-                continue
-
             if entry.never_attempted:
-                # 首轮软预算
-                if not cp.first_pass_done and spent >= soft_cap:
-                    continue
-                if not _has_dispatch_budget_capacity(
-                    episode_id,
-                    entry,
-                    budget_cap_cny=cap,
-                ):
-                    budget_capacity_reached = True
-                    break
                 cp.phase = "DISPATCHING"
                 try:
                     dispatched = await _dispatch_with_heartbeat_async(
@@ -396,7 +333,6 @@ async def run_video_completion_supervisor(
             plan = route_video_repair(
                 issues,
                 entry=entry,
-                budget=_budget_view(cp, ledger),
                 fingerprint_counts=entry.issue_fingerprint_counts,
                 current_level=entry.repair_level,  # type: ignore[arg-type]
                 allow_storyboard_edit=allow_storyboard_edit,
@@ -482,7 +418,6 @@ async def run_video_completion_supervisor(
                 })
 
             if plan.strategy == "requeue_no_charge":
-                # 预算暂停是页面确认门禁，不能作为普通失败免计费重排。
                 requeued_job_id = (
                     _requeue_no_charge_job(
                         conn,
@@ -512,13 +447,6 @@ async def run_video_completion_supervisor(
                     plan.reason, payload=cp.last_plan,
                 )
             try:
-                if plan.is_paid and not _has_dispatch_budget_capacity(
-                    episode_id,
-                    entry,
-                    budget_cap_cny=cap,
-                ):
-                    budget_capacity_reached = True
-                    break
                 dispatched = await _dispatch_with_heartbeat_async(
                     entry,
                     episode_id=episode_id,
@@ -553,25 +481,7 @@ async def run_video_completion_supervisor(
                 run_id=run_id,
             )
 
-        if budget_capacity_reached:
-            observed = await _rebuild_coverage_ledger_async(
-                episode_id,
-                cp=cp,
-                fallback_quota=int(cp.coverage.get("fallback_quota") or 0),
-            )
-            _merge_shot_state(cp, observed)
-            if observed.has_active_jobs():
-                cp.phase = "OBSERVING"
-                cp.outcome = "VIDEO_BUDGET_CAPACITY_RESERVED_BY_ACTIVE_JOBS"
-                await _save_checkpoint_async(cp, run_id=run_id)
-                await asyncio.sleep(cp.tick_interval_s)
-                continue
-            cp.phase = "PAUSED_BUDGET"
-            cp.outcome = "VIDEO_BUDGET_CAPACITY_REACHED"
-            await _save_checkpoint_async(cp, run_id=run_id)
-            return cp
-
-        # 尝试预算耗尽后统一 best-effort 兜底；质量等级和旧 fallback quota
+        # 尝试次数耗尽后统一 best-effort 兜底；质量等级和旧 fallback quota
         # 只用于报告，不得让任何已有可播候选继续空置。
         if allow_fallback_adopt:
             # 刷新 ledger 状态到 cp
@@ -584,7 +494,7 @@ async def run_video_completion_supervisor(
                 if _adopt_fallback(entry, episode_id=episode_id, run_id=run_id):
                     progressed = True
 
-        # 首轮：若所有 never_attempted 都处理过或软预算触顶
+        # 首轮：若所有 never_attempted 都已处理过
         if not any(e.never_attempted for e in ledger.entries):
             cp.first_pass_done = True
 

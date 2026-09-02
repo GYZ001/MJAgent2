@@ -22,24 +22,8 @@ from app.provider_task_clearance import (
 
 GRANT_TTL_S = 6 * 3600  # 6 小时
 VIDEO_PERMISSION = "video.complete_episode"
-DEFAULT_VIDEO_BUDGET_CAP_CNY = 150.0
 DEFAULT_VIDEO_WALL_CLOCK_CAP_S = 4 * 3600
 DEFAULT_FALLBACK_QUOTA_FRACTION = 0.2
-# 快速生成（video.generate_episode / video.generate_shot）曾经把 cap 精确设成
-# 首轮预估，零余量——任何一镜只要真需要第二次付费尝试就必然打穿上限，只能
-# 人工加额。2026-08-25 用 data/manju.db 里 shot_versions 的版本数分布反推：
-# 已产出真实版本的 24 个镜头中 66.7% 只需 1 个版本、29.2% 需要 2 个、4.2%
-# （EP1 第 1 镜）需要 3 个——单镜最多观测到 2 次重投，EP1 全集口径达到过
-# 15 版/8 镜=1.88 倍。按“每镜最多可承受 2 次重投”取整数倍数，对首轮预估
-# 整体乘 3，覆盖已观测到的最坏单镜情形，即使全集所有镜头都撞到这个上限也
-# 仍有余量。
-VIDEO_BUDGET_RETRY_MARGIN_MULTIPLIER = 3.0
-# 用户拍板的单集硬上限（2026-08-25，「留余量吧，一集 500 块钱以内」）。现有
-# 单价 ¥12/镜、库内最大分集 15 镜（ep_a0e90058f83c）时，3 倍余量后 ¥540 会
-# 被这道保险丝截到 ¥500——截断后的有效倍数（¥500/¥180≈2.78）仍高于历史
-# 最坏重投比例（EP1 1.88 倍），只是把无限风险换成有限风险，正常分集规模
-# 下不会触发。
-EPISODE_VIDEO_BUDGET_HARD_CAP_CNY = 500.0
 
 _PROVIDER_CLAIM_LEDGER_COLUMNS = {
     "operation_id",
@@ -77,7 +61,6 @@ class VideoCompletionGrant(BaseModel):
     capability_snapshot_id: str | None = None
     permission: Literal["video.complete_episode"] = VIDEO_PERMISSION
     kind: Literal["video"] = "video"
-    budget_cap_cny: float = DEFAULT_VIDEO_BUDGET_CAP_CNY
     wall_clock_cap_s: float = DEFAULT_VIDEO_WALL_CLOCK_CAP_S
     deadline_at: float
     allow_fallback_adopt: bool = True
@@ -91,7 +74,13 @@ class VideoCompletionGrant(BaseModel):
 
 
 class VideoBudgetAuthorizationError(RuntimeError):
-    """A payable provider video call would exceed the user-approved cap."""
+    """A payable provider video call could not be recorded against the ledger.
+
+    金额不再构成生成拦截（会员分档时长制）：``reserve_provider_video_budget``
+    正常路径恒返回 True，这个异常现在只在预算台账表缺失（部署/迁移异常）时
+    触发，不代表"超支"——见 CLAUDE.md「Retiring Features」与本次「成本预算
+    拦截体系退场」。类名与异常类型保留，避免改动全部调用/捕获点签名。
+    """
 class GrantValidationError(ValueError):
     def __init__(self, code: str, message: str):
         self.code = code
@@ -137,7 +126,6 @@ def _row_to_video_grant(row) -> VideoCompletionGrant:
         ),
         video_plan_release_hash=_col("video_plan_release_hash") or None,
         capability_snapshot_id=_col("capability_snapshot_id") or None,
-        budget_cap_cny=float(_col("budget_cap_cny") or DEFAULT_VIDEO_BUDGET_CAP_CNY),
         wall_clock_cap_s=float(_col("wall_clock_cap_s") or DEFAULT_VIDEO_WALL_CLOCK_CAP_S),
         deadline_at=float(
             _col("deadline_at")

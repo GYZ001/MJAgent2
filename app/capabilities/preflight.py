@@ -213,7 +213,7 @@ def episode_plan(args) -> PreflightResult:
     if replacing:
         warnings = [
             "现有剧本、分镜、视频和交付投影将从项目中移除；历史运行证据仍保留",
-            "重新分集采用本地章节规则，不调用模型，也不会产生新的模型费用",
+            "重新分集采用本地章节规则，不调用模型",
         ]
     return PreflightResult(
         command="episode.plan",
@@ -295,7 +295,7 @@ def video_clear_episode(args) -> PreflightResult:
                 invalidated_artifacts=int(versions or 0),
                 extra=clearance,
             ),
-            warnings=["保留任务句柄与费用账本，待供应商状态收敛后可重试"],
+            warnings=["保留任务句柄与结算记录，待供应商状态收敛后可重试"],
             state_fingerprint=_fp({
                 "episode_id": args.episode_id,
                 "status": ep["status"],
@@ -370,7 +370,7 @@ def video_clear_shot(args) -> PreflightResult:
                 invalidated_artifacts=int(versions or 0),
                 extra=clearance,
             ),
-            warnings=["保留任务句柄与费用账本，待供应商状态收敛后可重试"],
+            warnings=["保留任务句柄与结算记录，待供应商状态收敛后可重试"],
             state_fingerprint=_fp({
                 "shot_id": args.shot_id,
                 "artifact": shot["storyboard_artifact_id"],
@@ -569,9 +569,7 @@ def video_complete_episode(args) -> PreflightResult:
     )
     allow_edit = bool(getattr(args, "allow_storyboard_edit", False))
     risk = RiskLevel.R3_DESTRUCTIVE if allow_edit else RiskLevel.R2_MATERIAL
-    cap_arg = getattr(args, "budget_cap_cny", None)
     wall_arg = getattr(args, "wall_clock_cap_s", None)
-    cap = 150.0 if cap_arg is None else cap_arg
     wall = 14400 if wall_arg is None else wall_arg
     fallback = getattr(args, "max_fallback_shots", None)
     if fallback is None:
@@ -607,7 +605,6 @@ def video_complete_episode(args) -> PreflightResult:
             "status": ep["status"],
             "storyboard_artifact_id": ep["storyboard_artifact_id"],
             "grades": grades,
-            "budget_cap_cny": cap,
             "wall_clock_cap_s": wall,
             "max_fallback_shots": fallback,
             "allow_storyboard_edit": allow_edit,
@@ -651,10 +648,6 @@ def video_complete_project(args) -> PreflightResult:
         if r["status"] in {"confirmed", "generating", "done", "mixed"}
         or storyboard_pack_prompts_complete(conn, r["id"])
     ]
-    global_arg = getattr(args, "global_budget_cap_cny", None)
-    per_arg = getattr(args, "per_episode_cap_cny", None)
-    global_cap = float(500 if global_arg is None else global_arg)
-    per_cap = float(150 if per_arg is None else per_arg)
     allow_edit = bool(getattr(args, "allow_storyboard_edit", False))
     risk = RiskLevel.R3_DESTRUCTIVE if allow_edit else RiskLevel.R2_MATERIAL
     summary = (
@@ -681,8 +674,6 @@ def video_complete_project(args) -> PreflightResult:
         state_fingerprint=_fp({
             "project_id": args.project_id,
             "episode_ids": [r["id"] for r in eligible],
-            "global_budget_cap_cny": global_cap,
-            "per_episode_cap_cny": per_cap,
             "allow_storyboard_edit": allow_edit,
         }),
         requires_confirmation=True,

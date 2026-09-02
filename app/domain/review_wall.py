@@ -41,7 +41,7 @@ _REVIEW_TERMINAL_RUN_STATES = {
 }
 _REVIEW_ACTIVE_RUN_STATES = {
     "CREATED", "RUNNING", "WAITING_RETRY", "WAITING_HUMAN",
-    "WAITING_AUTHORIZATION", "PAUSED_BUDGET", "PAUSED_EXTERNAL",
+    "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL",
 }
 
 
@@ -967,9 +967,7 @@ def review_wall_context(episode_id: str):
         "upstream": snapshot,
         "archived_versions": archived,
         "authorization_constraints": {
-            "budget_cap_cny": {"type": "number", "unit": "CNY", "default": 150, "min": 1, "max": 100000, "step": 1, "finite": True},
             "wall_clock_cap_s": {"type": "number", "unit": "seconds", "default": 14400, "min": 60, "max": 604800, "step": 60, "finite": True},
-            "add_budget_cny": {"type": "number", "unit": "CNY", "default": 50, "min": 1, "max": 100000, "step": 1, "finite": True},
             "add_wall_clock_s": {"type": "number", "unit": "seconds", "default": 3600, "min": 60, "max": 604800, "step": 60, "finite": True},
         },
         "server_time": now(),

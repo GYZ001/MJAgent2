@@ -49,7 +49,6 @@ export const JOB_STATUS_LABELS: Record<string, string> = {
   succeeded: "已完成",
   partial: "部分完成",
   failed: "失败",
-  paused_budget: "预算暂停",
   paused_external: "外部中断",
   cancelled: "已取消",
   recovering: "恢复排队中",
@@ -176,7 +175,7 @@ export function isProviderCreateUnresolved(
     || Boolean(job.error?.includes("[VIDEO_PROVIDER_CREATE_UNRESOLVED]"));
 }
 export const PROVIDER_RESUBMISSION_WARNING =
-  "未找到可继续查询的供应商任务编号。请先核对供应商后台；确认后会创建新的 operation ID，重新核算本集额度并建立独立预算 claim。原请求费用仍可能已经产生。";
+  "未找到可继续查询的供应商任务编号。请先核对供应商后台；确认后会创建新的 operation ID，重新核算本集用量并建立独立追踪记录。原请求仍可能已经被供应商处理。";
 export function jobNextStep(job: Job) {
   if (isProviderCreateUnresolved(job))
     return "供应商可能已接收创建请求；请先恢复原任务句柄，无法确认后再决定是否重新提交";
@@ -194,8 +193,6 @@ export function jobNextStep(job: Job) {
     return "正在等待自动重试，可查看失败原因";
   if (job.status === "waiting_human")
     return "等待人工确认，请打开详情处理";
-  if (job.status === "paused_budget")
-    return "因预算暂停，请查看范围和费用后恢复";
   if (job.status === "paused_external")
     return "任务被外部中断，可查看原因后恢复";
   if (job.status === "partial")
@@ -214,7 +211,6 @@ export function stampClass(status: string) {
     : [
           "failed",
           "partial",
-          "paused_budget",
           "paused_external",
           "FAILED",
           "TIMEOUT",

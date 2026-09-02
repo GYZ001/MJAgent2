@@ -16,7 +16,6 @@ export interface ShotVersion {
     start_state_match?: number | boolean;
     end_state_match?: number | boolean;
   } | null;
-  cost_cny: number;
   latency_s: number;
   /** 在跑任务的服务端起点（秒）；有值表示这条正在生成，用于实时计时。 */
   running_since?: number | null;

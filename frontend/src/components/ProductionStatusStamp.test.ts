@@ -15,7 +15,7 @@ describe('制作状态文案', () => {
       tone: 'gold',
       known: true,
     })
-    expect(episodeStatusMeta('paused_budget').label).toBe('视频因预算暂停')
+    expect(episodeStatusMeta('mixed').label).toBe('视频处理中')
     expect(episodeStatusMeta('done').label).toBe('本集已成片')
   })
 

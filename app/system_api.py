@@ -87,54 +87,29 @@ def _is_blocked_fs_path(path: Path) -> bool:
     return False
 
 
-def _list_directory_grants() -> list[str]:
-    try:
-        raw = json.loads(get_setting("directory_grants") or "[]")
-    except (TypeError, json.JSONDecodeError):
-        return []
-    if not isinstance(raw, list):
-        return []
-    out: list[str] = []
-    for item in raw:
-        text = str(item or "").strip()
-        if text and text not in out:
-            out.append(text)
-    return out
-
-
 def _builtin_directory_roots() -> list[Path]:
     """默认可浏览/建目录根：仅项目与数据目录，不开放家目录枚举（Todolist T5）。"""
     return [config.PROJECTS_DIR.resolve(), config.DATA_DIR.resolve()]
 
 
 def allowed_directory_roots() -> list[Path]:
-    roots = list(_builtin_directory_roots())
-    for grant in _list_directory_grants():
-        try:
-            path = Path(grant).expanduser().resolve()
-        except OSError:
-            continue
-        if _is_blocked_fs_path(path):
-            continue
-        if path not in roots:
-            roots.append(path)
-    return roots
+    """可浏览/建目录的根路径集合。
+
+    人工目录授权（``directory_grants`` 设置项、``POST /api/system/directory-
+    grants``）已于 2026-09-01 退场：写入路由零调用点、零测试覆盖，且
+    ``browse_dir`` 本就有独立的内置根（项目/数据目录）与敏感路径黑名单兜底，
+    不依赖用户额外授权才能安全工作——见 CLAUDE.md「Retiring Features」。现在
+    只剩内置根，浏览范围收紧到 Todolist T5 的默认安全边界。
+    """
+    return list(_builtin_directory_roots())
 
 
 def assert_path_under_directory_grant(path: Path) -> Path:
-    """路径必须落在 builtin 根或已授权 directory_grant 之下。"""
+    """路径必须落在内置根（项目/数据目录）之下。"""
     try:
         resolved = path.expanduser().resolve()
     except OSError as exc:
         raise HTTPException(400, f"路径不可解析：{path}") from exc
-    # 应用内建数据根由部署配置明确指定；macOS 的临时目录会解析到
-    # /private/var，不能因此把应用自己的 projects/data 目录误判为敏感路径。
-    for root in _builtin_directory_roots():
-        try:
-            resolved.relative_to(root)
-            return resolved
-        except ValueError:
-            continue
     if _is_blocked_fs_path(resolved):
         raise HTTPException(403, f"不允许访问系统敏感目录：{resolved}")
     for root in allowed_directory_roots():
@@ -143,7 +118,7 @@ def assert_path_under_directory_grant(path: Path) -> Path:
             return resolved
         except ValueError:
             continue
-    raise HTTPException(403, f"路径不在已授权 directory_grant 白名单内：{resolved}")
+    raise HTTPException(403, f"路径不在允许访问的目录范围内：{resolved}")
 
 
 def _list_drives() -> list[str]:
@@ -192,34 +167,6 @@ def browse_dir(path: str = ""):
         except HTTPException:
             parent = None
     return {"path": str(base.resolve()), "parent": parent, "drives": drives, "dirs": dirs}
-
-
-@router.post("/system/directory-grants")
-def grant_directory(body: dict):
-    """人工授权一个可浏览/建子目录的根路径（Todolist T5）。"""
-    raw = str(body.get("path") or "").strip()
-    if not raw:
-        raise HTTPException(422, "缺少 path")
-    path = Path(raw).expanduser()
-    try:
-        resolved = path.resolve()
-    except OSError as exc:
-        raise HTTPException(400, f"路径不可解析：{raw}") from exc
-    if _is_blocked_fs_path(resolved):
-        raise HTTPException(403, f"不允许授权系统敏感目录：{resolved}")
-    if not resolved.exists() or not resolved.is_dir():
-        raise HTTPException(404, f"目录不存在：{resolved}")
-    grants = _list_directory_grants()
-    text = str(resolved)
-    if text not in grants:
-        grants.append(text)
-        set_setting("directory_grants", json.dumps(grants, ensure_ascii=False))
-    return {"ok": True, "path": text, "grants": [str(r) for r in allowed_directory_roots()]}
-
-
-@router.get("/system/directory-grants")
-def list_directory_grants_route():
-    return {"grants": [str(r) for r in allowed_directory_roots()]}
 
 
 @router.post("/system/mkdir")
@@ -543,7 +490,7 @@ async def _probe_openai_model(base_url: str, api_key: str, model: str, kind: str
     if kind in {"video", "image"}:
         return {
             "ok": True, "latency_ms": latency_ms, "probe": "model_catalog",
-            "preview": "凭证与模型目录识别通过；为避免产生费用，未执行媒体生成",
+            "preview": "凭证与模型目录识别通过；这只是连通性检测，未执行媒体生成",
             **normalize_token_limits({}),
         }
     try:
@@ -1188,28 +1135,6 @@ def download_call_detail(
     })
 
 
-@router.get("/system/val422-metrics")
-def val422_metrics(limit: int = 500):
-    """聚合 VAL-422 指标（provider_calls.kind=val422_metric）。"""
-    rows = rows_to_dicts(get_conn().execute(
-        """SELECT id, ts, response_preview, meta_json FROM provider_calls
-           WHERE kind='val422_metric' ORDER BY id DESC LIMIT ?""",
-        (min(limit, 2000),),
-    ).fetchall())
-    totals: dict[str, int] = {}
-    for row in rows:
-        meta = {}
-        try:
-            meta = json.loads(row.get("meta_json") or "{}")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            meta = {}
-        name = str(meta.get("metric") or "")
-        if not name:
-            continue
-        totals[name] = totals.get(name, 0) + int(meta.get("value") or 1)
-    return {"totals": totals, "samples": len(rows)}
-
-
 @router.get("/system/errors")
 def recent_errors(limit: int = 50):
     """最近报错码列表（不含原文/堆栈，只给概览）。凭 id 调下方详情接口查根因。"""
@@ -1247,7 +1172,6 @@ def jobs_overview(include_all: bool = False):
         "RUNNING": "running",
         "WAITING_RETRY": "waiting_retry",
         "WAITING_HUMAN": "waiting_human",
-        "PAUSED_BUDGET": "paused_budget",
         "PAUSED_EXTERNAL": "paused_external",
         "SUCCEEDED": "succeeded",
         "PARTIAL": "partial",
@@ -1550,7 +1474,7 @@ def job_detail(job_id: str, source: str = "job"):
             "raw_status": run.get("status"),
             "status": summary.get("status") or {
                 "CREATED": "queued", "RUNNING": "running", "WAITING_RETRY": "waiting_retry",
-                "WAITING_HUMAN": "waiting_human", "PAUSED_BUDGET": "paused_budget",
+                "WAITING_HUMAN": "waiting_human",
                 "PAUSED_EXTERNAL": "paused_external", "SUCCEEDED": "succeeded",
                 "PARTIAL": "partial", "FAILED": "failed", "CANCELLED": "cancelled",
             }.get(str(run.get("status") or ""), str(run.get("status") or "").lower()),
@@ -1631,7 +1555,7 @@ def retry_job(job_id: str, body: dict | None = None, _admin: None = Depends(requ
     )
     if item["status"] not in {
         "failed", "cancelled", "abandoned", "paused", "paused_external",
-        "paused_budget", "waiting_retry",
+        "waiting_retry",
     } and not waiting_input_repair and not waiting_provider_create_resolution and not waiting_provider_failure:
         raise HTTPException(409, detail={
             "code": "JOB_STATE_CONFLICT", "message": f"当前状态 {item['status']} 不支持重试",
@@ -1692,7 +1616,7 @@ def retry_job(job_id: str, body: dict | None = None, _admin: None = Depends(requ
                         "paid_risk": "previous_charge_unknown",
                         "will_submit_new_provider_task": True,
                         "will_continue_existing_provider_task": False,
-                        "message": "请先核对供应商后台；确认继续后会重新校验预算，并可能产生新费用",
+                        "message": "请先核对供应商后台；确认继续后会重新校验授权，并向供应商发起新任务",
                     },
                 })
             else:
@@ -1723,7 +1647,7 @@ def retry_job(job_id: str, body: dict | None = None, _admin: None = Depends(requ
                     "retryable": False,
                     "action": "create_new_version",
                     "paid_risk": "requires_new_charge",
-                    "message": "新版本会创建新的供应商任务，并可能产生新费用",
+                    "message": "新版本会创建新的供应商任务",
                 },
             })
         manual_provider_failure = bool(
@@ -1733,7 +1657,7 @@ def retry_job(job_id: str, body: dict | None = None, _admin: None = Depends(requ
         if manual_provider_failure and not request.get("allow_new_submission"):
             raise HTTPException(409, detail={
                 "code": "PROVIDER_TECHNICAL_FAILURE_CONFIRMATION_REQUIRED",
-                "message": "原供应商任务发生技术失败，重新提交可能产生新费用",
+                "message": "原供应商任务发生技术失败，重新提交会创建新的供应商任务",
                 "retryability": {
                     "retryable": True,
                     "action": "confirm_new_submission",
@@ -1789,7 +1713,7 @@ def retry_job(job_id: str, body: dict | None = None, _admin: None = Depends(requ
                 "paid_risk": "may_create_new_charge",
                 "will_submit_new_provider_task": True,
                 "will_continue_existing_provider_task": False,
-                "message": "已确认继续并重新校验预算；将开启新的提交批次，并可能产生新费用",
+                "message": "已确认继续并重新校验授权；将开启新的提交批次",
             }
         else:
             target_status = "queued"
@@ -1805,7 +1729,7 @@ def retry_job(job_id: str, body: dict | None = None, _admin: None = Depends(requ
                 "paid_risk": "may_create_new_charge",
                 "will_submit_new_provider_task": True,
                 "will_continue_existing_provider_task": False,
-                "message": "该任务尚无供应商断点，将重新提交并可能产生新费用",
+                "message": "该任务尚无供应商断点，将重新提交并创建新的供应商任务",
             }
 
         def activate_video_slot() -> None:
@@ -1897,15 +1821,9 @@ def retry_job(job_id: str, body: dict | None = None, _admin: None = Depends(requ
                             job_id,
                         ),
                     )
-                # 金额不再构成生成拦截（会员分档时长制，非按金额计费）：
-                # reserve_budget/reserve_provider_video_budget 均已删除
-                # cap 比较分支，恒定返回 True——仍然调用它们只是为了保留
-                # budget_reservations/provider_video_budget_claims 审计台账
-                # 的记账副作用。历史上这里会在任一者返回 False 时把 job 打成
-                # paused_budget 并抛 409（JOB_RETRY_AUTHORITY_MISSING /
-                # JOB_RETRY_BUDGET_BLOCKED），那条拦截分支已删除——见
-                # CLAUDE.md「Retiring Features」与本次「成本预算拦截体系
-                # 退场」。
+                # 金额不再构成生成拦截：reserve_budget/reserve_provider_video_budget
+                # 恒定返回 True，仍调用只为保留审计台账记账；「失败→paused_budget
+                # 并抛 409」分支已删除。
                 worker.media_scheduler.reserve_budget(
                     job_id,
                     item["episode_id"],

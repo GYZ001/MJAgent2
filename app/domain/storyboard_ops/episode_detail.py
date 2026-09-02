@@ -9,7 +9,6 @@ import json
 
 from app import (
     errors,
-    worker,
 )
 from app.db import (
     get_conn,
@@ -239,8 +238,6 @@ def _episode_detail_projection(episode_id: str, view: str | None) -> dict:
     # 调用只在 script.narrative_plan is not None 时才执行，对 prep_pack
     # （契约 6.0.0+）分集永远是 None，本就是死分支，不留兼容。
     ep["narrative_metrics"] = None
-    # 预估只按模型选择的实际分镜时长累计；单集不设总时长产品上限。
-    ep["cost_cny"] = worker.episode_cost(episode_id)
     shots = rows_to_dicts(shot_rows)
     version_counts = {}
     if view == "board" and shots:

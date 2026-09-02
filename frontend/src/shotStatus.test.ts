@@ -57,27 +57,6 @@ describe('compactShotStage', () => {
     expect(compactShotStage(retrying)).toBe('校验失败，自动重试')
   })
 
-  it('依赖镜预算暂停优先展示恢复后的等待关系', () => {
-    const paused = shot({
-      video_status: 'generating',
-      mode_plan: {
-        mode: 'FIRST_LAST_FRAME_MODE',
-        confidence: 1,
-        depends_on_shot_id: 'upstream-shot',
-      },
-      pipeline: {
-        task_accepted: true,
-        pipeline_status: 'paused_budget',
-        pipeline_stage: 'job_queued',
-        candidate_count: 0,
-        retake_count: 0,
-      },
-    })
-
-    expect(compactShotStage(paused))
-      .toBe('预算暂停，恢复后等待上一镜素材')
-  })
-
   it('静态尾帧资产等待不显示成等待采用视频', () => {
     const waiting = shot({
       video_status: 'generating',

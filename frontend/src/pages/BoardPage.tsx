@@ -1024,7 +1024,7 @@ export default function BoardPage() {
           clearPreview.delivery_package_count
             ? `将删除 ${clearPreview.delivery_package_count} 个下游交付包`
             : '当前没有下游交付包',
-          '此操作不可撤销，已经产生的模型调用费用不会退回',
+          '此操作不可撤销',
         ]}
         confirmLabel="确认清空并保留映射结果"
         cancelLabel="取消"
@@ -1040,7 +1040,7 @@ export default function BoardPage() {
         details={[
           `${videoModelLabel(videoModelConfirm.current_target_video_model)} → ${videoModelLabel(videoModelConfirm.requested_target_video_model)}`,
           '参考图与人物谱不受影响，只清空视频生成产物',
-          '已经产生的模型调用费用不会退回',
+          '此操作不可撤销',
         ]}
         confirmLabel="确认切换并清空"
         cancelLabel="取消"
@@ -1060,7 +1060,7 @@ export default function BoardPage() {
         </>}>
         {providerClearance && <div className="storyboard-preview-card">
           <p>
-            以下任务可能已被供应商接单，直接清空会让这笔费用查无对应产物；不核实清楚就清空可能丢账，所以先挡在这里。
+            以下任务可能已被供应商接单，直接清空会让产物与任务对不上号；不核实清楚就清空会丢失可追溯性，所以先挡在这里。
             点击「核对供应商任务状态」会去问供应商每个任务的真实状态——只有确认结果（成功/失败）或确认从未真正提交给供应商，才会解除阻塞；
             供应商仍在处理中的任务会原样保留，不提供绕过闸门的选项。
           </p>
@@ -1070,7 +1070,7 @@ export default function BoardPage() {
               return (
                 <li key={blocker.job_id}>
                   <b>{shotNo != null ? `第 ${shotNo} 段` : '未知段落'} · 任务 {blocker.job_id}</b>
-                  <span>费用 ¥{blocker.amount_cny.toFixed(2)} · 状态 {blocker.job_status}</span>
+                  <span>状态 {blocker.job_status}</span>
                   <span>{providerRecoveryActionLabel(blocker)}</span>
                 </li>
               )
@@ -1087,7 +1087,7 @@ export default function BoardPage() {
               <b>核对结果</b>
               <span>
                 {providerReconcileResult.provider_confirmed_terminal_job_ids.length
-                  ? `${providerReconcileResult.provider_confirmed_terminal_job_ids.length} 个任务确认供应商终态并已结算费用责任；`
+                  ? `${providerReconcileResult.provider_confirmed_terminal_job_ids.length} 个任务确认供应商终态并已归档；`
                   : ''}
                 {providerReconcileResult.superseded_jobs_closed_job_ids.length
                   ? `${providerReconcileResult.superseded_jobs_closed_job_ids.length} 个任务确认从未提交给供应商（所属段落已有其他成功版本），已作为过时任务收口；`

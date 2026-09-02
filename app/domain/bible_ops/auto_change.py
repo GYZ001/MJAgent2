@@ -236,7 +236,7 @@ async def decide_auto_change(project_id: str, change_id: str, body: dict | None 
                     )
                     action_result.update({
                         "added_scene": scene["name"], "requires_payment_confirmation": True,
-                        "message": "场景锚点已批准入库；出图仍需在场景库完成费用预检",
+                        "message": "场景锚点已批准入库；出图仍需在场景库完成生成范围确认",
                     })
         elif kind == "scene_state_change":
             scene_name = str(matched_item.get("scene") or "").strip()
@@ -274,7 +274,7 @@ async def decide_auto_change(project_id: str, change_id: str, body: dict | None 
                 "approved_scene_change": scene_name,
                 "requires_payment_confirmation": True,
                 "pending_state_ep_start": ep_start,
-                "message": "状态变化锚点已保存为待重绘版本；仍需在场景库完成费用预检",
+                "message": "状态变化锚点已保存为待重绘版本；仍需在场景库完成生成范围确认",
             })
     elif matched_item and decision == "rollback":
         portrait_id = _auto_change_portrait_id(change_id, matched_item)

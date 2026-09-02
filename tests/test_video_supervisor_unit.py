@@ -29,7 +29,7 @@ from app.video_supervisor import (
     MIN_ATTEMPTS_PER_SHOT,
     CoverageLedger,
     ShotCoverageEntry,
-    _budget_paused_job_id,
+    VideoSupervisorCheckpoint,
     _requeue_no_charge_job,
     attempts_for,
 )
@@ -84,7 +84,9 @@ def test_watchdog_stall_reconciliation_does_not_block_event_loop(
     assert asyncio.run(scenario()) == 5
 
 
-def test_no_charge_requeue_preserves_budget_pause_gate() -> None:
+def test_no_charge_requeue_only_touches_failed_or_waiting_retry_jobs() -> None:
+    """免计费重排只认领 failed/waiting_retry；其它状态（如历史遗留的
+    ``waiting_human``）原样保留，不被这个非付费重排通道误碰。"""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(db.SCHEMA)
@@ -96,17 +98,17 @@ def test_no_charge_requeue_preserves_budget_pause_gate() -> None:
     conn.executemany(
         """INSERT INTO jobs(
                id,kind,shot_id,status,retry_count,error,created_at,updated_at
-           ) VALUES(?, 'video', 'shot-budget', ?, 2, 'x', ?, 1)""",
+           ) VALUES(?, 'video', 'shot-x', ?, 2, 'x', ?, 1)""",
         [
             ("job-failed", "failed", 1),
-            ("job-budget", "paused_budget", 2),
+            ("job-other", "waiting_human", 2),
         ],
     )
     conn.commit()
 
     requeued = _requeue_no_charge_job(
         conn,
-        shot_id="shot-budget",
+        shot_id="shot-x",
         run_id=None,
     )
 
@@ -117,12 +119,8 @@ def test_no_charge_requeue_preserves_budget_pause_gate() -> None:
     assert requeued == "job-failed"
     assert statuses == {
         "job-failed": "queued",
-        "job-budget": "paused_budget",
+        "job-other": "waiting_human",
     }
-    assert _budget_paused_job_id(
-        conn,
-        shot_id="shot-budget",
-    ) == "job-budget"
 
 
 def test_grade_shot_video_a_b_c():
@@ -352,7 +350,8 @@ def test_qa_gain_never_enters_paid_repair():
     assert plan.is_paid is False
 
 
-def test_attempts_for_budget():
+def test_attempts_for_shot_count_only():
+    """金额已退场：attempts_for 只按链首/C 级加成计数，不再接受 budget_cap_cny。"""
     entry = ShotCoverageEntry(shot_no=1, shot_id="s1", grade="C", chain_position=0, chain_len=3)
     ledger = CoverageLedger(
         episode_id="ep",
@@ -363,21 +362,23 @@ def test_attempts_for_budget():
         entries=[entry],
         cost_spent=0.0,
     )
-    n = attempts_for(entry, ledger, budget_cap_cny=150.0)
+    n = attempts_for(entry, ledger)
     assert MIN_ATTEMPTS_PER_SHOT <= n <= MAX_ATTEMPTS_PER_SHOT
+    # 链首 + C 级各加 1 次
+    assert n == min(MIN_ATTEMPTS_PER_SHOT + 2, MAX_ATTEMPTS_PER_SHOT)
 
 
-def test_first_pass_soft_budget_and_per_shot_cap():
-    from app.video_supervisor import FIRST_PASS_BUDGET_FRACTION, SHOT_BUDGET_MULTIPLIER
-
-    cap = 150.0
-    soft = cap * FIRST_PASS_BUDGET_FRACTION
-    assert soft == pytest.approx(97.5)
-    # 首轮：已花费 >= soft 时不应再派未尝试镜（契约常量 + 主循环守卫）
-    assert soft < cap
-    per_shot = (cap / 11) * SHOT_BUDGET_MULTIPLIER
-    assert per_shot == pytest.approx((150 / 11) * 3.0)
-    assert per_shot < cap
+def test_legacy_checkpoint_budget_cap_cny_key_is_ignored_not_rejected():
+    """旧存档 budget.cap_cny 等历史金额键不得让 model_validate 报错（budget
+    是纯 dict[str, float]，天然不受 schema 约束）；继续被读的只有 wall_clock_cap_s。"""
+    legacy_raw = {
+        "episode_id": "e", "phase": "OBSERVING",
+        "budget": {"cap_cny": 150.0, "wall_clock_cap_s": 14400.0},
+    }
+    cp = VideoSupervisorCheckpoint.model_validate(legacy_raw)
+    assert cp.phase == "OBSERVING"
+    assert cp.budget["wall_clock_cap_s"] == 14400.0
+    assert cp.budget["cap_cny"] == 150.0
 
 
 def test_should_cascade_branches():
@@ -502,7 +503,6 @@ def test_video_grant_episode_binding(tmp_path, monkeypatch):
         episode_id=episode_id,
         project_id=project_id,
         storyboard_artifact_id="art_sb_v1",
-        budget_cap_cny=100,
         shots_total=10,
     )
     assert token
@@ -511,7 +511,7 @@ def test_video_grant_episode_binding(tmp_path, monkeypatch):
         episode_id=episode_id,
         storyboard_artifact_id="art_sb_v1",
     )
-    assert ok.budget_cap_cny == 100
+    assert ok.grant_id == grant.grant_id
 
     with pytest.raises(GrantValidationError) as ei:
         validate_video_grant(

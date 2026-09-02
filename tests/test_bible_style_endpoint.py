@@ -117,7 +117,7 @@ def test_set_bible_style_change_requires_confirm_first(monkeypatch) -> None:
     assert precheck["scene_bible_ready"] is False
     assert precheck["scenes"] is None
     assert precheck["characters"]["character_count"] == 1
-    assert precheck["total_estimated_cost_cny"] == precheck["characters"]["estimated_cost_cny"]
+    assert precheck["total_image_count"] == precheck["characters"]["image_count"]
     assert calls["refs"] == [] and calls["scene_refs"] == [], "未确认前不能发起任何生成"
     row = conn.execute("SELECT bible_version FROM projects WHERE id='p1'").fetchone()
     assert row["bible_version"] == 3, "未确认前不能写库"
@@ -144,8 +144,8 @@ def test_set_bible_style_confirm_spawns_both_legs_in_one_request(monkeypatch) ->
     })
     assert precheck["scene_bible_ready"] is True
     assert precheck["scenes"]["scene_count"] == 2
-    assert precheck["total_estimated_cost_cny"] == round(
-        precheck["characters"]["estimated_cost_cny"] + precheck["scenes"]["estimated_cost_cny"], 2,
+    assert precheck["total_image_count"] == (
+        precheck["characters"]["image_count"] + precheck["scenes"]["image_count"]
     )
 
     result = asyncio.run(bible_ops.set_bible_visual_style("p1", {

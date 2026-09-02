@@ -133,9 +133,7 @@ def compute_scene_cost_precheck(
     action: str | None = None,
     scene_payloads: list[dict] | None = None,
 ) -> dict:
-    """所有场景图片付费入口共用的服务端范围/费用预检。"""
-    from app.config import IMAGE_PRICE_PER_UNIT
-
+    """所有场景图片生成入口共用的服务端范围预检。"""
     p = _project_or_404(project_id)
     if not p.get("bible_json"):
         raise HTTPException(409, "请先生成人物谱")
@@ -183,15 +181,11 @@ def compute_scene_cost_precheck(
                 "reason": "首次生成" if action == "generate_bible_and_refs" else "整包重生",
             })
     image_count = sum(len(item.get("views") or []) for item in scope)
-    unit = float(IMAGE_PRICE_PER_UNIT)
-    estimated = round(image_count * unit, 2)
-    max_retry = round(estimated * 1.5, 2)
     computed = now()
     scope_fp = fingerprint({
         "project_id": project_id,
         "action": action or ("regenerate_view" if view_role else ("resume_missing" if resume else "regenerate_pack")),
         "scope": scope,
-        "unit": unit,
         "bible_version": p.get("bible_version"),
     })
     return {
@@ -206,14 +200,10 @@ def compute_scene_cost_precheck(
         "actual_view_count": image_count,
         "views_per_scene": max((len(item.get("views") or []) for item in scope), default=0),
         "image_count": image_count,
-        "unit_price_cny": unit,
-        "estimated_cost_cny": estimated,
-        "max_retry_budget_cny": max_retry,
-        "budget_cap_cny": max_retry,
         "max_retries": 2,
         "estimated_duration_min": [max(1, image_count), max(3, image_count * 3)],
         "scope": scope,
         "old_asset_policy": "新包文件齐全并可读取后原子切换；质量评分只作提示，切换前旧采用包继续服务下游",
-        "idempotency_hint": "同一有效报价重复确认只受理一个任务；范围或价格扩大必须重新确认",
-        "stop_policy": "可停止；已开始步骤可能计费，结构完整并落盘的资产保留",
+        "idempotency_hint": "同一有效报价重复确认只受理一个任务；范围扩大必须重新确认",
+        "stop_policy": "可停止；已开始步骤不可撤回，结构完整并落盘的资产保留",
     }

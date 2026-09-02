@@ -117,7 +117,7 @@ def _stop_supervised_video_jobs(episode_id: str, *, run_id: str | None, reason: 
              AND s.adopted_version_id IS NULL
              AND j.status IN (
                'queued','running','waiting_provider','waiting_retry','waiting',
-               'waiting_human','paused_budget'
+               'waiting_human'
              )""",
         (episode_id,),
     ).fetchall()

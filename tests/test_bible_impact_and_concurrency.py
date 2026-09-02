@@ -257,12 +257,11 @@ def test_refs_precheck_counts_images(monkeypatch) -> None:
     patch_api_everywhere(monkeypatch, "_project_or_404", lambda _pid: dict(conn.execute(
         "SELECT * FROM projects WHERE id='proj_test'"
     ).fetchone()))
-    quote = bible_ops.compute_refs_cost_precheck("proj_test")
+    quote = bible_ops.compute_refs_precheck("proj_test")
     assert quote["character_count"] == 1
     assert quote["image_count"] == 3
-    assert quote["estimated_cost_cny"] == pytest.approx(0.6)
-    # compute_refs_cost_precheck 是未签发的原始范围指纹，quote_id 只有经
-    # _issue_payment_quote 落库才产生（见 test_bible_generate_requires_confirm
+    # compute_refs_precheck 是未签发的原始范围指纹，quote_id 只有经
+    # _issue_scope_quote 落库才产生（见 test_bible_generate_requires_confirm
     # 与 test_payment_quote_expires_and_consumed_quote_replays）。
     assert "quote_id" not in quote
     assert quote["scope_fingerprint"] == fingerprint({
@@ -272,7 +271,6 @@ def test_refs_precheck_counts_images(monkeypatch) -> None:
         "resume": False,
         "view_role": None,
         "image_count": 3,
-        "unit": 0.2,
         "bible_version": 1,
     })
 
@@ -318,8 +316,8 @@ def test_refs_precheck_filters_characters(monkeypatch) -> None:
         "SELECT * FROM projects WHERE id='proj_test'"
     ).fetchone()))
 
-    all_quote = bible_ops.compute_refs_cost_precheck("proj_test")
-    filtered = bible_ops.compute_refs_cost_precheck("proj_test", characters=["丙老"])
+    all_quote = bible_ops.compute_refs_precheck("proj_test")
+    filtered = bible_ops.compute_refs_precheck("proj_test", characters=["丙老"])
     assert all_quote["character_count"] == 2
     assert filtered["character_count"] == 1
     assert filtered["scope"][0]["character"] == "丙老"
@@ -337,18 +335,18 @@ def test_payment_quote_expires_and_consumed_quote_replays(monkeypatch) -> None:
         "SELECT * FROM projects WHERE id='proj_test'"
     ).fetchone()))
 
-    current = bible_ops.compute_refs_cost_precheck("proj_test")
-    issued = bible_ops._issue_payment_quote(current)
+    current = bible_ops.compute_refs_precheck("proj_test")
+    issued = bible_ops._issue_scope_quote(current)
     clock["value"] = issued["quote_expires_at"] + 1
     with pytest.raises(HTTPException) as exc:
-        bible_ops._validate_payment_quote("proj_test", issued["quote_id"], current)
+        bible_ops._validate_scope_quote("proj_test", issued["quote_id"], current)
     assert exc.value.detail["code"] == "QUOTE_STALE"
 
     clock["value"] = 200.0
-    consumed = bible_ops._issue_payment_quote(current)
+    consumed = bible_ops._issue_scope_quote(current)
     bible_ops._consume_payment_quote(consumed["quote_id"], task_id="refs:proj_test", run_id="run_1")
     clock["value"] = consumed["quote_expires_at"] + 100
-    row = bible_ops._validate_payment_quote("proj_test", consumed["quote_id"], current)
+    row = bible_ops._validate_scope_quote("proj_test", consumed["quote_id"], current)
     assert row["consumed_task_id"] == "refs:proj_test"
     assert row["consumed_run_id"] == "run_1"
 
@@ -664,7 +662,7 @@ def test_refs_progress_excludes_ineligible_from_missing(monkeypatch) -> None:
     by_status = {item["character"]: item["status"] for item in progress["items"]}
     assert by_status == {"甲一": "ready", "孟浩": "blocked", "王腾飞": "blocked"}
 
-    quote = bible_ops.compute_refs_cost_precheck("proj_test", resume=True)
+    quote = bible_ops.compute_refs_precheck("proj_test", resume=True)
     assert quote["character_count"] == 1
     assert quote["image_count"] == 0
     assert quote["scope"] == []

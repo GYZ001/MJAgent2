@@ -95,7 +95,7 @@ def _storyboard_status_snapshot(
     )
     paused = not active_run_live and (
         phase in {
-            "PAUSED_EXTERNAL", "PAUSED_BUDGET",
+            "PAUSED_EXTERNAL",
             "WAITING_HUMAN", "WAITING_AUTHORIZATION",
         }
         or incomplete_terminal_checkpoint

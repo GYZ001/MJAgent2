@@ -27,8 +27,6 @@ export interface Episode {
   status: string;
   script_error?: string;
   storyboard_warning?: string | null;
-  cost_cny: number;
-  cost_limit_cny?: number;
   screenplay_status: string;
   screenplay_error?: string | null;
   screenplay_updated_at?: number | null;

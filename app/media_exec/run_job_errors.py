@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app import config, errors
+from app import errors
 from app.completion_grant import VideoBudgetAuthorizationError
 from app.db import now
 from app.orchestration import media_scheduler
@@ -73,80 +73,19 @@ def _handle_budget_authorization_error(
     meta: dict[str, Any],
     exc: VideoBudgetAuthorizationError,
 ) -> None:
-    """Retry a transient budget-claim miss a bounded number of times, then pause for a human.
+    """Route straight to human review; ``paused_budget`` no longer exists.
 
-    预算认领在"cap 与已认领总额零余量"附近可能被瞬时挤掉（同集其它镜头的认领/
-    释放时序），不代表这一集真的超支——claim_video_submit_slot 用的仍是人已经
-    批准过的同一个 cap，没有申请新额度。像"槽位已满"一样先给几次有限退避重试
-    的机会，比一次没挤上就直接卡死等人手再点一次 /generate 更合理；重试耗尽仍
-    未通过，才落回真正需要人工处理的 paused_budget 终态——预算保护本身没有放
-    宽，只是不再让一次瞬时失败必须靠人手恢复。
+    金额不再构成生成拦截（会员分档时长制）：``reserve_provider_video_budget``
+    正常路径恒返回 True，这个异常现在只在预算台账表缺失（部署/迁移异常）时
+    触发——不是"钱不够"，是数据库结构缺陷，重试解决不了，必须人工介入。原来
+    "有限退避重试 N 次，耗尽后落 paused_budget 终态、需人在页面显式提额继续"
+    的两段式处理已删除——见 CLAUDE.md「Retiring Features」与本次「成本预算
+    拦截体系退场」。
     """
     message = str(exc)
-    retry_count = int(meta.get("budget_pause_auto_retry_count") or 0)
-    if retry_count < config.VIDEO_JOB_MAX_RETRIES:
-        _retry_budget_authorization(conn, job, job_id, owner, version, meta, message, retry_count)
-        return
-    _pause_for_budget_authorization(conn, job, job_id, owner, version, message)
-
-
-def _retry_budget_authorization(
-    conn: Any,
-    job: Any,
-    job_id: str,
-    owner: str,
-    version: Any,
-    meta: dict[str, Any],
-    message: str,
-    retry_count: int,
-) -> None:
-    """Requeue the job for a bounded auto-retry within the already-approved budget."""
-    import asyncio
-    import json
-
-    retry_count += 1
-    delay = config.VIDEO_JOB_RETRY_BASE_DELAY * (2 ** (retry_count - 1))
-    meta["budget_pause_auto_retry_count"] = retry_count
-    note = (
-        f"本集视频预算认领未通过，已在人工已批准的额度内自动重试第 "
-        f"{retry_count}/{config.VIDEO_JOB_MAX_RETRIES} 次（约 {int(delay)} 秒后），"
-        f"不会申请新的预算；若重试耗尽仍未通过才会暂停等待人工处理。原因：{message}"
-    )
-    retried = conn.execute(
-        """UPDATE jobs
-              SET status='queued',error=?,reason_code='VIDEO_BUDGET_NOT_AUTHORIZED',
-                  reason_text=?,provider_non_cancellable=0,
-                  provider_create_state='not_started',
-                  lease_owner=NULL,lease_expires_at=NULL,next_retry_at=?,
-                  updated_at=?
-            WHERE id=? AND status='running' AND lease_owner=?""",
-        (note, note, now() + delay, now(), job_id, owner),
-    )
-    if retried.rowcount != 1:
-        conn.rollback()
-        return
-    conn.execute(
-        """UPDATE budget_reservations SET status='reserved'
-            WHERE job_id=? AND status='running'""",
-        (job_id,),
-    )
-    conn.commit()
-    _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False))
-    mark_media_job_state(
-        _row_value(job, "run_id"), _row_value(job, "step_run_id"), "queued", note,
-    )
-    task = asyncio.get_running_loop().create_task(_requeue_after(job_id, delay))
-    _retry_tasks.add(task)
-    task.add_done_callback(_retry_tasks.discard)
-
-
-def _pause_for_budget_authorization(
-    conn: Any, job: Any, job_id: str, owner: str, version: Any, message: str,
-) -> None:
-    """Pause the job for human review once its bounded auto-retries are exhausted."""
     changed = conn.execute(
         """UPDATE jobs
-              SET status='paused_budget',error=?,reason_code='VIDEO_BUDGET_NOT_AUTHORIZED',
+              SET status='waiting_human',error=?,reason_code='VIDEO_BUDGET_LEDGER_UNAVAILABLE',
                   reason_text=?,provider_non_cancellable=0,
                   provider_create_state='not_started',
                   video_slot_active=0,
@@ -158,11 +97,7 @@ def _pause_for_budget_authorization(
     if changed.rowcount != 1:
         conn.rollback()
         return
-    _set_version(version["id"], status="paused_budget", error=message)
-    conn.execute(
-        "UPDATE shot_versions SET video_slot_active=0 WHERE id=?",
-        (version["id"],),
-    )
+    _set_version(version["id"], status="waiting_human", error=message, video_slot_active=0)
     conn.execute(
         """UPDATE budget_reservations
               SET status='released',settled_at=?,actual_cost_cny=0
@@ -173,7 +108,7 @@ def _pause_for_budget_authorization(
     mark_media_job_state(
         _row_value(job, "run_id"),
         _row_value(job, "step_run_id"),
-        "paused_budget",
+        "waiting_human",
         message,
     )
     reconcile_episode_generation_status(job["episode_id"])

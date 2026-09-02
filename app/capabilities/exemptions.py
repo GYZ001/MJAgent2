@@ -67,7 +67,6 @@ EXEMPT_ROUTE_REASONS: dict[str, str] = {
         "POST /api/provider-media-publications": "内部媒体发布协议入口；仅发布项目自有媒体并执行 URL/哈希校验，不作为 Agent 领域工具",
     "POST /api/system/mcp-tokens": "MCP token 生命周期管理是运维端点；Agent/外部 MCP 客户端不能自我签发或升级授权范围",
     "DELETE /api/system/mcp-tokens/{token_id}": "同上：token 撤销只能由本机操作者通过监制房页面执行，不进入 Agent/MCP 能力面",
-    "POST /api/system/directory-grants": "本机人工授权可浏览/建目录根；仅本机会话可写，不向 Agent/MCP 开放",
     "POST /api/system/users": "开户是运维身份管理，不是制作领域命令；仅系统管理员可调用，不向 Agent/MCP 开放",
     "PUT /api/system/users/{user_id}": "编辑账号（改密/启停/管理员标记）同上，仅系统管理员可调用",
     "POST /api/auth/login": "账号登录是鉴权入口本身：签发会话先于任何账号归属/scope 判定，不经 Command Bus",

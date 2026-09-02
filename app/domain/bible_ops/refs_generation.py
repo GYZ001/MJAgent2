@@ -28,15 +28,15 @@ from app.orchestration.engine import (
 )
 from fastapi import HTTPException
 
-from .precheck import compute_refs_cost_precheck
+from .precheck import compute_refs_precheck
 from .primitives import (
     QUOTA_MODULE_PORTRAIT,
     _consume_payment_quote,
-    _issue_payment_quote,
+    _issue_scope_quote,
     _normalize_character_selection,
     _payment_confirm_required,
     _refs_target_payload,
-    _validate_payment_quote,
+    _validate_scope_quote,
     count_active_project_scoped_workflow_runs,
 )
 
@@ -223,7 +223,7 @@ def _start_refs_generation(
                 recorder.cancel("定妆任务未能启动，项目状态已回滚", conn=None)
             except Exception:  # noqa: BLE001
                 pass
-        raise ValueError("定妆任务未能启动，原状态和费用凭证已保留，请重试") from exc
+        raise ValueError("定妆任务未能启动，原状态和范围凭证已保留，请重试") from exc
     return {
         "status": "accepted",
         "task_id": f"refs:{project_id}",
@@ -232,7 +232,7 @@ def _start_refs_generation(
 
 def _character_pack_incomplete(conn, project_id: str, name: str) -> bool:
     """单个角色「当前采用包」是否残缺：无当前采用包、pack_status 非 ready，
-    或必需视角未齐全。判据与 compute_refs_cost_precheck 的 resume 分支同
+    或必需视角未齐全。判据与 compute_refs_precheck 的 resume 分支同
     口径，抽成共享实现供 _incomplete_portrait_eligible_names 复用，不重写
     第二份相似判据。"""
     from app.multiview import CHARACTER_REQUIRED_VIEWS
@@ -432,15 +432,15 @@ async def start_refs(project_id: str, body: dict | None = None):
         raise HTTPException(422, "character 与 characters 范围不一致")
     resume = bool(payload.get("resume", False))
     quote_character = only if not selected_names else None
-    quote = compute_refs_cost_precheck(
+    quote = compute_refs_precheck(
         project_id, character=quote_character, characters=selected_names, resume=resume
     )
     if payload.get("confirm") is not True:
         # 见 task_run.py 同类注释：未签发的报价不能作为 409 里的 quote_id 递
         # 出去，否则调用方按响应指引确认必然 QUOTE_STALE。
-        raise _payment_confirm_required(_issue_payment_quote(quote))
+        raise _payment_confirm_required(_issue_scope_quote(quote))
     quote_id = payload.get("quote_id")
-    quote_row = _validate_payment_quote(project_id, quote_id, quote)
+    quote_row = _validate_scope_quote(project_id, quote_id, quote)
     if quote_row["consumed_at"] is not None:
         return {
             "status": "accepted", "idempotent_replay": True,

@@ -63,73 +63,72 @@ def _issue(*, idempotency_key: str | None = None):
         episode_id="grant-episode",
         project_id="grant-project",
         storyboard_artifact_id="storyboard-artifact",
-        budget_cap_cny=50,
+        wall_clock_cap_s=3600,
         shots_total=2,
         **kwargs,
     )
 
 
-def test_issue_rolls_back_grant_when_budget_authority_write_fails(
+def test_issue_rolls_back_grant_when_audit_ledger_write_fails(
     grant_db,
     monkeypatch,
 ) -> None:
-    write_authority = completion_grant.authorize_episode_video_budget_absolute
+    """成本预算拦截体系退场（2026-09-01）：``authorize_episode_video_budget_
+    absolute`` 已整体删除。签发仍在同一个事务里写 ``video_budget_authority_
+    ledger``（幂等去重职责，见 grants_issue.py 说明）——注入失败到这个剩余的
+    写点上，证明原子性回滚依然成立。"""
+    write_event = completion_grant._record_video_budget_authority_event
 
-    def fail_authority(*args, **kwargs):
-        write_authority(*args, **kwargs)
-        raise RuntimeError("injected authority failure")
+    def fail_event(*args, **kwargs):
+        write_event(*args, **kwargs)
+        raise RuntimeError("injected ledger failure")
 
     patch_completion_grant_everywhere(
         monkeypatch,
-        "authorize_episode_video_budget_absolute",
-        fail_authority,
+        "_record_video_budget_authority_event",
+        fail_event,
     )
 
-    with pytest.raises(RuntimeError, match="injected authority failure"):
+    with pytest.raises(RuntimeError, match="injected ledger failure"):
         _issue()
 
     assert grant_db.execute(
         "SELECT COUNT(*) FROM completion_grants"
     ).fetchone()[0] == 0
     assert grant_db.execute(
-        "SELECT COUNT(*) FROM episode_video_budget_authorities"
+        "SELECT COUNT(*) FROM video_budget_authority_ledger"
     ).fetchone()[0] == 0
 
 
-def test_topup_rolls_back_grant_when_budget_authority_write_fails(
+def test_topup_rolls_back_grant_when_audit_ledger_write_fails(
     grant_db,
     monkeypatch,
 ) -> None:
     grant, _token = _issue()
-    before_authority = grant_db.execute(
-        """SELECT cap_cny,source FROM episode_video_budget_authorities
-           WHERE episode_id='grant-episode'"""
-    ).fetchone()
-    write_authority = completion_grant.authorize_episode_video_budget_absolute
+    before_wall = grant_db.execute(
+        "SELECT wall_clock_cap_s FROM completion_grants WHERE id=?",
+        (grant.grant_id,),
+    ).fetchone()["wall_clock_cap_s"]
+    write_event = completion_grant._record_video_budget_authority_event
 
-    def fail_authority(*args, **kwargs):
-        write_authority(*args, **kwargs)
-        raise RuntimeError("injected topup authority failure")
+    def fail_event(*args, **kwargs):
+        write_event(*args, **kwargs)
+        raise RuntimeError("injected topup ledger failure")
 
     patch_completion_grant_everywhere(
         monkeypatch,
-        "authorize_episode_video_budget_absolute",
-        fail_authority,
+        "_record_video_budget_authority_event",
+        fail_event,
     )
 
-    with pytest.raises(RuntimeError, match="injected topup authority failure"):
-        completion_grant.bump_video_grant_budget(grant.grant_id, add_cny=10)
+    with pytest.raises(RuntimeError, match="injected topup ledger failure"):
+        completion_grant.bump_video_grant_wall_clock(grant.grant_id, add_wall_s=600)
 
     stored_grant = grant_db.execute(
-        "SELECT budget_cap_cny FROM completion_grants WHERE id=?",
+        "SELECT wall_clock_cap_s FROM completion_grants WHERE id=?",
         (grant.grant_id,),
     ).fetchone()
-    stored_authority = grant_db.execute(
-        """SELECT cap_cny,source FROM episode_video_budget_authorities
-           WHERE episode_id='grant-episode'"""
-    ).fetchone()
-    assert stored_grant["budget_cap_cny"] == 50
-    assert tuple(stored_authority) == tuple(before_authority)
+    assert stored_grant["wall_clock_cap_s"] == before_wall
 
 
 def test_issue_retry_reuses_one_grant_and_one_audit_event(grant_db) -> None:
@@ -142,42 +141,40 @@ def test_issue_retry_reuses_one_grant_and_one_audit_event(grant_db) -> None:
     assert grant_db.execute(
         "SELECT COUNT(*) FROM completion_grants"
     ).fetchone()[0] == 1
+    # 金额字段固定写 0（见 grants_issue.py 说明）：这张台账现在只承担幂等
+    # 去重职责，不再是金额审计。
     events = grant_db.execute(
         """SELECT event_type,grant_cap_cny,authority_cap_cny
            FROM video_budget_authority_ledger ORDER BY created_at,id"""
     ).fetchall()
     assert [tuple(row) for row in events] == [
-        ("grant_issued", 50.0, 50.0),
+        ("grant_issued", 0.0, 0.0),
     ]
 
 
 def test_topup_retry_applies_once_and_preserves_audit_history(grant_db) -> None:
     grant, _token = _issue(idempotency_key="issue-request-2")
 
-    first = completion_grant.bump_video_grant_budget(
+    first = completion_grant.bump_video_grant_wall_clock(
         grant.grant_id,
-        add_cny=10,
+        add_wall_s=600,
         idempotency_key="topup-request-1",
     )
-    replay = completion_grant.bump_video_grant_budget(
+    replay = completion_grant.bump_video_grant_wall_clock(
         grant.grant_id,
-        add_cny=10,
+        add_wall_s=600,
         idempotency_key="topup-request-1",
     )
 
-    assert first.budget_cap_cny == 60
-    assert replay.budget_cap_cny == 60
-    assert grant_db.execute(
-        """SELECT cap_cny FROM episode_video_budget_authorities
-           WHERE episode_id='grant-episode'"""
-    ).fetchone()["cap_cny"] == 60
+    assert first.wall_clock_cap_s == 4200
+    assert replay.wall_clock_cap_s == 4200
     events = grant_db.execute(
-        """SELECT event_type,prior_grant_cap_cny,grant_cap_cny,requested_add_cny
+        """SELECT event_type,prior_wall_clock_cap_s,wall_clock_cap_s
            FROM video_budget_authority_ledger ORDER BY created_at,id"""
     ).fetchall()
     assert [tuple(row) for row in events] == [
-        ("grant_issued", None, 50.0, 50.0),
-        ("grant_topped_up", 50.0, 60.0, 10.0),
+        ("grant_issued", None, 3600.0),
+        ("grant_topped_up", 3600.0, 4200.0),
     ]
 
 
@@ -188,24 +185,20 @@ def test_concurrent_distinct_topups_are_all_applied(grant_db) -> None:
 
     def topup(index: int) -> float:
         barrier.wait()
-        updated = completion_grant.bump_video_grant_budget(
+        updated = completion_grant.bump_video_grant_wall_clock(
             grant.grant_id,
-            add_cny=1,
+            add_wall_s=60,
             idempotency_key=f"topup-concurrent-{index}",
         )
-        return updated.budget_cap_cny
+        return updated.wall_clock_cap_s
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         results = list(executor.map(topup, range(workers)))
 
-    assert max(results) == 56
+    assert max(results) == 3960
     assert completion_grant.get_video_grant(
         grant.grant_id
-    ).budget_cap_cny == 56
-    assert grant_db.execute(
-        """SELECT cap_cny FROM episode_video_budget_authorities
-           WHERE episode_id='grant-episode'"""
-    ).fetchone()["cap_cny"] == 56
+    ).wall_clock_cap_s == 3960
     assert grant_db.execute(
         "SELECT COUNT(*) FROM video_budget_authority_ledger"
     ).fetchone()[0] == workers + 1
@@ -218,21 +211,17 @@ def test_concurrent_same_topup_key_is_applied_once(grant_db) -> None:
 
     def topup(_index: int) -> float:
         barrier.wait()
-        updated = completion_grant.bump_video_grant_budget(
+        updated = completion_grant.bump_video_grant_wall_clock(
             grant.grant_id,
-            add_cny=5,
+            add_wall_s=300,
             idempotency_key="topup-concurrent-retry",
         )
-        return updated.budget_cap_cny
+        return updated.wall_clock_cap_s
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         results = list(executor.map(topup, range(workers)))
 
-    assert results == [55] * workers
-    assert grant_db.execute(
-        """SELECT cap_cny FROM episode_video_budget_authorities
-           WHERE episode_id='grant-episode'"""
-    ).fetchone()["cap_cny"] == 55
+    assert results == [3900] * workers
     assert grant_db.execute(
         """SELECT COUNT(*) FROM video_budget_authority_ledger
            WHERE event_type='grant_topped_up'"""
@@ -279,7 +268,6 @@ async def test_completion_core_passes_idempotency_key_to_grant_issue(
             "grant-episode",
             {
                 "mode": "fresh",
-                "budget_cap_cny": 50,
                 "idempotency_key": "episode-fresh-request",
             },
         )
@@ -306,7 +294,7 @@ async def test_completion_core_passes_idempotency_key_to_grant_topup(
 
     patch_completion_grant_everywhere(
         monkeypatch,
-        "bump_video_grant_budget",
+        "bump_video_grant_wall_clock",
         stop_after_capture,
     )
 
@@ -316,15 +304,14 @@ async def test_completion_core_passes_idempotency_key_to_grant_topup(
             {
                 "mode": "resume",
                 "completion_grant_id": "grant-existing",
-                "add_budget_cny": 5,
+                "add_wall_clock_s": 300,
                 "idempotency_key": "episode-topup-request",
             },
         )
 
     assert captured == {
         "grant_id": "grant-existing",
-        "add_cny": 5.0,
-        "add_wall_s": 0.0,
+        "add_wall_s": 300.0,
         "idempotency_key": "episode-topup-request",
     }
 
@@ -361,8 +348,6 @@ async def test_project_completion_derives_stable_episode_grant_key(
         "grant-project",
         {
             "episode_ids": ["grant-episode"],
-            "global_budget_cap_cny": 50,
-            "per_episode_cap_cny": 50,
             "wall_clock_cap_s": 3600,
             "idempotency_key": "project-request",
         },
@@ -374,112 +359,18 @@ async def test_project_completion_derives_stable_episode_grant_key(
     )
 
 
-def _insert_claim(conn, *, operation_id: str, amount: float, status: str) -> None:
-    completion_grant.ensure_video_budget_authority_tables(conn)
-    conn.execute(
-        """INSERT INTO provider_video_budget_claims(
-               operation_id,project_id,episode_id,shot_id,job_id,version_id,
-               origin_episode_id,origin_shot_id,origin_job_id,origin_version_id,
-               amount_cny,status,created_at,updated_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (
-            # job_id/version_id 置空，复刻生产形态：这两列的外键是
-            # ON DELETE SET NULL，镜头版本被清掉后认领行留存、只剩 origin_*。
-            operation_id, "grant-project", "grant-episode", "grant-shot-1",
-            None, None, "grant-episode", "grant-shot-1", "job-1", "ver-1",
-            amount, status, 1, 1,
-        ),
-    )
-    conn.commit()
+def test_issue_does_not_write_completion_grants_budget_cap_cny(grant_db) -> None:
+    """成本预算拦截体系退场（2026-09-01）：签发不再计算或写入任何金额上限。
 
+    ``completion_grants.budget_cap_cny`` 是历史列，无写入者；
+    ``episode_video_budget_authorities``/``_episode_video_budget_floor``/
+    ``authorize_episode_video_budget_increment`` 这条金额上限计算链路已随
+    A2 整体删除——见 CLAUDE.md「Retiring Features」。"""
+    grant, _token = _issue(idempotency_key="no-budget-write")
 
-def test_budget_floor_counts_claims_when_authority_row_is_missing(grant_db) -> None:
-    """已有认领、却没有 authority 行时，新批的上限不得低于已用额度。
-
-    扣款侧一律按 ``used = baseline + claimed`` 判断，而
-    ``_historical_video_liability`` 按设计只统计**没有 claim 归属**的遗留责任
-    （避免与 claimed 重复计），所以有认领时它正确地返回 0。此前 floor 直接
-    等于 baseline、把 claimed 丢掉，新批的 cap 一诞生就低于已用额度：实测
-    ep_0a70ec56e8e9 已有 96 元 settled 认领，新授权拿到 cap=96 而 used 已是
-    96，之后每次供应商调用都被判超限，8 个镜头全部 paused_budget，整集永久
-    停在 WAITING_AUTHORIZATION。
-    """
-    conn = grant_db
-    _insert_claim(conn, operation_id="op-old", amount=96.0, status="settled")
-    conn.execute("DELETE FROM episode_video_budget_authorities")
-    conn.commit()
-
-    baseline, floor = completion_grant._episode_video_budget_floor(
-        "grant-episode", conn=conn,
-    )
-
-    assert baseline == 0.0
-    assert floor == 96.0
-
-
-def test_released_claims_do_not_raise_the_floor(grant_db) -> None:
-    """released 的认领代表从未真正计费，不构成已承诺责任，不得抬高下限。"""
-    conn = grant_db
-    _insert_claim(conn, operation_id="op-released", amount=96.0, status="released")
-    conn.execute("DELETE FROM episode_video_budget_authorities")
-    conn.commit()
-
-    _baseline, floor = completion_grant._episode_video_budget_floor(
-        "grant-episode", conn=conn,
-    )
-
-    assert floor == 0.0
-
-
-def test_new_grant_after_historical_claims_can_still_reserve(grant_db) -> None:
-    """端到端：有历史认领的分集重新发授权后，下一次供应商扣款必须还能通过。"""
-    conn = grant_db
-    _insert_claim(conn, operation_id="op-old", amount=96.0, status="settled")
-    conn.execute("DELETE FROM episode_video_budget_authorities")
-    conn.commit()
-
-    completion_grant.authorize_episode_video_budget_increment(
-        episode_id="grant-episode", increment_cny=96.0, source="test:regrant", conn=conn,
-    )
-    row = conn.execute(
-        "SELECT baseline_cny,cap_cny FROM episode_video_budget_authorities"
-        " WHERE episode_id='grant-episode'"
+    stored = grant_db.execute(
+        "SELECT budget_cap_cny FROM completion_grants WHERE id=?",
+        (grant.grant_id,),
     ).fetchone()
-
-    assert float(row["cap_cny"]) > 96.0
-
-
-def test_regrant_leaves_room_for_the_newly_approved_amount(grant_db) -> None:
-    """重跑时新批的额度必须真的可用：可用 = 上限 - 已用 应等于本轮批准数。
-
-    分集授权存的是累计上限，而 grant 的 cap 是本轮批准额度，两者不是同一个
-    量。首轮已承诺为 0 时恰好相等，掩盖了这个区别；重跑时旧责任已经占满上限，
-    直接把本轮额度当绝对总额写入就等于零余量，扣款侧第一次调用就超限——实测
-    八个镜头全部 paused_budget、整集停在 WAITING_AUTHORIZATION。
-    """
-    conn = grant_db
-    _insert_claim(conn, operation_id="op-old", amount=96.0, status="settled")
-    conn.execute("DELETE FROM episode_video_budget_authorities")
-    conn.commit()
-
-    _issue(idempotency_key="regrant-after-history")
-    row = conn.execute(
-        "SELECT cap_cny FROM episode_video_budget_authorities"
-        " WHERE episode_id='grant-episode'"
-    ).fetchone()
-    used = 96.0
-
-    assert float(row["cap_cny"]) - used == 50.0
-
-
-def test_first_grant_cap_is_unchanged_without_history(grant_db) -> None:
-    """没有历史责任时上限与从前完全一致，不会多批。"""
-    conn = grant_db
-
-    _issue(idempotency_key="first-grant-no-history")
-    row = conn.execute(
-        "SELECT cap_cny FROM episode_video_budget_authorities"
-        " WHERE episode_id='grant-episode'"
-    ).fetchone()
-
-    assert float(row["cap_cny"]) == 50.0
+    assert stored["budget_cap_cny"] is None
+    assert not hasattr(grant, "budget_cap_cny")

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import api, completion_grant, db
+from app import api, db
 from tests.conftest import patch_video_supervisor_everywhere, patch_api_everywhere
 
 
@@ -82,7 +82,6 @@ def _patch_queue_dependencies(monkeypatch, conn: sqlite3.Connection) -> None:
 
 def _state(episode_ids: list[str]) -> dict:
     return {
-        "global_budget_cap_cny": 100,
         "wall_clock_cap_s": 3600,
         "allow_fallback_adopt": True,
         "allow_storyboard_edit": False,
@@ -91,210 +90,22 @@ def _state(episode_ids: list[str]) -> dict:
                 "episode_id": episode_id,
                 "episode_no": episode_no,
                 "status": "queued",
-                "allocated_cny": 20,
             }
             for episode_no, episode_id in enumerate(episode_ids, start=1)
         ],
     }
 
 
-def _seed_video_claim(
-    conn: sqlite3.Connection,
-    episode_id: str,
-    *,
-    claim_status: str,
-    amount_cny: float,
-    job_status: str,
-    version_status: str,
-    provider_create_state: str,
-    cost_cny: float = 0,
-) -> None:
-    completion_grant.ensure_video_budget_authority_tables(conn)
-    suffix = episode_id.replace("-", "_")
-    shot_id = f"shot-{suffix}"
-    version_id = f"version-{suffix}"
-    job_id = f"job-{suffix}"
-    conn.execute(
-        "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES(?,?,1,5)",
-        (shot_id, episode_id),
-    )
-    conn.execute(
-        """INSERT INTO shot_versions(
-               id,shot_id,version_no,prompt_text,idem_key,status,cost_cny,created_at
-           ) VALUES(?,?,1,'prompt',?,?,?,1)""",
-        (version_id, shot_id, f"idem-{suffix}", version_status, cost_cny),
-    )
-    conn.execute(
-        """INSERT INTO jobs(
-               id,kind,shot_id,version_id,episode_id,project_id,status,
-               provider_create_state,created_at,updated_at
-           ) VALUES(?,?,?,?,?,'p',?,?,1,1)""",
-        (
-            job_id,
-            "video",
-            shot_id,
-            version_id,
-            episode_id,
-            job_status,
-            provider_create_state,
-        ),
-    )
-    conn.execute(
-        """INSERT INTO episode_video_budget_authorities(
-               episode_id,baseline_cny,cap_cny,source,authorized_at,updated_at
-           ) VALUES(?,0,100,'test',1,1)""",
-        (episode_id,),
-    )
-    conn.execute(
-        """INSERT INTO provider_video_budget_claims(
-               operation_id,project_id,episode_id,shot_id,job_id,version_id,
-               origin_episode_id,origin_shot_id,origin_job_id,origin_version_id,
-               amount_cny,status,created_at,updated_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,1)""",
-        (
-            f"operation-{suffix}",
-            "p",
-            episode_id,
-            shot_id,
-            job_id,
-            version_id,
-            episode_id,
-            shot_id,
-            job_id,
-            version_id,
-            amount_cny,
-            claim_status,
-        ),
-    )
-    conn.commit()
-
-
-def test_project_video_spent_tracks_claim_release_not_job_or_version_status(
-    monkeypatch,
-) -> None:
-    conn = _conn({
-        "e-success": "SUCCEEDED",
-        "e-failed": "FAILED",
-        "e-external": "FAILED",
-        "e-unknown": "WAITING_HUMAN",
-        "e-not-sent": "FAILED",
-    })
-    _seed_video_claim(
-        conn,
-        "e-success",
-        claim_status="settled",
-        amount_cny=4,
-        job_status="succeeded",
-        version_status="succeeded",
-        provider_create_state="accepted",
-        cost_cny=4,
-    )
-    _seed_video_claim(
-        conn,
-        "e-failed",
-        claim_status="accepted",
-        amount_cny=4,
-        job_status="failed",
-        version_status="failed",
-        provider_create_state="accepted",
-    )
-    _seed_video_claim(
-        conn,
-        "e-external",
-        claim_status="accepted",
-        amount_cny=4,
-        job_status="failed",
-        version_status="failed",
-        provider_create_state="model_rejected",
-    )
-    _seed_video_claim(
-        conn,
-        "e-unknown",
-        claim_status="reserved",
-        amount_cny=4,
-        job_status="waiting_human",
-        version_status="waiting_human",
-        provider_create_state="unknown",
-    )
-    _seed_video_claim(
-        conn,
-        "e-not-sent",
-        claim_status="released",
-        amount_cny=4,
-        job_status="failed",
-        version_status="failed",
-        provider_create_state="not_started",
-    )
-    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
-
-    assert api._project_video_spent("p") == 16
-
-
 @pytest.mark.asyncio
-async def test_project_video_initial_plan_deducts_prior_episode_claim(
+async def test_project_video_queue_processes_failed_and_queued_siblings(
     monkeypatch,
 ) -> None:
-
-    conn = _conn({"e1": "SUCCEEDED", "e2": "SUCCEEDED"})
-    conn.execute("DELETE FROM workflow_runs WHERE id='run-project'")
-    conn.commit()
-    _seed_video_claim(
-        conn,
-        "e1",
-        claim_status="accepted",
-        amount_cny=8,
-        job_status="failed",
-        version_status="failed",
-        provider_create_state="accepted",
-    )
-    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
-    monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
-    patch_video_supervisor_everywhere(
-        monkeypatch,
-        "rebuild_coverage_ledger",
-        lambda episode_id: SimpleNamespace(
-            covered_within_quota=lambda: episode_id == "e1"
-        ),
-    )
-    completions: list[str] = []
-
-    async def capture_complete(episode_id: str, _body: dict) -> dict:
-        completions.append(episode_id)
-        return {"run_id": f"run-{episode_id}", "completion_grant_id": f"grant-{episode_id}"}
-
-    patch_api_everywhere(monkeypatch, "_complete_episode_core", capture_complete)
-
-    result = await api._complete_project_videos_core("p", {
-        "global_budget_cap_cny": 12,
-        "per_episode_cap_cny": 10,
-        "wall_clock_cap_s": 3600,
-    })
-
-    assert result["project_spent_cny"] == 8
-    assert result["remaining_cny"] == 4
-    assert [item["status"] for item in result["plan"]] == [
-        "already_covered",
-        "skipped_budget",
-    ]
-    assert completions == []
-
-
-@pytest.mark.asyncio
-async def test_project_video_queue_does_not_reuse_failed_episode_claim(
-    monkeypatch,
-) -> None:
+    """成本预算拦截体系退场（2026-09-01）：跨集队列不再按全局/单集金额上限
+    跳过集——``_project_video_spent``/``skipped_budget``/``allocated_cny``
+    已随 A3 整体删除。一集失败不影响同批次其它集正常派发。"""
     from app.orchestration.engine import WorkflowRecorder
 
     conn = _conn({"e1": "FAILED", "e2": "SUCCEEDED"})
-    _seed_video_claim(
-        conn,
-        "e1",
-        claim_status="accepted",
-        amount_cny=8,
-        job_status="failed",
-        version_status="failed",
-        provider_create_state="accepted",
-    )
     _patch_queue_dependencies(monkeypatch, conn)
     completions: list[str] = []
 
@@ -304,7 +115,6 @@ async def test_project_video_queue_does_not_reuse_failed_episode_claim(
 
     patch_api_everywhere(monkeypatch, "_complete_episode_core", capture_complete)
     state = _state(["e1", "e2"])
-    state["global_budget_cap_cny"] = 12
     state["plan"][0]["status"] = "failed"
 
     await api._run_project_video_completion_queue(
@@ -313,9 +123,8 @@ async def test_project_video_queue_does_not_reuse_failed_episode_claim(
         WorkflowRecorder("run-project"),
     )
 
-    assert state["plan"][1]["status"] == "skipped_budget"
-    assert state["plan"][1]["allocated_cny"] == 0
-    assert completions == []
+    assert state["plan"][1]["status"] == "success"
+    assert completions == ["e2"]
 
 
 @pytest.mark.asyncio

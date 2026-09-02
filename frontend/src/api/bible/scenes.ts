@@ -1,9 +1,9 @@
 import { request } from "../client";
 import type { ArtifactEvidence } from "../common";
-import type { RefsCostPrecheck } from "./core";
+import type { RefsPrecheck } from "./core";
 
-export interface SceneCostPrecheck
-  extends Omit<RefsCostPrecheck, "character_count" | "views_per_character"> {
+export interface ScenePrecheck
+  extends Omit<RefsPrecheck, "character_count" | "views_per_character"> {
   scene_count: number;
   actual_view_count: number;
   views_per_scene: number;
@@ -50,7 +50,6 @@ export interface SceneRefsProgress {
   current_scene?: string | null;
   current_view?: string | null;
   attempt?: number;
-  spent_cny?: number;
   items: Array<{ scene: string; status: string; detail?: SceneGapItem }>;
 }
 
@@ -120,29 +119,6 @@ export interface Scene {
   discovery_sources?: string[];
 }
 
-export function sceneBiblePreview(projectId: string): Promise<{
-  project_id: string;
-  scenes: Scene[];
-  precheck: SceneCostPrecheck;
-  generates_images: false;
-}> {
-  return request("POST", `/projects/${projectId}/scene-bible/preview`);
-}
-
-export function sceneBiblePrecheck(
-  projectId: string,
-  scenes: Scene[],
-): Promise<SceneCostPrecheck> {
-  return request("POST", `/projects/${projectId}/scene-bible/precheck`, { scenes });
-}
-
-export function genSceneBible(
-  projectId: string,
-  body: { scenes: Scene[]; confirm: true; quote_id: string },
-) {
-  return request("POST", `/projects/${projectId}/scene-bible`, body);
-}
-
 export function sceneRefsPrecheck(
   projectId: string,
   body?: {
@@ -152,7 +128,7 @@ export function sceneRefsPrecheck(
     scene_reference_id?: string;
     action?: string;
   },
-): Promise<SceneCostPrecheck> {
+): Promise<ScenePrecheck> {
   return request("POST", `/projects/${projectId}/scene-refs/precheck`, body || {});
 }
 

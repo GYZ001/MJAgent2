@@ -23,7 +23,6 @@ const STATUS_MAP: Record<string, string> = {
   pending_review: '待审核',
   waiting_provider: '等待生成服务',
   waiting_retry: '等待重试',
-  paused_budget: '因预算暂停',
   needs_revision: '待修订',
   ineligible: '不可用',
   available: '可用',

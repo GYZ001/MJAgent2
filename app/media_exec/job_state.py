@@ -44,8 +44,7 @@ def _set_job(
     # 不会被清空，重新生成会在指纹比对之前就被短路成假的"reused"（见
     # CLAUDE.md「Gates and Criteria」）。
     terminal = status in {
-        "succeeded", "failed", "cancelled", "abandoned", "paused_budget",
-        "waiting_human",
+        "succeeded", "failed", "cancelled", "abandoned", "waiting_human",
     }
     if terminal:
         cursor = conn.execute(

@@ -12,20 +12,17 @@ import pytest
 
 from app import db as db_mod
 from app.completion_grant import (
-    bump_video_grant_budget,
+    bump_video_grant_wall_clock,
     issue_video_completion_grant,
     validate_video_grant,
 )
 from app.compiler import CompileError
 from app.evidence import repository as evidence_repository
 from app.harness.types import Issue, IssueSeverity
-from app.video_cost_model import predict_episode_completion_cost, predict_shot_completion_cost
 from app.video_crop import auto_crop_video
 from app.video_issues import issues_from_enqueue_error, persist_shot_issue
 from app.video_repair_router import MAX_CHAIN_CASCADE_DEPTH, route, should_cascade
 from app.video_supervisor import (
-    FIRST_PASS_BUDGET_FRACTION,
-    SHOT_BUDGET_MULTIPLIER,
     CoverageLedger,
     ShotCoverageEntry,
     VideoSupervisorCheckpoint,
@@ -33,10 +30,8 @@ from app.video_supervisor import (
     _deadline_closeout,
     _dispatch_with_heartbeat,
     _finalize_covered,
-    _has_dispatch_budget_capacity,
     _reconcile_terminal_continuity_blocks,
     _save_checkpoint_async,
-    attempts_for,
     preview_video_completion_repair,
     reconcile_stale_video_supervisors,
     recover_video_completion_runs,
@@ -80,7 +75,6 @@ def memdb(monkeypatch, tmp_path):
     import app.evidence.media as evidence_media
     import app.orchestration.media_scheduler as media_scheduler
     import app.orchestration.state_machine as state_machine
-    import app.video_cost_model as video_cost_model
     import app.video_crop as video_crop
 
     # completion_grant 已是包（2026-08-31 拆分）：裸的循环 setattr 只到包属性，
@@ -93,7 +87,6 @@ def memdb(monkeypatch, tmp_path):
         evidence_media,
         media_scheduler,
         state_machine,
-        video_cost_model,
         video_crop,
     ):
         monkeypatch.setattr(mod, "get_conn", _get)
@@ -715,40 +708,6 @@ def test_cleared_versions_do_not_count_as_current_epoch_attempts(memdb) -> None:
     assert entry.attempts_dispatched == 0
     assert entry.never_attempted is True
     assert entry.cost_spent_cny == 0
-
-
-def test_active_budget_reservations_fence_expensive_supervisor_preflight(memdb) -> None:
-    eid, _ = _seed_episode(memdb, 2)
-    entry = rebuild_coverage_ledger(eid).entries[1]
-    memdb.execute(
-        """INSERT INTO jobs(
-               id,kind,shot_id,episode_id,project_id,status,created_at,updated_at
-           ) VALUES('job-reserved','video',?,?,'proj_int','queued',1,1)""",
-        (f"{eid}_shot_1", eid),
-    )
-    memdb.execute(
-        """INSERT INTO budget_reservations(
-               id,job_id,scope_type,scope_id,amount_cny,status,created_at
-           ) VALUES('budget-reserved','job-reserved','episode',?,149,'reserved',1)""",
-        (eid,),
-    )
-    memdb.commit()
-
-    assert not _has_dispatch_budget_capacity(
-        eid,
-        entry,
-        budget_cap_cny=150,
-    )
-
-    memdb.execute(
-        "UPDATE budget_reservations SET status='released' WHERE id='budget-reserved'"
-    )
-    memdb.commit()
-    assert _has_dispatch_budget_capacity(
-        eid,
-        entry,
-        budget_cap_cny=150,
-    )
 
 
 @pytest.mark.asyncio
@@ -1642,23 +1601,6 @@ def test_integration_continuity_degraded_marks_b(memdb):
     assert g["grade"] == "B"
 
 
-def test_cost_regression_all_fail_within_cap(memdb):
-    eid, _ = _seed_episode(memdb, 11)
-    ledger = rebuild_coverage_ledger(eid, fallback_quota=2)
-    cap = 150.0
-    remaining = cap
-    paid = 0.0
-    for e in ledger.entries:
-        n = attempts_for(e, ledger, budget_cap_cny=cap)
-        unit = 4.0
-        per_shot_cap = (cap / max(1, ledger.shots_total)) * SHOT_BUDGET_MULTIPLIER
-        spend = min(n * unit, remaining, per_shot_cap)
-        remaining -= spend
-        paid += spend
-    assert paid <= cap + 1e-6
-    assert remaining >= -1e-6
-
-
 def test_cost_regression_jitter_baseline(memdb):
     """抖动：一半首轮过、一半需 3 次 → 记录基线成本上界。"""
     eid, _ = _seed_episode(memdb, 10)
@@ -2001,70 +1943,6 @@ def test_collect_issues_still_lets_manual_review_be_retried_by_new_run(memdb):
     assert issues == []
 
 
-def test_fake_enqueue_paid_attempts_bounded(memdb, monkeypatch):
-    """假 provider：每镜成功计费，总账不超 cap（模拟全失败前采纳预算墙）。"""
-    from app.video_supervisor import ShotCoverageEntry, _dispatch
-
-    eid, _ = _seed_episode(memdb, 11)
-    cap = 150.0
-    paid_versions = {"n": 0}
-
-    def fake_enqueue(shot_id, **kwargs):
-        paid_versions["n"] += 1
-        no = paid_versions["n"]
-        vid = f"fake_ver_{no}"
-        memdb.execute(
-            """INSERT INTO shot_versions(
-                id, shot_id, version_no, prompt_text, idem_key, status, created_at,
-                qa_json, cost_cny, technical_validation_json, provider_task_id
-            ) VALUES(?,?,?,?,?, 'succeeded', 1.0, ?, 4.0, ?, ?)""",
-            (
-                vid, shot_id, no, "p", f"idem-{vid}",
-                json.dumps({"overall": 0.2, "contract_facts": ["end_state_match_below_contract"]}),
-                json.dumps({"passed": True, "issues": []}),
-                f"task-{vid}",
-            ),
-        )
-        memdb.commit()
-        return {"version_id": vid, "reused": False}
-
-    patch_worker_everywhere(monkeypatch, "enqueue_shot", fake_enqueue)
-    ledger = rebuild_coverage_ledger(eid, fallback_quota=2)
-    spent = 0.0
-    for e in ledger.entries:
-        budgeted = attempts_for(e, ledger, budget_cap_cny=cap)
-        per_shot_cap = (cap / 11) * SHOT_BUDGET_MULTIPLIER
-        for _ in range(budgeted):
-            if spent + 4.0 > cap:
-                break
-            if spent + 4.0 > per_shot_cap and e.cost_spent_cny >= per_shot_cap:
-                break
-            ok = _dispatch(
-                ShotCoverageEntry(shot_no=e.shot_no, shot_id=e.shot_id, grade="C"),
-                episode_id=eid, run_id=None, first=False,
-            )
-            if ok:
-                spent += 4.0
-                e.cost_spent_cny += 4.0
-        ledger = rebuild_coverage_ledger(eid, fallback_quota=2)
-        spent = ledger.cost_spent
-        if spent >= cap:
-            break
-    assert ledger.cost_spent <= cap + 1e-6
-
-
-def test_cost_model_predicts_positive(memdb):
-    eid, _ = _seed_episode(memdb, 4)
-    for i in range(1, 3):
-        _add_succeeded_version(
-            memdb, f"{eid}_shot_{i}", qa={"overall": 0.9, "contract_facts": []}, cost=5.0,
-        )
-    pred = predict_shot_completion_cost(5, episode_id=eid, grade="C")
-    assert pred["expected_cny"] > 0
-    ep = predict_episode_completion_cost(eid)
-    assert ep["expected_cny"] >= 0
-
-
 def test_auto_crop_without_ffmpeg_graceful(tmp_path):
     src = tmp_path / "a.mp4"
     src.write_bytes(b"not-a-real-mp4")
@@ -2088,71 +1966,14 @@ def test_router_keeps_qa_crop_finding_score_only():
     assert plan.is_paid is False
 
 
-def test_soft_budget_constant():
-    assert 0 < FIRST_PASS_BUDGET_FRACTION < 1
-
-
-def test_bump_grant(memdb):
+def test_bump_grant_wall_clock(memdb):
+    """金额已退场：追加授权只延长 wall_clock_cap_s，不再有 budget_cap_cny。"""
     eid, pid = _seed_episode(memdb, 2)
     grant, _ = issue_video_completion_grant(
         episode_id=eid, project_id=pid, storyboard_artifact_id="art_sb_v1",
-        budget_cap_cny=50, shots_total=2,
+        wall_clock_cap_s=3600, shots_total=2,
     )
-    updated = bump_video_grant_budget(grant.grant_id, add_cny=100)
-    assert updated.budget_cap_cny >= 150
+    updated = bump_video_grant_wall_clock(grant.grant_id, add_wall_s=1800)
+    assert updated.wall_clock_cap_s == pytest.approx(3600 + 1800)
     ok = validate_video_grant(grant.grant_id, episode_id=eid, storyboard_artifact_id="art_sb_v1")
-    assert ok.budget_cap_cny == updated.budget_cap_cny
-
-
-def test_project_plan_budget_allocation(memdb):
-    """跨集编排：全局预算串行分配，已覆盖集跳过。"""
-    t = 1.0
-    memdb.execute(
-        "INSERT INTO projects(id, name, status, created_at) VALUES('p_multi','跨集', 'created', ?)",
-        (t,),
-    )
-    for no, eid in enumerate(["ep_a", "ep_b", "ep_c"], start=1):
-        memdb.execute(
-            """INSERT INTO episodes(
-                id, project_id, episode_no, title, status, storyboard_artifact_id, created_at
-            ) VALUES(?,?,?,?, 'confirmed', 'art', ?)""",
-            (eid, "p_multi", no, f"E{no}", t),
-        )
-        for i in range(1, 3):
-            memdb.execute(
-                """INSERT INTO shots(
-                    id, episode_id, shot_no, duration_s, shot_size, camera_move,
-                    scene_setting, characters, action_desc, dialogues
-                ) VALUES(?,?,?,?, '中景', '固定', '日', '[]', '动作', '[]')""",
-                (f"{eid}_s{i}", eid, i, 5),
-            )
-    # ep_a 已全覆盖
-    for i in range(1, 3):
-        _add_succeeded_version(memdb, f"ep_a_s{i}", qa={"overall": 0.9, "contract_facts": []})
-    memdb.commit()
-
-    # 复用 core 的规划逻辑（不真正 spawn supervisor）
-    from app.video_supervisor import rebuild_coverage_ledger as rebuild
-    global_cap = 200.0
-    per_cap = 80.0
-    rows = memdb.execute(
-        "SELECT id, episode_no, status FROM episodes WHERE project_id=? ORDER BY episode_no",
-        ("p_multi",),
-    ).fetchall()
-    remaining = global_cap
-    plan = []
-    for r in rows:
-        ledger = rebuild(r["id"])
-        if ledger.covered_within_quota():
-            plan.append({"id": r["id"], "status": "already_covered", "cap": 0})
-            continue
-        if remaining < 5:
-            plan.append({"id": r["id"], "status": "skipped_budget", "cap": 0})
-            continue
-        ep_cap = min(per_cap, remaining)
-        plan.append({"id": r["id"], "status": "queued", "cap": ep_cap})
-        remaining -= ep_cap
-    assert plan[0]["status"] == "already_covered"
-    assert plan[1]["status"] == "queued" and plan[1]["cap"] == 80
-    assert plan[2]["status"] == "queued" and plan[2]["cap"] == 80
-    assert remaining == 40
+    assert ok.wall_clock_cap_s == updated.wall_clock_cap_s

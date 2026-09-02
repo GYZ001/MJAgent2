@@ -42,7 +42,6 @@ interface TraceView {
   started_at?: number | null;
   finished_at?: number | null;
   latency_ms?: number;
-  cost_cny?: number;
   selected_node_id: string;
   nodes: TraceNode[];
   server_time: number;
@@ -63,7 +62,6 @@ const STATUS_LABELS: Record<string, string> = {
   WAITING_RETRY: "等待重试",
   WAITING_HUMAN: "等待人工",
   WAITING_AUTHORIZATION: "等待授权",
-  PAUSED_BUDGET: "预算暂停",
   PAUSED_EXTERNAL: "外部中断",
   SUCCEEDED: "成功",
   SUCCESS: "成功",
@@ -79,7 +77,6 @@ const STATUS_LABELS: Record<string, string> = {
   waiting_human: "等待人工",
   waiting_provider: "等待供应商",
   waiting_retry: "等待重试",
-  paused_budget: "预算暂停",
 };
 
 const KIND_LABELS: Record<TraceNode["kind"], string> = {

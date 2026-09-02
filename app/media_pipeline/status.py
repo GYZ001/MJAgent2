@@ -44,8 +44,6 @@ def _video_status(*, has_adopted: bool, has_active_job: bool,
 
 def _macro_status_from_job(job) -> str:
     status = job["status"]
-    if status == "paused_budget":
-        return S.WAITING_BUDGET
     if status in ("cancelled", "abandoned", "failed", "succeeded"):
         return status
     if status == S.WAITING_PROVIDER:
@@ -104,8 +102,6 @@ def _status_from_rows(shot, *, candidate_count: int, retake_count: int,
             status = job["status"]
             if status == S.WAITING_PROVIDER or provider_task_id:
                 current_stage = S.STAGE_VIDEO_GENERATING
-            elif status == "paused_budget":
-                current_stage = S.STAGE_PAUSED_BUDGET
             elif status == S.WAITING_RETRY and not job["version_id"]:
                 current_stage = S.STAGE_PREFLIGHT_RETRY
             elif status == S.WAITING_HUMAN and not job["version_id"]:
@@ -341,7 +337,7 @@ def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, 
            LEFT JOIN shot_versions v ON v.id=j.version_id
            WHERE j.episode_id=? AND j.kind='video'
              AND j.status IN (
-               'queued','running','waiting_provider','paused_budget',
+               'queued','running','waiting_provider',
                'waiting_retry','waiting_human','paused'
              )
              AND j.cancellation_requested=0 AND j.abandoned=0

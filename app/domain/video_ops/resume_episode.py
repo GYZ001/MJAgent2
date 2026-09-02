@@ -42,18 +42,15 @@ async def resume_episode(episode_id: str):
             "episode_id": episode_id,
             "recoverable": True,
         })
-    budget_resumed = worker.retry_paused(episode_id)
     generated = await _generate_episode_core(episode_id, {"only_incomplete": True})
     if (
         int(resumed.get("resumed_jobs") or 0) == 0
-        and int(budget_resumed or 0) == 0
         and int(generated.get("selected_shots") or 0) == 0
         and not generated.get("enqueued")
     ):
         if reset_result is not None:
             return {
                 **resumed,
-                "budget_resumed_jobs": 0,
                 "enqueued": [],
                 "skipped_completed": int(generated.get("skipped_completed") or 0),
                 "selected_shots": 0,
@@ -71,14 +68,12 @@ async def resume_episode(episode_id: str):
             "recoverable": True,
             "state": {
                 "resumed_jobs": 0,
-                "budget_resumed_jobs": 0,
                 "selected_shots": 0,
                 "skipped_completed": int(generated.get("skipped_completed") or 0),
             },
         })
     return {
         **resumed,
-        "budget_resumed_jobs": budget_resumed,
         "enqueued": generated["enqueued"],
         "skipped_completed": generated["skipped_completed"],
         "selected_shots": generated["selected_shots"],

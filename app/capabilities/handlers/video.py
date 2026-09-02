@@ -116,13 +116,11 @@ async def complete_episode(args: I.VideoCompleteEpisodeInput) -> CommandResult:
 
     body = {
         "mode": args.mode,
-        "budget_cap_cny": args.budget_cap_cny,
         "wall_clock_cap_s": args.wall_clock_cap_s,
         "allow_fallback_adopt": args.allow_fallback_adopt,
         "max_fallback_shots": args.max_fallback_shots,
         "allow_storyboard_edit": args.allow_storyboard_edit,
         "completion_grant_id": args.completion_grant_id,
-        "add_budget_cny": args.add_budget_cny,
         "add_wall_clock_s": args.add_wall_clock_s,
         "qualification_version": args.qualification_version,
         "idempotency_key": args.idempotency_key,
@@ -201,8 +199,6 @@ async def complete_project(args: I.VideoCompleteProjectInput) -> CommandResult:
 
     body = {
         "episode_ids": args.episode_ids,
-        "global_budget_cap_cny": args.global_budget_cap_cny,
-        "per_episode_cap_cny": args.per_episode_cap_cny,
         "wall_clock_cap_s": args.wall_clock_cap_s,
         "allow_fallback_adopt": args.allow_fallback_adopt,
         "allow_storyboard_edit": args.allow_storyboard_edit,

@@ -344,7 +344,6 @@ async def generate_episode_plan(
             reason_codes=["FIRST_SHOT_NO_PREDECESSOR"],
             confidence=1.0,
             estimated_latency_ms=690_000,
-            estimated_cost=0.0,
             capability_snapshot_id=snapshot.id,
             input_revision_fingerprints={
                 "asset_revisions": asset_fingerprints.get(str(only_row["id"]), ""),
@@ -391,7 +390,6 @@ async def generate_episode_plan(
                 ),
                 confidence=1.0,
                 estimated_latency_ms=690_000,
-                estimated_cost=0.0,
                 capability_snapshot_id=snapshot.id,
                 input_revision_fingerprints={
                     "asset_revisions": asset_fingerprints.get(str(row["id"]), ""),
@@ -453,7 +451,7 @@ async def generate_episode_plan(
         "\"state_dependency\":\"none|start_only|start_and_end|full_trajectory\","
         "\"motion_dependency\":\"none|pose|trajectory|camera|rhythm|audio\","
         "\"reason_codes\":[通用关系码],\"confidence\":0到1,\"unknown_dimensions\":[],"
-        "\"estimated_latency_ms\":整数,\"estimated_cost\":数字}]}"
+        "\"estimated_latency_ms\":整数}]}"
     )
     planner_payload_base = {
         key: value for key, value in prompt_payload.items() if key != "shots"
@@ -611,10 +609,8 @@ async def generate_episode_plan(
                 confidence=analysis.confidence,
                 unknown_dimensions=analysis.unknown_dimensions,
                 fallback_order=[],
-                max_cost=max(analysis.estimated_cost * 2, 1.0),
                 timeout_s=7200,
                 estimated_latency_ms=analysis.estimated_latency_ms,
-                estimated_cost=analysis.estimated_cost,
                 capability_snapshot_id=snapshot.id,
             )
         except (TypeError, ValueError, ValidationError) as exc:

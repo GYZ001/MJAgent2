@@ -27,13 +27,13 @@ from app.orchestration.engine import (
 )
 from fastapi import HTTPException
 
-from .precheck import compute_refs_cost_precheck
+from .precheck import compute_refs_precheck
 from .primitives import (
     _consume_payment_quote,
-    _issue_payment_quote,
+    _issue_scope_quote,
     _parse_json_value,
     _payment_confirm_required,
-    _validate_payment_quote,
+    _validate_scope_quote,
 )
 from .scene_assets import compute_scene_cost_precheck
 
@@ -114,7 +114,7 @@ def _start_portrait_view_redo(
             recorder.cancel("人物单视角重做未能启动", conn=None)
         except Exception:  # noqa: BLE001
             pass
-        raise RuntimeError("人物单视角重做任务未能启动，旧定妆包和费用凭证均已保留") from exc
+        raise RuntimeError("人物单视角重做任务未能启动，旧定妆包和范围凭证均已保留") from exc
     return {
         "status": "accepted", "task_id": f"portrait_view_redo:{task_key}",
         "run_id": recorder.run_id, "portrait_id": portrait_id,
@@ -183,14 +183,14 @@ async def regenerate_character_view_route(
     if routed is not None:
         return routed
     _project_or_404(project_id)
-    quote = compute_refs_cost_precheck(
+    quote = compute_refs_precheck(
         project_id, character=character_name, view_role=view_role,
     )
     if payload.get("confirm") is not True:
-        # 曾经这里的 409 完全不带 precheck；现在签发并落库一份可直接拿去确认的真实报价。
-        raise _payment_confirm_required(_issue_payment_quote(quote))
+        # 曾经这里的 409 完全不带 precheck；现在签发并落库一份可直接拿去确认的真实范围。
+        raise _payment_confirm_required(_issue_scope_quote(quote))
     quote_id = payload.get("quote_id")
-    quote_row = _validate_payment_quote(project_id, quote_id, quote)
+    quote_row = _validate_scope_quote(project_id, quote_id, quote)
     if quote_row["consumed_at"] is not None:
         return {
             "status": "accepted", "idempotent_replay": True,
@@ -230,7 +230,7 @@ async def regenerate_character_view_route(
         started = _start_portrait_view_redo(
             project_id, character_name, portrait_id, view_role,
             quote_id=str(quote_id),
-            budget_limit_cny=float(quote.get("max_retry_budget_cny") or 1),
+            budget_limit_cny=1.0,  # 金额分支已退场（同 20b6252），只作审计留痕
         )
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -317,7 +317,7 @@ def _start_scene_view_redo(
             recorder.cancel("场景单视角重做未能启动", conn=None)
         except Exception:  # noqa: BLE001
             pass
-        raise RuntimeError("场景单视角重做任务未能启动，旧场景包和费用凭证均已保留") from exc
+        raise RuntimeError("场景单视角重做任务未能启动，旧场景包和范围凭证均已保留") from exc
     return {
         "status": "accepted", "task_id": f"scene_view_redo:{task_key}",
         "run_id": recorder.run_id, "scene_reference_id": scene_reference_id,
@@ -400,9 +400,9 @@ async def regenerate_scene_view_route(
     )
     if payload.get("confirm") is not True:
         # 见 task_run.py 同类注释：未签发的报价不能作为 409 的 quote_id 递出去。
-        raise _payment_confirm_required(_issue_payment_quote(quote))
+        raise _payment_confirm_required(_issue_scope_quote(quote))
     confirmed_quote_id = payload.get("quote_id")
-    quote_row = _validate_payment_quote(project_id, confirmed_quote_id, quote)
+    quote_row = _validate_scope_quote(project_id, confirmed_quote_id, quote)
     if quote_row["consumed_at"] is not None:
         return {
             "status": "accepted", "idempotent_replay": True,
@@ -421,7 +421,7 @@ async def regenerate_scene_view_route(
     started = _start_scene_view_redo(
         project_id, scene_name, scene_reference_id, view_role,
         quote_id=str(confirmed_quote_id),
-        budget_limit_cny=float(quote.get("max_retry_budget_cny") or 1),
+        budget_limit_cny=1.0,  # 金额分支已退场（同 20b6252），只作审计留痕
     )
     if not started:
         raise HTTPException(409, "该场景视角重做任务已在运行")

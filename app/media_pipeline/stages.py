@@ -8,7 +8,6 @@ RUNNING = "running"
 WAITING = "waiting"
 WAITING_PROVIDER = "waiting_provider"
 WAITING_RETRY = "waiting_retry"
-WAITING_BUDGET = "waiting_budget"
 WAITING_HUMAN = "waiting_human"
 SUCCEEDED = "succeeded"
 FAILED = "failed"
@@ -49,7 +48,6 @@ STAGE_CANDIDATE_READY = "candidate_ready"
 STAGE_ADOPTED = "adopted"
 STAGE_FAILED = "failed"
 STAGE_CANCELLED = "cancelled"
-STAGE_PAUSED_BUDGET = "paused_budget"
 
 PIPELINE_STAGES = frozenset({
     STAGE_PREFLIGHT_VALIDATING,
@@ -77,7 +75,6 @@ PIPELINE_STAGES = frozenset({
     STAGE_ADOPTED,
     STAGE_FAILED,
     STAGE_CANCELLED,
-    STAGE_PAUSED_BUDGET,
     # 旧枚举保留以便兼容读取
     STAGE_REFERENCE,
     STAGE_VIDEO_SUBMIT,
@@ -103,7 +100,7 @@ LANE_REFERENCE_NORMAL = "reference_normal"
 LANE_RETAKE = "retake"
 
 ACTIVE_JOB_STATUSES = frozenset({
-    QUEUED, RUNNING, WAITING_PROVIDER, WAITING_RETRY, WAITING_BUDGET, WAITING,
+    QUEUED, RUNNING, WAITING_PROVIDER, WAITING_RETRY, WAITING,
 })
 
 PIPELINE_STAGE_LABELS = {
@@ -132,7 +129,6 @@ PIPELINE_STAGE_LABELS = {
     STAGE_ADOPTED: "已采用",
     STAGE_FAILED: "生成失败",
     STAGE_CANCELLED: "已停止",
-    STAGE_PAUSED_BUDGET: "预算暂停",
     # 旧标签
     STAGE_REFERENCE: "准备参考图",
     STAGE_VIDEO_SUBMIT: "提交视频",

@@ -76,7 +76,7 @@ def _deadline_closeout(
             # adopted 是不可被补齐流程覆盖的用户结果；技术/QA 风险写报告，
             # 但截止收口也不得换版。
             continue
-        result = select_best_video_candidate(entry.shot_id, force_best=True)
+        result = select_best_video_candidate(entry.shot_id)
         if not result:
             continue
         version_id = result.get("version_id")

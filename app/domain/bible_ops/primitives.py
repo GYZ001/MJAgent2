@@ -125,7 +125,7 @@ def _decode_refs_target(value: str | None) -> tuple[str | None, list[str] | None
     target = str(value or "").strip() or None
     return target, None
 
-def _quote_stale(precheck: dict, message: str = "费用预检已过期或范围变化，请重新确认") -> HTTPException:
+def _quote_stale(precheck: dict, message: str = "范围预检已过期或范围变化，请重新确认") -> HTTPException:
     return HTTPException(
         409,
         detail={
@@ -138,7 +138,7 @@ def _quote_stale(precheck: dict, message: str = "费用预检已过期或范围�
 def _payment_confirm_required(precheck: dict | None = None) -> HTTPException:
     detail = {
         "code": "PAYMENT_CONFIRM_REQUIRED",
-        "message": "必须先完成费用预检并显式确认（confirm=true）",
+        "message": "必须先完成范围预检并显式确认（confirm=true）",
     }
     if precheck is not None:
         detail["precheck"] = precheck
@@ -161,8 +161,8 @@ def _ensure_character_payment_quotes(conn) -> None:
         )"""
     )
 
-def _issue_payment_quote(precheck: dict) -> dict:
-    """将付费预检签发为有时效、可消费的服务端凭证。"""
+def _issue_scope_quote(precheck: dict) -> dict:
+    """将范围预检签发为有时效、可消费的服务端凭证。"""
     issued = dict(precheck)
     issued["quote_id"] = new_id("quote")
     issued["computed_at"] = now()
@@ -181,9 +181,9 @@ def _issue_payment_quote(precheck: dict) -> dict:
     conn.commit()
     return issued
 
-def _validate_payment_quote(project_id: str, quote_id: str | None, current: dict):
+def _validate_scope_quote(project_id: str, quote_id: str | None, current: dict):
     if not quote_id:
-        raise _quote_stale(current, "费用预检缺失，请重新确认")
+        raise _quote_stale(current, "范围预检缺失，请重新确认")
     conn = get_conn()
     _ensure_character_payment_quotes(conn)
     row = conn.execute(
@@ -195,7 +195,7 @@ def _validate_payment_quote(project_id: str, quote_id: str | None, current: dict
     if row["consumed_at"] is not None:
         return row
     if float(row["expires_at"] or 0) < now():
-        raise _quote_stale(current, "费用预检已过期，请重新确认")
+        raise _quote_stale(current, "范围预检已过期，请重新确认")
     if row["action"] != current.get("action") or row["scope_fingerprint"] != current.get("scope_fingerprint"):
         raise _quote_stale(current)
     return row

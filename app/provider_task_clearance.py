@@ -107,7 +107,7 @@ def _provider_task_clearance_evaluation(
                        j.provider_create_state,j.provider_failure_disposition,
                        v.provider_task_id,v.status AS version_status,
                        v.video_path,v.cost_cny,
-                       c.status AS claim_status,c.amount_cny AS claim_amount,
+                       c.status AS claim_status,
                        c.operation_id AS claim_operation_id,c.accepted_at,
                        {create_call_succeeded_sql.format(operation="c.operation_id")}
                            AS create_call_succeeded
@@ -139,7 +139,7 @@ def _provider_task_clearance_evaluation(
                    j.provider_create_state,j.provider_failure_disposition,
                    v.provider_task_id,v.status AS version_status,
                    v.video_path,v.cost_cny,
-                   NULL AS claim_status,NULL AS claim_amount,
+                   NULL AS claim_status,
                    j.provider_operation_id AS claim_operation_id,
                    NULL AS accepted_at,
                    {create_call_succeeded_sql.format(operation="j.provider_operation_id")}
@@ -289,7 +289,6 @@ def _provider_task_clearance_evaluation(
                 create_state if claim_is_current and create_state else "unknown"
             ),
             "claim_status": claim_status,
-            "amount_cny": float(row["claim_amount"] or 0),
             "recovery_status": (
                 "waiting_provider" if locally_recoverable_poll else "waiting_human"
             ),

@@ -239,7 +239,7 @@ function providerBlocker(overrides: Partial<ProviderTaskBlocker> = {}): Provider
   return {
     job_id: 'job_1', shot_id: 's1', version_id: 'ver_1', job_status: 'waiting_human',
     provider_operation_id: 'op_1', provider_task_id: 'task_1', provider_create_state: 'accepted',
-    claim_status: 'accepted', amount_cny: 12, recovery_status: 'waiting_human',
+    claim_status: 'accepted', recovery_status: 'waiting_human',
     recovery_action: 'review_provider_failure',
     ...overrides,
   }

@@ -445,7 +445,6 @@ def test_video_completion_preflight_no_longer_quotes_cost() -> None:
         "video.complete_episode",
         {
             "episode_id": "video-complete-quote-ep",
-            "budget_cap_cny": 1,
         },
     )
 

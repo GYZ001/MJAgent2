@@ -131,7 +131,6 @@ export type ProviderTaskBlocker = {
   provider_task_id: string | null;
   provider_create_state: string;
   claim_status: string | null;
-  amount_cny: number;
   recovery_status: "waiting_provider" | "waiting_human" | string;
   recovery_action: "review_provider_failure" | "continue_provider_poll" | "restore_provider_poll" | "reconcile_provider_create" | string;
 };

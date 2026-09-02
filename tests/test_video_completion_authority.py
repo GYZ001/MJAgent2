@@ -10,9 +10,6 @@ from app import db, hiagent
 from app.completion_grant import (
     ensure_video_budget_authority_tables,
     GrantValidationError,
-    authorize_episode_video_budget_increment,
-    episode_video_completion_budget_requirement,
-    episode_video_budget_snapshot,
     issue_video_completion_grant,
     reserve_provider_video_budget,
     validate_video_grant,
@@ -36,7 +33,13 @@ def _isolated_db(tmp_path, monkeypatch):
     db.init_db()
 
 
-def test_provider_video_budget_claims_no_longer_capped() -> None:
+def test_provider_video_budget_claims_never_rejected_by_amount() -> None:
+    """成本预算拦截体系退场（2026-09-01）：``authorize_episode_video_budget_
+    increment``/``episode_video_budget_snapshot``/
+    ``episode_video_completion_budget_requirement`` 这条金额上限计算/报表链
+    路已随 A2 整体删除——见 CLAUDE.md「Retiring Features」。
+    ``reserve_provider_video_budget`` 不再据任何金额上限拒绝认领：连续四笔
+    认领必须全部成功，不受累计金额影响。"""
     conn = db.get_conn()
     conn.execute(
         "INSERT INTO projects(id,name,status,created_at) VALUES('budget-p','P','created',1)"
@@ -79,17 +82,6 @@ def test_provider_video_budget_claims_no_longer_capped() -> None:
         )
     conn.commit()
 
-    # 成本预算拦截体系退场（2026-09-01）：cap 仍然计算并写入审计台账
-    # （completion_grant.VIDEO_BUDGET_RETRY_MARGIN_MULTIPLIER 口径不变，
-    # 4.0*3=12.0），但 reserve_provider_video_budget 不再据此拒绝认领——
-    # 那条「used+amount>cap 拒绝」分支正是 EP2 事故的机制之一。
-    cap = authorize_episode_video_budget_increment(
-        "budget-e",
-        4.0,
-        source="test-approval",
-        conn=conn,
-    )
-    assert cap == 12.0
     for index in (1, 2, 3, 4):
         assert reserve_provider_video_budget(
             episode_id="budget-e",
@@ -99,19 +91,16 @@ def test_provider_video_budget_claims_no_longer_capped() -> None:
             amount_cny=4.0,
             conn=conn,
         ) is True
-    # 第 4 笔（累计 16.0）早已超过审计 cap（12.0）——snapshot 如实反映这个
-    # 超额（cap_cny 不变、claimed_cny 已超过、remaining_cny 夹到 0），但这只是
-    # 报表数字，不再是任何人的拦截依据。
-    assert episode_video_budget_snapshot("budget-e", conn=conn) == {
-        "baseline_cny": 0.0,
-        "claimed_cny": 16.0,
-        "used_cny": 16.0,
-        "cap_cny": 12.0,
-        "remaining_cny": 0.0,
-    }
+    claimed = conn.execute(
+        """SELECT COALESCE(SUM(amount_cny),0) AS amount
+             FROM provider_video_budget_claims
+            WHERE episode_id='budget-e' AND status!='released'"""
+    ).fetchone()["amount"]
+    assert claimed == 16.0
 
 
-def test_concurrent_provider_video_budget_claims_no_longer_contend_on_cap() -> None:
+def test_concurrent_provider_video_budget_claims_do_not_contend() -> None:
+    """并发认领互不阻塞——不存在任何隐藏的金额互斥残留。"""
     conn = db.get_conn()
     conn.execute(
         "INSERT INTO projects(id,name,status,created_at) VALUES('race-p','P','created',1)"
@@ -153,20 +142,9 @@ def test_concurrent_provider_video_budget_claims_no_longer_contend_on_cap() -> N
             ),
         )
     conn.commit()
-    # 成本预算拦截体系退场（2026-09-01）：授权 4.0 首轮预估，含重试余量后
-    # cap=12.0（见 completion_grant.VIDEO_BUDGET_RETRY_MARGIN_MULTIPLIER，
-    # 这个口径本身不变）。两笔并发认领各 7.0，合计 14.0 早已超过 12.0——旧版
-    # 这里测的是「谁能原子地挤进 cap」，新版 cap 不再拦人，两笔都必须成功，
-    # 用来证明退场后的并发路径里也没有任何隐藏的金额互斥残留。
-    authorize_episode_video_budget_increment(
-        "race-e",
-        4.0,
-        source="concurrency-test",
-        conn=conn,
-    )
     # 建表在起线程之前做完：DDL 落进竞态窗口会让另一线程已编译的语句抛
     # sqlite3.OperationalError: database schema has changed，那是 setup 自己
-    # 打架，与本测试要验的「并发认领共享同一个原子 cap」无关。
+    # 打架，与本测试要验的「并发认领互不阻塞」无关。
     ensure_video_budget_authority_tables(conn)
     barrier = threading.Barrier(2)
 
@@ -174,10 +152,10 @@ def test_concurrent_provider_video_budget_claims_no_longer_contend_on_cap() -> N
         barrier.wait()
         # 连接必须在线程内部取。app/db.py 的 get_conn() 是线程局部的
         # （_local = threading.local()），每个线程拿到自己的连接，两笔认领才会
-        # 真的在 SQLite 层面争用同一个 cap——这正是本测试要验的东西。
+        # 真的在 SQLite 层面并发写入——这正是本测试要验的东西。
         #
         # 2026-08-31 教训：连接所有权收紧那一轮（aa4d0d9）把主线程的 conn 传进
-        # 了这里，两个线程于是共用一条连接，没有任何真实争用，两笔都能成功。
+        # 了这里，两个线程于是共用一条连接，没有任何真实争用。
         # 症状是间歇性的（有时报 schema has changed，有时断言 [True, True]），
         # 所以它在几轮全量里都侥幸绿过——被削弱的测试比红的测试危险。
         return reserve_provider_video_budget(
@@ -193,83 +171,12 @@ def test_concurrent_provider_video_budget_claims_no_longer_contend_on_cap() -> N
         results = list(executor.map(reserve, (1, 2)))
 
     assert sorted(results) == [True, True]
-    assert episode_video_budget_snapshot("race-e", conn=conn) == {
-        "baseline_cny": 0.0,
-        "claimed_cny": 14.0,
-        "used_cny": 14.0,
-        "cap_cny": 12.0,
-        "remaining_cny": 0.0,
-    }
-
-
-def test_completion_budget_requirement_includes_sunk_duplicate_claims() -> None:
-    conn = db.get_conn()
-    conn.execute(
-        "INSERT INTO projects(id,name,status,created_at) VALUES('required-p','P','created',1)"
-    )
-    conn.execute(
-        """INSERT INTO episodes(id,project_id,episode_no,status,created_at)
-           VALUES('required-e','required-p',1,'confirmed',1)"""
-    )
-    for shot_no in (1, 2):
-        conn.execute(
-            """INSERT INTO shots(
-                   id,episode_id,shot_no,duration_s,characters,dialogues
-               ) VALUES(?,?,?,5,'[]','[]')""",
-            (f"required-s{shot_no}", "required-e", shot_no),
-        )
-    for index in (1, 2):
-        conn.execute(
-            """INSERT INTO shot_versions(
-                   id,shot_id,version_no,prompt_text,idem_key,status,created_at
-               ) VALUES(?,?,?,?,?,'queued',1)""",
-            (
-                f"required-v{index}",
-                "required-s1",
-                index,
-                "prompt",
-                f"required-key-{index}",
-            ),
-        )
-        conn.execute(
-            """INSERT INTO jobs(
-                   id,kind,shot_id,version_id,episode_id,project_id,status,
-                   created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,'queued',1,1)""",
-            (
-                f"required-j{index}",
-                "video",
-                "required-s1",
-                f"required-v{index}",
-                "required-e",
-                "required-p",
-            ),
-        )
-    conn.commit()
-    authorize_episode_video_budget_increment(
-        "required-e",
-        20,
-        source="test-approval",
-        conn=conn,
-    )
-    for index in (1, 2):
-        operation_id = f"video-create-required-v{index}"
-        assert reserve_provider_video_budget(
-            episode_id="required-e",
-            job_id=f"required-j{index}",
-            version_id=f"required-v{index}",
-            operation_id=operation_id,
-            amount_cny=4,
-            conn=conn,
-        ) is True
-
-    assert episode_video_completion_budget_requirement("required-e", conn=conn) == {
-        "used_cny": 8.0,
-        "claimed_current_shots": 1,
-        "shots_total": 2,
-        "unclaimed_first_pass_cny": 4.0,
-        "required_completion_cap_cny": 12.0,
-    }
+    claimed = conn.execute(
+        """SELECT COALESCE(SUM(amount_cny),0) AS amount
+             FROM provider_video_budget_claims
+            WHERE episode_id='race-e' AND status!='released'"""
+    ).fetchone()["amount"]
+    assert claimed == 14.0
 
 
 def _narrative_authority_case() -> dict:

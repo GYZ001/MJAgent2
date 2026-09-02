@@ -88,10 +88,8 @@ export interface ShotVideoGenerationPlan {
   unknown_dimensions: string[];
   fallback_order: VideoGenerationMode[];
   max_attempts: number;
-  max_cost: number;
   timeout_s: number;
   estimated_latency_ms: number;
-  estimated_cost: number;
   critical_path_group: string | null;
   capability_snapshot_id: string;
   input_revision_fingerprints: Record<string, string>;
@@ -131,7 +129,6 @@ export interface EpisodeGenerateResult {
   plan_revision: number;
   mode_distribution: Record<string, number>;
   critical_path_latency_ms: number;
-  estimated_cost: number;
   enqueued: EpisodeGenerateEnqueueResult[];
   /** only_incomplete=true 时被跳过的已完成段数——服务端口径，不是前端猜的。 */
   skipped_completed: number;
@@ -177,9 +174,7 @@ export interface ReviewWallContext {
     { version_id: string; reason?: string | null; archived_at: number }
   >;
   authorization_constraints: {
-    budget_cap_cny: NumberConstraint;
     wall_clock_cap_s: NumberConstraint;
-    add_budget_cny: NumberConstraint;
     add_wall_clock_s: NumberConstraint;
   };
   server_time: number;

@@ -139,13 +139,9 @@ def storyboard_db(tmp_path, monkeypatch):
         ),
     )
     conn.execute("UPDATE episodes SET storyboard_artifact_id=? WHERE id='e1'", (artifact["id"],))
-    workspace.realign_generated_source_binding(
-        "e1",
-        "s1",
-        source,
-        conn=conn,
-        commit=False,
-    )
+    _candidate, _normalized = workspace.align_generated_source_evidence("e1", source, conn=conn)
+    conn.execute("UPDATE shots SET source_excerpt=? WHERE id='s1'", (_candidate,))
+    workspace.persist_source_binding("s1", _normalized, conn=conn, commit=False)
     conn.commit()
     yield conn
     conn.close()

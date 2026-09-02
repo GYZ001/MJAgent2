@@ -16,52 +16,6 @@ from .primitives import _hash, _row_value
 from .shot_row import _shot_model_from_row
 
 
-def authoritative_storyboard_plan_cost(
-    episode_id: str,
-    *,
-    conn=None,
-) -> dict[str, Any]:
-    """Quote one first pass from the exact released outline/shot version."""
-    db = conn or get_conn()
-    manifest = current_storyboard_release_manifest(episode_id, conn=db)
-    rows = db.execute(
-        "SELECT id,shot_no,duration_s FROM shots WHERE episode_id=? ORDER BY shot_no",
-        (episode_id,),
-    ).fetchall()
-    if not rows:
-        raise ValueError("当前分镜发布版没有正式 shots")
-    duration_s = sum(int(row["duration_s"] or 0) for row in rows)
-    authoritative_duration_s = int(
-        manifest.get("authoritative_duration_s") or 0
-    )
-    if authoritative_duration_s and duration_s != authoritative_duration_s:
-        raise ValueError(
-            "视频计划 shots 时长与发布 outline authority 不一致"
-        )
-    from app.video_cost_model import initial_shot_generation_cost
-
-    estimated_cost_cny = round(sum(
-        initial_shot_generation_cost(float(row["duration_s"] or 0))
-        for row in rows
-    ), 6)
-    return {
-        "episode_id": episode_id,
-        "published_storyboard_artifact_id": manifest[
-            "published_storyboard_artifact_id"
-        ],
-        "release_qualification_hash": manifest["release_qualification_hash"],
-        "outline_revision": int(manifest.get("outline_revision") or 0),
-        "outline_fingerprint": str(
-            manifest.get("outline_fingerprint") or ""
-        ),
-        "shot_count": len(rows),
-        "authoritative_duration_s": (
-            authoritative_duration_s or duration_s
-        ),
-        "estimated_cost_cny": estimated_cost_cny,
-    }
-
-
 def canonical_shot_contract_fingerprint(row: Any) -> str:
     """Hash the complete canonical Shot, not a partial/raw DB projection."""
     shot = _shot_model_from_row(row)

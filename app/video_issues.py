@@ -261,26 +261,6 @@ def issues_from_job_failure(
             },
         )]
 
-    if status == "paused_budget":
-        return [_mk(
-            "VIDEO_BUDGET_PAUSED",
-            IssueSeverity.BLOCKER,
-            shot_id=sid,
-            message=message or "视频任务因预算暂停",
-            shot_no=shot_no,
-            version_id=vid,
-            job_id=jid,
-            rule_id=status,
-            repairable=False,
-            category="operational",
-            extra={
-                "provider_reason_code": reason_code or None,
-                "pause_state": "WAITING_AUTHORIZATION",
-                "recommended_level": "L6",
-                "runtime_blocking": True,
-            },
-        )]
-
     if status in {"waiting_human", "paused"} or stage.endswith("waiting_human"):
         return [_mk(
             "VIDEO_OPERATION_WAITING_HUMAN",

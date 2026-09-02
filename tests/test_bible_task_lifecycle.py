@@ -422,7 +422,7 @@ async def test_bible_spawn_failure_restores_state_and_keeps_quote(
     conn.commit()
     patch_api_everywhere(monkeypatch, "_require_harness_engine", lambda _project_id: None)
     precheck = api._compute_bible_generate_precheck("p1")
-    quote = api._issue_payment_quote(precheck)
+    quote = api._issue_scope_quote(precheck)
 
     def fail_spawn(_kind, _key, coro, *, project_id=None):
         coro.close()
@@ -523,7 +523,7 @@ async def test_start_bible_core_recovers_stale_failed_project_without_model_call
     monkeypatch.setattr(model_gateway, "chat_structured", fail_if_called)
 
     precheck = api._compute_bible_generate_precheck("p1", style_name="真人摄影风")
-    quote = api._issue_payment_quote(precheck)
+    quote = api._issue_scope_quote(precheck)
 
     result = await api._start_bible_core(
         "p1", "", confirm=True, quote_id=quote["quote_id"], style_name="真人摄影风",
@@ -549,11 +549,11 @@ async def test_start_bible_core_confirm_flow_from_409_precheck_succeeds(
     这条分支——之前 precheck 是 _compute_bible_generate_precheck 的原始返回值，
     其中占位的 ``quote_id`` 字段实际装的是 scope_fingerprint，从未写进
     character_payment_quotes。任何按 409 响应指引（带 confirm=true + 该
-    quote_id）再来一次的调用方都会在 _validate_payment_quote 里查不到这一行，
+    quote_id）再来一次的调用方都会在 _validate_scope_quote 里查不到这一行，
     命中 QUOTE_STALE——而"请重新确认"没有出路，因为重新预检拿到的还是同一个
     假值，是死循环（实测复现：尝试恢复 proj_f8cf2eeb2e66 时撞上）。
 
-    这条用例钉住修复：未确认调用必须先 _issue_payment_quote() 把报价落库，
+    这条用例钉住修复：未确认调用必须先 _issue_scope_quote() 把报价落库，
     409 响应里的 quote_id 才是一个真正能拿去确认的凭证。"""
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "bible-409-confirm.db")
     monkeypatch.setattr(db._local, "conn", None, raising=False)

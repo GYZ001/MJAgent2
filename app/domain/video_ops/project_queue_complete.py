@@ -17,7 +17,6 @@ from fastapi import HTTPException
 
 from .completion_contract import _resume_prepared_complete_episode_operation
 from .completion_core import _complete_episode_core
-from .project_queue_core import _project_video_spent
 from .project_queue_run import _run_project_video_completion_queue
 
 
@@ -75,7 +74,7 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
                  AND recovered_by_run_id IS NULL
                  AND status IN (
                    'CREATED','RUNNING','WAITING_RETRY','WAITING_HUMAN',
-                   'WAITING_AUTHORIZATION','PAUSED_BUDGET','PAUSED_EXTERNAL'
+                   'WAITING_AUTHORIZATION','PAUSED_EXTERNAL'
                  )
                ORDER BY updated_at DESC LIMIT 1""",
             (project_id,),
@@ -88,12 +87,6 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
                 "action": "view_progress",
             })
 
-        global_cap = float(_review_validate_authorization_number(
-            body.get("global_budget_cap_cny", 500), field="global_budget_cap_cny", minimum=1, maximum=1000000, allow_none=False,
-        ))
-        per_cap = float(_review_validate_authorization_number(
-            body.get("per_episode_cap_cny", 150), field="per_episode_cap_cny", minimum=1, maximum=100000, allow_none=False,
-        ))
         wall_cap = float(_review_validate_authorization_number(
             body.get("wall_clock_cap_s", 4 * 3600), field="wall_clock_cap_s", minimum=60, maximum=604800, allow_none=False,
         ))
@@ -117,17 +110,16 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
         if not eligible:
             raise HTTPException(409, "没有可补齐的已确认剧集")
 
-        project_spent = _project_video_spent(project_id, conn=conn)
-        remaining_global = max(0.0, global_cap - project_spent)
-
+        # 金额不再构成跳集判断（会员分档时长制）：每个可补齐集直接 queued，
+        # 不再按全局/单集金额上限截断——见 CLAUDE.md「Retiring Features」与
+        # 本次「成本预算拦截体系退场」。
         plan = []
-        allocated = 0.0
         from app.video_supervisor import rebuild_coverage_ledger
         for r in eligible:
             if task_registry.active("video_completion", r["id"]):
                 plan.append({
                     "episode_id": r["id"], "episode_no": r["episode_no"],
-                    "status": "already_running", "allocated_cny": 0,
+                    "status": "already_running",
                 })
                 continue
             try:
@@ -135,36 +127,23 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
                 if ledger.covered_within_quota():
                     plan.append({
                         "episode_id": r["id"], "episode_no": r["episode_no"],
-                        "status": "already_covered", "allocated_cny": 0,
+                        "status": "already_covered",
                     })
                     continue
             except Exception:  # noqa: BLE001
                 pass
-            room = remaining_global - allocated
-            if room < 5:
-                plan.append({
-                    "episode_id": r["id"], "episode_no": r["episode_no"],
-                    "status": "skipped_budget", "allocated_cny": 0,
-                })
-                continue
-            ep_cap = min(per_cap, room)
             plan.append({
                 "episode_id": r["id"], "episode_no": r["episode_no"],
-                "status": "queued", "allocated_cny": ep_cap,
+                "status": "queued",
             })
-            allocated += ep_cap
 
         frozen = {
             "project_id": project_id,
-            "global_budget_cap_cny": global_cap,
-            "per_episode_cap_cny": per_cap,
             "wall_clock_cap_s": wall_cap,
             "allow_fallback_adopt": allow_fallback,
             "allow_storyboard_edit": allow_edit,
             "idempotency_key": project_idempotency_key,
             "eligible_episode_ids": [str(row["id"]) for row in eligible],
-            "project_spent_cny": project_spent,
-            "remaining_cny": remaining_global,
             "plan": json.loads(json.dumps(plan, ensure_ascii=False)),
         }
         if has_operation_receipt:
@@ -182,14 +161,10 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
     else:
         if str(frozen.get("project_id") or "") != project_id:
             raise RuntimeError("项目补齐 receipt 绑定的项目已漂移")
-        global_cap = float(frozen["global_budget_cap_cny"])
-        per_cap = float(frozen["per_episode_cap_cny"])
         wall_cap = float(frozen["wall_clock_cap_s"])
         allow_fallback = bool(frozen["allow_fallback_adopt"])
         allow_edit = bool(frozen["allow_storyboard_edit"])
         project_idempotency_key = str(frozen.get("idempotency_key") or "") or None
-        project_spent = float(frozen["project_spent_cny"])
-        remaining_global = float(frozen["remaining_cny"])
         plan = json.loads(json.dumps(frozen["plan"], ensure_ascii=False))
 
     started = []
@@ -198,48 +173,8 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
     project_queue_run_id = None
 
     async def _run_one(item: dict) -> dict:
-        bound_resolution = operation_binding.get("first_episode_resolution")
-        if isinstance(bound_resolution, dict):
-            if str(bound_resolution.get("episode_id") or "") != str(item["episode_id"]):
-                raise RuntimeError("项目补齐 receipt 绑定的首集预算已漂移")
-            item["allocated_cny"] = float(bound_resolution["allocated_cny"])
-            if bound_resolution.get("status") == "skipped_budget":
-                item["status"] = "skipped_budget"
-                return item
-        else:
-            room_now = max(0.0, global_cap - _project_video_spent(project_id))
-            resolution_status = "resolved"
-            if room_now < 5:
-                item["allocated_cny"] = 0
-                item["status"] = "skipped_budget"
-                resolution_status = "skipped_budget"
-            else:
-                item["allocated_cny"] = min(float(item["allocated_cny"]), room_now)
-            if has_operation_receipt:
-                bound_resolution = {
-                    "episode_id": item["episode_id"],
-                    "allocated_cny": item["allocated_cny"],
-                    "status": resolution_status,
-                }
-                bind_video_command_operation(
-                    command=operation_command,
-                    idempotency_key=operation_idempotency_key,
-                    request_fingerprint=operation_fingerprint,
-                    claim_token=operation_claim_token,
-                    binding={
-                        "phase": "project_first_episode_budget_resolved",
-                        "first_episode_resolution": bound_resolution,
-                    },
-                    conn=conn,
-                    merge=True,
-                )
-                conn.commit()
-                operation_binding["first_episode_resolution"] = bound_resolution
-            if resolution_status == "skipped_budget":
-                return item
         child_body = {
             "mode": "fresh",
-            "budget_cap_cny": item["allocated_cny"],
             "wall_clock_cap_s": wall_cap,
             "allow_fallback_adopt": allow_fallback,
             "allow_storyboard_edit": allow_edit,
@@ -337,8 +272,6 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
         rest = queue[1:]
         if rest:
             queue_state = {
-                "global_budget_cap_cny": global_cap,
-                "per_episode_cap_cny": per_cap,
                 "wall_clock_cap_s": wall_cap,
                 "allow_fallback_adopt": allow_fallback,
                 "allow_storyboard_edit": allow_edit,
@@ -402,13 +335,8 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
                             input_fingerprint=queue_fingerprint,
                             requested_by="user",
                             trigger_type="manual",
-                            policy_snapshot={
-                                "serial": True,
-                                "global_budget_cap_cny": global_cap,
-                                "per_episode_cap_cny": per_cap,
-                            },
+                            policy_snapshot={"serial": True},
                             config_snapshot={"queue_state": queue_state},
-                            budget_limit_cny=global_cap,
                         )
                         project_queue_run_id = recorder.run_id
                         # create() is the authority for this just-created run.
@@ -491,9 +419,6 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
     project_result = {
         "status": "accepted",
         "project_id": project_id,
-        "global_budget_cap_cny": global_cap,
-        "project_spent_cny": project_spent,
-        "remaining_cny": remaining_global,
         "plan": plan,
         "started": started,
         "project_queue_active": bool(rest) and all(

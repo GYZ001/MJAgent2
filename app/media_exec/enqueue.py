@@ -34,18 +34,6 @@ def _video_path(project_id: str, episode_no: int, shot_no: int, version_no: int)
     return d / f"v{version_no}.mp4"
 
 
-# ---------- 成本熔断 ----------
-
-def episode_cost(episode_id: str) -> float:
-    row = get_conn().execute(
-        """SELECT COALESCE(SUM(v.cost_cny), 0) AS c FROM shot_versions v
-           JOIN shots s ON s.id = v.shot_id
-           WHERE s.episode_id = ? AND v.status IN ('succeeded', 'running', 'queued')""",
-        (episode_id,),
-    ).fetchone()
-    return float(row["c"])
-
-
 def reconcile_episode_generation_status(episode_id: str) -> bool:
     """视频队列已无活动任务时，把剧集从假“生成中”恢复为“已确认”。
 
@@ -85,7 +73,7 @@ def reconcile_episode_generation_status(episode_id: str) -> bool:
             cp = load_latest_checkpoint(episode_id)
             # 仅在故意暂停/等待授权时保留 generating；崩溃中途不得锁死
             if cp is not None and cp.phase in {
-                "PAUSED_EXTERNAL", "PAUSED_BUDGET",
+                "PAUSED_EXTERNAL",
                 "WAITING_AUTHORIZATION", "WAITING_HUMAN",
             }:
                 return False
@@ -1137,6 +1125,11 @@ def _resume_reused_paused_job(
         raise ValueError(
             "[VIDEO_PROVIDER_HANDLE_REQUIRED] 已放弃任务没有供应商接单证据，禁止复活"
         )
+    # 金额不再构成生成拦截（会员分档时长制）：恢复中断任务不再以预算预留为
+    # 前提，原「[VIDEO_BUDGET_RESERVATION_REQUIRED]」拦截已删除。这里仍对
+    # 已放弃且供应商已接单的任务补一条预留记账，只是为了维持
+    # budget_reservations 审计台账完整，不参与任何放行判断——见 CLAUDE.md
+    # 「Retiring Features」与本次「成本预算拦截体系退场」。
     reservation = conn.execute(
         "SELECT status FROM budget_reservations WHERE job_id=?",
         (row["id"],),
@@ -1148,16 +1141,12 @@ def _resume_reused_paused_job(
     if not reservation_active and row["status"] == "abandoned" and provider_task_id:
         from app.video_cost_model import initial_shot_generation_cost
 
-        reservation_active = media_scheduler.reserve_budget(
+        media_scheduler.reserve_budget(
             row["id"],
             row["episode_id"],
             initial_shot_generation_cost(float(row["duration_s"] or 0)),
             episode_video_budget_limit(str(row["episode_id"])),
             conn=conn,
-        )
-    if not reservation_active:
-        raise ValueError(
-            "[VIDEO_BUDGET_RESERVATION_REQUIRED] 中断任务缺少有效预算预留，禁止恢复"
         )
 
     next_status = "waiting_provider" if provider_task_id else "queued"
@@ -1559,16 +1548,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         shot_plan=shot_plan,
     )
     job_id = persisted["job_id"]
-    if not persisted["reserved"]:
-        reconcile_episode_generation_status(ep["id"])
-        result = {
-            "reused": False, "version_id": version_id, "job_id": job_id,
-            "paused_budget": True,
-        }
-        if preflight_repair:
-            result["preflight_repair"] = preflight_repair
-        return result
-
+    # 金额不再构成生成拦截：persist_new_video_version 的「预算不足→paused_budget」分支已删除。
     dispatch_deferred = enqueue_persist.dispatch_new_video_job(
         conn, job_id=job_id, shot_id=shot_id, episode_id=ep["id"],
     )

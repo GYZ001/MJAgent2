@@ -40,8 +40,6 @@ def project_db(tmp_path, monkeypatch):
     conn.commit()
     patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(operations, "get_conn", lambda: conn)
-    patch_api_everywhere(monkeypatch, "_project_video_spent", lambda *_args, **_kwargs: 0.0)
-
 
     patch_video_supervisor_everywhere(
         monkeypatch,
@@ -65,8 +63,6 @@ def _claim_project() -> tuple[str, dict]:
     assert recovered is None
     return owner, {
         "episode_ids": ["e1", "e2"],
-        "global_budget_cap_cny": 100,
-        "per_episode_cap_cny": 40,
         "wall_clock_cap_s": 3600,
         "allow_fallback_adopt": True,
         "allow_storyboard_edit": False,
@@ -148,7 +144,6 @@ async def test_project_receipt_recovers_exact_first_episode_after_process_loss(
         "episode_id": "e1",
         "episode_no": 1,
         "status": "started",
-        "allocated_cny": 40.0,
         "run_id": "run-e1-exact",
         "completion_grant_id": "grant-e1-exact",
     }]
@@ -219,7 +214,7 @@ async def test_project_receipt_resumes_prepared_first_episode_before_success(
 
     def resume_prepared(episode_id: str, child_body: dict, prepared: dict) -> dict:
         assert episode_id == "e1"
-        assert child_body["budget_cap_cny"] == 40.0
+        assert "budget_cap_cny" not in child_body
         assert prepared["_resume_prepared"] is True
         resumed.append(prepared)
         return dict(prepared["result"])

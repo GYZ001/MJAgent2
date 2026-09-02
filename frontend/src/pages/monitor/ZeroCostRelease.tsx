@@ -3,9 +3,9 @@ import { api, ApiError } from "../../api";
 import type { Job } from "../../api";
 
 /** 「供应商任务尚未终态」拦住清空/重做时，界面此前没有任何入口能核对——这个
- * 组件就是那个入口：只对已证明零扣费的终态拒绝任务展示，本地二段式确认
- * （不带 confirm 只预览，确认才真正把预留结算为 0），不提供强制忽略式绕过——
- * 不满足条件的任务这里不会出现按钮，点击后台仍会重新核验一遍。
+ * 组件就是那个入口：只对已证明供应商侧未产生任何调用的终态拒绝任务展示，
+ * 本地二段式确认（不带 confirm 只预览，确认才真正释放占用），不提供强制忽略
+ * 式绕过——不满足条件的任务这里不会出现按钮，点击后台仍会重新核验一遍。
  * 从 JobDrawer 抽成独立文件是因为该文件已经踩着行数基线，没有余量再长。 */
 export default function ZeroCostRelease({
   job,
@@ -14,7 +14,7 @@ export default function ZeroCostRelease({
   job: Job;
   onReleased: () => void;
 }) {
-  const [eligible, setEligible] = useState<{ reason: string; amount: number } | null>(null);
+  const [eligible, setEligible] = useState<{ reason: string } | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -30,7 +30,7 @@ export default function ZeroCostRelease({
     void api.getZeroCostCandidate(job.id).then(
       (result) => {
         if (!cancelled && result.eligible) {
-          setEligible({ reason: result.reason, amount: result.reserved_amount_cny });
+          setEligible({ reason: result.reason });
         }
       },
       () => undefined, // 查询失败就不展示按钮，不把不确定的判断当作可以释放
@@ -60,7 +60,7 @@ export default function ZeroCostRelease({
         </button>
       ) : (
         <div className="monitor-inline-confirm">
-          确认后会释放这笔占用，并解除对该镜头清空/重做操作的阻塞，不可撤销。
+          确认后系统会核实供应商侧确未产生调用并释放这笔占用，解除对该镜头清空/重做操作的阻塞，不可撤销。
           <button
             disabled={busy}
             onClick={async () => {

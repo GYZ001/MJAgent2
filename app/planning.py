@@ -25,10 +25,8 @@ ACTIVE_MEDIA_JOB_STATUSES = {
     "running",
     "waiting_provider",
     "waiting_retry",
-    "waiting_budget",
     "waiting",
     "waiting_human",
-    "paused_budget",
     "paused",
 }
 

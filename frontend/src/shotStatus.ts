@@ -4,7 +4,6 @@ import type { Shot } from './api'
 export function compactShotStage(shot: Shot): string {
   const pipeline = shot.pipeline
   const stage = pipeline?.pipeline_stage || pipeline?.current_stage || ''
-  const pipelineStatus = pipeline?.pipeline_status || ''
   if (pipeline?.reason_code === 'WAITING_STATIC_BOUNDARY_ASSET') {
     return '等待上一镜静态尾帧'
   }
@@ -17,11 +16,6 @@ export function compactShotStage(shot: Shot): string {
       version => Boolean(version.image_inputs?.after_shot_id),
     )
   )
-  if (pipelineStatus === 'paused_budget') {
-    return dependsOnUpstream
-      ? '预算暂停，恢复后等待上一镜素材'
-      : '预算暂停'
-  }
   if (stage === 'job_queued' && dependsOnUpstream) {
     return '等待上一镜采用素材'
   }
@@ -46,7 +40,6 @@ export function compactShotStage(shot: Shot): string {
     video_downloading: '下载视频',
     video_technical_check: '技术校验',
     auto_retake_queued: '重新生成排队',
-    paused_budget: '预算暂停',
     waiting_human: '等待人工',
   }
   return labels[stage] || pipeline?.stage_label || '状态同步中'

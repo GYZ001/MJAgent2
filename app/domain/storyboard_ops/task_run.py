@@ -197,7 +197,7 @@ async def _recorded_storyboard_task(
         phase = str(getattr(supervisor_result, "phase", "") or "")
         outcome = str(getattr(supervisor_result, "outcome", "") or "")
         if result and result["status"] == "confirmed":
-            recorder.succeed("分镜已确认（尚未产生视频费用）", conn=None)
+            recorder.succeed("分镜已确认，尚未开始视频生成", conn=None)
         elif phase == "SUCCEEDED" and outcome == "SUCCEEDED_READY_FOR_CONFIRM":
             recorder.succeed("分镜已完成，等待人工确认", conn=None)
         elif phase == "PAUSED_EXTERNAL":

@@ -257,13 +257,11 @@ class VideoGenerateShotInput(StandardCommandInput):
 class VideoCompleteEpisodeInput(StandardCommandInput):
     episode_id: str
     mode: Literal["fresh", "resume"] = "fresh"
-    budget_cap_cny: float | None = Field(default=None, ge=1, le=100000, allow_inf_nan=False)
     wall_clock_cap_s: float | None = Field(default=None, ge=60, le=604800, allow_inf_nan=False)
     allow_fallback_adopt: bool = True
     max_fallback_shots: int | None = Field(default=None, ge=0, le=10000)
     allow_storyboard_edit: bool = False
     completion_grant_id: str | None = None
-    add_budget_cny: float | None = Field(default=None, ge=1, le=100000, allow_inf_nan=False)
     add_wall_clock_s: float | None = Field(default=None, ge=60, le=604800, allow_inf_nan=False)
     qualification_version: str | None = None
 
@@ -271,8 +269,6 @@ class VideoCompleteEpisodeInput(StandardCommandInput):
 class VideoCompleteProjectInput(StandardCommandInput):
     project_id: str
     episode_ids: list[str] | None = None
-    global_budget_cap_cny: float | None = Field(default=None, ge=1, le=1000000, allow_inf_nan=False)
-    per_episode_cap_cny: float | None = Field(default=None, ge=1, le=100000, allow_inf_nan=False)
     wall_clock_cap_s: float | None = Field(default=None, ge=60, le=604800, allow_inf_nan=False)
     allow_fallback_adopt: bool = True
     allow_storyboard_edit: bool = False

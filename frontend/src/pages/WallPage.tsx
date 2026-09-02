@@ -32,7 +32,7 @@ export function isSegmentShot(shot: Shot): boolean {
 }
 
 /** shot_versions.status 的活动态（app/media_pipeline/stages.py 权威枚举的子集）。 */
-const ACTIVE_VERSION_STATUSES = ['queued', 'running', 'waiting_provider', 'waiting_retry', 'waiting_budget']
+const ACTIVE_VERSION_STATUSES = ['queued', 'running', 'waiting_provider', 'waiting_retry']
 
 const VERSION_STATUS_LABEL: Record<string, string> = {
   queued: '排队中',
@@ -43,8 +43,6 @@ const VERSION_STATUS_LABEL: Record<string, string> = {
   waiting_human: '等待人工处理',
   quarantined: '已隔离（不可用）',
   waiting_retry: '等待重试',
-  waiting_budget: '预算等待',
-  paused_budget: '预算暂停',
   cancelled: '已取消',
 }
 

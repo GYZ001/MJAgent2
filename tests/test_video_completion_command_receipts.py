@@ -105,7 +105,6 @@ def test_prepared_episode_completion_restarts_exact_durable_run(monkeypatch) -> 
                 "project_id": "project-1",
                 "grant_id": "grant-exact",
                 "resume": False,
-                "budget_cap_cny": 100,
                 "wall_clock_cap_s": 3600,
                 "allow_fallback_adopt": False,
                 "max_fallback_shots": 0,
@@ -228,7 +227,6 @@ async def test_completion_reuses_exact_run_across_pre_binding_crash(
     monkeypatch.setattr(api.task_registry, "spawn", fake_spawn)
     grant = SimpleNamespace(
         grant_id="grant-exact",
-        budget_cap_cny=100.0,
         wall_clock_cap_s=3600.0,
         max_fallback_shots=0,
     )
@@ -325,7 +323,6 @@ async def test_caught_spawn_failure_is_exact_terminal_failure(monkeypatch) -> No
     )
     grant = SimpleNamespace(
         grant_id="grant-failed",
-        budget_cap_cny=100.0,
         wall_clock_cap_s=3600.0,
         max_fallback_shots=0,
     )
@@ -404,7 +401,6 @@ async def test_hard_crash_reuses_actual_persisted_workflow_without_duplicate(
         lambda **_kwargs: (
             SimpleNamespace(
                 grant_id="grant-hard-crash",
-                budget_cap_cny=100.0,
                 wall_clock_cap_s=3600.0,
                 max_fallback_shots=0,
             ),

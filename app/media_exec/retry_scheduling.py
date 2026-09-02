@@ -1,25 +1,26 @@
-"""延迟重排、供应商轮询退避与预算暂停恢复（拆分自 ``run_job.py``）。
+"""延迟重排与供应商轮询退避（拆分自 ``run_job.py``）。
 
 ``_requeue_after``/``_schedule_job_retry``/``_defer_provider_poll`` 是三种延迟
 重新入队场景（内存队列延迟、job 失败退避重试、供应商轮询节流），全部经
-``_retry_tasks``（``.common``）持有强引用防止被 GC 回收。``retry_paused`` 是预
-算暂停任务在用户提升额度后的批量恢复入口，与前三者共用
+``_retry_tasks``（``.common``）持有强引用防止被 GC 回收。与前三者共用
 ``.dispatch._enqueue_for_current_status``（2026-08-30 从 ``.worker_lifecycle``
-拆出）把 job 重新路由回正确的调度通道。
+拆出）把 job 重新路由回正确的调度通道。``retry_paused``（"预算暂停任务在
+用户提升额度后的批量恢复入口"）与其估算辅助函数 ``_resume_estimate`` 已于
+2026-09-01 随成本预算拦截体系整体退场删除：``paused_budget`` 状态既无生产
+者又无存量行，为它保留的读侧恢复机制本身就是为废止概念服务的机器（见
+CLAUDE.md「Retiring Features」）。
 """
 
 from __future__ import annotations
 
 import asyncio
 
-from app import config, errors, video_modes
-from app.compiler import shot_cost_cny
+from app import config
 from app.db import get_conn, now
 from app.hiagent import ProviderError
-from app.orchestration import media_scheduler
 from app.orchestration.media_runs import mark_media_job_state
 
-from .common import _retry_tasks, episode_video_budget_limit
+from .common import _retry_tasks
 from .dispatch import _enqueue_for_current_status
 
 
@@ -138,77 +139,5 @@ def _defer_provider_poll(
     task.add_done_callback(_retry_tasks.discard)
     return True
 
-
-def _resume_estimate(row) -> float:
-    """恢复时写进台账的估算额（纯审计口径，不再参与任何拦截判定）。"""
-    estimate = float(row["reserved_cost_cny"] or 0)
-    if estimate > 0:
-        return estimate
-    if row["kind"] == "scene":
-        return float(config.IMAGE_PRICE_PER_UNIT)
-    return float(
-        shot_cost_cny(int(row["duration_s"] or 5))
-        + config.IMAGE_PRICE_PER_UNIT
-        * video_modes.estimated_keyframe_generation_count()
-    )
-
-
-def retry_paused(episode_id: str, *, job_id: str | None = None) -> int:
-    """Resume budget-paused work against the current user-approved cap."""
-    conn = get_conn()
-    budget_limit = episode_video_budget_limit(episode_id)
-    if job_id:
-        rows = conn.execute(
-            """SELECT j.id,j.reserved_cost_cny,j.kind,s.duration_s
-                 FROM jobs j LEFT JOIN shots s ON s.id=j.shot_id
-                WHERE j.episode_id=? AND j.id=? AND j.status='paused_budget'""",
-            (episode_id, job_id),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """SELECT j.id,j.reserved_cost_cny,j.kind,s.duration_s
-                 FROM jobs j LEFT JOIN shots s ON s.id=j.shot_id
-                WHERE j.episode_id=? AND j.status='paused_budget'""",
-            (episode_id,),
-        ).fetchall()
-    resumed = 0
-    for r in rows:
-        estimate = _resume_estimate(r)
-        if media_scheduler.reserve_budget(
-            r["id"], episode_id, estimate,
-            budget_limit, conn=conn,
-        ):
-            # 恢复必须连 video_slot_active/provider_result_adoptable 一起放回：
-            # 预算暂停当初把它们清零（见 enqueue_persist._reserve_or_pause_budget
-            # 与 run_job_errors._pause_for_budget_authorization），只改 status 会
-            # 让任务重新跑完、拿到好视频，却在
-            # checkpoints._commit_video_result_checkpoint_in_transaction 里因
-            # adoptable=False 被判 quarantined——放行了任务却扔掉它的产出。
-            changed = conn.execute(
-                """UPDATE jobs SET status='queued', error=NULL, next_retry_at=NULL,
-                          video_slot_active=1, provider_result_adoptable=1, updated_at=?
-                   WHERE id=? AND status='paused_budget'""",
-                (now(), r["id"]),
-            )
-            if changed.rowcount == 1:
-                conn.execute(
-                    """UPDATE shot_versions SET video_slot_active=1
-                        WHERE id=(SELECT version_id FROM jobs WHERE id=?)
-                          AND video_slot_active=0""",
-                    (r["id"],),
-                )
-            conn.commit()
-            if changed.rowcount != 1:
-                continue
-            try:
-                _enqueue_for_current_status(r["id"])
-            except Exception as exc:
-                errors.record_and_format(
-                    exc,
-                    action="budget_resume_dispatch",
-                    context={"episode_id": episode_id, "job_id": r["id"]},
-                )
-            resumed += 1
-    return resumed
 
 __all__ = [name for name in globals() if not name.startswith("__")]

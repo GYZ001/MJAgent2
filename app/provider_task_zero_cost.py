@@ -129,11 +129,10 @@ def zero_cost_terminal_release_eligible(
     )
     if recorded_cost:
         return True, (
-            f"供应商已确认终态失败（轮询接口返回 failed）且从未产生任何产出"
-            f"文件；本地记录的成本 ¥{recorded_cost:.2f} 与零产出矛盾，不构成"
-            "已花钱的证据，释放时会一并纠正为 0"
+            "供应商已确认终态失败（轮询接口返回 failed）且从未产生任何产出"
+            "文件；本地记录的历史结算数据与零产出矛盾，释放时会一并纠正为 0"
         )
-    return True, "供应商已确认终态失败（轮询接口返回 failed），且未记录任何已产生费用"
+    return True, "供应商已确认终态失败（轮询接口返回 failed），且未记录任何历史结算数据"
 
 
 def apply_zero_cost_terminal_release(
@@ -192,8 +191,7 @@ def list_zero_cost_terminal_candidates(
     rows = db.execute(
         f"""SELECT j.id AS job_id, j.status AS job_status, j.project_id,
                    j.episode_id, j.shot_id, j.reason_text, j.updated_at,
-                   s.shot_no, e.episode_no, p.name AS project_name,
-                   br.amount_cny AS reserved_amount_cny
+                   s.shot_no, e.episode_no, p.name AS project_name
               FROM jobs j
               JOIN budget_reservations br ON br.job_id=j.id
               LEFT JOIN shots s ON s.id=j.shot_id
@@ -256,10 +254,7 @@ def _release_zero_cost_terminal_jobs_in_transaction(
                     WHERE job_id=? AND status!='released'""",
                 (stamp, stamp, job_id),
             )
-        receipts.append({
-            "job_id": job_id, "amount_cny": 0.0, "reason": reason,
-            "reserved_amount_cny": float(evidence.get("reserved_amount_cny") or 0),
-        })
+        receipts.append({"job_id": job_id, "reason": reason})
     return receipts
 
 

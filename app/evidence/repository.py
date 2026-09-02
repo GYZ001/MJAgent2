@@ -18,7 +18,7 @@ from app.harness.types import Evaluation, EvidenceArtifact
 
 ACTIVE_RUN_STATUSES = {
     "CREATED", "RUNNING", "WAITING_RETRY", "WAITING_HUMAN",
-    "WAITING_AUTHORIZATION", "PAUSED_BUDGET", "PAUSED_EXTERNAL",
+    "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL",
 }
 JSON_FIELDS = {
     "policy_snapshot_json", "config_snapshot_json", "input_artifact_ids_json",

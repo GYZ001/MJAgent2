@@ -499,10 +499,7 @@ async def test_project_video_queue_is_persisted_and_recoverable(monkeypatch) -> 
     patch_api_everywhere(monkeypatch, "_complete_episode_core", fake_complete)
     monkeypatch.setattr(api.task_registry, "spawn", capture_spawn)
 
-    result = await api._complete_project_videos_core("p", {
-        "global_budget_cap_cny": 300,
-        "per_episode_cap_cny": 100,
-    })
+    result = await api._complete_project_videos_core("p", {})
 
     project_run_id = result["project_queue_run_id"]
     assert project_run_id
@@ -512,7 +509,6 @@ async def test_project_video_queue_is_persisted_and_recoverable(monkeypatch) -> 
     ).fetchone()
     assert persisted["workflow_type"] == "project_video_completion_queue"
     state = json.loads(persisted["config_snapshot_json"])["queue_state"]
-    assert state["global_budget_cap_cny"] == 300
     assert next(item for item in state["plan"] if item["episode_id"] == "e2")["status"] == "queued"
     assert spawned == [("video_completion_project", "p", "p")]
 
@@ -1085,7 +1081,6 @@ async def test_resume_episode_reports_when_nothing_can_resume(monkeypatch) -> No
         "resume_episode_video_tasks",
         lambda _episode_id: {"resumed_jobs": 0},
     )
-    monkeypatch.setattr(api.worker, "retry_paused", lambda _episode_id: 0)
 
     async def empty_generation(_episode_id, _body):
         return {"enqueued": [], "skipped_completed": 1, "selected_shots": 0}
@@ -1114,7 +1109,6 @@ async def test_resume_episode_reports_complete_mode_reset_as_success(monkeypatch
         "resume_episode_video_tasks",
         lambda _episode_id: {"resumed_jobs": 0},
     )
-    monkeypatch.setattr(api.worker, "retry_paused", lambda _episode_id: 0)
 
     async def reset_completion(_episode_id, *, reason):
         assert reason == "CONTINUED_AS_QUICK"

@@ -21,7 +21,7 @@ async def _confirm_and_start_bible(project_id: str, style_name: str | None) -> C
 
     async def _run():
         precheck = api._compute_bible_generate_precheck(project_id, style_name=style_name)
-        quote = api._issue_payment_quote(precheck)
+        quote = api._issue_scope_quote(precheck)
         return await api._start_bible_core(
             project_id, "", confirm=True, quote_id=quote["quote_id"], style_name=style_name,
         )
@@ -100,7 +100,7 @@ async def import_novel(args: I.ProjectImportNovelInput) -> CommandResult:
                 outcome["asset_generation"] = {
                     "status": "awaiting_confirmation",
                     "reason_code": "payment_confirmation_required",
-                    "message": "人物谱与定妆涉及模型费用，已保留导入结果，确认费用后即可继续",
+                    "message": "人物谱与定妆需要确认生成范围，已保留导入结果，确认后即可继续",
                     "precheck": detail.get("precheck"),
                     "retryable": True,
                     "precheck_endpoint": f"/api/projects/{project_id}/bible/generate-precheck",
@@ -123,7 +123,7 @@ async def import_novel(args: I.ProjectImportNovelInput) -> CommandResult:
         summary = f"小说已导入，共 {chapter_count} 章；分集、人物谱与素材准备已启动"
     elif planning_status in {"running", "ready"} and asset_status == "awaiting_confirmation":
         planning_text = "已完成" if planning_status == "ready" else "已启动"
-        summary = f"小说已导入，共 {chapter_count} 章；分集{planning_text}，人物谱与定妆等待费用确认"
+        summary = f"小说已导入，共 {chapter_count} 章；分集{planning_text}，人物谱与定妆等待确认"
     elif planning_status == "ready" and asset_status in {"ready", "warning"}:
         summary = f"小说导入结果已恢复，共 {chapter_count} 章；分集和人物谱均已保留"
     elif planning_status in {"running", "ready"} and asset_status == "running":

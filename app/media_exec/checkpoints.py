@@ -226,7 +226,7 @@ def _commit_video_result_checkpoint_in_transaction(
     terminal_message = (
         None
         if adoptable
-        else "历史供应商任务已完成；结果与费用已记录，素材保持隔离且不可采用"
+        else "历史供应商任务已完成；结果已记录，素材保持隔离且不可采用"
     )
     claimed = conn.execute(
         """UPDATE jobs

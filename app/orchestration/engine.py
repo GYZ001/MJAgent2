@@ -426,7 +426,7 @@ class WorkflowRecorder:
             self.run_id,
             {
                 "CREATED", "RUNNING", "WAITING_RETRY", "WAITING_HUMAN",
-                "WAITING_AUTHORIZATION", "PAUSED_BUDGET", "PAUSED_EXTERNAL",
+                "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL",
             },
             "CANCELLED",
             message,

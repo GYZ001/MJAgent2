@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 
-from app.compiler import shot_cost_cny
 from app.db import get_conn
 from app.domain.common import router
 from app.evidence import repository as evidence_repository
@@ -107,10 +106,6 @@ def preview_shot_edit_impact(shot_id: str, body: dict):
         "revalidation_shots": sorted({max(1, int(shot["shot_no"]) - 1), int(shot["shot_no"]), int(shot["shot_no"]) + 1}),
         "rebuild": {
             "image_count": scene_count,
-            "unit_price_cny": 0,
-            "estimated_cost_cny": round(shot_cost_cny(int(changes.get("duration_s") or shot["duration_s"])), 2) if version_count else 0,
-            "max_retry_budget_cny": round(shot_cost_cny(int(changes.get("duration_s") or shot["duration_s"])) * 2, 2) if version_count else 0,
-            "note": "视频重生成费用按届时服务端费率重新报价",
         },
     }
     return create_preview(

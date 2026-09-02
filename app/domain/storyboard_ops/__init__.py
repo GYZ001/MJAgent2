@@ -155,7 +155,6 @@ from .shot_edit_session import (
     discard_shot_edit_draft as discard_shot_edit_draft,
     list_shot_edit_drafts as list_shot_edit_drafts,
     preview_shot_edit_impact as preview_shot_edit_impact,
-    shot_cost_cny as shot_cost_cny,
     start_shot_edit_session as start_shot_edit_session,
 )
 
