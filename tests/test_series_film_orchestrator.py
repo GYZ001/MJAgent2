@@ -1,11 +1,15 @@
-"""连播台串行主循环的行为回归：跳过判据、失败即停、暂停/取消三分支。
+"""连播任务台单任务主循环的行为回归：跳过判据、失败即停、取消原样冒泡。
 
 照 tests/test_project_video_queue_outcomes.py 的写法：内存 sqlite + 直接
 monkeypatch 各处 ``get_conn``，绕开真实剧本/分镜/视频生成，只验证
-``orchestrator.run_series_film`` 自身的编排逻辑（五步一 monkeypatch 到
+``orchestrator.run_task`` 自身的编排逻辑（五步一 monkeypatch 到
 ``stages.stage_is_complete``/``stages.run_stage`` 两个符号，因为
 ``orchestrator.py`` 用 ``from . import stages`` 走模块限定访问，这两个符号
 就是全部调用点的唯一绑定，不需要额外的 patch_series_ops_everywhere helper）。
+
+取消（暂停/服务重启/明确取消某个任务）的分类落终态逻辑现在归 ``queue.py``
+（见 tests/test_series_queue.py），本文件只验证 ``run_task`` 在被取消时原样
+冒泡 ``CancelledError``、不触碰终态。
 """
 from __future__ import annotations
 
@@ -42,7 +46,7 @@ def _conn(episode_nos: list[int]) -> tuple[sqlite3.Connection, list[dict]]:
     conn.execute(
         """INSERT INTO workflow_runs(
                id,workflow_type,scope_type,scope_id,status,input_fingerprint,updated_at
-           ) VALUES('run-series','series_film','project','p','CREATED','fp',1)"""
+           ) VALUES('run-task','series_task','series_task','task-1','CREATED','fp',1)"""
     )
     conn.commit()
     return conn, entries
@@ -58,7 +62,7 @@ def _patch_conn(monkeypatch, conn: sqlite3.Connection) -> None:
 
 
 def _row(conn: sqlite3.Connection) -> dict:
-    return dict(conn.execute("SELECT * FROM workflow_runs WHERE id='run-series'").fetchone())
+    return dict(conn.execute("SELECT * FROM workflow_runs WHERE id='run-task'").fetchone())
 
 
 @pytest.mark.asyncio
@@ -70,17 +74,17 @@ async def test_all_stages_skipped_then_merge_runs_and_succeeds(monkeypatch) -> N
     monkeypatch.setattr(merge, "merge_is_current", lambda *_a: False)
     monkeypatch.setattr(merge, "build_series_film", lambda *a: merge_calls.append(a) or {})
 
-    run_state = state.new_state(1, 2, entries)
-    recorder = WorkflowRecorder("run-series")
-    await orchestrator.run_series_film("p", run_state, recorder)
+    progress = state.new_progress(entries)
+    recorder = WorkflowRecorder("run-task")
+    await orchestrator.run_task("p", "task-1", 1, 2, progress, recorder)
 
     row = _row(conn)
     assert row["status"] == "SUCCEEDED"
     assert len(merge_calls) == 1
-    for entry in run_state["episodes"]:
+    for entry in progress["episodes"]:
         assert all(v == "skipped" for v in entry["stages"].values())
-    assert run_state["current_stage"] is None
-    assert run_state["current_episode_no"] is None
+    assert progress["current_stage"] is None
+    assert progress["current_episode_no"] is None
 
 
 @pytest.mark.asyncio
@@ -103,19 +107,20 @@ async def test_stage_failure_stops_serial_loop_before_next_episode(monkeypatch) 
     monkeypatch.setattr(series_stages, "stage_is_complete", fake_complete)
     monkeypatch.setattr(series_stages, "run_stage", fake_run_stage)
 
-    run_state = state.new_state(1, 2, entries)
-    recorder = WorkflowRecorder("run-series")
-    await orchestrator.run_series_film("p", run_state, recorder)
+    progress = state.new_progress(entries)
+    recorder = WorkflowRecorder("run-task")
+    with pytest.raises(orchestrator.StageFailure):
+        await orchestrator.run_task("p", "task-1", 1, 2, progress, recorder)
 
     row = _row(conn)
     assert row["status"] == "FAILED"
-    assert row["failure_code"] == "SERIES_FILM_STAGE_FAILED"
-    ep1 = run_state["episodes"][0]
+    assert row["failure_code"] == "SERIES_TASK_STAGE_FAILED"
+    ep1 = progress["episodes"][0]
     assert ep1["stages"]["screenplay"] == "done"
     assert ep1["stages"]["storyboard"] == "failed"
     assert "分镜台" in ep1["error"]
     assert ep1["stages"]["confirm"] == "pending"
-    ep2 = run_state["episodes"][1]
+    ep2 = progress["episodes"][1]
     assert all(v == "pending" for v in ep2["stages"].values())
     assert not any(episode_id == "e2" for _stage, episode_id in calls)
 
@@ -132,61 +137,15 @@ async def test_stage_completing_run_but_criteria_still_unmet_fails_closed(monkey
 
     monkeypatch.setattr(series_stages, "run_stage", fake_run_stage)
 
-    run_state = state.new_state(1, 1, entries)
-    recorder = WorkflowRecorder("run-series")
-    await orchestrator.run_series_film("p", run_state, recorder)
+    progress = state.new_progress(entries)
+    recorder = WorkflowRecorder("run-task")
+    with pytest.raises(orchestrator.StageFailure):
+        await orchestrator.run_task("p", "task-1", 1, 1, progress, recorder)
 
     row = _row(conn)
     assert row["status"] == "FAILED"
-    assert run_state["episodes"][0]["stages"]["screenplay"] == "failed"
-    assert "完成判据" in run_state["episodes"][0]["error"]
-
-
-@pytest.mark.asyncio
-async def test_cancelled_with_pause_request_marks_paused_external(monkeypatch) -> None:
-    conn, entries = _conn([1])
-    _patch_conn(monkeypatch, conn)
-    monkeypatch.setattr(series_stages, "stage_is_complete", lambda *_a: False)
-
-    async def cancelling_stage(*_a, **_k):
-        raise asyncio.CancelledError()
-
-    monkeypatch.setattr(series_stages, "run_stage", cancelling_stage)
-
-    run_state = state.new_state(1, 1, entries)
-    recorder = WorkflowRecorder("run-series")
-    state.request_pause("p")
-    try:
-        with pytest.raises(asyncio.CancelledError):
-            await orchestrator.run_series_film("p", run_state, recorder)
-    finally:
-        state.clear_pause("p")
-
-    row = _row(conn)
-    assert row["status"] == "PAUSED_EXTERNAL"
-    assert row["failure_code"] == "USER_PAUSED"
-    assert not state.is_pause_requested("p")
-
-
-@pytest.mark.asyncio
-async def test_cancelled_without_pause_or_shutdown_marks_cancelled(monkeypatch) -> None:
-    conn, entries = _conn([1])
-    _patch_conn(monkeypatch, conn)
-    monkeypatch.setattr(series_stages, "stage_is_complete", lambda *_a: False)
-
-    async def cancelling_stage(*_a, **_k):
-        raise asyncio.CancelledError()
-
-    monkeypatch.setattr(series_stages, "run_stage", cancelling_stage)
-
-    run_state = state.new_state(1, 1, entries)
-    recorder = WorkflowRecorder("run-series")
-    assert not state.is_pause_requested("p")
-    with pytest.raises(asyncio.CancelledError):
-        await orchestrator.run_series_film("p", run_state, recorder)
-
-    row = _row(conn)
-    assert row["status"] == "CANCELLED"
+    assert progress["episodes"][0]["stages"]["screenplay"] == "failed"
+    assert "完成判据" in progress["episodes"][0]["error"]
 
 
 @pytest.mark.asyncio
@@ -201,29 +160,51 @@ async def test_merge_failure_marks_run_failed(monkeypatch) -> None:
 
     monkeypatch.setattr(merge, "build_series_film", boom)
 
-    run_state = state.new_state(1, 1, entries)
-    recorder = WorkflowRecorder("run-series")
-    await orchestrator.run_series_film("p", run_state, recorder)
+    progress = state.new_progress(entries)
+    recorder = WorkflowRecorder("run-task")
+    with pytest.raises(orchestrator.StageFailure):
+        await orchestrator.run_task("p", "task-1", 1, 1, progress, recorder)
 
     row = _row(conn)
     assert row["status"] == "FAILED"
-    assert row["failure_code"] == "SERIES_FILM_MERGE_FAILED"
-    assert "ffmpeg 挂了" in run_state["error"]
+    assert row["failure_code"] == "SERIES_TASK_MERGE_FAILED"
+    assert "ffmpeg 挂了" in progress["error"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_propagates_without_touching_terminal_status(monkeypatch) -> None:
+    """取消的分类落终态归 queue.py；run_task 自己只管原样冒泡，不touch终态。"""
+    conn, entries = _conn([1])
+    _patch_conn(monkeypatch, conn)
+    monkeypatch.setattr(series_stages, "stage_is_complete", lambda *_a: False)
+
+    async def cancelling_stage(*_a, **_k):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(series_stages, "run_stage", cancelling_stage)
+
+    progress = state.new_progress(entries)
+    recorder = WorkflowRecorder("run-task")
+    with pytest.raises(asyncio.CancelledError):
+        await orchestrator.run_task("p", "task-1", 1, 1, progress, recorder)
+
+    row = _row(conn)
+    assert row["status"] == "RUNNING"  # start() 已跑过，取消没有落任何终态
 
 
 # --------------------------------------------------- HTTPException 文案折叠
 
 
 def test_exception_message_plain_string_detail_passthrough() -> None:
-    exc = HTTPException(409, "本项目已有连播台运行中")
-    assert orchestrator._exception_message(exc) == "本项目已有连播台运行中"
+    exc = HTTPException(409, "本项目已有连播任务运行中")
+    assert orchestrator._exception_message(exc) == "本项目已有连播任务运行中"
 
 
 def test_exception_message_prefers_message_key() -> None:
     exc = HTTPException(
-        409, {"code": "SERIES_FILM_ALREADY_ACTIVE", "message": "本项目已有连播台运行中"}
+        409, {"code": "SERIES_TASK_ALREADY_ACTIVE", "message": "本项目已有连播任务运行中"}
     )
-    assert orchestrator._exception_message(exc) == "本项目已有连播台运行中"
+    assert orchestrator._exception_message(exc) == "本项目已有连播任务运行中"
 
 
 def test_exception_message_falls_back_to_hard_gates_errors() -> None:
@@ -268,7 +249,7 @@ def test_exception_message_last_resort_str_dict() -> None:
 async def test_stage_failure_with_confirmation_gate_detail_shows_human_message(
     monkeypatch,
 ) -> None:
-    """真实故障复现：确认阶段被硬门禁拦下时，run.error 不再是整个契约字典。"""
+    """真实故障复现：确认阶段被硬门禁拦下时，进度树的 error 不再是整个契约字典。"""
     conn, entries = _conn([1])
     _patch_conn(monkeypatch, conn)
     # 只让 confirm 走到 run_stage；其余阶段判定为已完成直接跳过。
@@ -288,11 +269,12 @@ async def test_stage_failure_with_confirmation_gate_detail_shows_human_message(
 
     monkeypatch.setattr(series_stages, "run_stage", fake_run_stage)
 
-    run_state = state.new_state(1, 1, entries)
-    recorder = WorkflowRecorder("run-series")
-    await orchestrator.run_series_film("p", run_state, recorder)
+    progress = state.new_progress(entries)
+    recorder = WorkflowRecorder("run-task")
+    with pytest.raises(orchestrator.StageFailure):
+        await orchestrator.run_task("p", "task-1", 1, 1, progress, recorder)
 
-    ep1 = run_state["episodes"][0]
+    ep1 = progress["episodes"][0]
     assert ep1["stages"]["confirm"] == "failed"
     assert "分镜没有覆盖整集原文" in ep1["error"]
     assert "处理办法：返回分镜台继续修复" in ep1["error"]

@@ -5,26 +5,28 @@ Unlike the 13 existing ``test_*_monkeypatch_guard.py`` files (which guard a
 single-file module was split into a package), ``app/domain/series_ops`` was
 designed as a real package from day one specifically to avoid ever needing
 that helper: every sibling submodule that a test might want to stub
-(``stages``, ``merge``, ``orchestrator``, ``state``) is reached exclusively
-via ``from . import x`` + ``x.name(...)`` attribute access, never
-``from .x import name``. Because Python resolves ``x.name`` on the shared
-module object at *call time*, a single ``monkeypatch.setattr(x, "name",
-stub)`` reaches every call site in the package -- there is no second,
-private copy for the patch to miss.
+(``stages``, ``merge``, ``orchestrator``, ``state``, ``tasks``, ``queue``,
+``exports``) is reached exclusively via ``from . import x`` + ``x.name(...)``
+attribute access, never ``from .x import name``. Because Python resolves
+``x.name`` on the shared module object at *call time*, a single
+``monkeypatch.setattr(x, "name", stub)`` reaches every call site in the
+package -- there is no second, private copy for the patch to miss.
 
 This guard is the structural half of that promise: it AST-scans every file
 under ``app/domain/series_ops/`` and fails if any of them reintroduces
 ``from .stages import name`` / ``from .merge import name`` /
-``from .orchestrator import name`` / ``from .state import name`` (a level-1
-relative import that copies a *name*, not the module, into the importer's
-own namespace) -- the exact pattern that made ``patch_X_everywhere`` helpers
-necessary for the other packages in this repo (see e.g.
-``app/video_supervisor/__init__.py``'s module docstring). ``from . import
-recovery`` (module-level) is fine anywhere; ``__init__.py``'s own
-``from .recovery import recover_series_film_runs`` is exempt because nothing
-inside the package calls back into that name -- it is a leaf export consumed
-only by ``app/recovery.py`` outside the package, so there is no internal
-call site a patch could fail to reach.
+``from .orchestrator import name`` / ``from .state import name`` /
+``from .tasks import name`` / ``from .queue import name`` /
+``from .exports import name`` (a level-1 relative import that copies a
+*name*, not the module, into the importer's own namespace) -- the exact
+pattern that made ``patch_X_everywhere`` helpers necessary for the other
+packages in this repo (see e.g. ``app/video_supervisor/__init__.py``'s
+module docstring). ``from . import recovery`` (module-level) is fine
+anywhere; ``__init__.py``'s own ``from .recovery import
+recover_series_film_runs`` is exempt because nothing inside the package
+calls back into that name -- it is a leaf export consumed only by
+``app/recovery.py`` outside the package, so there is no internal call site a
+patch could fail to reach.
 
 If this test ever needs a real exemption (a genuine reason to copy a name
 out of one of the four guarded modules), the fix is almost always "call
@@ -37,9 +39,9 @@ from pathlib import Path
 
 PACKAGE_DIR = Path(__file__).resolve().parent.parent / "app" / "domain" / "series_ops"
 
-# These four hold state/behaviour tests stub out; they must only ever be
+# These hold state/behaviour tests stub out; they must only ever be
 # reached via ``from . import <name>`` + attribute access.
-GUARDED_MODULES = {"stages", "merge", "orchestrator", "state"}
+GUARDED_MODULES = {"stages", "merge", "orchestrator", "state", "tasks", "queue", "exports"}
 
 
 def _iter_package_files() -> list[Path]:

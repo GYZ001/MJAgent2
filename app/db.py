@@ -1777,6 +1777,44 @@ MIGRATIONS = (
        )""",
     "CREATE INDEX IF NOT EXISTS idx_payment_orders_user ON payment_orders(user_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_payment_orders_status ON payment_orders(status, created_at)",
+    # 连播任务台（见 docs/series_task_console_plan.md，2026-09-02 冻结）：把旧的
+    # 项目级单例连播台（一个项目同时只有一条 workflow_runs(workflow_type=
+    # 'series_film')）换成「一个连续集区间 = 一条任务记录」，配一张项目级队列
+    # 状态表做串行调度。UNIQUE(project_id, episode_from, episode_to) 让「按
+    # group_size 重新切分」天然幂等：同区间已存在就跳过，不删除任何既有任务。
+    # queue_seq 用 REAL 而不是 INTEGER：入队时直接取当次调用内自增的浮点序号，
+    # 不需要额外一张计数器表；NULL 表示不在队列里。
+    """CREATE TABLE IF NOT EXISTS series_tasks (
+           id TEXT PRIMARY KEY,
+           project_id TEXT NOT NULL,
+           title TEXT NOT NULL DEFAULT '',
+           episode_from INTEGER NOT NULL,
+           episode_to INTEGER NOT NULL,
+           status TEXT NOT NULL DEFAULT 'idle',
+           queue_seq REAL,
+           run_id TEXT,
+           progress_json TEXT NOT NULL DEFAULT '{}',
+           error TEXT,
+           created_at REAL NOT NULL,
+           updated_at REAL NOT NULL,
+           started_at REAL,
+           finished_at REAL,
+           FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+       )""",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_series_tasks_range "
+    "ON series_tasks(project_id, episode_from, episode_to)",
+    "CREATE INDEX IF NOT EXISTS idx_series_tasks_queue "
+    "ON series_tasks(project_id, status, queue_seq)",
+    # 队列级暂停开关：paused=1 时 runner 不再自动取下一个任务；stop_reason 只在
+    # 「连续 3 个任务失败自动停队」时写入（中文原文，界面直接展示），用户手动
+    # 暂停不写这个字段。
+    """CREATE TABLE IF NOT EXISTS series_queue_state (
+           project_id TEXT PRIMARY KEY,
+           paused INTEGER NOT NULL DEFAULT 0,
+           stop_reason TEXT,
+           updated_at REAL NOT NULL,
+           FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+       )""",
 )
 
 

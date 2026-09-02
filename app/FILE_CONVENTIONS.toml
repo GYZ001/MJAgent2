@@ -72,7 +72,9 @@ max_lines_tests = 500
 # app/payments/ 模块文档）。MIGRATIONS 是只增不减的历史迁移账本，行数增长
 # 是这类文件的正常形态，不是需要拆解的膨胀——与"巨型函数分解"那类因为拒绝拆
 # 解而上调基线的情况不是同一性质，不违反棘轮"只降不升"守的是设计质量维度。
-"app/db.py" = 3535
+# 2026-09-02 +38：新增 series_tasks / series_queue_state 两张表 + 三条索引
+# （连播任务台改造，见 docs/series_task_console_plan.md），同一账本性质。
+"app/db.py" = 3573
 "app/delivery.py" = 1460
 "app/domain/__init__.py" = 1090
 "app/domain/bible_ops/precheck.py" = 517

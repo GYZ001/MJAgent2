@@ -391,15 +391,44 @@ class SystemMkdirInput(StandardCommandInput):
     name: str
 
 
-class SeriesFilmStartInput(StandardCommandInput):
-    """连播台启动（``series.film_start``）：闭区间 [episode_from, episode_to]，跨度 ≤10。"""
+class SeriesTasksGenerateInput(StandardCommandInput):
+    """连播任务生成（``series.tasks_generate``）：``group_size`` 与 ``ranges`` 二选一。"""
 
     project_id: str
-    episode_from: int
-    episode_to: int
+    group_size: int | None = None
+    ranges: list[dict[str, int]] | None = None
 
 
-class SeriesFilmControlInput(StandardCommandInput):
-    """连播台暂停/继续（``series.film_pause``/``series.film_resume``）共用输入。"""
+class SeriesTaskDeleteInput(StandardCommandInput):
+    """连播任务删除（``series.task_delete``）：只删任务记录，成片文件保留。"""
 
     project_id: str
+    task_id: str
+
+
+class SeriesTasksEnqueueInput(StandardCommandInput):
+    """连播任务入队（``series.tasks_enqueue``）：数组顺序即执行顺序。"""
+
+    project_id: str
+    task_ids: list[str]
+    force: bool = False
+
+
+class SeriesTasksCancelInput(StandardCommandInput):
+    """连播任务取消（``series.tasks_cancel``）：命中排队中即退回 idle，命中正在跑的即打断。"""
+
+    project_id: str
+    task_ids: list[str]
+
+
+class SeriesQueueControlInput(StandardCommandInput):
+    """连播队列暂停/继续（``series.queue_pause``/``series.queue_resume``）共用输入。"""
+
+    project_id: str
+
+
+class SeriesExportCreateInput(StandardCommandInput):
+    """连播导出（``series.export_create``）：只接受成片已存在的任务。"""
+
+    project_id: str
+    task_ids: list[str]

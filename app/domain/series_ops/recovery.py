@@ -1,84 +1,45 @@
-"""开机恢复因服务重启而中断的连播台运行。
+"""开机恢复：连播任务台的半边状态清理 + 队列重启。
 
-镜像 ``app.domain.video_ops.project_queue_run.recover_project_video_completion_queues``
-的写法：只抢救「因进程重启而暂停」的运行（``failure_code='SERVICE_RESTART'``），
-用户主动暂停（``failure_code='USER_PAUSED'``）的运行不在这里恢复，等用户自己
-在连播台点「继续」。
+两件事：
+1. 把旧单例模型遗留的 ``workflow_runs(workflow_type='series_film', status IN
+   (CREATED/RUNNING/PAUSED_EXTERNAL))`` 统一标为 ``CANCELLED``（不会再有任何
+   代码去推进它们，永远挂着会误导观测台）。
+2. 把因进程重启卡在 ``running`` 的 ``series_tasks`` 复位为 ``queued``（进度
+   保留），再按项目重启队列 runner（项目本身处于暂停状态则不自动重启，尊重
+   用户此前的暂停）。
 """
 from __future__ import annotations
 
-import json
+from app.db import get_conn
+from app.orchestration.state_machine import transition_run
 
-from app import errors, task_registry
-from app.db import get_conn, now
-from app.orchestration.engine import WorkflowRecorder
+from . import queue, tasks
 
-from . import orchestrator, state
+_LEGACY_STATUSES = ("CREATED", "RUNNING", "PAUSED_EXTERNAL")
+_LEGACY_MESSAGE = "连播台已升级为连播任务台，历史单例运行记录不再使用，自动标记为已取消。"
+
+
+def _cancel_legacy_series_film_runs(conn) -> int:
+    rows = conn.execute(
+        "SELECT id, status FROM workflow_runs WHERE workflow_type='series_film' AND status IN (?,?,?)",
+        _LEGACY_STATUSES,
+    ).fetchall()
+    for row in rows:
+        transition_run(
+            row["id"], row["status"], "CANCELLED", _LEGACY_MESSAGE,
+            failure_code="SERIES_TASK_MIGRATION", conn=conn,
+        )
+    if rows:
+        conn.commit()
+    return len(rows)
 
 
 def recover_series_film_runs() -> int:
     conn = get_conn()
-    rows = conn.execute(
-        """SELECT * FROM workflow_runs
-           WHERE workflow_type=? AND status='PAUSED_EXTERNAL' AND failure_code='SERVICE_RESTART'
-             AND recovered_by_run_id IS NULL
-             AND NOT EXISTS (
-               SELECT 1 FROM projects p -- ALL_OWNERS：开机恢复扫描全部所有者的
-               -- 中断连播台运行，排除软删除（回收站）项目，避免重新点燃残留任务
-                WHERE p.id=workflow_runs.scope_id AND p.deleted_at IS NOT NULL
-             )
-           ORDER BY updated_at""",
-        (state.WORKFLOW_TYPE,),
-    ).fetchall()
+    _cancel_legacy_series_film_runs(conn)
+    project_ids = tasks.reset_running_to_queued(conn)
     resumed = 0
-    for row in rows:
-        if _recover_one(conn, dict(row)):
+    for project_id in project_ids:
+        if queue.resume_after_recovery(project_id):
             resumed += 1
     return resumed
-
-
-def _recover_one(conn, row: dict) -> bool:
-    project_id = row["scope_id"]
-    if task_registry.active(state.TASK_KIND, project_id):
-        return False
-    recorder = None
-    coro = None
-    try:
-        run_state = state.load_state(row)
-        if not run_state:
-            raise ValueError("连播台恢复参数不完整")
-        recorder = WorkflowRecorder.create(
-            workflow_type=state.WORKFLOW_TYPE,
-            scope_type="project",
-            scope_id=project_id,
-            input_fingerprint=row["input_fingerprint"],
-            requested_by="system",
-            trigger_type="resume",
-            policy_snapshot=json.loads(row["policy_snapshot_json"] or "{}"),
-            config_snapshot={"series_state": run_state},
-            parent_run_id=row["id"],
-        )
-        coro = orchestrator.run_series_film(project_id, run_state, recorder)
-        task_registry.spawn(state.TASK_KIND, project_id, coro, project_id=project_id)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        if coro is not None:
-            coro.close()
-        if recorder is not None:
-            try:
-                recorder.cancel("连播台恢复任务未能启动", conn=None)
-            except Exception:  # noqa: BLE001
-                pass
-        errors.record_and_format(
-            exc, action="series_film_recovery",
-            context={"project_id": project_id, "run_id": row["id"]},
-        )
-        conn.execute(
-            """UPDATE workflow_runs
-               SET status='FAILED', failure_code='RECOVERY_START_FAILED',
-                   failure_message='连播台恢复任务未能启动，可重新提交', updated_at=?
-               WHERE id=? AND status='PAUSED_EXTERNAL'""",
-            (now(), row["id"]),
-        )
-        conn.commit()
-        return False
