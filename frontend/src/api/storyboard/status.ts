@@ -89,7 +89,6 @@ export type ConfirmPreview = {
   final_shot_valid: boolean;
   hard_gates: { passed: boolean; errors: string[] };
   warnings: string[];
-  estimated_video_cost_cny: { min: number; max: number; note: string };
   unlocks: string[];
   recovery_action?: string | null;
 };

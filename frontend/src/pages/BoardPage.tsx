@@ -631,7 +631,7 @@ export default function BoardPage() {
         } catch (caught) {
           const apiError = caught as ApiError
           const detail = apiError.detail as Partial<ConfirmPreview> | undefined
-          if (detail?.hard_gates && detail.estimated_video_cost_cny && detail.unlocks) {
+          if (detail?.hard_gates && detail.unlocks) {
             setConfirmPreview(detail as ConfirmPreview)
           } else {
             toast(apiError.message, true)
@@ -1129,11 +1129,11 @@ export default function BoardPage() {
         {confirmPreview && <div className="storyboard-preview-card">
           <dl><div><dt>当前视频提示词</dt><dd>{confirmPreview.storyboard_artifact_id ? '已生成，等待确认' : '待定稿'}</dd></div><div><dt>段落完整性</dt><dd>{confirmPreview.shot_count}/{confirmPreview.planned_shots}</dd></div>
             <div><dt>总时长</dt><dd>{confirmPreview.total_duration_s}s</dd></div><div><dt>收尾段</dt><dd>{confirmPreview.final_shot_valid ? '有效' : '缺失'}</dd></div>
-            <div><dt>必检项</dt><dd>未通过</dd></div><div><dt>预计视频成本</dt><dd>¥{confirmPreview.estimated_video_cost_cny.min}–¥{confirmPreview.estimated_video_cost_cny.max}</dd></div></dl>
+            <div><dt>必检项</dt><dd>未通过</dd></div></dl>
           {!!confirmPreview.warnings.length && <div className="warning-banner">{confirmPreview.warnings.map(storyboardGateIssueLabel).join('；')}</div>}
           {!!confirmPreview.hard_gates.errors.length && <div className="error-banner" role="alert"><b>请先处理以下问题：</b><ul>{confirmPreview.hard_gates.errors.map((item, index) => <li key={`${index}-${item}`}>{storyboardGateIssueLabel(item)}</li>)}</ul></div>}
           <p>处理方式：{confirmPreview.recovery_action || '返回分镜台继续修复，全部必检项通过后会自动确认'}</p>
-          <small>{confirmPreview.estimated_video_cost_cny.note}</small>
+          <small>确认分镜不会自动开始视频生成，仍需在生成台手动发起。</small>
         </div>}
       </Modal>
     </>

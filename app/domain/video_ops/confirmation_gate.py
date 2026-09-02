@@ -343,11 +343,10 @@ def create_storyboard_confirmation_preview(episode_id: str) -> dict:
             "runtime_blocking": False,
             "issue_count": len(evaluation.issues),
         },
-        "estimated_video_cost_cny": {
-            "min": evaluation.estimated_cost_cny,
-            "max": evaluation.estimated_cost_cny,
-            "note": "按当前服务端费率估算；确认不会自动提交付费视频",
-        },
+        # 金额展示随成本预算体系一并退场（会员分档时长制，不按金额计费）：
+        # 这里过去发的 estimated_video_cost_cny 是分镜台确认弹窗「预计视频成本
+        # ¥X–¥Y」的唯一数据源。前端同步删除展示与类型定义，两侧一起退场，不留
+        # 一侧宽（见 CLAUDE.md「Retiring Features」与「界面承诺必须与实际行为一致」）。
         "unlocks": [] if hard_errors else ["生成台", "付费视频生成入口"],
         "recovery_action": (
             "返回分镜台继续修复；全部硬门禁通过后再确认"
