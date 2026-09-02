@@ -720,11 +720,7 @@ def patch_api_everywhere(monkeypatch, name, value, **kwargs):
     monkeypatch.setattr(api, name, value, **kwargs)
     monkeypatch.setattr(domain, name, value, **kwargs)
     for _, mod_name, _ in pkgutil.iter_modules(domain.__path__):
-        # 用 sys.modules 按全限定名解析叶子模块，不要用 getattr：子模块若
-        # 再导出一个与自身文件同名的符号（`from .x import x as x`），包属性
-        # 会被那个符号覆盖掉子模块引用，getattr 于是静默返回错的对象，
-        # hasattr 判 False、打桩打空且不报错（2026-08-30 实测：曾让
-        # get_conn 静默连到生产库，造成 7 个测试假绿/假红）。
+        # 按全限定名走 sys.modules，不用 getattr（理由见 patch_stages_everywhere）。
         submodule = sys.modules.get(f"{domain.__name__}.{mod_name}")
         if submodule is None:
             continue
@@ -1000,7 +996,11 @@ def _reset_capability_runtime(
     from app.capabilities import bus as capability_bus
     from app.capabilities.loader import ensure_catalog_loaded
     from app.capabilities.policy import reset_approvals_for_tests
-    from app import db
+    from app import db, hiagent
+    from app.portraits import identity_investigation
+    async def _empty_investigation_turn(*_a, **_k):
+        return hiagent.AssistantTurn(content="", tool_calls=[])
+    monkeypatch.setattr(identity_investigation, "_chat_with_tools", _empty_investigation_turn)
 
     if _DATABASE_TEMPLATE is None:
         raise RuntimeError("pytest database template is not configured")
