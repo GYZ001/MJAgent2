@@ -10,12 +10,12 @@
 ``tests/test_series_film_orchestrator.py`` 直测
 ``orchestrator._exception_message`` 的先例——这是一个纯决策函数，不需要经过
 整个 ``run_series_film`` 编排跑一遍。``app.domain.video_ops._complete_episode_core``
-在 ``stages.py`` 里永远是函数体内的惰性 import（``from app.domain.video_ops
-import _complete_episode_core``），每次调用都在包对象上现查，所以直接
-monkeypatch 包属性即可命中，不需要 ``patch_video_ops_everywhere`` 之类的
-「everywhere」helper（那是给顶层缓存 import 准备的，参见
-``tests/test_stages_monkeypatch_guard.py`` 的说明）。同理
-``app.video_supervisor.load_latest_checkpoint``。
+在 ``stages.py`` 里是函数体内的惰性 import（``from app.domain.video_ops
+import _complete_episode_core``），打包属性本可命中；但仓库的 AST 守卫
+（``tests/test_api_monkeypatch_guard.py`` / ``test_video_supervisor_monkeypatch_guard.py``）
+不区分这种形态，一律要求走 ``patch_api_everywhere`` /
+``patch_video_supervisor_everywhere``——它们同样会打到包属性，对本测试等价，
+且守卫能把「漏改」从静默变成 CI 立刻报错（CLAUDE.md「拆包会静默废掉 monkeypatch」）。
 """
 from __future__ import annotations
 
@@ -25,10 +25,9 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-import app.domain.video_ops as video_ops
-import app.video_supervisor as video_supervisor
 from app import db
 from app.domain.series_ops import stages as series_stages
+from tests.conftest import patch_api_everywhere, patch_video_supervisor_everywhere
 
 
 def _conn(active_video_run_id: str | None) -> sqlite3.Connection:
@@ -68,8 +67,8 @@ async def test_paused_external_service_restart_resumes_with_original_grant(
     conn = _conn("run-old")
     _insert_run(conn, "run-old", "PAUSED_EXTERNAL")
     monkeypatch.setattr(series_stages, "get_conn", lambda: conn)
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "load_latest_checkpoint",
         lambda _eid: SimpleNamespace(
             run_id="run-old", grant_id="grant-1", phase="DISPATCHING", outcome=None,
@@ -81,7 +80,7 @@ async def test_paused_external_service_restart_resumes_with_original_grant(
         captured.update({"episode_id": episode_id, "body": body})
         return {"run_id": "run-new"}
 
-    monkeypatch.setattr(video_ops, "_complete_episode_core", fake_complete)
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", fake_complete)
 
     await series_stages._kick_video_completion("e", "series-run-1")
 
@@ -99,8 +98,8 @@ async def test_waiting_authorization_stops_with_actionable_message(monkeypatch) 
     conn = _conn("run-old")
     _insert_run(conn, "run-old", "PARTIAL")
     monkeypatch.setattr(series_stages, "get_conn", lambda: conn)
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "load_latest_checkpoint",
         lambda _eid: SimpleNamespace(
             run_id="run-old",
@@ -113,7 +112,7 @@ async def test_waiting_authorization_stops_with_actionable_message(monkeypatch) 
     async def fail_if_called(*_a, **_k):
         raise AssertionError("等待人工处理时不应该发起新的补齐尝试")
 
-    monkeypatch.setattr(video_ops, "_complete_episode_core", fail_if_called)
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", fail_if_called)
 
     with pytest.raises(RuntimeError) as exc:
         await series_stages._kick_video_completion("e", "series-run-1")
@@ -134,7 +133,7 @@ async def test_fresh_mode_unaffected_when_no_active_run(monkeypatch) -> None:
         captured.update({"episode_id": episode_id, "body": body})
         return {}
 
-    monkeypatch.setattr(video_ops, "_complete_episode_core", fake_complete)
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", fake_complete)
 
     await series_stages._kick_video_completion("e", "series-run-1")
 
@@ -151,7 +150,7 @@ async def test_fresh_still_swallows_already_active_conflict(monkeypatch) -> None
     async def conflict(*_a, **_k):
         raise HTTPException(409, {"code": "VIDEO_COMPLETION_ALREADY_ACTIVE"})
 
-    monkeypatch.setattr(video_ops, "_complete_episode_core", conflict)
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", conflict)
 
     await series_stages._kick_video_completion("e", "series-run-1")  # 不应该抛出
 
@@ -165,8 +164,8 @@ async def test_paused_external_resume_conflict_falls_back_to_wait_message(
     conn = _conn("run-old")
     _insert_run(conn, "run-old", "PAUSED_EXTERNAL")
     monkeypatch.setattr(series_stages, "get_conn", lambda: conn)
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "load_latest_checkpoint",
         lambda _eid: SimpleNamespace(
             run_id="run-old", grant_id="grant-1", phase="DISPATCHING", outcome=None,
@@ -179,7 +178,7 @@ async def test_paused_external_resume_conflict_falls_back_to_wait_message(
             "message": "全片补齐任务已在启动或运行，请勿重复提交",
         })
 
-    monkeypatch.setattr(video_ops, "_complete_episode_core", already_active)
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", already_active)
 
     with pytest.raises(RuntimeError) as exc:
         await series_stages._kick_video_completion("e", "series-run-1")
