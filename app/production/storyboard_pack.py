@@ -58,6 +58,9 @@ from app.production.storyboard_dialects import (
     SEEDANCE_DIALECT_INSTRUCTIONS,  # noqa: F401 -- 重新导出，测试按旧路径 import
     _dialect_for_target_video_model,
 )
+from app.production.storyboard_context_segments import (
+    context_only_segment_errors, context_segment_indexes, context_segment_rule,
+)
 from app.production.storyboard_dialogue_ledger import (
     DialogueQuote,
     _AiDroppedLine,
@@ -498,8 +501,9 @@ class _AiBeatSheetDraft(BaseModel):
 
 def _validate_beat_sheet_draft(
     draft: _AiBeatSheetDraft, *, total_segments: int, dialogue_quotes: list[DialogueQuote],
+    context_indexes: set[int] = frozenset(), paratext_indexes: set[int] = frozenset(),
 ) -> list[str]:
-    errors: list[str] = []
+    errors = context_only_segment_errors(draft.segments, set(context_indexes), set(paratext_indexes))
     beat_ids = {beat.beat_id for beat in draft.beat_sheet}
     if len(beat_ids) != len(draft.beat_sheet):
         errors.append("beat_sheet 中 beat_id 必须唯一")
@@ -771,7 +775,7 @@ def _dialogue_targets_payload(dialogue_quotes: list[DialogueQuote]) -> dict[str,
     }
 
 
-def _beat_sheet_rules(paratext_indexes: set[int]) -> list[str]:
+def _beat_sheet_rules(paratext_indexes: set[int], context_indexes: set[int] = frozenset()) -> list[str]:
     """阶段一 rules[]：段落归组形状要求 + 2.1.0 对白台账正面陈述（见 beat_sheet_dialogue_ledger_rules）。"""
     rules = [
         "beat_sheet[].segment_indexes 与 segments[].source_segment_indexes 必须引用"
@@ -787,9 +791,8 @@ def _beat_sheet_rules(paratext_indexes: set[int]) -> list[str]:
         *beat_sheet_dialogue_ledger_rules(),
         *beat_sheet_narrative_arc_rules(),
     ]
-    paratext_rule = _paratext_exclusion_rule(paratext_indexes)
-    if paratext_rule is not None:
-        rules.append(paratext_rule)
+    extra = (_paratext_exclusion_rule(paratext_indexes), context_segment_rule(set(context_indexes)))
+    rules.extend(rule for rule in extra if rule is not None)
     return rules
 
 
@@ -802,6 +805,7 @@ async def _generate_beat_sheet(
     dialogue_quotes: list[DialogueQuote],
 ) -> _AiBeatSheetDraft:
     paratext_indexes = _paratext_segment_indexes(payload)
+    context_indexes = context_segment_indexes(payload)
     source_block = _source_block_for_prompt(segments, paratext_indexes)
     task_payload = {
         "task": (
@@ -812,7 +816,7 @@ async def _generate_beat_sheet(
             "叙事推进段用 3-4 镜；这不是你要填的字段，是下一步的产出约束，这里只需要"
             "正确分段）。dialogue_targets 里的每一句原文台词都要显式决定去留，见 rules。"
         ),
-        "rules": _beat_sheet_rules(paratext_indexes),
+        "rules": _beat_sheet_rules(paratext_indexes, context_indexes),
         "episode_no": episode_no,
         "known_assets": _manifest_brief_for_prompt(payload),
         "source_text_by_segment": source_block,
@@ -824,18 +828,13 @@ async def _generate_beat_sheet(
     ).hexdigest()[:24]
     return await model_gateway.chat_structured(
         [
-            {
-                "role": "system",
-                "content": (
-                    "你是短剧分镜师。只输出符合 Schema 的一个 JSON 对象，不输出 Markdown"
-                    "或解释。"
-                ),
-            },
+            {"role": "system", "content": "你是短剧分镜师。只输出符合 Schema 的一个 JSON 对象，不输出 Markdown或解释。"},
             {"role": "user", "content": json.dumps(task_payload, ensure_ascii=False)},
         ],
         model_type=_AiBeatSheetDraft,
         validate=lambda value: _validate_beat_sheet_draft(
             value, total_segments=len(segments), dialogue_quotes=dialogue_quotes,
+            context_indexes=context_indexes, paratext_indexes=paratext_indexes,
         ),
         operation_id=f"storyboard_pack_beat_sheet_{episode_id}_{fingerprint}",
         max_tokens=6000,
