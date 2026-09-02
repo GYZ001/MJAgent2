@@ -212,6 +212,22 @@ function readLocation() {
   return routeFromPath(window.location.pathname);
 }
 
+/** go() 的分集槽位解析：``undefined`` = 沿用当前选中的集（映射台/分镜台之间来回
+ *  切换要记住分集），``null``/字符串 = 显式指定。连播台是唯一的例外：它的这个槽位
+ *  承载的是**任务 id**（/projects/{pid}/series/{taskId}），只能来自列表→详情的显式
+ *  导航；从别的工作台带过来的粘性分集 id 对它没有意义——2026-09-02 实测，从选中了
+ *  某一集的分镜台点侧栏进连播台，那个集 id 被编进 URL、当成任务 id 去查详情，
+ *  用户看到的是「资源不存在或不属于当前账号」。 */
+export function resolveNavEpisodeId(
+  view: View,
+  requested: string | null | undefined,
+  current: string | null,
+): string | null {
+  if (view === "studio" || view === "system") return null;
+  if (requested === undefined) return view === "series" ? null : current;
+  return requested;
+}
+
 export function locationFor(
   view: View,
   projectId: string | null,
@@ -457,11 +473,7 @@ function AppShell() {
         : pid === undefined
           ? projectId
           : pid;
-      const nextEpisodeId = globalView
-        ? null
-        : eid === undefined
-          ? episodeId
-          : eid;
+      const nextEpisodeId = resolveNavEpisodeId(v, eid, episodeId);
       const nextChapterIdx = globalView
         ? null
         : cidx === undefined

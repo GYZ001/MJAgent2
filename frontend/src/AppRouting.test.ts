@@ -1,7 +1,7 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { locationFor, routeFromPath, shouldRetryPollError, useNav } from './App'
+import { locationFor, resolveNavEpisodeId, routeFromPath, shouldRetryPollError, useNav } from './App'
 
 describe('无分集工作台路由', () => {
   afterEach(() => vi.unstubAllGlobals())
@@ -33,6 +33,22 @@ describe('无分集工作台路由', () => {
       episodeId: 'e1',
       chapterIdx: null,
     })
+  })
+
+  it('连播台不吃从别的工作台带过来的粘性分集 id，显式任务 id 照常进 URL', () => {
+    // 分镜台选中 e1 → 点侧栏连播台：eid 未指定（沿用当前），连播台必须得到 null，
+    // 否则 e1 会被编进 /series/e1 当成任务 id 去查详情而 404。
+    expect(resolveNavEpisodeId('series', undefined, 'e1')).toBeNull()
+    expect(locationFor('series', 'p1', resolveNavEpisodeId('series', undefined, 'e1'), null))
+      .toBe('/projects/p1/series')
+    // 列表 → 详情是显式导航，任务 id 照常进 URL；刷新后仍解析回同一个任务。
+    expect(resolveNavEpisodeId('series', 'st_1', 'e1')).toBe('st_1')
+    expect(locationFor('series', 'p1', 'st_1', null)).toBe('/projects/p1/series/st_1')
+    expect(routeFromPath('/projects/p1/series/st_1').episodeId).toBe('st_1')
+    // 其它工作台的「沿用当前」语义不变：映射台/分镜台之间切换要记住分集。
+    expect(resolveNavEpisodeId('board', undefined, 'e1')).toBe('e1')
+    expect(resolveNavEpisodeId('bible', undefined, 'e1')).toBe('e1')
+    expect(resolveNavEpisodeId('studio', undefined, 'e1')).toBeNull()
   })
 
   it('项目观测台与系统设置使用隔离的稳定路由', () => {
