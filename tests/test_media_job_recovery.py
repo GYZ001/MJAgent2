@@ -199,7 +199,13 @@ def test_restart_interrupted_job_is_resumed(monkeypatch) -> None:
 
 
 def test_paused_budget_jobs_are_not_resumed(monkeypatch) -> None:
-    """集预算不足暂停的 job 不应被自动恢复（需显式 retry_paused 释放预算后重试）。"""
+    """启动期恢复不碰 paused_budget 的 job。
+
+    成本预算退场后这些旧状态行由周期对账 ``reconcile_stalled_video_jobs``
+    自动放行（见 job_recovery._resume_budget_paused_episodes），但那是另一条
+    路径；``recover_media_jobs`` 这条启动期入口仍然只处理被重启打断的在途
+    任务，不越权改动它们，本用例守的就是这个边界。
+    """
     conn = _conn()
     # PAUSED_BUDGET 的 run，不是 SERVICE_RESTART
     conn.execute(

@@ -917,7 +917,9 @@ def test_episode_plan_preflight_binds_destructive_impact(
     assert impact.affected.shot_count == 1
     assert impact.affected.invalidated_artifacts == 5
     assert impact.affected.packages == ["pkg1"]
-    assert impact.estimated_cost_cny is None
+    # 「预检不估算费用」这条断言随成本预算体系退场（20b6252）一并移除：
+    # PreflightResult.estimated_cost_cny 字段已删，本产品改为会员分档时长制。
+    # 「重排不产生模型调用」这层原意由下面的 warning 断言继续承担。
     assert any("不调用模型" in warning for warning in impact.warnings)
 
 
