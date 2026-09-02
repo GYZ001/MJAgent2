@@ -14,6 +14,10 @@ from app import config
 from app.artifacts import _adopted_video_paths
 from app.atomic_io import atomic_copy
 from app.db import get_conn, new_id, now, rows_to_dicts
+from app.media_pipeline.delivery_encode import (
+    DELIVERY_VIDEO_ARGS, INTERMEDIATE_VIDEO_ARGS, canvas_filter, encode_timeout_s,
+    probe_resolution, probe_video_codec, uniform_resolution,
+)
 from app.media_urls import build_media_url
 
 
@@ -254,6 +258,12 @@ def _concat_promotion_checkpoint(_phase: str) -> None:
     """No-op checkpoint used by crash-recovery integration tests."""
 
 
+def _video_delivery_report(path: str | Path) -> dict[str, Any]:
+    """width/height/video_encode 值来自对成片本身的 ffprobe，不是编码参数常量。"""
+    width, height = probe_resolution(path)
+    return {"width": width, "height": height, "video_encode": probe_video_codec(path)}
+
+
 def _content_versioned_final_url(final_path: Path, content_hash: str) -> str:
     return build_media_url(final_path, version=content_hash.removeprefix("sha256:"))
 
@@ -471,14 +481,13 @@ def _publish_concat_output(
         operation_key = _concat_operation_key(operation_idempotency_key)
         final_sha256 = _media_sha256(candidate_path)
         report["final_video_sha256"] = final_sha256
+        report.update(_video_delivery_report(candidate_path))
         report_content = json.dumps(report, ensure_ascii=False, indent=2)
         report_sha256 = hashlib.sha256(report_content.encode("utf-8")).hexdigest()
         result["video_url"] = _content_versioned_final_url(final_path, final_sha256)
         result["final_video_sha256"] = final_sha256
         result["edit_report_sha256"] = report_sha256
-        stage_path = final_path.with_name(
-            f".{final_path.name}.{operation_claim_token}.stage"
-        )
+        stage_path = final_path.with_name(f".{final_path.name}.{operation_claim_token}.stage")
         report_path = _edit_report_path(final_path)
         if conn.in_transaction:
             conn.commit()
@@ -567,9 +576,7 @@ def _publish_concat_output(
                    status='publishing',updated_at=excluded.updated_at""",
             (episode_id, owner, video_delivery_manifest["manifest_hash"], now()),
         )
-        if verify_current_storyboard_release_authority(
-            episode_id, conn=conn,
-        ) != release_authority:
+        if verify_current_storyboard_release_authority(episode_id, conn=conn) != release_authority:
             raise ValueError("合片发布前分镜权威发生漂移")
         # 合片冻结的是部分交付清单（跳过缺镜/失效镜），发布前漂移复核要用同一
         # 口径重算，否则本来就合法跳过的镜头会被严格版本误判成漂移。
@@ -578,12 +585,10 @@ def _publish_concat_output(
         ) != video_delivery_manifest:
             raise ValueError("合片发布前已采纳视频发生漂移")
         report["final_video_sha256"] = _media_sha256(candidate_path)
+        report.update(_video_delivery_report(candidate_path))
         atomic_copy(candidate_path, final_path)
         report_path = _edit_report_path(final_path)
-        atomic_write_text(
-            report_path,
-            json.dumps(report, ensure_ascii=False, indent=2),
-        )
+        atomic_write_text(report_path, json.dumps(report, ensure_ascii=False, indent=2))
         final_sha256 = _media_sha256(final_path)
         report_sha256 = _media_sha256(report_path)
         result["video_url"] = _versioned_final_url(final_path)
@@ -1006,6 +1011,118 @@ def _final_edit_decision(
     return False, "simple_timeline_fast_concat"
 
 
+def _piece_video_args(rate: float, speed_change: bool, needs_scale: bool) -> list[str]:
+    """不变速且分辨率已一致 → -c:v copy（无损最快，旧 720p 集保持 720p，放大不
+    会凭空多出细节）；否则按需 setpts/canvas_filter 后走 INTERMEDIATE_VIDEO_ARGS。
+    """
+    if not speed_change and not needs_scale:
+        return ["-c:v", "copy"]
+    parts = [f"setpts=PTS/{rate:.6f}"] if speed_change else []
+    if needs_scale:
+        parts.append(canvas_filter())
+    return ["-vf", ",".join(parts), *INTERMEDIATE_VIDEO_ARGS]
+
+
+def _run_concat_demuxer(
+    concat_in: list[str], concat_output: Path, timeout_s: float,
+    uniform_ok: bool, audio_rate: int,
+) -> None:
+    """分辨率一致才尝试 -c copy 无损直粘；分辨率原本不一致或 -c copy 失败，都回退
+    DELIVERY_VIDEO_ARGS 全量重编码（不再用中间件参数顶替最终交付）。
+    """
+    if uniform_ok:
+        try:
+            subprocess.run(
+                concat_in + ["-c", "copy", "-movflags", "+faststart", str(concat_output)],
+                check=True, capture_output=True, timeout=timeout_s)
+            return
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pass
+    try:
+        subprocess.run(
+            concat_in + [*DELIVERY_VIDEO_ARGS, "-c:a", "aac", "-ar", str(audio_rate),
+                         "-movflags", "+faststart", str(concat_output)],
+            check=True, capture_output=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(f"整集合成超过 {int(timeout_s)} 秒，已停止本次任务；上一版成片仍保留，可稍后重试") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or b"").decode("utf-8", "replace")[-500:]
+        raise ValueError("整集合成失败，上一版成片仍保留，可检查片段后重试" + (f"：{detail}" if detail else "")) from exc
+
+
+def _draft_concat_pieces(
+    piece_specs: list[tuple[int, str, float]], probe_by_shot: dict[int, dict[str, Any]],
+    final_path: Path, concat_timeout_s: float,
+) -> tuple[float, Path]:
+    """逐镜音频归一（必要时视频重编码）后走 concat demuxer 拼接；不归一直接拼接
+    会被按首段 timebase 解释后续音频包，混用采样率时把时长拉伸到秒级——draft 与
+    final_edit 共用同一套音频归一逻辑。返回 (total_duration_s, publish_candidate)。
+    """
+    from app.final_edit import FINAL_AUDIO_RATE, audio_normalize_filter
+
+    measured_total_dur = sum(
+        float(probe_by_shot[no]["video_duration_s"]) / rate for no, _path, rate in piece_specs)
+    vpaths = [vpath for _no, vpath, _rate in piece_specs]  # 单镜没有混分辨率可言，跳过探测
+    uniform_ok = len(vpaths) <= 1 or uniform_resolution(vpaths) is not None
+
+    with tempfile.TemporaryDirectory() as td:
+        listfile = Path(td) / "list.txt"
+        lines = []
+        for shot_no, vpath, rate in piece_specs:
+            source_probe = probe_by_shot[shot_no]
+            video_duration_s = float(source_probe["video_duration_s"])
+            has_audio = bool(source_probe["has_audio"])
+            effective_duration = max(0.05, video_duration_s / rate)
+            speed_change = abs(rate - 1.0) > 0.0001
+            prepared_path = Path(td) / f"shot-{shot_no}-norm.mp4"
+            inputs = ["-i", vpath]
+            audio_label = "0:a"
+            if not has_audio:
+                inputs += [
+                    "-f", "lavfi", "-t", f"{effective_duration:.6f}",
+                    "-i", f"anullsrc=channel_layout=stereo:sample_rate={FINAL_AUDIO_RATE}",
+                ]
+                audio_label = "1:a"
+            video_args = _piece_video_args(rate, speed_change, not uniform_ok)
+            audio_filter = audio_normalize_filter(
+                atempo_rate=rate if (speed_change and has_audio) else None, duration_s=effective_duration,
+            )
+            prepare_cmd = [
+                "ffmpeg", "-y", "-loglevel", "error", *inputs,
+                "-map", "0:v:0", "-map", audio_label,
+                *video_args,
+                "-af", audio_filter,
+                "-c:a", "aac", "-ar", str(FINAL_AUDIO_RATE),
+                "-movflags", "+faststart", str(prepared_path),
+            ]
+            try:
+                subprocess.run(prepare_cmd, check=True, capture_output=True, timeout=concat_timeout_s)
+            except subprocess.TimeoutExpired as exc:
+                raise ValueError(f"镜 {shot_no} 的音视频归一处理超时；上一版成片仍保留，可稍后重试") from exc
+            except subprocess.CalledProcessError as exc:
+                detail = (exc.stderr or b"").decode("utf-8", "replace")[-500:]
+                msg = f"镜 {shot_no} 的音视频归一处理失败；上一版成片仍保留" + (f"：{detail}" if detail else "")
+                raise ValueError(msg) from exc
+            if not prepared_path.is_file() or prepared_path.stat().st_size <= 0:
+                raise ValueError(f"镜 {shot_no} 的音视频归一处理未产出有效片段；上一版成片仍保留")
+            # concat demuxer 要求绝对路径并转义单引号
+            safe = str(prepared_path).replace("'", "'\\''")
+            lines.append(f"file '{safe}'")
+        listfile.write_text("\n".join(lines), encoding="utf-8")
+        concat_output = Path(td) / "concat.mp4"
+        concat_in = ["ffmpeg", "-y", "-loglevel", "error",
+                     "-f", "concat", "-safe", "0", "-i", str(listfile)]
+        _run_concat_demuxer(concat_in, concat_output, concat_timeout_s, uniform_ok, FINAL_AUDIO_RATE)
+        if not concat_output.is_file() or concat_output.stat().st_size <= 0:
+            raise ValueError("ffmpeg 未产出有效成片，上一版成片仍保留，可检查片段后重试")
+        total_dur = _validate_concat_output(
+            concat_output, expected_duration_s=measured_total_dur, decode_timeout_s=concat_timeout_s,
+        )
+        publish_candidate = final_path.with_name(f".{final_path.name}.{new_id('candidate')}.tmp")
+        atomic_copy(concat_output, publish_candidate)
+    return total_dur, publish_candidate
+
+
 def concatenate_episode(
     episode_id: str,
     *,
@@ -1158,7 +1275,7 @@ def concatenate_episode(
         duration_by_shot.get(shot_no, 0.0) / rate
         for shot_no, _path, rate in piece_specs
     )
-    concat_timeout_s = min(1800.0, max(120.0, est_total_dur * 10.0 + 60.0))
+    concat_timeout_s = encode_timeout_s(est_total_dur)
 
     final_path = _final_video_path(ep["project_id"], ep["episode_no"])
     started_at = time.perf_counter()
@@ -1249,124 +1366,7 @@ def concatenate_episode(
             final_edit_elapsed_s = time.perf_counter() - final_edit_started_at
             final_edit_failure = f"{type(exc).__name__}: {exc}"[:1000]
 
-    # probe_by_shot 已在候选预检阶段对每个入选片段探测过一次（未通过的候选
-    # 已被排除并记入 skip_reasons，不会走到这里）；这里直接复用，不重复调用
-    # ffprobe，也不会再因为单个片段的问题让整份合成失败。
-    measured_total_dur = 0.0
-    for shot_no, vpath, rate in piece_specs:
-        source_probe = probe_by_shot[shot_no]
-        # 预期时长以视频流为准：容器 duration 取音视频流较长者，源片段音轨普遍
-        # 比视频轨长几十毫秒，拿它当预期基准会把音频的漂移错记成时长膨胀。
-        measured_total_dur += float(source_probe["video_duration_s"]) / rate
-
-    from app.final_edit import FINAL_AUDIO_RATE, audio_normalize_filter
-
-    # 用 concat demuxer 优先无重编码直粘（画质无损）；但 -c copy 要求各片段编码参数
-    # （像素格式/timebase/SAR/profile）完全一致，否则会失败或花屏。一旦失败，回退重编码兜底。
-    #
-    # 拼接前逐镜先把音频归一：模型产出的源片段音轨是真实录音（不是无声占位），
-    # 采样率并不保证一致，逐镜时长也和视频流有几十毫秒的量级偏差。不归一直接
-    # -c copy 直粘，concat demuxer 会用首段音频的 timebase 解释后续所有音频包，
-    # 采样率一旦混用即把时长拉伸到秒级（超出时长门容差）；即使采样率一致，
-    # 逐镜偏差也会累积成音画不同步。draft 与 final_edit 共用同一套音频归一
-    # 逻辑（app.final_edit.audio_normalize_filter），不允许只有一条路径正确。
-    with tempfile.TemporaryDirectory() as td:
-        listfile = _P(td) / "list.txt"
-        lines = []
-        prepared_specs: list[tuple[int, str, float]] = []
-        for shot_no, vpath, rate in piece_specs:
-            source_probe = probe_by_shot[shot_no]
-            video_duration_s = float(source_probe["video_duration_s"])
-            has_audio = bool(source_probe["has_audio"])
-            effective_duration = max(0.05, video_duration_s / rate)
-            speed_change = abs(rate - 1.0) > 0.0001
-            prepared_path = _P(td) / f"shot-{shot_no}-norm.mp4"
-            inputs = ["-i", vpath]
-            audio_label = "0:a"
-            if not has_audio:
-                inputs += [
-                    "-f", "lavfi", "-t", f"{effective_duration:.6f}",
-                    "-i", f"anullsrc=channel_layout=stereo:sample_rate={FINAL_AUDIO_RATE}",
-                ]
-                audio_label = "1:a"
-            video_args = (
-                ["-vf", f"setpts=PTS/{rate:.6f}", "-c:v", "libx264", "-preset", "veryfast",
-                 "-crf", "18", "-pix_fmt", "yuv420p"]
-                if speed_change else ["-c:v", "copy"]
-            )
-            audio_filter = audio_normalize_filter(
-                atempo_rate=rate if (speed_change and has_audio) else None,
-                duration_s=effective_duration,
-            )
-            prepare_cmd = [
-                "ffmpeg", "-y", "-loglevel", "error", *inputs,
-                "-map", "0:v:0", "-map", audio_label,
-                *video_args,
-                "-af", audio_filter,
-                "-c:a", "aac", "-ar", str(FINAL_AUDIO_RATE),
-                "-movflags", "+faststart", str(prepared_path),
-            ]
-            try:
-                subprocess.run(
-                    prepare_cmd, check=True, capture_output=True, timeout=concat_timeout_s,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise ValueError(
-                    f"镜 {shot_no} 的音视频归一处理超时；上一版成片仍保留，可稍后重试"
-                ) from exc
-            except subprocess.CalledProcessError as exc:
-                detail = (exc.stderr or b"").decode("utf-8", "replace")[-500:]
-                raise ValueError(
-                    f"镜 {shot_no} 的音视频归一处理失败；上一版成片仍保留"
-                    + (f"：{detail}" if detail else "")
-                ) from exc
-            if not prepared_path.is_file() or prepared_path.stat().st_size <= 0:
-                raise ValueError(
-                    f"镜 {shot_no} 的音视频归一处理未产出有效片段；上一版成片仍保留"
-                )
-            prepared_specs.append((shot_no, str(prepared_path), rate))
-            # concat demuxer 要求绝对路径并转义单引号
-            safe = str(prepared_path).replace("'", "'\\''")
-            lines.append(f"file '{safe}'")
-        listfile.write_text("\n".join(lines), encoding="utf-8")
-        concat_output = _P(td) / "concat.mp4"
-        concat_in = ["ffmpeg", "-y", "-loglevel", "error",
-                     "-f", "concat", "-safe", "0", "-i", str(listfile)]
-        try:
-            subprocess.run(
-                concat_in + ["-c", "copy", "-movflags", "+faststart", str(concat_output)],
-                check=True, capture_output=True, timeout=concat_timeout_s)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            # 片段编码参数不一致导致 -c copy 失败 → 重编码兜底（画质损失极小，但保证能拼成整集）。
-            # 拼接输入已经是上面逐镜归一过的片段，这里显式声明相同的音频目标规格，
-            # 重编码回退与 -c copy 快速路径共享同一套音频归一结果，不会走了兜底就漏归一。
-            try:
-                subprocess.run(
-                    concat_in + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-                                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", str(FINAL_AUDIO_RATE),
-                                 "-movflags", "+faststart", str(concat_output)],
-                    check=True, capture_output=True, timeout=concat_timeout_s)
-            except subprocess.TimeoutExpired as exc:
-                raise ValueError(
-                    f"整集合成超过 {int(concat_timeout_s)} 秒，已停止本次任务；上一版成片仍保留，可稍后重试"
-                ) from exc
-            except subprocess.CalledProcessError as exc:
-                detail = (exc.stderr or b"").decode("utf-8", "replace")[-500:]
-                raise ValueError(
-                    "整集合成失败，上一版成片仍保留，可检查片段后重试"
-                    + (f"：{detail}" if detail else "")
-                ) from exc
-        if not concat_output.is_file() or concat_output.stat().st_size <= 0:
-            raise ValueError("ffmpeg 未产出有效成片，上一版成片仍保留，可检查片段后重试")
-        total_dur = _validate_concat_output(
-            concat_output,
-            expected_duration_s=measured_total_dur,
-            decode_timeout_s=concat_timeout_s,
-        )
-        publish_candidate = final_path.with_name(
-            f".{final_path.name}.{new_id('candidate')}.tmp"
-        )
-        atomic_copy(concat_output, publish_candidate)
+    total_dur, publish_candidate = _draft_concat_pieces(piece_specs, probe_by_shot, final_path, concat_timeout_s)
 
     fallback_edit_report = {
         "ok": False,

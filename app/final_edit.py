@@ -1,14 +1,12 @@
 """最终编辑：统一片段规格、确定性文字、转场、音频衔接与边界风险报告。
 
-该模块不调用生成模型，也不把内容质量问题升格为交付门禁。调用方在编辑
-图失败时必须回退到普通硬拼，保留可播整集。
+该模块不调用生成模型，也不把内容质量问题升格为交付门禁。调用方在编辑图失败时必须回退到普通硬拼，保留可播整集。
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,10 +17,12 @@ from app.continuity import (
     required_text_strategy,
     structured_boundary_issues,
 )
+from app.media_pipeline.delivery_encode import (
+    DELIVERY_HEIGHT as FINAL_HEIGHT, DELIVERY_VIDEO_ARGS, DELIVERY_WIDTH as FINAL_WIDTH,
+    INTERMEDIATE_VIDEO_ARGS, canvas_filter, encode_timeout_s, scale_box, scale_px,
+)
 from app.schemas import Shot
 
-FINAL_WIDTH = 720
-FINAL_HEIGHT = 1280
 FINAL_FPS = 24
 FINAL_AUDIO_RATE = 48_000
 
@@ -104,14 +104,9 @@ def shot_from_row(row: Any) -> Shot:
 
 def _probe_media(path: str) -> dict[str, Any]:
     raw = subprocess.run(
-        [
-            "ffprobe", "-v", "error", "-show_entries",
-            "format=duration:stream=codec_type,duration", "-of", "json", path,
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
+        ["ffprobe", "-v", "error", "-show_entries",
+         "format=duration:stream=codec_type,duration", "-of", "json", path],
+        check=True, capture_output=True, text=True, timeout=30,
     ).stdout
     payload = json.loads(raw or "{}")
     streams = payload.get("streams") or []
@@ -203,14 +198,15 @@ def render_text_card(
             (0, y, FINAL_WIDTH, y),
             fill=(max(150, tone - 9), max(126, tone - 36), max(88, tone - 73)),
         )
-    draw.rounded_rectangle((54, 128, 666, 1152), radius=22, outline=(80, 48, 26), width=5)
-    draw.rounded_rectangle((70, 144, 650, 1136), radius=16, outline=(143, 96, 51), width=2)
+    r1, r2, w1, w2 = scale_px(22), scale_px(16), scale_px(5), scale_px(2)
+    draw.rounded_rectangle(scale_box(54, 128, 666, 1152), radius=r1, outline=(80, 48, 26), width=w1)
+    draw.rounded_rectangle(scale_box(70, 144, 650, 1136), radius=r2, outline=(143, 96, 51), width=w2)
 
     max_chars = 8 if len(text) <= 24 else 12
     lines = _split_text(text, max_chars)
-    font_size = 92 if len(lines) <= 2 else (74 if len(lines) <= 4 else 58)
+    font_size = scale_px(92 if len(lines) <= 2 else (74 if len(lines) <= 4 else 58))
     font = ImageFont.truetype(str(font_path), font_size)
-    label_font = ImageFont.truetype(str(font_path), 30)
+    label_font = ImageFont.truetype(str(font_path), scale_px(30))
     line_height = int(font_size * 1.5)
     block_height = line_height * len(lines)
     y = (FINAL_HEIGHT - block_height) // 2
@@ -229,7 +225,7 @@ def render_text_card(
     label = str(surface or "画面文字").strip()[:24]
     label_bbox = draw.textbbox((0, 0), label, font=label_font)
     draw.text(
-        ((FINAL_WIDTH - (label_bbox[2] - label_bbox[0])) // 2, 1030),
+        ((FINAL_WIDTH - (label_bbox[2] - label_bbox[0])) // 2, scale_px(1030)),
         label,
         font=label_font,
         fill=(102, 68, 42),
@@ -281,9 +277,8 @@ def _prepare_clip(
     text_report: dict[str, Any] | None = None
     video_label = "base"
     video_chain = (
-        f"[0:v]setpts=(PTS-STARTPTS)/{rate:.6f},"
-        f"scale={FINAL_WIDTH}:{FINAL_HEIGHT}:force_original_aspect_ratio=increase,"
-        f"crop={FINAL_WIDTH}:{FINAL_HEIGHT},fps={FINAL_FPS},settb=AVTB,format=rgba[{video_label}]"
+        f"[0:v]setpts=(PTS-STARTPTS)/{rate:.6f},{canvas_filter()},"
+        f"fps={FINAL_FPS},settb=AVTB,format=rgba[{video_label}]"
     )
     filters.append(video_chain)
 
@@ -339,13 +334,13 @@ def _prepare_clip(
         "-filter_complex", ";".join(filters),
         "-map", "[vout]", "-map", "[aout]",
         "-t", f"{effective_duration:.3f}",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+        *INTERMEDIATE_VIDEO_ARGS,
         "-c:a", "aac", "-b:a", "128k", "-ar", str(FINAL_AUDIO_RATE),
         "-movflags", "+faststart", str(destination),
     ]
     _run_ffmpeg(
         command,
-        timeout=max(120.0, effective_duration * 12.0),
+        timeout=encode_timeout_s(effective_duration),
         context=f"镜 {shot.shot_no} 片段标准化",
     )
     if not destination.is_file() or destination.stat().st_size <= 0:
@@ -420,7 +415,11 @@ def _text_owners(shots: list[Shot]) -> tuple[dict[str, int], list[dict[str, Any]
 
 def _compose(prepared: list[dict[str, Any]], transitions: list[TransitionSpec], destination: Path) -> dict[str, Any]:
     if len(prepared) == 1:
-        shutil.copyfile(prepared[0]["path"], destination)
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", prepared[0]["path"],
+               *DELIVERY_VIDEO_ARGS, "-c:a", "copy", "-movflags", "+faststart", str(destination)]
+        _run_ffmpeg(cmd, timeout=encode_timeout_s(prepared[0]["duration_s"]), context="最终编码（单镜）")
+        if not destination.is_file() or destination.stat().st_size <= 0:
+            raise RuntimeError("最终编辑未产出有效文件")
         return {"total_duration_s": prepared[0]["duration_s"], "transitions": []}
 
     command = ["ffmpeg", "-y", "-loglevel", "error"]
@@ -468,12 +467,12 @@ def _compose(prepared: list[dict[str, Any]], transitions: list[TransitionSpec], 
             *base_command,
             "-filter_complex", ";".join(normalized_filters),
             "-map", f"[{video_label}]", "-map", "[aout]",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+            *DELIVERY_VIDEO_ARGS,
             "-c:a", "aac", "-b:a", "160k", "-ar", str(FINAL_AUDIO_RATE),
             "-movflags", "+faststart", str(destination),
         ]
 
-    timeout = max(180.0, cumulative * 12.0 + 60.0)
+    timeout = encode_timeout_s(cumulative)
     audio_normalization = "loudnorm"
     try:
         _run_ffmpeg(

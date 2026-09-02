@@ -31,6 +31,7 @@ pytestmark = pytest.mark.skipif(not _FFMPEG_AVAILABLE, reason="ffmpeg/ffprobe un
 
 def _make_clip(
     path: Path, *, color: str, video_duration_s: float, sample_rate: int, fps: int = 24,
+    size: str = "64x64",
 ) -> None:
     """生成一段真实可解码的 mp4：视频严格落在 fps 网格上，音频是有真实内容的
     正弦波（不是无声占位），且不在输出端强制裁剪，让 AAC 编码器的整帧量化
@@ -41,7 +42,7 @@ def _make_clip(
     subprocess.run(
         [
             "ffmpeg", "-y", "-loglevel", "error",
-            "-f", "lavfi", "-i", f"color=c={color}:s=64x64:r={fps}:d={video_duration_s}",
+            "-f", "lavfi", "-i", f"color=c={color}:s={size}:r={fps}:d={video_duration_s}",
             "-f", "lavfi", "-i", f"sine=frequency=440:sample_rate={sample_rate}:duration={video_duration_s}",
             "-c:v", "libx264", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-ar", str(sample_rate),
@@ -331,3 +332,101 @@ def test_concatenate_episode_order_independent_of_which_sample_rate_leads(
     assert abs(video_s - 6.0) < 0.1
     assert abs(audio_s - video_s) < 0.5
     assert sample_rate == FINAL_AUDIO_RATE
+
+
+def _spy_subprocess_run(monkeypatch) -> list[list[str]]:
+    """记录每次真实 subprocess.run 的命令行，同时仍然真跑（不是 stub）。"""
+    commands: list[list[str]] = []
+    real_run = subprocess.run
+
+    def spy(command, *args, **kwargs):
+        commands.append(list(command))
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    return commands
+
+
+def test_concatenate_episode_mixed_resolution_skips_copy_fastpath_and_scales(
+    tmp_path, monkeypatch, _current_authority,
+) -> None:
+    """混合分辨率源片段：快速路径不能对不同分辨率直接 -c copy——容器分辨率
+    声明与真实帧分辨率不一致这件事 -c copy 完全不校验，rc=0 但花屏。必须先按
+    canvas_filter 把每镜归一到同一交付画布，最终 concat 用 DELIVERY_VIDEO_ARGS
+    （medium/crf20）重编码。
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    for statement in db.MIGRATIONS:
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError:
+            pass
+
+    project_root = tmp_path / "projects"
+    shot_dir = project_root / "p" / "episodes" / "1" / "shots"
+    shot_dir.mkdir(parents=True)
+    shot_paths = [shot_dir / f"shot-{i}.mp4" for i in range(1, 3)]
+    _make_clip(shot_paths[0], color="red", video_duration_s=2.0, sample_rate=44100, size="64x64")
+    _make_clip(shot_paths[1], color="green", video_duration_s=2.0, sample_rate=44100, size="96x96")
+    _database_with_shots(conn, shot_paths)
+
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(media_evidence, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
+    commands = _spy_subprocess_run(monkeypatch)
+
+    result = worker.concatenate_episode("e")
+
+    assert result["final_edit"]["mode"] == "draft_concat"
+    concat_cmds = [cmd for cmd in commands if "-f" in cmd and "concat" in cmd]
+    assert len(concat_cmds) == 1, "分辨率不一致时不应尝试 -c copy 再回退，应直接重编码"
+    assert "copy" not in concat_cmds[0]
+    assert "medium" in concat_cmds[0]
+    assert "20" in concat_cmds[0]
+    normalize_cmds = [cmd for cmd in commands if "-vf" in cmd]
+    assert any("lanczos" in cmd[cmd.index("-vf") + 1] for cmd in normalize_cmds)
+
+    from app.media_pipeline.delivery_encode import DELIVERY_HEIGHT, DELIVERY_WIDTH, probe_resolution
+
+    final_path = project_root / "p" / "episodes" / "1" / "final" / "episode.mp4"
+    assert probe_resolution(final_path) == (DELIVERY_WIDTH, DELIVERY_HEIGHT)
+
+
+def test_concatenate_episode_uniform_resolution_keeps_copy_fastpath(
+    tmp_path, monkeypatch, _current_authority,
+) -> None:
+    """分辨率全一致时必须维持 -c copy 无损直粘的快速路径——旧的全 720p 集不
+    应被强制重编码放大，放大不会凭空多出细节。
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    for statement in db.MIGRATIONS:
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError:
+            pass
+
+    project_root = tmp_path / "projects"
+    shot_dir = project_root / "p" / "episodes" / "1" / "shots"
+    shot_dir.mkdir(parents=True)
+    shot_paths = [shot_dir / f"shot-{i}.mp4" for i in range(1, 3)]
+    _make_clip(shot_paths[0], color="red", video_duration_s=2.0, sample_rate=44100, size="64x64")
+    _make_clip(shot_paths[1], color="green", video_duration_s=2.0, sample_rate=44100, size="64x64")
+    _database_with_shots(conn, shot_paths)
+
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(media_evidence, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
+    commands = _spy_subprocess_run(monkeypatch)
+
+    worker.concatenate_episode("e")
+
+    concat_cmds = [cmd for cmd in commands if "-f" in cmd and "concat" in cmd]
+    assert len(concat_cmds) == 1
+    assert "copy" in concat_cmds[0]
+    assert "medium" not in concat_cmds[0]

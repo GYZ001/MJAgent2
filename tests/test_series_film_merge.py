@@ -40,6 +40,40 @@ def project_dir(tmp_path, monkeypatch):
     return tmp_path
 
 
+def test_build_series_film_uses_delivery_encode_params_and_lanczos_scale(
+    project_dir, monkeypatch,
+) -> None:
+    """交付编码参数与超时公式必须来自 app.media_pipeline.delivery_encode，不是
+    写死的 veryfast/crf18/30 分钟旧上限——real_run_ffmpeg 仍真跑一次 ffmpeg，
+    只是在调用前拦一次记录实际传下去的命令与超时。
+    """
+    from app.final_edit import _run_ffmpeg as real_run_ffmpeg
+
+    captured: dict[str, object] = {}
+
+    def spy(command, *, timeout, context):
+        captured["command"] = command
+        captured["timeout"] = timeout
+        return real_run_ffmpeg(command, timeout=timeout, context=context)
+
+    monkeypatch.setattr(merge, "_run_ffmpeg", spy)
+
+    project_id = "proj-merge-encode"
+    ep1 = _final_video_path(project_id, 1)
+    ep2 = _final_video_path(project_id, 2)
+    _make_clip(ep1, duration_s=2.0, color="red")
+    _make_clip(ep2, duration_s=2.0, color="blue")
+
+    merge.build_series_film(project_id, 1, 2, [1, 2])
+
+    command = captured["command"]
+    assert command[command.index("-preset") + 1] == "medium"
+    assert command[command.index("-crf") + 1] == "20"
+    filter_complex = command[command.index("-filter_complex") + 1]
+    assert "lanczos" in filter_complex
+    assert captured["timeout"] == merge.encode_timeout_s(4.0)
+
+
 def test_build_series_film_two_episodes_concatenates_and_reports_chapters(project_dir) -> None:
     project_id = "proj-merge"
     ep1 = _final_video_path(project_id, 1)

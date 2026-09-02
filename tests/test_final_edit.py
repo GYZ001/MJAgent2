@@ -167,10 +167,30 @@ def test_deterministic_cjk_text_card_has_fixed_dimensions(tmp_path: Path) -> Non
     report = render_text_card("天门已开", "青铜古碑", destination)
 
     with Image.open(destination) as image:
-        assert image.size == (720, 1280)
+        assert image.size == (1080, 1920)
         assert image.format == "PNG"
     assert report["exact_text"] == "天门已开"
     assert len(report["sha256"]) == 64
+
+
+def test_text_card_border_scales_off_legacy_720_coordinates(tmp_path: Path) -> None:
+    """旧 720 画布把外框画在 (54,128)；画布换成 1080 宽后这一点必须只是背景
+    渐变色，证明边框坐标真的按 DELIVERY_WIDTH/720 整体缩放挪走了，不是仍然
+    写死停留在 720 画布假设上。
+    """
+    try:
+        _font_path()
+    except RuntimeError:
+        pytest.skip("test host has no configured CJK font")
+    destination = tmp_path / "text.png"
+
+    render_text_card("天门已开", "青铜古碑", destination)
+
+    with Image.open(destination) as image:
+        height = image.height
+        tone = int(232 - 30 * abs(128 - height / 2) / (height / 2))
+        expected = (max(150, tone - 9), max(126, tone - 36), max(88, tone - 73))
+        assert image.convert("RGB").getpixel((54, 128)) == expected
 
 
 def _database_with_shots(shots: list[Shot]) -> sqlite3.Connection:

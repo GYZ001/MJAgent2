@@ -1,8 +1,9 @@
 """连播成片：五步全部完成后，把各集 ``final/episode.mp4`` 用 ffmpeg 拼接。
 
 各集编码参数可能不一致，用 ``filter_complex`` 的 ``concat`` 滤镜逐路先统一
-``scale/crop/fps``、音频重采样，再拼接、重编码（libx264/aac，常量与写法照
-``app/final_edit.py``）。先写 ``film.tmp.mp4`` 再原子改名，时长用
+``scale/crop/fps``、音频重采样，再拼接、重编码（交付编码参数照
+``app/media_pipeline/delivery_encode.py::DELIVERY_VIDEO_ARGS``，与成片台/
+``app/final_edit.py`` 同一份）。先写 ``film.tmp.mp4`` 再原子改名，时长用
 ``app/media_exec/concat.py::_probe_concat_media`` 校验（容差沿用它的
 ``_CONCAT_DURATION_TOLERANCE_*`` 常量），失败时旧长片原封不动。
 """
@@ -15,12 +16,15 @@ import time
 from pathlib import Path
 
 from app import config
-from app.final_edit import FINAL_AUDIO_RATE, FINAL_FPS, FINAL_HEIGHT, FINAL_WIDTH, _run_ffmpeg
+from app.final_edit import FINAL_AUDIO_RATE, FINAL_FPS, _run_ffmpeg
 from app.media_exec.concat import (
     _CONCAT_DURATION_TOLERANCE_MIN_S,
     _CONCAT_DURATION_TOLERANCE_RATIO,
     _final_video_path,
     _probe_concat_media,
+)
+from app.media_pipeline.delivery_encode import (
+    DELIVERY_VIDEO_ARGS, canvas_filter, encode_timeout_s, probe_resolution,
 )
 from app.media_urls import build_media_url
 
@@ -69,11 +73,7 @@ def _build_filter_complex(count: int) -> str:
     parts: list[str] = []
     labels: list[str] = []
     for i in range(count):
-        parts.append(
-            f"[{i}:v]scale={FINAL_WIDTH}:{FINAL_HEIGHT}:"
-            f"force_original_aspect_ratio=increase,crop={FINAL_WIDTH}:{FINAL_HEIGHT},"
-            f"fps={FINAL_FPS},setsar=1[v{i}]"
-        )
+        parts.append(f"[{i}:v]{canvas_filter()},fps={FINAL_FPS},setsar=1[v{i}]")
         parts.append(f"[{i}:a]aresample={FINAL_AUDIO_RATE}[a{i}]")
         labels.append(f"[v{i}][a{i}]")
     concat = f"{''.join(labels)}concat=n={count}:v=1:a=1[outv][outa]"
@@ -87,7 +87,7 @@ def _run_concat_ffmpeg(paths: list[Path], out_path: Path, timeout_s: float) -> N
     cmd += [
         "-filter_complex", _build_filter_complex(len(paths)),
         "-map", "[outv]", "-map", "[outa]",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+        *DELIVERY_VIDEO_ARGS,
         "-c:a", "aac", "-b:a", "160k", "-ar", str(FINAL_AUDIO_RATE),
         "-movflags", "+faststart",
         str(out_path),
@@ -132,22 +132,25 @@ def build_series_film(
     out_dir = series_film_dir(project_id, episode_from, episode_to)
     out_dir.mkdir(parents=True, exist_ok=True)
     tmp_path = out_dir / "film.tmp.mp4"
-    timeout_s = min(1800.0, max(120.0, expected_total * 10.0 + 60.0))
+    timeout_s = encode_timeout_s(expected_total)
     _run_concat_ffmpeg(final_paths, tmp_path, timeout_s)
     probe = _validate_merged_duration(tmp_path, expected_total)
     film_path = out_dir / "film.mp4"
     os.replace(tmp_path, film_path)
+    width, height = probe_resolution(film_path)
     report = {
         "episode_from": episode_from,
         "episode_to": episode_to,
         "chapters": _build_chapters(episode_nos, durations),
         "duration_s": probe["video_duration_s"],
         "size_bytes": film_path.stat().st_size,
+        "width": width,
+        "height": height,
         "created_at": time.time(),
         "input_fingerprints": _input_fingerprints(final_paths),
         "ffmpeg_command_summary": (
-            "filter_complex concat(scale/crop/fps/aresample 归一化) -> "
-            "libx264/aac + faststart"
+            "filter_complex concat(scale/crop/fps/aresample 归一化，lanczos) -> "
+            "DELIVERY_VIDEO_ARGS(h264 medium crf20) + aac + faststart"
         ),
     }
     (out_dir / "film.report.json").write_text(
@@ -201,6 +204,8 @@ def _film_projection(out_dir: Path) -> dict | None:
         "episode_from": int(report.get("episode_from") or 0),
         "episode_to": int(report.get("episode_to") or 0),
         "chapters": report.get("chapters") or [],
+        "width": int(report.get("width") or 0),
+        "height": int(report.get("height") or 0),
     }
 
 
