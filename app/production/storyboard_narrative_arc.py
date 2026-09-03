@@ -66,10 +66,16 @@ def beat_sheet_narrative_arc_rules() -> list[str]:
     return [
         (
             "为每一个段构思一句色温/色调方向（例如「冷调青灰」「夕阳暖金」"
-            "「高对比青绿银白」，不必套用这三个例子，按剧情自行拟定）；在"
-            "情绪或世界观出现转折的地方，让转折前后相邻两段的色温方向明显"
-            "拉开差异，不要让全片停留在同一个色调——这句色温方向就是"
-            "segments[].palette 字段的内容，供下一阶段写进画面。"
+            "「高对比青绿银白」，不必套用这三个例子，按剧情自行拟定）。"
+            "色温方向按场戏分配，不是按段分配：本段与上一段的 "
+            "source_segment_indexes（各自对应的原文段落编号）完全相同时，"
+            "说明两段是同一场戏，本段的 palette 必须与上一段逐字相同，"
+            "一个字都不能改写、精简或替换；只有本段的 source_segment_indexes "
+            "换成了不同的原文段落，或者本段原文本身明确写出了时间推移"
+            "（例如从白天写到入夜、从此刻写到片刻之后），才允许为本段拟一个"
+            "新的色温方向。在真正出现这类转折的地方，让转折前后相邻两段的"
+            "色温方向明显拉开差异，不要让全片停留在同一个色调——这句色温"
+            "方向就是 segments[].palette 字段的内容，供下一阶段写进画面。"
         ),
         (
             "同一人物在同一情绪状态下的连续静态独白（没有新信息、没有场景"
@@ -90,6 +96,39 @@ def beat_sheet_narrative_arc_rules() -> list[str]:
             "同样长的一个段里。"
         ),
     ]
+
+
+def palette_scene_consistency_errors(segments: list[Any]) -> list[str]:
+    """节拍表草稿的阻断式校验：同一场戏（相邻两段引用完全相同的
+    source_segment_indexes）必须共用同一个色温方向，防止逐段独立调用下
+    模型对同一场戏反复重开新的 palette——真实故障见本模块 docstring 顶部
+    （2026-09-03「橘座在上」EP1，同一间会议室、同一分钟内的 6 段灯光变了
+    四次，根因是这 6 段 source_segment_indexes 全是 [4]，palette 却每段
+    新拟一个）。
+
+    只比较相邻两段：source_segment_indexes 不同（换了原文段落/场戏）不
+    检查，允许合理换场时改变色温；source_segment_indexes 相同但 palette
+    不同——包括一个是空字符串、另一个非空这种情况——都算不同，不兜底
+    当作沿用，因为空 palette 本身就是模型漏填的信号，不该被悄悄放过。
+    入参用鸭子类型（``.segment_no``/``.source_segment_indexes``/``.palette``），
+    不绑定具体的 pydantic 模型，方便节拍表草稿与测试双方各自复用。
+    """
+    errors: list[str] = []
+    for prev, cur in zip(segments, segments[1:]):
+        if list(prev.source_segment_indexes) != list(cur.source_segment_indexes):
+            continue
+        if prev.palette == cur.palette:
+            continue
+        errors.append(
+            f"第 {prev.segment_no} 段与第 {cur.segment_no} 段引用完全相同的"
+            f"原文段落（source_segment_indexes={list(cur.source_segment_indexes)}），"
+            f"是同一场戏，但 palette 不同：第 {prev.segment_no} 段是"
+            f"「{prev.palette or '（空）'}」，第 {cur.segment_no} 段是"
+            f"「{cur.palette or '（空）'}」——同一场戏内色温方向必须逐字相同，"
+            f"唯一修法是把第 {cur.segment_no} 段的 palette 改成与第 "
+            f"{prev.segment_no} 段逐字相同。"
+        )
+    return errors
 
 
 def segment_narrative_arc_payload_fields(
@@ -114,7 +153,9 @@ def segment_narrative_arc_payload_fields(
 
 def segment_narrative_arc_rules(*, palette_current: str, palette_previous: str) -> list[str]:
     """阶段二 rules[] 新增的正面陈述：首尾段含义（恒定出现）、色温渐变
-    （只在本段色温与上一段不同时出现）、闪回边界（恒定出现）。
+    （只在本段色温与上一段不同时出现）、色温延续时禁止假渐变（只在本段
+    色温与上一段相同时出现，2026-09-03 补，修「同一场戏灯光反复闪」的
+    真实故障）、闪回边界（恒定出现）。
     """
     rules = [
         "task_payload 里的 is_first_segment 为 true 表示本段是全片开场段，"
@@ -131,6 +172,17 @@ def segment_narrative_arc_rules(*, palette_current: str, palette_previous: str) 
             "内写出色温渐变的过程本身（光线变化、色调过渡、环境对光线的"
             "反应），转折必须发生在本段画面里——你看不到下一段会写什么，把"
             "渐变留给下一段等于让它永远不会被画出来。"
+        )
+    elif palette_current and palette_current == palette_previous:
+        rules.append(
+            f"本段的色温/色调方向是「{palette_current}」，与上一段完全相同："
+            "如果本段在 continuity_memo.time_of_day_basis 里判定为 "
+            "inherited（时段沿用上一段，不是本段原文另有明确时间、也不是"
+            "你自行推断出的新时段），本段开头必须直接呈现与上一段结尾一致"
+            "的光线，不写任何「光线从……渐变到……」「灯光逐渐过渡」这类"
+            "描写——光线变化只应该出现在色温方向确实改变的段落里，本段与"
+            "上一段色温相同就不该再演一次渐变，观众看到的应该是同一片"
+            "稳定的光，不是灯一直在闪。"
         )
     rules.append(
         "如果本段有台词是画外音（dialogue[].delivery=offscreen_voice）："
