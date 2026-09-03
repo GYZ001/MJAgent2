@@ -30,12 +30,15 @@ from .common import DELIVERY_OWNERS as DELIVERY_OWNERS
 from .common import EMOTIONS as EMOTIONS
 from .common import KEY_LINE_ID_RE as KEY_LINE_ID_RE
 from .common import NARRATIVE_CONTRACT_VERSION as NARRATIVE_CONTRACT_VERSION
+from .common import NARRATOR_LABEL as NARRATOR_LABEL
 from .common import PROMPT_CONTRACT_VERSION as PROMPT_CONTRACT_VERSION
+from .common import SHOT_FORMS as SHOT_FORMS
 from .common import SHOT_SIZES as SHOT_SIZES
 from .common import SPINE_BEAT_ID_RE as SPINE_BEAT_ID_RE
 from .common import STORY_EVENT_ID_RE as STORY_EVENT_ID_RE
 from .common import SYSTEM_ENVIRONMENT_ENTITY_PREFIX as SYSTEM_ENVIRONMENT_ENTITY_PREFIX
 from .common import TRANSITIONS as TRANSITIONS
+from .common import is_narrator_label as is_narrator_label
 from .common import is_system_environment_entity_id as is_system_environment_entity_id
 from .common import system_environment_entity_id as system_environment_entity_id
 from .json_extract import extract_json as extract_json
@@ -97,6 +100,7 @@ from .screenplay_outline import SourceCoverageDecision as SourceCoverageDecision
 from .screenplay_outline import StoryEvent as StoryEvent
 from .screenplay_outline import VoiceCanonical as VoiceCanonical
 from .shot import Shot as Shot
+from .shot_montage import MontageBeat as MontageBeat
 from .shot_state import AudioTimelineItem as AudioTimelineItem
 from .shot_state import CharacterContinuityState as CharacterContinuityState
 from .shot_state import ContinuityState as ContinuityState

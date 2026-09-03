@@ -58,6 +58,17 @@ PROMPT_CONTRACT_VERSION = "video_cinematic_continuity_v6"
 NARRATIVE_CONTRACT_VERSION = "narrative-continuity.v2"
 SYSTEM_ENVIRONMENT_ENTITY_PREFIX = "environment:"
 
+# 镜头形态（WS7）：见 app.schemas.shot_montage 模块 docstring。"scene" 是绝大多数
+# 镜头的既有形态；"montage" 是叙述者总结/回忆列举/跨年排比段落的新形态。
+SHOT_FORMS = {"scene", "montage"}
+
+# 旁白是画外叙述声音，从来不是画面里的人——它不应该出现在 Shot.characters /
+# characters_visible 里（those two fields answer "谁在画面里/谁跟这一镜有关"）。
+# 与 SYSTEM_ENVIRONMENT_ENTITY_PREFIX 同一类保留标识手法：不是靠猜测穷举各种
+# 旁白写法（黑名单），而是把它定成一个显式保留字面量，产出方与校验方共用同一
+# 个常量，谁写错都能立刻定位。
+NARRATOR_LABEL = "旁白"
+
 
 def system_environment_entity_id(scope_id: object) -> str:
     """Return the reserved, non-character narrative subject for one scope."""
@@ -74,6 +85,11 @@ def is_system_environment_entity_id(
     if scope_id is None:
         return normalized.startswith(SYSTEM_ENVIRONMENT_ENTITY_PREFIX)
     return normalized == system_environment_entity_id(scope_id)
+
+
+def is_narrator_label(value: object) -> bool:
+    """Recognize the reserved narrator sentinel, never a real character name."""
+    return str(value or "").strip() == NARRATOR_LABEL
 
 # 主线节拍 ID（S*）与剧本事件 ID（E*）长得像但语义不同，历史数据把 S07 写进了 story_event_id。
 # 这两个正则是四类 ID 分离（PRD VAL-422 §4.4.1）的判定底座。

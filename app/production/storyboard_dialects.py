@@ -20,6 +20,7 @@ docs/prompt-skills/{novel-to-storyboard,minimax-h3-prompts}/。H3 的字段名�
 from __future__ import annotations
 
 from app import config
+from app.schemas import MontageBeat
 from app.video_prompt_profiles import VideoPromptProfile
 
 SEEDANCE_DIALECT_INSTRUCTIONS = f"""\
@@ -131,6 +132,24 @@ JSON 字段或分点罗列）。
   后期合成——Seedance 对汉字字形的还原极不稳定，这是能力缺失，不是可选项。
   凡是写了「无字」的地方，必须在 degraded_capabilities 里对应记一条后期文字
   合成清单条目（写清载体是什么、原文应该是什么字）。
+- 若本段原文本身是叙述者对多年经历的总结、回忆列举，或跨越多个时间点的排比
+  （例如「我八岁的时候被诊断出长不高……我十三岁离开家……我三十五岁，把它抱
+  在怀里」），这一段的镜头就应该按它列举的时间点分拍，每个时间点各给一个
+  「镜头N」、各自的场景与画面，而不是把整段总结硬塞进某一个和内容无关的
+  单一场景——实测：这类段落被配成「校园食堂」，是因为模型把总结性文字里
+  出现的第一个具体地点当成了整段的场景，其余时间点的画面全部丢失。判据是
+  原文段落本身列举了多个时间点/事项，不是「这一段有画外音」——同一段落里
+  人物停在原地的第一人称内心独白（即使整句都是 offscreen_voice）仍然只有
+  一个时空，必须保持单一场景，不要因为台词是画外音就顺带拆成多镜头总结。
+- 台词的人称决定 speaker：原文用第三人称叙述这个人物（「他跑得不算快」「他
+  跳得不算高」）时，这是叙述者的画外音，speaker 必须写旁白，不能写成这个
+  人物自己在说第三人称的自己；原文用第一人称自述（「我八岁的时候……」）时，
+  才由这个人物本人配音，speaker 写这个人物在人物谱里的正名。这两种画外音都
+  是 offscreen_voice，区别只在 speaker 是谁。
+- speaker 与画面里出场的人物一律使用 relevant_assets.characters 给出的正名，
+  逐字取用；原文只有称谓、relevant_assets.characters 查不到的人才用称谓本身
+  （前面「没有参考图」那条已经讲过怎么处理这类人）。旁白是叙述声音、不是
+  画面里的人，绝不能出现在画面主体或人物清单里，也不能给旁白安排出场镜头。
 """
 
 MINIMAX_H3_DIALECT_INSTRUCTIONS = f"""\
@@ -257,6 +276,33 @@ Rules:
   role, e.g. "the character shown in the reference image, wearing ..." --
   give each reference material exactly one stated role, never let two
   references' roles overlap.
+- If this segment's source text is itself a narrator's summary, a
+  reminiscence list, or a series spanning multiple points in time (e.g. "At
+  eight I was diagnosed as unable to grow taller... at thirteen I left home...
+  at thirty-five I held it in my arms"), split the Shots along those time
+  points -- each point gets its own [Shot N] with its own space and picture --
+  instead of forcing the whole summary into one location that only matches
+  its first concrete noun. (Real failure: such a passage got rendered as a
+  single school-cafeteria shot because the model latched onto the first place
+  name mentioned, and every other time point's picture was lost.) The trigger
+  is the source paragraph itself enumerating multiple time points or items --
+  not "this shot has an off-screen line." A character's first-person interior
+  monologue delivered while stationary (even if entirely off-screen-voice)
+  is still one time and one place; keep it a single consistent scene, do not
+  split it into a multi-time summary just because the line is off-screen.
+- Grammatical person decides the speaker tag: a third-person narrating
+  sentence about this character (e.g. "He never ran fast. He never jumped
+  high.") is the narrator's voice -- tag it as the narrator, never as this
+  character speaking about himself in third person. A first-person
+  self-narrating line (e.g. "At eight I was diagnosed...") is this character's
+  own voice-over. Both are off-screen voice; only the speaker tag differs.
+- Every speaker and every on-screen character must use the canonical name
+  given in relevant_assets.characters, copied verbatim; only a person with a
+  mere honorific in the source text that relevant_assets.characters cannot
+  resolve gets referred to by that honorific (see the earlier rule on people
+  with no reference image). The narrator is a voice-over, not a person in the
+  picture -- never list the narrator as an on-screen subject or give the
+  narrator its own establishing shot.
 """
 
 
@@ -274,3 +320,35 @@ def _dialect_for_target_video_model(target_video_model: str) -> tuple[VideoPromp
     if profile.render_format == "minimax_h3_native_fields":
         return profile, "minimax_h3", MINIMAX_H3_DIALECT_INSTRUCTIONS
     return profile, "seedance_2", SEEDANCE_DIALECT_INSTRUCTIONS
+
+
+def render_montage_beat_shots(beats: list[MontageBeat], *, duration_s: int) -> str:
+    """Render the deterministic "镜头1（约0-Xs）……镜头2……" skeleton for a
+    montage-form segment's ``beats``, splitting ``duration_s`` evenly.
+
+    This is the code-side counterpart to the montage guidance embedded in the
+    two dialect blocks above: once a caller has resolved a segment to
+    ``form == "montage"`` with 1-3 ``MontageBeat`` entries (schema/validation
+    contract in app.schemas.shot_montage / app.validators.storyboard_montage),
+    this composes the per-beat time-sliced skeleton that the free-text
+    prompt_text should follow. It does not decide *whether* a segment is a
+    montage, does not call the model, and is not wired into
+    app.production.storyboard_pack's own prompt assembly (that module owns
+    the stage-1/stage-2 calls and is out of this change's file scope) --
+    it only owns the deterministic beats-to-timeslice text so that wiring
+    step has a tested, ready building block instead of ad-hoc string glue.
+    """
+    if not beats:
+        return ""
+    beat_count = len(beats)
+    slice_s = max(1, duration_s // beat_count)
+    lines: list[str] = []
+    start = 0
+    for index, beat in enumerate(beats, start=1):
+        end = duration_s if index == beat_count else min(duration_s, start + slice_s)
+        descriptor = "、".join(
+            part for part in (beat.time_anchor, beat.scene_name, beat.visual) if part
+        )
+        lines.append(f"镜头{index}（约{start}-{end}秒）：{descriptor}")
+        start = end
+    return "\n".join(lines)

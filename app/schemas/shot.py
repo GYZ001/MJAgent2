@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 from .common import _normalize_information_ids
 from .narrative_action import ActionParticipantDelivery
 from .narrative_capacity import AudienceStatePathRef, ShotCapacityBudget, ShotContribution
+from .shot_montage import MontageBeat
 from .shot_state import AudioTimelineItem, ContinuityState, Dialogue, RequiredOnScreenText
 
 if TYPE_CHECKING:
@@ -122,6 +123,18 @@ class Shot(BaseModel):
     # 字段名与冻结契约 beat_sheet[] 一致），供前端展示节拍摘要用，见
     # app/production/storyboard_pack.py persist_storyboard_pack。
     storyboard_pack_segment: dict[str, Any] | None = None
+    # 镜头形态（WS7，2026-09-02，见 .shot_montage 模块 docstring 的完整背景）：
+    # "scene"（默认）= 一镜一地一动作，其余描述字段照旧解释；"montage" = 这一行
+    # 的原文是叙述者总结/回忆列举/跨年排比，narration 承载原文本身（逐字或忠实
+    # 压缩），scene_name/scene_time 等单场景字段在这行上不再有意义，改由 beats
+    # 承载段内最多 3 个独立拍点。判据是正面陈述，不是黑名单：原文段落本身构成
+    # 「我八岁……我十三岁……我三十五岁」这类跨越多个时间点的排比或列举时才用
+    # montage；单一场景内的连续对白/动作（即使台词全部 offscreen_voice，例如
+    # 人物在原地的第一人称内心独白）必须保持 "scene"，不得因为台词是画外音就
+    # 顺带改判——那是两件独立的事：offscreen_voice 描述「这句话是不是张嘴说
+    # 的」，form 描述「这一行是不是横跨多个时空」。
+    form: str = "scene"
+    beats: list[MontageBeat] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _sync_information_ids(self) -> "Shot":
