@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -53,13 +54,14 @@ def _call(
     reasoning: int | None = None,
     ts: float,
     first_chunk_at: float | None = None,
+    content: str = "ok",
 ) -> dict:
     payload = "null"
     if reasoning is not None:
-        payload = (
-            '{"usage": {"completion_tokens_details": {"reasoning_tokens": %d}}}'
-            % reasoning
-        )
+        payload = json.dumps({
+            "usage": {"completion_tokens_details": {"reasoning_tokens": reasoning}},
+            "choices": [{"message": {"content": content}}],
+        })
     return {
         "model": model,
         "kind": "chat",
@@ -298,3 +300,24 @@ def test_unreadable_observations_fall_back_rather_than_break_generation(monkeypa
     assert hiagent.reasoning_token_reserve(model="glm-5.3-flash") == (
         config.TEXT_REASONING_TOKEN_RESERVE
     )
+
+
+def test_runaway_reasoning_without_answer_is_not_a_ceiling_sample(monkeypatch):
+    """思考完却没交出正文的调用不算「答案要付的思考成本」。
+
+    生产根因（2026-09-03 橘座在上分镜一直失败）：seed2.0mini 一次调用思考 131078
+    token 后 content 为空，画像取 max 后预留 131078 > 模型输出上限 32768，分镜台
+    预算闸门对该模型一律拒绝（「留给答案只剩 -98310 tokens」），且要等 30 天窗口
+    滑过才会自愈。
+    """
+    import time
+
+    now = time.time()
+    rows = [
+        _call(model="seed-mini", reasoning=6440, ts=now - 100)
+        for _ in range(MIN_OBSERVATIONS)
+    ]
+    rows.append(_call(model="seed-mini", reasoning=131078, ts=now - 50, content=""))
+    _install(monkeypatch, rows)
+
+    assert load_profile("seed-mini").reasoning_ceiling == 6440

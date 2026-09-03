@@ -414,3 +414,72 @@ async def test_streaming_json_protocol_fallback_also_reserves_once(
     )
 
     assert seen == [2000 + config.TEXT_REASONING_TOKEN_RESERVE]
+
+
+def _runaway_reasoning_response() -> dict:
+    """2026-09-03 橘座在上分镜（provider_calls id=29924）的真实指纹：seed2.0mini 思考
+    131078 token 后 content 为空、finish_reason=stop。供应商跑完了，但正文一个字没给。"""
+    return {
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {"content": "", "reasoning_content": "……（131078 token 的思考）"},
+        }],
+        "usage": {"completion_tokens": 131078, "completion_tokens_details": {"reasoning_tokens": 131078}},
+    }
+
+
+def _install_fake_provider_with_meta(monkeypatch, responses: list[dict]) -> list[tuple[dict, dict]]:
+    """同 _install_fake_provider，但连 meta 一起记录，用来核对降级重发的标记。"""
+    calls: list[tuple[dict, dict]] = []
+    monkeypatch.setattr(hiagent, "_model_connection", lambda *_a, **_k: ("https://example.invalid", {}))
+    monkeypatch.setattr(hiagent, "_cached_successful_provider_response", lambda *_a, **_k: None)
+    monkeypatch.setattr(hiagent, "_require_cached_replay_or_raise", lambda *_a, **_k: None)
+
+    async def fake_request(client, url, payload, *, kind, model, headers, key_name, meta):
+        calls.append((payload, dict(meta or {})))
+        return responses.pop(0)
+
+    monkeypatch.setattr(hiagent, "_plain_chat_request", fake_request)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_empty_answer_after_reasoning_is_resent_once_with_minimal_reasoning(monkeypatch) -> None:
+    """思考失控不是「交付了的坏答案」：按最低思考重发一次，首轮请求不带该参数。"""
+    _patch_model(monkeypatch)
+    calls = _install_fake_provider_with_meta(
+        monkeypatch, [_runaway_reasoning_response(), _ok_response()]
+    )
+
+    result = await hiagent.chat(
+        [{"role": "user", "content": "写一段"}],
+        max_tokens=2048,
+        call_meta={"operation_id": "op-runaway-reasoning"},
+    )
+
+    assert result == '{"ok":true}'
+    assert len(calls) == 2
+    assert "reasoning_effort" not in calls[0][0]
+    assert calls[1][0]["reasoning_effort"] == "minimal"
+    assert calls[1][1]["reasoning_fallback"] is True
+    assert calls[1][1]["reasoning_fallback_cause"] == "empty_content_with_reasoning"
+
+
+@pytest.mark.asyncio
+async def test_empty_answer_after_reasoning_fails_closed_after_one_resend(monkeypatch) -> None:
+    """重发一次仍空就照常失败，不无限重试，也不退化成原样重放。"""
+    _patch_model(monkeypatch)
+    calls = _install_fake_provider_with_meta(
+        monkeypatch, [_runaway_reasoning_response(), _runaway_reasoning_response()]
+    )
+
+    with pytest.raises(hiagent.ProviderError) as excinfo:
+        await hiagent.chat(
+            [{"role": "user", "content": "写一段"}],
+            max_tokens=2048,
+            call_meta={"operation_id": "op-runaway-reasoning-twice"},
+        )
+
+    assert excinfo.value.failure_kind == hiagent.ProviderFailureKind.OUTPUT_MISSING.value
+    assert excinfo.value.replay_safe is False
+    assert len(calls) == 2

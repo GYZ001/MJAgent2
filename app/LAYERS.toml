@@ -154,6 +154,7 @@ allowed_exceptions = []
 # ---- L3 供应商适配：可依赖 L0-L2 ----
 "app.harness.model_gateway" = 3
 "app.hiagent" = 3
+"app.chat_response_probe" = 1  # 2026-09-03：从 hiagent 搬出的纯判定函数，无 app 内依赖
 "app.system_health" = 3  # 2026-08-30 新增：health() 的凭据/模型状态计算，只
                           # import app.config（L1），其余靠调用方注入回调
                           # （item_key_configured/active_provider），不直接

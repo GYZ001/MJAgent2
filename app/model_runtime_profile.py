@@ -100,6 +100,7 @@ def _measure(model: str) -> ModelRuntimeProfile:
             """SELECT
                    json_extract(response_json,
                        '$.usage.completion_tokens_details.reasoning_tokens') AS reasoning_tokens,
+                   length(coalesce(json_extract(response_json, '$.choices[0].message.content'), '')) AS content_len,
                    ts,
                    first_chunk_at
                FROM provider_calls
@@ -113,7 +114,10 @@ def _measure(model: str) -> ModelRuntimeProfile:
     first_token: list[float] = []
     for row in rows:
         raw = row["reasoning_tokens"]
-        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        # 思考完却没交出正文（content 为空）的调用不是「答案要付的思考成本」，是一次失控：
+        # 2026-09-03 seed2.0mini 思考 131078 token 后 content 为空，若计入 max，预留会超过模型输出
+        # 上限 32768，分镜台预算闸门从此对该模型一律拒绝（留给答案 -98310 tokens），直到 30 天窗口滑过。
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool) and (row["content_len"] or 0) > 0:
             reasoning.append(float(raw))
         ts, chunk_at = row["ts"], row["first_chunk_at"]
         if ts and chunk_at:

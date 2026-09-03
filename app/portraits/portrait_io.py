@@ -19,6 +19,7 @@ from app.errors import ContentGenerationError, code_ref
 from app.evidence.media import record_reference_asset
 from app.harness.types import EvidenceArtifact
 from app.portraits.card_owner import resolve_card_owner
+from app.portraits.portrait_insert import insert_portrait_row_or_existing
 from app.refs import _safe_name, portrait_prompt, production_appearance_anchor
 from app.schemas import Bible
 
@@ -581,19 +582,11 @@ async def _generate_discovered_character_portrait(
         values["artifact_id"] = artifact["id"] if artifact else None
     if pack_supported:
         values["pack_status"] = "generating"
-    columns = list(values)
-    conn.execute(
-        f"INSERT INTO character_portraits({', '.join(columns)}) "
-        f"VALUES({', '.join('?' for _ in columns)})",
-        tuple(values[column] for column in columns),
-    )
-    conn.commit()
-    inserted = conn.execute(
-        "SELECT * FROM character_portraits WHERE id=?", (portrait_id,),
-    ).fetchone()
+    inserted = insert_portrait_row_or_existing(conn, values)
     return await _complete_candidate(
         inserted,
         primary_qa=qa,
-        purge_on_failure=True,
+        # 槽位被并行任务抢先时续做的是别人的行，失败不能替别人清场。
+        purge_on_failure=str(inserted["id"]) == portrait_id,
     )
 

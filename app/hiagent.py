@@ -28,6 +28,8 @@ from urllib.parse import urljoin
 import httpx
 
 from app import config
+from app.chat_response_probe import (_content_delivery_absent, _empty_content_detail,
+                                     _reasoning_present, _reasoning_used_all_output_budget)
 from app.atomic_io import atomic_write_bytes
 from app.db import (finish_provider_call, get_conn, get_setting, log_provider_call,
                     provider_operation_id, start_provider_call,
@@ -897,35 +899,6 @@ def _chat_content(data: dict, *, label: str = "chat") -> str:
     return content or ""
 
 
-def _reasoning_used_all_output_budget(data: dict) -> bool:
-    """判断推理模型是否在生成正文前已用完输出预算。
-
-    OpenRouter 的 reasoning 与 message.content 共用 max_tokens。部分模型会在
-    finish_reason=length 时只返回 reasoning、将 content 留为 null。
-    """
-    try:
-        choice = data["choices"][0]
-        message = choice["message"]
-    except (KeyError, IndexError, TypeError):
-        return False
-    reasoning = message.get("reasoning") or message.get("reasoning_content")
-    return choice.get("finish_reason") == "length" and bool(reasoning)
-
-
-def _empty_content_detail(data: dict) -> str:
-    try:
-        choice = data["choices"][0]
-        message = choice.get("message") or {}
-    except (KeyError, IndexError, TypeError):
-        return "响应结构中无可用 choice"
-    finish_reason = choice.get("finish_reason") or "unknown"
-    reasoning_present = bool(message.get("reasoning") or message.get("reasoning_content"))
-    usage = data.get("usage") or {}
-    completion_tokens = usage.get("completion_tokens")
-    return (f"finish_reason={finish_reason}, reasoning_present={reasoning_present}, "
-            f"completion_tokens={completion_tokens}")
-
-
 def _reject_truncated_chat_response(data: dict) -> None:
     try:
         finish_reason = data["choices"][0].get("finish_reason")
@@ -944,36 +917,6 @@ def _reject_truncated_chat_response(data: dict) -> None:
     )
 
 
-def _content_delivery_absent(data: dict) -> bool:
-    """Whether an OpenAI 兼容响应完全没有交付证据（既非答案也非可诊断的拒答）。
-
-    一次真正跑完的补全，无论模型说了什么，最终 chunk 都会盖上一个终态
-    ``finish_reason``（stop/length/content_filter/tool_calls/...），并且
-    ``usage.completion_tokens`` 会如实反映它花掉的预算——即便答案是"什么都
-    不说"。当这两个证据同时缺席（没有 finish_reason，且已入账的
-    completion_tokens 为 0 或未上报）、content 又为空时，供应商没有对这次请求
-    做出任何决定：这与 ``_stream_chat_completion`` 里"流在 [DONE] 前中断"
-    （见 ``provider_answer_undelivered``）是同一种情况，只是这次流最终还是吐出
-    了 ``[DONE]``，因此被记成了正常的 200。既然没有答案可挑选、也没有判断可
-    保留，原样重放这份确定性请求一次是安全的——与 ``_reject_truncated_chat_response``
-    对 ``OUTPUT_TRUNCATED`` 的论证同构，只是这里对应的是生成中途夭折，而不是
-    预算耗尽。
-
-    反之，只要 finish_reason 或 completion_tokens 任一项证明供应商确实跑完了
-    这次请求（哪怕答案就是空字符串），就不属于这里——那是一次交付了的坏答案，
-    必须继续 fail-closed，不能被这条重放豁免。
-    """
-    try:
-        choice = data["choices"][0]
-    except (KeyError, IndexError, TypeError):
-        return False
-    if choice.get("finish_reason"):
-        return False
-    usage = data.get("usage") or {}
-    completion_tokens = usage.get("completion_tokens")
-    return not (isinstance(completion_tokens, int) and completion_tokens > 0)
-
-
 def _empty_chat_content_error(data: dict) -> ProviderError:
     """构造"content 为空"的分类化 ProviderError（供 ``chat()`` 两条 provider 分支复用）。
 
@@ -989,6 +932,14 @@ def _empty_chat_content_error(data: dict) -> ProviderError:
             failure_kind=ProviderFailureKind.OUTPUT_MISSING,
             delivery_state="responded",
             replay_safe=True,
+        )
+    if _reasoning_present(data):
+        # 供应商跑完了，但输出预算全花在思考上、正文一个字没给（2026-09-03 橘座在上：seed2.0mini
+        # 思考 131078 token 后 content 为空、finish_reason=stop）。不是「交付了的坏答案」，是思考失控；
+        # 不许原样重放（replay_safe=False），由 chat() 派发循环改按最低思考重发一次。
+        return ProviderError(
+            message, raw=detail, failure_kind=ProviderFailureKind.OUTPUT_MISSING,
+            delivery_state="responded", replay_safe=False,
         )
     return ProviderError(message)
 
@@ -1289,25 +1240,19 @@ async def _chat_with_reasoning_fallback(client: httpx.AsyncClient, url: str, pay
     _notify_completion_usage(data, usage_callback, reused=reused)
     if not content.strip() and _reasoning_used_all_output_budget(data):
         if bool((call_meta or {}).get("disable_reasoning_fallback")):
-            raise ProviderError(
-                "模型推理耗尽输出预算，该业务操作禁止隐式第二次付费请求",
-                raw=_empty_content_detail(data),
-                failure_kind=ProviderFailureKind.OUTPUT_TRUNCATED,
-                delivery_state="responded",
-                replay_safe=False,
-            )
+            raise ProviderError("模型推理耗尽输出预算，该业务操作禁止隐式第二次付费请求", raw=_empty_content_detail(data),
+                                failure_kind=ProviderFailureKind.OUTPUT_TRUNCATED, delivery_state="responded", replay_safe=False)
         # 思考过长时重试；移除 OpenRouter reasoning 参数，使用普通生成。
+        # 「思考后 content 为空、finish_reason=stop」这一类不在这里处理——它由 chat() 的派发循环按
+        # 供应商各自的「压到最低思考」参数重发一次（见 reasoning_fallback_used）。
         fallback_payload = {**payload, "temperature": temperature}
-        # 移除 OpenRouter 风格的 reasoning 参数
         fallback_payload.pop("reasoning", None)
         if thinking_disabled(call_meta):
             fallback_payload["thinking"] = {"type": "disabled"}
         # DeepSeek/智谱等路径原请求可能根本没有 reasoning 字段。此时所谓降级请求
         # 与首轮逐字相同，重复发送只会再次耗尽预算并产生费用，必须直接结束。
         if fallback_payload == payload:
-            raise ProviderError(
-                f"模型推理耗尽输出预算，且当前接口不支持关闭推理（{_empty_content_detail(data)}）"
-            )
+            raise ProviderError(f"模型推理耗尽输出预算，且当前接口不支持关闭推理（{_empty_content_detail(data)}）")
         fallback_meta = {
             **(call_meta or {}),
             "reasoning_fallback": True,
@@ -1640,6 +1585,54 @@ async def _plain_chat_request(
 _RESPONSE_FORMAT_REQUIRED_JSON_SCHEMA_RETRIES = 2
 
 
+async def _custom_protocol_chat(
+    client: httpx.AsyncClient, provider: str, custom_model: str, messages: list[dict], *,
+    with_rf, temperature: float, max_tokens: int, call_meta: dict, usage_callback,
+) -> tuple[str, dict]:
+    """HiAgent / 自定义 OpenAI 兼容模型的一次 chat 往返（含缓存重放与截断/空答判定）。"""
+    base_url, headers = _model_connection(
+        provider, custom_model,
+        config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY,
+    )
+    payload = with_rf({"model": custom_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens})
+    if call_meta.get("reasoning_fallback"):
+        # 2026-09-03 在 B 上直连 HiAgent 网关实测：thinking.type=disabled 被 400 拒绝
+        # （与网关默认 reasoning_effort=medium 冲突），reasoning_effort=minimal 才把
+        # reasoning_tokens 压到 0 且正文正常；low 仍思考。首轮请求不带此参数，只在降级重发时加。
+        payload["reasoning_effort"] = "minimal"
+    data = _cached_successful_provider_response(
+        "chat", custom_model, payload, call_meta,
+    )
+    _require_cached_replay_or_raise(
+        data, call_meta, kind="chat", model=custom_model, payload=payload,
+    )
+    reused = data is not None
+    if data is None:
+        data = await _plain_chat_request(
+            client,
+            f"{base_url}/chat/completions",
+            payload,
+            kind="chat",
+            model=custom_model,
+            headers=headers,
+            key_name=f"model:{custom_model}",
+            meta=call_meta,
+        )
+    _notify_completion_usage(data, usage_callback, reused=reused)
+    _reject_truncated_chat_response(data)
+    return _chat_content(data, label="chat"), data
+
+
+def _reasoning_fallback_meta(call_meta: dict) -> dict:
+    """思考失控降级重发那一次的 call_meta：关思考，并把降级原因写进观测台。"""
+    return {
+        **call_meta,
+        "disable_thinking": True,
+        "reasoning_fallback": True,
+        "reasoning_fallback_cause": "empty_content_with_reasoning",
+    }
+
+
 async def chat(messages: list[dict], *, model: str | None = None, provider: str | None = None,
                temperature: float = 0.7,
                max_tokens: int = 65535, call_meta: dict | None = None,
@@ -1753,33 +1746,11 @@ async def chat(messages: list[dict], *, model: str | None = None, provider: str 
                     usage_callback=usage_callback)
                 data = {}
             else:
-                custom_model = selected_model
-                base_url, headers = _model_connection(
-                    provider, custom_model,
-                    config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY,
+                content, data = await _custom_protocol_chat(
+                    client, provider, selected_model, messages, with_rf=_with_rf,
+                    temperature=temperature, max_tokens=max_tokens, call_meta=call_meta,
+                    usage_callback=usage_callback,
                 )
-                payload = _with_rf({"model": custom_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens})
-                data = _cached_successful_provider_response(
-                    "chat", custom_model, payload, call_meta,
-                )
-                _require_cached_replay_or_raise(
-                    data, call_meta, kind="chat", model=custom_model, payload=payload,
-                )
-                reused = data is not None
-                if data is None:
-                    data = await _plain_chat_request(
-                        client,
-                        f"{base_url}/chat/completions",
-                        payload,
-                        kind="chat",
-                        model=custom_model,
-                        headers=headers,
-                        key_name=f"model:{custom_model}",
-                        meta=call_meta,
-                    )
-                _notify_completion_usage(data, usage_callback, reused=reused)
-                _reject_truncated_chat_response(data)
-                content = _chat_content(data, label="chat")
         return content, data
 
     response_format_required = bool(
@@ -1817,6 +1788,7 @@ async def chat(messages: list[dict], *, model: str | None = None, provider: str 
         )
     truncation_escalated = False
     undelivered_retry_used = False
+    reasoning_fallback_used = False
     required_format_attempt = 0
     while True:
         try:
@@ -1858,6 +1830,19 @@ async def chat(messages: list[dict], *, model: str | None = None, provider: str 
                 continue
             if (
                 exc.failure_kind == ProviderFailureKind.OUTPUT_MISSING.value
+                and not exc.replay_safe
+                and not reasoning_fallback_used
+            ):
+                # 思考失控（content 为空但带思考，见 _empty_chat_content_error）：不是重摇一个语义
+                # 答案，而是把同一请求按各协议自己的「最低思考」参数再发一次——首轮已证明思考对
+                # 这条请求有害。只做一次；再空就照常 fail-closed。
+                reasoning_fallback_used = True
+                disable_thinking = True
+                call_meta = _reasoning_fallback_meta(call_meta)
+                continue
+            if (
+                exc.failure_kind == ProviderFailureKind.OUTPUT_MISSING.value
+                and exc.replay_safe
                 and not undelivered_retry_used
             ):
                 # content 为空、且响应既没有终态 finish_reason 也没有已入账的
