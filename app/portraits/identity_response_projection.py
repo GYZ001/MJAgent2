@@ -19,6 +19,7 @@ from .constants import (
     IDENTITY_NAME_FORM_PERSONAL,
     IDENTITY_SOURCE_LABEL_DEFENSIVE_MAX_LENGTH,
 )
+from . import identity_degrade
 from .discovery_resample import _bounded_owned_identity_evidence
 from .evidence_merge import (
     _CurrentIdentitySchemaViolation,
@@ -235,11 +236,7 @@ def _project_current_identity_response(
             if identity_kind == "functional"
             else None
         )
-        if (
-            identity_kind == "functional"
-            and functional_key.startswith("P:")
-            and prior_functional_group is None
-        ):
+        if identity_kind == "functional" and functional_key.startswith("P:") and prior_functional_group is None:
             errors.append(
                 f"current prior functional decision 越界：{functional_key}"
             )
@@ -633,6 +630,9 @@ def _project_current_identity_response(
         reconciled = _current_identity_reconcile_as_single(options)
         if reconciled is not None:
             merged.append(reconciled)
+            continue
+        if degraded := identity_degrade.merge_declared_functional_repeat_if_eligible(options, evidence_by_ref):
+            merged.append(degraded)
             continue
         # 第31轮真实回归 ERR-20260824-614276（EP5，两条"老者"）：跟马脸
         # 青年案（申报逐字段雷同→归一合并）方向相反——这次模型用不同
