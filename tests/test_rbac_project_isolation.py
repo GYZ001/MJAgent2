@@ -300,7 +300,12 @@ def test_artifact_detail_cross_account_is_404(seed, client):
 
 
 def test_job_detail_cross_account_is_404(seed, client):
-    own = client.get("/api/system/jobs/job_a", headers=seed.headers_a)
+    # 观测数据 2026-09-03 起只对租户管理员开放，所以「自己的任务能看到」这一档改由
+    # 管理员会话来证明；普通会员即便是任务的所有者也先被 require_system_admin 拦成
+    # 403。跨账号仍然是 404——归属闸门排在管理员闸门之前，别人的对象对你先是
+    # 「不存在」。
+    assert client.get("/api/system/jobs/job_a", headers=seed.headers_a).status_code == 403
+    own = client.get("/api/system/jobs/job_a", headers=seed.headers_admin)
     assert own.status_code == 200, own.text
     assert client.get("/api/system/jobs/job_b", headers=seed.headers_a).status_code == 404
 
@@ -381,13 +386,24 @@ def test_system_overview_is_admin_only(seed, client):
     assert allowed.status_code == 200
 
 
-def test_project_scoped_observability_still_works_for_members(seed, client):
-    """项目内的观测入口继续对项目所有者开放（_assert_scope 的既有细粒度校验不受
-    影响），只是全局跨项目入口收紧到系统管理员。"""
-    own = client.get(
+def test_project_scoped_observability_is_admin_only(seed, client):
+    """观测数据 2026-09-03 起整体收紧到租户管理员：项目所有者本人也看不到。
+
+    普通会员在前端连入口都没有（frontend/src/appSections.ts 的 adminOnly + App.tsx
+    的兜底跳转），这里是真正的闸门（app/main.py 给 observability_router 挂的
+    require_system_admin）。跨项目请求仍然在归属闸门就被判 404——
+    require_project_owner_access 排在 require_system_admin 之前，别人的对象对你
+    先是「不存在」，再谈权限。
+    """
+    owner_denied = client.get(
         "/api/projects/proj_a/observability/runs/run_a_proj", headers=seed.headers_a
     )
-    assert own.status_code == 200, own.text
+    assert owner_denied.status_code == 403, owner_denied.text
+    admin_allowed = client.get(
+        "/api/projects/proj_a/observability/runs/run_a_proj",
+        headers=seed.headers_admin,
+    )
+    assert admin_allowed.status_code == 200, admin_allowed.text
     foreign = client.get(
         "/api/projects/proj_a/observability/runs/run_a_proj", headers=seed.headers_b
     )

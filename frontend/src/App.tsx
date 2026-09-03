@@ -43,6 +43,7 @@ import {
   PAGE_LOADERS,
   SECTIONS,
   SYSTEM_SECTIONS,
+  visibleSectionsFor,
   type View,
 } from "./appSections";
 export type { View } from "./appSections";
@@ -535,9 +536,11 @@ function AppShell() {
   );
 
   // 前端隐藏只是体验层面；真正的边界在后端（403/404）。这里只兜底手输
-  // /system/overview 之类的地址——非系统管理员一律不该停在系统设置页上。
+  // /system/overview、/projects/x/observability/jobs 之类的地址——非系统管理员
+  // 一律不该停在系统设置页或观测台上（观测台的侧栏入口也已按 adminOnly 摘掉，
+  // 但旧链接、收藏夹和别处的「查看任务详情」按钮仍会打到这个 view）。
   useEffect(() => {
-    if (view === "system" && !isSystemAdminUser) {
+    if ((view === "system" || view === "observability") && !isSystemAdminUser) {
       go("studio", null, null, null, "replace");
     }
   }, [view, isSystemAdminUser, go]);
@@ -679,7 +682,7 @@ function AppShell() {
     toast,
     registerNavigationGuard,
   };
-  const visibleSections = projectId ? SECTIONS : [];
+  const visibleSections = visibleSectionsFor(projectId, isSystemAdminUser);
 
   const openSection = (s: (typeof SECTIONS)[number]) => {
     if (!s.needEpisode || !projectId) {

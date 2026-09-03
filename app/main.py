@@ -24,6 +24,7 @@ from app.audit.retention import operation_audit_sweep_loop
 from app.audit.store import ensure_schema as ensure_audit_schema
 from app.auth.admin_api import router as auth_admin_router
 from app.auth.api import router as auth_router
+from app.auth.deps import require_system_admin
 from app.auth.principal import set_current_principal
 from app.authz import require_project_owner_access
 from app.config import PROJECTS_DIR, ROOT
@@ -290,7 +291,16 @@ app.include_router(payments_public_router)  # /api/payments/notify/*：渠道回
 app.include_router(router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(planning_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(orchestration_router, dependencies=_PROJECT_OWNER_DEPS)
-app.include_router(observability_router, dependencies=_PROJECT_OWNER_DEPS)
+# 观测数据（任务/运行/调用原文/链路/证据产物）只对租户管理员开放：普通账号在前端
+# 连入口都没有（frontend/src/appSections.ts 把观测台标成 adminOnly），这里是真正的闸门。
+# 挂在 include_router 而不是 APIRouter(dependencies=...) 上，是因为
+# tests/test_project_observability.py 把这个 router 单挂到裸 FastAPI 上跑项目归属
+# 回归，那批用例没有会话中间件、拿不到 Principal；闸门写在挂载点，真实应用的每条
+# 观测路由都被覆盖（tests/test_observability_admin_only.py 守着）。
+app.include_router(
+    observability_router,
+    dependencies=_PROJECT_OWNER_DEPS + [Depends(require_system_admin)],
+)
 app.include_router(system_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(provider_task_zero_cost_router, dependencies=_PROJECT_OWNER_DEPS)
 # agent_conversation_router 的 require_local_session 由路由自身声明（见

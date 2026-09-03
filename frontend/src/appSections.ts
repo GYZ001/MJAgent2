@@ -49,7 +49,7 @@ export const PAGE_LOADERS: Partial<Record<View, () => Promise<unknown>>> = {
   reader: loadReaderPage,
 };
 
-export const SECTIONS: {
+export type Section = {
   key: View;
   label: string;
   icon: string;
@@ -57,7 +57,13 @@ export const SECTIONS: {
   needProject?: boolean;
   needEpisode?: boolean;
   matchViews?: View[];
-}[] = [
+  /** 只对租户管理员（is_system_admin）显示的入口。普通会员账号连按钮都看不到，
+   *  真正的闸门在后端（app/main.py 给 observability_router 挂了
+   *  require_system_admin），两边不同步只会造成 UI 误导，不会造成越权。 */
+  adminOnly?: boolean;
+};
+
+export const SECTIONS: Section[] = [
   {
     key: "bible",
     label: "世界书",
@@ -95,8 +101,19 @@ export const SECTIONS: {
     needEpisode: true,
   },
   { key: "series", label: "连播台", icon: "连", group: "质量交付", needProject: true },
-  { key: "observability", label: "观测台", icon: "观", group: "项目观测", needProject: true },
+  {
+    key: "observability", label: "观测台", icon: "观", group: "项目观测",
+    needProject: true, adminOnly: true,
+  },
 ];
+
+/** 侧栏要渲染的入口：没进项目时不渲染任何工作台；观测台只对租户管理员可见。 */
+export function visibleSectionsFor(
+  projectId: string | null, isSystemAdmin: boolean,
+): Section[] {
+  if (!projectId) return [];
+  return SECTIONS.filter((section) => !section.adminOnly || isSystemAdmin);
+}
 
 export const SYSTEM_SECTIONS: Array<{ key: "overview" | "models" | "accounts" | "audit" | "settings"; label: string; icon: string }> = [
   { key: "overview", label: "总览", icon: "总" },

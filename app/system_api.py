@@ -817,7 +817,7 @@ def _effective_call_status(row: dict) -> str:
     return effective
 
 
-@router.get("/system/calls")
+@router.get("/system/calls", dependencies=[Depends(require_system_admin)])
 def recent_calls(limit: int = 30):
     """最近调用概览：禁止回传 request/response 原文（Todolist T6）。"""
     rows = rows_to_dicts(get_conn().execute(
@@ -987,7 +987,7 @@ def _job_project_id(
     return _resolved_project_id(candidates)
 
 
-@router.get("/system/calls/query")
+@router.get("/system/calls/query", dependencies=[Depends(require_system_admin)])
 def query_calls(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
@@ -1106,7 +1106,7 @@ def _call_detail_payload(call_id: int) -> dict:
     return item
 
 
-@router.get("/system/calls/{call_id}")
+@router.get("/system/calls/{call_id}", dependencies=[Depends(require_system_admin)])
 def call_detail(call_id: int, _session: str = Depends(require_local_session)):
     from app.monitoring import audit, monitor_features
 
@@ -1118,7 +1118,11 @@ def call_detail(call_id: int, _session: str = Depends(require_local_session)):
     return item
 
 
-@router.get("/system/calls/{call_id}/download", response_class=PlainTextResponse)
+@router.get(
+    "/system/calls/{call_id}/download",
+    response_class=PlainTextResponse,
+    dependencies=[Depends(require_system_admin)],
+)
 def download_call_detail(
     call_id: int,
     _session: str = Depends(require_local_session),
@@ -1135,7 +1139,7 @@ def download_call_detail(
     })
 
 
-@router.get("/system/errors")
+@router.get("/system/errors", dependencies=[Depends(require_system_admin)])
 def recent_errors(limit: int = 50):
     """最近报错码列表（不含原文/堆栈，只给概览）。凭 id 调下方详情接口查根因。"""
     rows = rows_to_dicts(get_conn().execute(
@@ -1144,7 +1148,7 @@ def recent_errors(limit: int = 50):
     return rows
 
 
-@router.get("/system/errors/{error_id}")
+@router.get("/system/errors/{error_id}", dependencies=[Depends(require_system_admin)])
 def error_detail(error_id: str, _session: str = Depends(require_local_session)):
     """凭错误ID查全文：请求动作上下文 + 原始报错 + 堆栈（需本机会话，Todolist T6）。"""
     from app.monitoring import redact_monitor_value
@@ -1164,7 +1168,7 @@ def error_detail(error_id: str, _session: str = Depends(require_local_session)):
     return item
 
 
-@router.get("/system/jobs")
+@router.get("/system/jobs", dependencies=[Depends(require_system_admin)])
 def jobs_overview(include_all: bool = False):
     conn = get_conn()
     run_statuses = {
@@ -1395,7 +1399,7 @@ def jobs_overview(include_all: bool = False):
     }
 
 
-@router.get("/system/jobs/query")
+@router.get("/system/jobs/query", dependencies=[Depends(require_system_admin)])
 def query_jobs(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
@@ -1455,7 +1459,7 @@ def query_jobs(
     }
 
 
-@router.get("/system/jobs/{job_id}")
+@router.get("/system/jobs/{job_id}", dependencies=[Depends(require_system_admin)])
 def job_detail(job_id: str, source: str = "job"):
     summary: dict = {}
     if source == "auto":

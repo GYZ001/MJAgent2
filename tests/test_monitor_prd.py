@@ -235,15 +235,20 @@ def test_calls_query_is_full_count_summary_only_and_detail_is_redacted(monkeypat
     assert "***" in combined and "[本机路径已隐藏]" in combined
     assert detail["raw_access"] is False
 
+    # 观测数据 2026-09-03 起只对租户管理员开放。这个裸挂 router 的 app 没有注入
+    # Principal 的中间件（app.main 的 bind_request_principal），所以带不带本机会话
+    # 都停在 require_system_admin 的 401；「管理员能看、普通会员 403」由
+    # tests/test_observability_admin_only.py 在真实 app 上覆盖。这里继续守本函数
+    # 真正要守的东西：脱敏与下载正文不带密钥。
     protected_app = FastAPI()
     protected_app.include_router(system_api.router)
     client = TestClient(protected_app)
     assert client.get("/api/system/calls/225").status_code == 401
     headers = {"X-Manju-Session": public_session_payload()["session_token"]}
-    assert client.get("/api/system/calls/225", headers=headers).status_code == 200
-    download = client.get("/api/system/calls/225/download", headers=headers)
+    assert client.get("/api/system/calls/225", headers=headers).status_code == 401
+    download = system_api.download_call_detail(225)
     assert download.status_code == 200
-    assert "sk-supersecret" not in download.text
+    assert "sk-supersecret" not in download.body.decode("utf-8")
 
 
 def test_jobs_and_runs_are_queryable_past_legacy_caps(monkeypatch) -> None:

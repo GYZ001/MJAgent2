@@ -6,6 +6,7 @@ import {
   type VideoModelSwitchConfirm,
 } from '../api'
 import { useEpisode, useNav, useProject } from '../App'
+import { useAuth } from '../auth/AuthContext'
 import EpisodeCrumb from '../components/EpisodeCrumb'
 import { ItemTaskTimer, ServerTaskTimer } from '../components/TaskTimer'
 import DecisionDialog from '../components/DecisionDialog'
@@ -427,6 +428,10 @@ function statusFallback(ep: Episode): StoryboardStatus {
 
 export default function BoardPage() {
   const { episodeId, go, projectId, toast } = useNav()
+  // 观测台只对租户管理员开放（后端闸门见 app/main.py 给 observability_router 挂的
+  // require_system_admin）。普通会员既看不到侧栏入口，这里也不能再许诺一个跳转
+  // ——进度本身由下面的进度条与 ServerTaskTimer 如实呈现。
+  const canOpenObservability = useAuth().isSystemAdmin
   const { data: ep, refresh, error, status: queryErrorStatus, loading } = useEpisode(episodeId!, 'board')
   // 项目 payload 只供占位四态判断"这一轮出图管没管到它"；缩略图取分集 payload 上
   // 后端现算的 current_* 字段。口径照抄 ScriptPage.tsx（出图中轮询项目、跑完补刷分集）。
@@ -619,7 +624,9 @@ export default function BoardPage() {
       case 'go_screenplay': go('script', projectId, ep.id); break
       case 'generate_storyboard': await loadStartPreview(); break
       case 'resume_storyboard': await loadStartPreview(); break
-      case 'view_progress': go('observability', projectId, null); break
+      case 'view_progress':
+        if (canOpenObservability) go('observability', projectId, null)
+        break
       case 'confirm_storyboard': {
         // 决策③：分镜确认不再是需要人工点头的内容质量门——必检项一旦全部通过就自动放行，
         // 不再停下来等一次"批准并确认分镜"的点击。必检项没通过是真实阻断（不是审美/内容取舍），
@@ -785,7 +792,10 @@ export default function BoardPage() {
   }
 
   const showLaunchPanel = !shots.length && (status.state === 'empty' || status.state === 'no_screenplay')
-  const primaryBlocked = status.recommended_action === 'refresh_status'
+  const viewProgressHidden = primaryAction.intent === 'view_progress' && !canOpenObservability
+  const primaryLabel = viewProgressHidden ? '任务进行中' : primaryAction.label
+  const primaryBlocked = viewProgressHidden
+    || status.recommended_action === 'refresh_status'
   const gateIssueCount = status.hard_gate_issue_count ?? status.hard_gate_issues?.length ?? 0
   const progressCopy = storyboardProgressCopy(status)
   const startPreviewCopy = startPreview ? storyboardStartPreviewCopy(startPreview) : null
@@ -854,14 +864,16 @@ export default function BoardPage() {
                 onClick={() => void pauseStoryboard()}>
                 {busy ? '正在暂停…' : '暂停任务'}
               </button>
-              <button type="button" className="btn" disabled={busy} onClick={() => go('observability', projectId, null)}>
-                查看任务详情
-              </button>
+              {canOpenObservability && (
+                <button type="button" className="btn" disabled={busy} onClick={() => go('observability', projectId, null)}>
+                  查看任务详情
+                </button>
+              )}
             </> : <>
               <button id="storyboard-primary-action" type="button" className="btn board-primary-action primary" disabled={busy || primaryBlocked}
-                aria-label={busy ? `${primaryAction.label}，暂不可用：正在处理上一项操作` : primaryBlocked ? `${primaryAction.label}，暂不可操作` : primaryAction.label}
+                aria-label={busy ? `${primaryLabel}，暂不可用：正在处理上一项操作` : primaryBlocked ? `${primaryLabel}，暂不可操作` : primaryLabel}
                 onClick={() => void runPrimary()}>
-                {busy ? '处理中…' : primaryAction.label}
+                {busy ? '处理中…' : primaryLabel}
               </button>
               {toolbarActions.clear && <button type="button" className="btn danger"
                 disabled={busy}
