@@ -119,7 +119,7 @@ def test_minimax_h3_maps_all_three_generation_modes(monkeypatch) -> None:
         call_meta={"operation_id": "keyframes", "duration_s": 5},
     ))
     references = asyncio.run(minimax_h3.create_video_task(
-        "Reference image 1 is the character. Reference image 2 is the scene.",
+        "图片1 is the character. 图片2 is the scene.",  # 锚点见 seedance_reference_notes
         image_urls=[
             (_image_data_url(), "reference_image"),
             (_image_data_url(), "reference_image"),
@@ -159,7 +159,7 @@ def test_minimax_h3_maps_all_three_generation_modes(monkeypatch) -> None:
     assert requests[1]["reference_images"] == ["uploaded_3", "uploaded_4"]
     assert "<Picture 1>" in requests[1]["prompt"]
     assert "<Picture 2>" in requests[1]["prompt"]
-    assert "Reference image 1 is the character" not in requests[1]["prompt"]
+    assert "图片1 is the character" not in requests[1]["prompt"]
     assert requests[2]["mode"] == "reference_video"
     assert requests[2]["reference_videos"] == ["uploaded_5"]
     assert requests[2]["use_source_audio"] is True
@@ -236,8 +236,8 @@ def test_h3_reference_binding_stays_inside_subject_definitions() -> None:
 
     subject_block = provider_prompt.split("\n\nsummary:", 1)[0]
     music_block = provider_prompt.split("non_diegetic_music:", 1)[1]
-    assert "<Picture 1>: use as character「A」" in subject_block
-    assert provider_prompt.count("<Picture 1>:") == 1
+    assert "<Picture 1>：角色A的人物参考，只用来锁定长相与服装" in subject_block
+    assert provider_prompt.count("<Picture 1>：") == 1
     assert "<Picture 1>" not in music_block
 
 
@@ -274,9 +274,9 @@ def test_seedance_binding_contract_round_trips_into_h3_picture_tags() -> None:
     )
 
     assert seedance_prompt.endswith("--ratio 9:16 --dur 5")
-    assert "<Picture 1>: use as character" in h3_prompt
-    assert "<Picture 1>: use as character「A」" in h3_prompt
-    assert "identity/appearance only" in h3_prompt
+    assert "<Picture 1>：角色A的人物参考" in h3_prompt
+    assert "只用来锁定长相与服装" in h3_prompt
+    assert "只用来锁定身份与环境外观" in h3_prompt
     assert "--ratio 9:16" not in h3_prompt
     assert "--dur 5" not in h3_prompt
 

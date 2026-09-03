@@ -86,11 +86,14 @@ def test_h3_dialogue_line_must_be_embedded_in_its_own_shot():
     assert "never bundled into one shot's description" in H3_FLAT
 
 
-def test_seedance_recap_section_is_reaffirmation_not_first_appearance():
-    """结尾「全片贯穿」段仍然保留，但现在的角色是汇总重申，不是台词第一次
-    出现的地方；逐镜文本、结尾汇总、dialogue[] 三处必须逐字一致。"""
-    assert "汇总重申" in SEEDANCE_FLAT
-    assert "三处必须逐字一致" in SEEDANCE_FLAT or "三处说的必须是同一份清单" in SEEDANCE_FLAT
+def test_seedance_recap_section_no_longer_repeats_dialogue_verbatim():
+    """2026-09-03 改版：台词只写在它发生的那个「镜头N」里一次；结尾「全片
+    贯穿」段保留，但只汇总环境音、配乐、风格与约束，不再逐句重申台词——
+    旧版「逐镜文本/结尾汇总/dialogue[] 三处逐字一致」收窄成「逐镜动作链
+    与 dialogue[] 两处逐字一致」，全片贯穿段不构成第三处。"""
+    assert "不再重复这些台词" in SEEDANCE_FLAT
+    assert "两处必须逐字一致" in SEEDANCE_FLAT
+    assert "不构成第三处" in SEEDANCE_FLAT
 
 
 def test_dialogue_ledger_cross_check_language_untouched_in_both_dialects():
@@ -99,6 +102,24 @@ def test_dialogue_ledger_cross_check_language_untouched_in_both_dialects():
     for text in (SEEDANCE_DIALECT_INSTRUCTIONS, MINIMAX_H3_DIALECT_INSTRUCTIONS):
         assert "required_dialogue" in text
         assert "dialogue[]" in text
+
+
+def test_seedance_shot_labels_no_longer_carry_a_second_range():
+    """2026-09-03 改版：秒数区间会被模型当字面时间码执行，镜头标签改成纯
+    序号「镜头1：」「镜头2：」，不再写「（约0-3秒）」这类区间；段时长仍
+    固定 15 秒、2-4 镜（本次未改，只去掉标签里的秒数）。"""
+    assert "镜头1：" in SEEDANCE_DIALECT_INSTRUCTIONS
+    assert "（约0-" not in SEEDANCE_FLAT
+    assert "本段固定15秒" in SEEDANCE_FLAT or "本段固定 15" in SEEDANCE_DIALECT_INSTRUCTIONS
+    assert "2-4" in SEEDANCE_DIALECT_INSTRUCTIONS
+
+
+def test_seedance_quote_holds_exactly_one_sentence():
+    """一个引号里只放一句话；原文一句台词若含多个独立句子，按标点拆成多个
+    连续引号，仍归同一说话人、同一条 dialogue[]。"""
+    assert "一个引号里只放一句话" in SEEDANCE_FLAT
+    assert "按句号/问号/感叹号拆成多个引号" in SEEDANCE_FLAT
+    assert "同一条dialogue[]" in SEEDANCE_FLAT
 
 
 # ---------------------------------------------------------------------------

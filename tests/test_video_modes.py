@@ -443,13 +443,13 @@ def test_reference_prompt_numbering_uses_exact_packed_order(monkeypatch) -> None
     packed = video_modes.pack_reference_images_for_seedance([asset.public_dict() for asset in assets])
 
     assert [ref["id"] for ref in packed] == ["early", "late", "scene", "character"]
-    assert "Reference image 1: use as plot key frame" in note and "target: opening target" in note
-    assert "Reference image 2: use as plot key frame" in note and "target: closing target" in note
-    assert "Reference image 3: use as scene" in note
-    assert "Reference image 4: use as character" in note
-    assert "beat 1/2@0%" in note
-    assert "beat 2/2@100%" in note
-    assert "each named character appears exactly once" in note
+    assert "图片1：A的关键帧参考" in note and "目标画面：opening target" in note
+    assert "图片2：A的关键帧参考" in note and "目标画面：closing target" in note
+    assert "图片3：场景参考，只用来锁定环境外观" in note
+    assert "图片4：角色A的人物参考，只用来锁定长相与服装" in note
+    assert "进度约0%" in note and "第1/2拍" in note
+    assert "进度约100%" in note and "第2/2拍" in note
+    assert "每个具名角色在画面里只出现一次" in note
     assert "[SUBJECT DEFINITIONS | HIGHEST PRIORITY]" not in note
 
 
@@ -468,7 +468,7 @@ def test_reference_prompt_notes_preserve_trailing_technical_suffix() -> None:
     result = video_modes.append_reference_prompt_notes_from_dicts(prompt, refs)
 
     assert result.endswith("--ratio 9:16 --dur 5")
-    assert result.index("Reference image 1") < result.rindex("--ratio 9:16 --dur 5")
+    assert result.index("图片1") < result.rindex("--ratio 9:16 --dur 5")
     assert result.count("--ratio 9:16") == 1
     assert result.count("--dur 5") == 1
 

@@ -242,6 +242,69 @@ def test_seedance_create_video_task_pins_explicit_1080p_resolution(monkeypatch) 
 
     assert task_id == "task-1080p"
     assert captured["payload"]["resolution"] == seedance.SEEDANCE_VIDEO_RESOLUTION
+
+
+def test_seedance_create_video_task_writes_duration_and_ratio_fields(monkeypatch) -> None:
+    """2026-09-03 在 B 上实测：网关认顶层 duration/ratio 字段——带字段出片
+    1080x1920/5.08s，不带字段落到网关自己的默认值 1920x1080（横屏）。字段与
+    prompt 尾部的 --ratio/--dur 文本后缀双写，文本后缀继续保留在正文里。
+    """
+    captured: dict = {}
+
+    async def fake_post_json(_client, _url, payload, **_kwargs):
+        captured["payload"] = payload
+        return {"id": "task-fields"}
+
+    monkeypatch.setattr(hiagent, "active_model", lambda *_a, **_k: "test-video-model")
+    monkeypatch.setattr(
+        hiagent, "_model_connection", lambda *_a, **_k: ("https://example.test", {})
+    )
+    monkeypatch.setattr(
+        hiagent, "_latest_provider_operation_request", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(hiagent, "_post_json", fake_post_json)
+
+    asyncio.run(
+        seedance.SeedanceAdapter().create_video_task(
+            "固定远景 --ratio 9:16 --dur 15",
+        )
+    )
+
+    assert captured["payload"]["duration"] == 15
+    assert captured["payload"]["ratio"] == "9:16"
+    assert captured["payload"]["content"][0]["text"] == "固定远景 --ratio 9:16 --dur 15"
+
+
+def test_seedance_create_video_task_prefers_call_meta_duration_when_prompt_has_no_dur(
+    monkeypatch,
+) -> None:
+    """分镜台 2.0.0 段落式 prompt_text 从不内嵌 --dur；duration 字段必须落到
+    call_meta['duration_s']（shot.duration_s），不能静默回落到 5 秒默认值。
+    """
+    captured: dict = {}
+
+    async def fake_post_json(_client, _url, payload, **_kwargs):
+        captured["payload"] = payload
+        return {"id": "task-meta-duration"}
+
+    monkeypatch.setattr(hiagent, "active_model", lambda *_a, **_k: "test-video-model")
+    monkeypatch.setattr(
+        hiagent, "_model_connection", lambda *_a, **_k: ("https://example.test", {})
+    )
+    monkeypatch.setattr(
+        hiagent, "_latest_provider_operation_request", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(hiagent, "_post_json", fake_post_json)
+
+    asyncio.run(
+        seedance.SeedanceAdapter().create_video_task(
+            "镜头1：固定远景，无对白。",
+            call_meta={"duration_s": 15},
+        )
+    )
+
+    assert captured["payload"]["duration"] == 15
+    assert captured["payload"]["ratio"] == "9:16"
     assert seedance.SEEDANCE_VIDEO_RESOLUTION == "1080p"
 
 

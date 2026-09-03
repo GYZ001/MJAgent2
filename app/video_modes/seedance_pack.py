@@ -22,6 +22,11 @@ from .mode_selection import (
     max_reference_images,
 )
 from .reference_prompt import reference_gallery_matches_library_policy
+from .seedance_reference_notes import (
+    REFERENCE_PROMPT_NOTE_MARKER as REFERENCE_PROMPT_NOTE_MARKER,
+    REFERENCE_SINGLE_INSTANCE_NOTE as REFERENCE_SINGLE_INSTANCE_NOTE,
+    build_seedance_reference_prompt_notes,
+)
 
 
 
@@ -194,102 +199,23 @@ def _dedupe_assets(assets: list[ReferenceImageAsset]) -> list[ReferenceImageAsse
     return out
 
 
-REFERENCE_SINGLE_INSTANCE_NOTE = (
-    " Reference images bind identity/environment only; each named character "
-    "appears exactly once."
-)
-REFERENCE_PROMPT_NOTE_MARKER = " Use the provided reference images as follows: "
-
-
 def append_reference_prompt_notes_from_dicts(
     prompt_text: str,
     packed_refs: list[dict[str, Any]],
     *,
     duration_s: float | int | None = None,
 ) -> str:
-    """Bind each provider image to stable Seedance subject labels.
+    """Bind each provider image to a stable ``@图片N`` Seedance subject label
+    and append a Chinese purpose note after the prompt body (2026-09-03 起，
+    对齐 Seedance 2.0 官方指南：用编号引用图片、说明语言与正文一致）。
 
-    Seedance 2.0's official guidance requires explicit ``image N -> subject``
-    definitions and stable reuse of those subject labels. Asset IDs alone are
-    not understood by the model.
-
-    ``duration_s``：legacy single-shot callers already have ``--dur`` embedded
-    in ``prompt_text`` by ``ensure_source_excerpt_in_prompt`` before this runs,
-    so ``_split_video_args`` finds and preserves it even with no explicit
-    duration passed here. 分镜台 2.0.0 段落绕过了那一步（会把模型写的换行压成
-    空格，见 app.media_exec.run_job._run_job 的说明），它的 prompt_text 从没
-    嵌过 ``--dur``，不传就会落到 ``_split_video_args`` 的兜底默认值
-    ``config.DEFAULT_VIDEO_DURATION_S``（5 秒，给旧架构最短单镜头用的）而不是
-    这一段真正的时长（15 秒）——实测复现：EP1 第 3 段 duration_s=15，不传
-    duration_s 时最终提交给供应商的是 ``--dur 5``。调用方在有 shot 时必须把
-    ``shot.duration_s`` 传进来。
+    实现搬到 ``app.video_modes.seedance_reference_notes``（该模块的拆分背景
+    与 duration_s 语义见那边的模块 docstring 与函数 docstring；本文件已在
+    line_count 棘轮基线里、零余量，新逻辑不能再往这加）。
     """
-    from app.compiler import _split_video_args
-
-    if REFERENCE_PROMPT_NOTE_MARKER in prompt_text:
-        return prompt_text
-    prompt_body, prompt_args = _split_video_args(prompt_text, duration_s)
-    lines: list[str] = []
-    for idx, ref in enumerate(packed_refs, 1):
-        label = {
-            "character": "character",
-            "scene": "scene",
-            "prop": "prop",
-            "style": "style",
-            "previous_shot_frame": "previous shot clean frame",
-            "plot_key_frame": "plot key frame",
-        }.get(str(ref.get("type") or "reference"), str(ref.get("type") or "reference"))
-        related = [
-            str(name).strip()
-            for name in (
-                ref.get("relatedCharacterIds")
-                or ref.get("related_character_ids")
-                or []
-            )
-            if str(name).strip()
-        ]
-        entity_name = str(ref.get("entity_name") or "").strip()
-        if ref.get("type") == "character" and entity_name and entity_name not in related:
-            related.append(entity_name)
-        subject = f"「{'、'.join(related)}」" if related else ""
-        timeline = ""
-        if ref.get("type") == "plot_key_frame":
-            target = str(ref.get("keyframe_target_desc") or "").strip()
-            beat_index = ref.get("keyframe_index") or "?"
-            beat_total = ref.get("keyframe_total") or "?"
-            time_ratio = ref.get("keyframe_time_ratio")
-            timing = ""
-            try:
-                timing = f"@{round(float(time_ratio) * 100)}%"
-            except (TypeError, ValueError):
-                pass
-            timeline = f"; beat {beat_index}/{beat_total}{timing}"
-            if target:
-                timeline += f"; target: {target}"
-        lines.append(
-            f"Reference image {idx}: use as {label}{subject}; "
-            f"identity/appearance only{timeline}."
-        )
-    if not lines:
-        return prompt_text
-    note = (
-        REFERENCE_PROMPT_NOTE_MARKER
-        + " ".join(lines)
-        + REFERENCE_SINGLE_INSTANCE_NOTE
+    return build_seedance_reference_prompt_notes(
+        prompt_text, packed_refs, duration_s=duration_s,
     )
-    if prompt_body.startswith("subject_definitions:\n"):
-        heading, body = prompt_body.split("\n", 1)
-        return (
-            heading
-            + "\n"
-            + " ".join(lines)
-            + " "
-            + REFERENCE_SINGLE_INSTANCE_NOTE.strip()
-            + "\n"
-            + body
-            + prompt_args
-        )
-    return prompt_body + note + prompt_args
 
 
 def append_reference_prompt_notes(

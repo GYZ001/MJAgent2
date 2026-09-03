@@ -482,9 +482,9 @@ def _tagged_prompt(
     video_input_intent: str = "",
 ) -> str:
     prompt_text, _suffix = _split_trailing_video_args(prompt_text)
-    for index in range(1, image_count + 1):
+    for index in range(1, image_count + 1):  # "图片N" 锚点见 seedance_reference_notes
         prompt_text = re.sub(
-            rf"\bReference image {index}\b",
+            rf"\b图片{index}\b",
             f"<Picture {index}>",
             prompt_text,
         )
@@ -510,8 +510,8 @@ def _tagged_prompt(
             for line in mappings
             if not (
                 (label_match := re.match(r"(<(?:Picture|Video|Audio) \d+>)", line))
-                and re.search(
-                    re.escape(label_match.group(1)) + r"\s*:",
+                and re.search(  # 全角冒号=中文参考图说明，半角=H3 原生英文写法，两种都要认
+                    re.escape(label_match.group(1)) + r"\s*[:：]",
                     prompt_text,
                 )
             )

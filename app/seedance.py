@@ -10,6 +10,7 @@ role），供应商自己去拉素材，产物直接出现在轮询响应的 ``c
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any
 
@@ -70,6 +71,22 @@ class SeedanceAdapter:
         # 默认值——供应商改了默认值我们不会知道，显式传参把这件事钉死在我们自己手里。
         payload["watermark"] = False
         payload["resolution"] = SEEDANCE_VIDEO_RESOLUTION
+        # 2026-09-03 B 上实测（探测记录见任务报告）：网关认顶层 duration/ratio
+        # 字段——带字段出片 1080×1920/5.08s，不带字段落到网关自己的默认值
+        # 1920×1080（横屏，不是产品要的竖屏）。字段与 prompt 尾部 --ratio/--dur
+        # 文本后缀双写：字段是结构化保险，文本后缀留着兼容旧网关/旧行为。
+        # 不 import app.compiler（L4，会造成 L3→L4 上行边）：上游打包时已把
+        # ``--ratio 9:16 --dur N`` 归一化到 prompt 尾部，这里只读尾部参数；
+        # call_meta.duration_s 是调用方显式给的镜头时长，优先于文本内嵌值。
+        dur_matches = re.findall(r"--dur\s+(\d+)", prompt_text)
+        ratio_matches = re.findall(r"--ratio\s+(\d+:\d+)", prompt_text)
+        explicit_duration = (call_meta or {}).get("duration_s")
+        if explicit_duration is not None:
+            payload["duration"] = int(explicit_duration)
+        elif dur_matches:
+            payload["duration"] = int(dur_matches[-1])
+        # 产品固定竖屏；探测证明缺 ratio 字段网关会落到横屏默认值，所以没写就补 9:16。
+        payload["ratio"] = ratio_matches[-1] if ratio_matches else "9:16"
         if return_last_frame:
             payload["return_last_frame"] = True
         if call_meta and call_meta.get("operation_id"):
@@ -282,7 +299,11 @@ class SeedanceAdapter:
                 ["first_frame", "reference_video"],
                 ["last_frame", "reference_video"],
             ],
-            duration_limits={"min_s": 5, "max_s": 10},
+            # 2026-09-03 修正：旧值 10s 是历史猜测，与产品实际可配置区间
+            # （config.VIDEO_DURATION_MIN_S~MAX_S；分镜台段固定 15 秒，旧架构
+            # 单镜 5 秒）不符——EP1 全集 9 个 15 秒段已经通过 Seedance 正常出片
+            # （靠 prompt 尾部 --dur 15 文本后缀），10s 上限只是没人校对过。
+            duration_limits={"min_s": 5, "max_s": 15},
             size_limits={},
             format_limits={},
             probe_time=now(),
