@@ -20,6 +20,7 @@ from .alias_resolution import (
     _prep_pack_cross_episode_alias_conflict,
     _prep_pack_lookup_character_alias_canonical_name,
 )
+from .appellation_resolve import resolve_narration_appellations
 from .asset_lookup import (
     _prep_pack_group_scene_quotes_by_canonical,
     _prep_pack_register_scene_alias_if_new,
@@ -245,9 +246,7 @@ async def _resolve_assets(
             if not name:
                 errors.append("存在空白角色名")
                 continue
-            mention_segment_indexes = sorted(
-                {int(index) for index in mention.get("segment_indexes") or []}
-            )
+            mention_segment_indexes = sorted({int(index) for index in mention.get("segment_indexes") or []})
             resolved_name = character_rename.get(name, name)
             # provenance（1.6.0）：记录这次改名到底走的是哪条路径——
             # via_alias_registry 单独标记 task① 的注册表命中（跟
@@ -559,9 +558,7 @@ async def _resolve_assets(
                     dual_anchor=(true_name_dual_anchor if via_suspected_true_name else None),
                 ),
             })
-            entry["segment_indexes"] = sorted(
-                set(entry["segment_indexes"]) | set(mention_segment_indexes)
-            )
+            entry["segment_indexes"] = sorted(set(entry["segment_indexes"]) | set(mention_segment_indexes))
             # appellation_map 真源（2.0.1 bug fix）：这条提及已经真正走到
             # 这里——有 portrait_id、通过了称谓证据闸——就是一条真实的
             # "模糊称谓 -> 身份"结论，读的是 entry 自己（跟 asset_manifest.
@@ -595,9 +592,7 @@ async def _resolve_assets(
             if not name:
                 errors.append("存在空白场景名")
                 continue
-            mention_segment_indexes = sorted(
-                {int(index) for index in mention.get("segment_indexes") or []}
-            )
+            mention_segment_indexes = sorted({int(index) for index in mention.get("segment_indexes") or []})
             # 2.0.2：这条提及自己申报的逐字引文（见 _ModelSceneMention.quote
             # 与 PREP_PACK_VERSION 上方 2.0.2 大注释）——resolution/discovery
             # 锚点候选表下面会用到，独立于 name/canonical_scene_name 本身。
@@ -774,9 +769,7 @@ async def _resolve_assets(
                     dual_anchor=(true_name_dual_anchor if via_suspected_true_name else None),
                 ),
             })
-            entry["segment_indexes"] = sorted(
-                set(entry["segment_indexes"]) | set(mention_segment_indexes)
-            )
+            entry["segment_indexes"] = sorted(set(entry["segment_indexes"]) | set(mention_segment_indexes))
         return (
             characters, scenes, functional_extras, errors,
             unresolved_characters, unresolved_scenes, true_name_hints,
@@ -977,6 +970,13 @@ async def _resolve_assets(
             errors = list(errors) + [
                 f"发现阶段诊断：{message}" for message in discovery_diagnostics[:5]
             ]
+
+    # 叙述向称谓归属（WS2-A，见 .appellation_resolve 模块 docstring）：补两遍
+    # 解析不处理的"被叙述/自述提及、原文未描写其画面出场"的称谓归属。
+    await resolve_narration_appellations(
+        conn, project_id, episode_id, episode_no, source_text, bible, segments,
+        characters, functional_extras, character_appellation_rows,
+    )
 
     functional_extras_payload = [
         {

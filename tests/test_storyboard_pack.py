@@ -1169,6 +1169,30 @@ def test_validate_segment_draft_empty_required_dialogue_is_noop():
     assert errors == []
 
 
+# manifest 真实产出形状（app.multiview._storyboard_pack_asset_dependencies）：
+# scene 单数 + additional_scenes，不是 scenes 复数（与 draft.resources.scenes
+# 是两个不同字典）。_manifest() 不传参数=存在但空；manifest=None=缺失，两者
+# 语义不同（见 test_manifest_present_but_empty_falls_back_to_text_only_unknown）。
+def _manifest_character(name: str, *, has_asset: bool = True) -> dict:
+    if not has_asset:
+        return {"name": name, "asset_required": True}
+    return {
+        "name": name, "asset_required": True, "look_revision_id": "v1",
+        "pack_status": "ready", "selected_view_ids": ["v1"], "missing_required": [],
+    }
+
+def _manifest_scene(name: str, *, has_asset: bool = True) -> dict:
+    if not has_asset:
+        return {"name": name, "asset_required": True}
+    return {
+        "name": name, "asset_required": True, "scene_revision_id": "v1",
+        "pack_status": "ready", "selected_view_ids": ["v1"], "missing_required": [],
+    }
+
+def _manifest(characters: list | None = None, scene: dict | None = None, additional_scenes: list | None = None) -> dict:
+    return {"characters": characters or [], "scene": scene, "additional_scenes": additional_scenes or []}
+
+
 # ---------------------------------------------------------------------------
 # _segment_content_advisories：内容判断照算，只是结论不再是拦截，而是
 # 附在产物 degraded_capabilities[] 上的信息（不许用删掉校验函数来实现）。
@@ -1180,10 +1204,8 @@ def test_segment_content_advisories_empty_for_well_formed_draft():
             characters=[{"identity_id": "id_a", "description": "x"}],
             scenes=[{"scene_id": "scene_a", "description": "y"}],
         )),
-        known_character_ids={"id_a"},
-        known_scene_ids={"scene_a"},
-        source_segment_indexes=[1, 2],
-        segment_relevant_scene_ids={"scene_a"},
+        source_segment_indexes=[1, 2], segment_relevant_scene_ids={"scene_a"},
+        manifest=_manifest(characters=[_manifest_character("id_a")], scene=_manifest_scene("scene_a")),
     )
     assert advisories == []
 
@@ -1210,10 +1232,7 @@ def test_segment_content_advisories_flags_dialogue_that_cannot_fit_in_fifteen_se
             source_segment_index=1,
         ),
     ])
-    advisories = _segment_content_advisories(
-        over, known_character_ids={"id_a"}, known_scene_ids=set(),
-        source_segment_indexes=[1, 2],
-    )
+    advisories = _segment_content_advisories(over, source_segment_indexes=[1, 2], manifest=None)
     flagged = [a for a in advisories if "STORYBOARD_PACK_DIALOGUE_OVER_CAPACITY" in a]
     assert len(flagged) == 1, "超容量必须留下且只留下一条信号"
     assert "[未拦截]" in flagged[0], "用户拍板第一版分镜提示词不设门禁，这条只能是信息"
@@ -1228,10 +1247,7 @@ def test_segment_content_advisories_silent_when_dialogue_fits_the_shot():
             speaker_identity_id="id_a", line="这……这里是什么地方？", source_segment_index=1,
         ),
     ])
-    advisories = _segment_content_advisories(
-        fits, known_character_ids={"id_a"}, known_scene_ids=set(),
-        source_segment_indexes=[1, 2],
-    )
+    advisories = _segment_content_advisories(fits, source_segment_indexes=[1, 2], manifest=None)
     assert not any("OVER_CAPACITY" in a for a in advisories)
 
 
@@ -1341,19 +1357,15 @@ def test_ai_dialogue_line_rejects_unknown_delivery_value():
 
 
 def test_unknown_character_advisory_says_what_actually_happened() -> None:
-    """降级信号不能声称做了它没做的事。
-
-    这条 advisory 原文写「已按纯文字描述处理」，可代码只是记了一句话，
-    prompt_text 里的 @吕氏 原样保留——承诺与行为不一致。
-    """
+    """降级信号不能声称做了它没做的事：advisory 原文写「已按纯文字描述处理」，可代码只记了一句话，prompt_text 里的 @吕氏 原样保留——承诺与行为不一致。"""
     draft = _draft(
         resources=_AiSegmentResources(
             characters=[{"identity_id": "吕氏", "description": "做针线的妇人"}],
         ),
     )
     advisories = _segment_content_advisories(
-        draft, known_character_ids={"bible:马子才"}, known_scene_ids=set(),
-        source_segment_indexes=[1],
+        draft, source_segment_indexes=[1],
+        manifest=_manifest(characters=[_manifest_character("马子才")]),
     )
     unknown = [a for a in advisories if "RESOURCE_CHARACTER_UNKNOWN" in a]
     assert unknown, "未知身份必须报出来"
@@ -1368,8 +1380,8 @@ def test_segment_content_advisories_flags_misattributed_speaker_but_does_not_rai
         resources=_AiSegmentResources(characters=[{"identity_id": "id_a", "description": "x"}]),
     )
     advisories = _segment_content_advisories(
-        draft, known_character_ids={"id_a", "id_absent"}, known_scene_ids=set(),
-        source_segment_indexes=[1, 2],
+        draft, source_segment_indexes=[1, 2],
+        manifest=_manifest(characters=[_manifest_character("id_a")]),
     )
     assert any("不在本段 resources.characters 内" in a for a in advisories)
 
@@ -1385,8 +1397,8 @@ def test_segment_content_advisories_offscreen_voice_uses_different_wording():
         resources=_AiSegmentResources(characters=[{"identity_id": "id_a", "description": "x"}]),
     )
     advisories = _segment_content_advisories(
-        draft, known_character_ids={"id_a", "id_absent"}, known_scene_ids=set(),
-        source_segment_indexes=[1, 2],
+        draft, source_segment_indexes=[1, 2],
+        manifest=_manifest(characters=[_manifest_character("id_a")]),
     )
     flagged = [a for a in advisories if "SPEAKER_ABSENT" in a]
     assert flagged
@@ -1397,9 +1409,7 @@ def test_segment_content_advisories_offscreen_voice_uses_different_wording():
 
 def test_segment_content_advisories_flags_untraceable_dialogue_source():
     draft = _draft(dialogue=[_AiDialogueLine(speaker_identity_id="id_a", line="走吧", source_segment_index=9)])
-    advisories = _segment_content_advisories(
-        draft, known_character_ids={"id_a"}, known_scene_ids=set(), source_segment_indexes=[1, 2],
-    )
+    advisories = _segment_content_advisories(draft, source_segment_indexes=[1, 2], manifest=None)
     assert any("不在本段引用的原文段号" in a for a in advisories)
 
 
@@ -1411,20 +1421,18 @@ def test_segment_content_advisories_flags_unknown_character_and_scene_resource()
         ),
     )
     advisories = _segment_content_advisories(
-        draft, known_character_ids={"id_a"}, known_scene_ids={"scene_1"}, source_segment_indexes=[1, 2],
+        draft, source_segment_indexes=[1, 2],
+        manifest=_manifest(characters=[_manifest_character("id_a")], scene=_manifest_scene("scene_1")),
     )
-    assert any("不是映射台已知的人物身份" in a for a in advisories)
-    assert any("不是映射台已知场景" in a for a in advisories)
+    assert any("STORYBOARD_PACK_RESOURCE_CHARACTER_UNKNOWN" in a for a in advisories)
+    assert any("STORYBOARD_PACK_RESOURCE_SCENE_UNKNOWN" in a for a in advisories)
 
 
 def test_segment_content_advisories_flags_invented_identity_id_even_when_manifest_is_empty():
-    """真实 EP7 回归的最小复现：本集 asset_manifest.characters/scenes 都恰好是
-    空集（映射台这次没能解析出任何角色/场景），模型对同一个角色自造了三种
-    不同前缀（character:/char:/ch:）。旧代码里 `known_character_ids and
-    identity_id not in known_character_ids` 在 known_character_ids 为空集时
-    整条判断短路成 False，八条越界引用一条告警都不产出——比 EP6 用旧映射包
-    跑、至少还挂出 CHARACTER_UNKNOWN 标记的年代更静默。空取值域必须被判定
-    成"取值域里什么都不合法"，而不是"这一项不用查"。"""
+    """真实 EP7 回归：本集 asset_manifest 恰好是空集，模型对同一角色自造三
+    种前缀（character:/char:/ch:）。manifest=_manifest()（存在但空，不是
+    None——None 是更严重的"缺失"，走 WILL_BLOCK）时空取值域仍判"什么都不
+    合法"，不整体短路跳过（EP7 真实事故：八条越界引用一条告警都不产出）。"""
     draft = _draft(
         resources=_AiSegmentResources(
             characters=[
@@ -1437,61 +1445,53 @@ def test_segment_content_advisories_flags_invented_identity_id_even_when_manifes
         dialogue=[],
     )
     advisories = _segment_content_advisories(
-        draft, known_character_ids=set(), known_scene_ids=set(), source_segment_indexes=[1, 2],
+        draft, source_segment_indexes=[1, 2], manifest=_manifest(),
     )
-    unknown_character_advisories = [
-        a for a in advisories if "STORYBOARD_PACK_RESOURCE_CHARACTER_UNKNOWN" in a
-    ]
-    unknown_scene_advisories = [
-        a for a in advisories if "STORYBOARD_PACK_RESOURCE_SCENE_UNKNOWN" in a
-    ]
+    unknown_character_advisories = [a for a in advisories if "STORYBOARD_PACK_RESOURCE_CHARACTER_UNKNOWN" in a]
+    unknown_scene_advisories = [a for a in advisories if "STORYBOARD_PACK_RESOURCE_SCENE_UNKNOWN" in a]
     assert len(unknown_character_advisories) == 3
     assert len(unknown_scene_advisories) == 1
 
 
 def test_segment_content_advisories_flags_manifest_gap_when_no_relevant_scenes_exist():
-    """真实 EP4 回归：asset_manifest.scenes 只覆盖原文段号 [2..20]，本集共
-    54 段，段号落在 [24..51] 的那几段 relevant_assets.scenes 天生是空列表——
-    模型没有任何合法 scene_id 可用，resources.scenes 留空是诚实的选择，不是
-    这次分镜生成的遗漏，必须标记成映射台侧的缺口，不能和"模型偷懒"混为一谈。
-    """
+    """真实 EP4 回归：asset_manifest.scenes 只覆盖原文段号 [2..20]，[24..51]
+    段的 relevant_assets.scenes 天生是空列表——resources.scenes 留空是诚实
+    选择，必须标记成映射台侧缺口。manifest 传空以确保 verdict=TEXT_ONLY_
+    FALLBACK，触发 resource_advisories_for_segment 自己的 MANIFEST_GAP 兜底。"""
     draft = _draft(resources=_AiSegmentResources(
         characters=[{"identity_id": "id_a", "description": "x"}],
     ))
     advisories = _segment_content_advisories(
-        draft, known_character_ids={"id_a"}, known_scene_ids=set(),
-        source_segment_indexes=[24, 25], segment_relevant_scene_ids=set(),
+        draft, source_segment_indexes=[24, 25], segment_relevant_scene_ids=set(), manifest=_manifest(),
     )
     assert any("STORYBOARD_PACK_RESOURCE_SCENE_MANIFEST_GAP" in a for a in advisories)
     assert not any("STORYBOARD_PACK_RESOURCE_SCENE_MISSING" in a for a in advisories)
 
 
 def test_segment_content_advisories_flags_missing_when_relevant_scenes_available_but_unused():
-    """区分于上一条：这次映射台确实给了候选场景（relevant_assets.scenes 非
-    空），但模型的 resources.scenes 仍然是空——不能排除"这段确实没有独立
-    场景"（例如纯特写/纯对话），所以只标记为需要人工核对，不是确定性错误，
-    也不阻断生成。"""
+    """区分于上一条：relevant_assets.scenes 非空但 resources.scenes 仍空，
+    只标记需人工核对，不是确定性错误。manifest 里 id_a 有资产（verdict=OK）
+    避免内部 MANIFEST_GAP 兜底跟外层 SCENE_MISSING 同时冒出来混淆判断。"""
     draft = _draft(resources=_AiSegmentResources(
         characters=[{"identity_id": "id_a", "description": "x"}],
     ))
     advisories = _segment_content_advisories(
-        draft, known_character_ids={"id_a"}, known_scene_ids={"scene_a"},
-        source_segment_indexes=[1, 2], segment_relevant_scene_ids={"scene_a"},
+        draft, source_segment_indexes=[1, 2], segment_relevant_scene_ids={"scene_a"},
+        manifest=_manifest(characters=[_manifest_character("id_a")]),
     )
     assert any("STORYBOARD_PACK_RESOURCE_SCENE_MISSING" in a for a in advisories)
     assert not any("STORYBOARD_PACK_RESOURCE_SCENE_MANIFEST_GAP" in a for a in advisories)
 
 
 def test_segment_content_advisories_no_scene_advisory_when_scenes_declared():
-    """场景确实被声明了（不管是否用满 relevant_assets 里的全部候选），两条
-    新标记都不应该出现——它们只在 resources.scenes 为空时才有意义。"""
+    """场景确实被声明了（不管是否用满 relevant_assets 候选），两条新标记都不该出现——只在 resources.scenes 为空时才有意义。"""
     draft = _draft(resources=_AiSegmentResources(
         characters=[{"identity_id": "id_a", "description": "x"}],
         scenes=[{"scene_id": "scene_a", "description": "y"}],
     ))
     advisories = _segment_content_advisories(
-        draft, known_character_ids={"id_a"}, known_scene_ids={"scene_a"},
-        source_segment_indexes=[1, 2], segment_relevant_scene_ids={"scene_a", "scene_b"},
+        draft, source_segment_indexes=[1, 2], segment_relevant_scene_ids={"scene_a", "scene_b"},
+        manifest=_manifest(characters=[_manifest_character("id_a")], scene=_manifest_scene("scene_a")),
     )
     assert not any("STORYBOARD_PACK_RESOURCE_SCENE_MISSING" in a for a in advisories)
     assert not any("STORYBOARD_PACK_RESOURCE_SCENE_MANIFEST_GAP" in a for a in advisories)
@@ -2887,7 +2887,7 @@ async def test_generate_calls_model_once_per_segment_strictly_sequential(monkeyp
         segments=source,
         payload={},
         target_video_model="hiagent",
-        bible=None,
+        bible=None, conn=None, project_id="",
         required_dialogue_by_segment_no={},
     )
 
@@ -2938,7 +2938,7 @@ async def test_generate_camera_digest_window_excludes_segments_outside_window(mo
         segments=source,
         payload={},
         target_video_model="hiagent",
-        bible=None,
+        bible=None, conn=None, project_id="",
         required_dialogue_by_segment_no={},
     )
 
@@ -2981,7 +2981,7 @@ async def test_generate_appearance_rule_tells_model_to_copy_fresh_not_from_memor
         segments=source,
         payload={},
         target_video_model="hiagent",
-        bible=None,
+        bible=None, conn=None, project_id="",
         required_dialogue_by_segment_no={},
     )
 
@@ -3030,7 +3030,7 @@ async def test_generate_passes_required_dialogue_into_payload_and_rules(monkeypa
         segments=source,
         payload={},
         target_video_model="hiagent",
-        bible=None,
+        bible=None, conn=None, project_id="",
         required_dialogue_by_segment_no=required,
     )
 
@@ -3090,7 +3090,7 @@ async def test_generate_marks_first_and_final_segment_and_carries_palette_arc(mo
         segments=source,
         payload={},
         target_video_model="hiagent",
-        bible=None,
+        bible=None, conn=None, project_id="",
         required_dialogue_by_segment_no={},
     )
 
@@ -3152,7 +3152,7 @@ async def test_generate_raises_before_any_call_when_budget_cannot_fit_first_segm
             segments=source,
             payload={},
             target_video_model="hiagent",
-            bible=None,
+            bible=None, conn=None, project_id="",
             required_dialogue_by_segment_no={},
         )
 

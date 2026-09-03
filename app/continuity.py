@@ -21,7 +21,9 @@ from app.schemas import (
     AudioTimelineItem,
     ContinuityState,
     EpisodeScreenplay,
+    MontageBeat,
     NarrativeBoundaryContract,
+    is_narrator_label,
     NarrativeContinuityPlan,
     RequiredOnScreenText,
     Shot,
@@ -53,11 +55,11 @@ def _scene_time_context(value: Any) -> str:
 
 
 def raw_characters_visible(shot: Shot) -> list[str]:
-    """分镜声明的原始可见人物，不应用对白构图派生规则。"""
+    """分镜声明的原始可见人物（旁白永远不算，见 is_narrator_label），不应用对白构图派生规则。"""
     return [
         str(name).strip()
         for name in (shot.characters_visible or shot.characters or [])
-        if str(name).strip()
+        if str(name).strip() and not is_narrator_label(name)
     ]
 
 
@@ -136,11 +138,7 @@ def onscreen_dialogue_speakers(shot: Shot) -> list[str]:
     return speakers
 
 
-def dialogue_two_shot_required(
-    shot: Shot,
-    *,
-    narrative_authority: bool = False,
-) -> bool:
+def dialogue_two_shot_required(shot: Shot, *, narrative_authority: bool = False) -> bool:
     """仅真实双人肢体互动允许对白镜头保留第二个可见人物。"""
     _ = narrative_authority
     return DIALOGUE_TWO_SHOT_RISK_TAG in (shot.risk_tags or [])
@@ -185,11 +183,7 @@ def dialogue_action_staging_kind(
     return ""
 
 
-def dialogue_focus_subject(
-    shot: Shot,
-    *,
-    narrative_authority: bool = False,
-) -> str | None:
+def dialogue_focus_subject(shot: Shot, *, narrative_authority: bool = False) -> str | None:
     """返回专业对白镜头的唯一画面主体；双人肢体互动属于显式例外。"""
     speakers = onscreen_dialogue_speakers(shot)
     if (
@@ -1714,6 +1708,9 @@ def apply_shot_contract(shot: Shot, payload: dict[str, Any] | str | None) -> Sho
     if "storyboard_pack_segment" in data:
         segment = data["storyboard_pack_segment"]
         shot.storyboard_pack_segment = dict(segment) if segment else None
+        if segment:  # WS7：form/beats 提升成 Shot 顶层字段，校验器/生成台读这两个
+            shot.form = str(segment.get("form") or "scene")
+            shot.beats = [MontageBeat.model_validate(b) for b in (segment.get("beats") or [])]
     return shot
 
 

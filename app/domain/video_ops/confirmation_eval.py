@@ -10,12 +10,7 @@ import json
 from app.compiler import compile_prompt
 from app.domain.storyboard_ops.mutation_primitives import _board_from_shot_rows
 from app.episode_target import _compact_episode_target
-from app.schemas import (
-    Bible,
-    EpisodeScreenplay,
-    Shot,
-    Storyboard,
-)
+from app.schemas import Bible, EpisodeScreenplay, Shot, Storyboard
 from app.validators import (
     normalize_continuity,
     normalize_offbible_characters,
@@ -252,11 +247,12 @@ def _evaluate_storyboard_pack_for_confirmation(
     """
     from app.evaluations.issues import issues_from_messages
     from app.harness.types import IssueSeverity
-    from app.validators import validate_storyboard, validate_storyboard_pack_dialogue
+    from app.validators import validate_storyboard, validate_storyboard_pack_dialogue, validate_storyboard_pack_montage
 
     board = Storyboard.model_validate(storyboard.model_dump(mode="json"))
     structural_errors = _storyboard_structural_errors(board)
-    warnings = validate_storyboard_pack_dialogue(board)
+    warnings = validate_storyboard_pack_dialogue(board)  # WS7：蒙太奇形态同样只 warning 不阻断
+    warnings.extend(validate_storyboard_pack_montage(board, known_scene_names={s.name for s in bible.scenes}))
     # validate_storyboard 对这类行本身也已经短路成同一条最小结构检查（见其
     # 函数体开头 storyboard_pack_segment 分支：段时长必须 15s、shot_no 连续
     # 递增），这两条是格式/结构问题，不是内容判断，保留阻断，复用而不是

@@ -12,7 +12,7 @@ import json
 import unicodedata
 from typing import Any, Iterable
 
-
+from app.identity_fold import reconcile_registered_authority_folds
 IDENTITY_AUTHORITY_VERSION = "screenplay-identity-authority.v1"
 BACKEND_OWNED_IDENTITY_AUTHORITY_VERSION = (
     "screenplay-backend-owned-identity-authority.v1"
@@ -279,10 +279,7 @@ def identity_authority_registry(
     authorities_by_group: dict[str, set[str]] = {}
     authorities_by_named_canonical: dict[str, set[str]] = {}
 
-    def scoped_group_key(
-        identity_group: str,
-        identity_scope_fingerprint: str = "",
-    ) -> str:
+    def scoped_group_key(identity_group: str, identity_scope_fingerprint: str = "") -> str:
         return (
             f"{identity_scope_fingerprint}:{identity_group}"
             if identity_scope_fingerprint
@@ -453,6 +450,7 @@ def identity_authority_registry(
                 f"authority_id={authority_id} 同时声明了多个 canonical_name："
                 f"{names}"
             )
+    reconcile_registered_authority_folds(groups_by_authority, entries)
     issues = [
         {
             "reason": "identity_group_multiple_canonical_identities",

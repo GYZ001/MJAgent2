@@ -194,7 +194,8 @@ async def test_generate_passes_previous_continuity_memo_into_next_segment_payloa
 
     await _generate_all_segment_prompts(
         episode_id="ep-memo-chain", episode_no=1, beat_draft=beat_draft, segments=source,
-        payload={}, target_video_model="hiagent", bible=None, required_dialogue_by_segment_no={},
+        payload={}, target_video_model="hiagent", bible=None, conn=None, project_id="",
+        required_dialogue_by_segment_no={},
     )
 
     assert calls[0]["previous_continuity_memo"] is None
@@ -245,7 +246,8 @@ async def test_generate_retries_when_segment_changes_time_of_day_without_quote(m
 
     result = await _generate_all_segment_prompts(
         episode_id="ep-memo-retry", episode_no=1, beat_draft=beat_draft, segments=source,
-        payload={}, target_video_model="hiagent", bible=None, required_dialogue_by_segment_no={},
+        payload={}, target_video_model="hiagent", bible=None, conn=None, project_id="",
+        required_dialogue_by_segment_no={},
     )
 
     assert attempts[2] == 2, "第 2 段第一次因擅自改时段被拦，重试后才通过"

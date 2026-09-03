@@ -257,6 +257,11 @@ allowed_exceptions = []
 "app.character_policy" = 1
 "app.harness.types" = 1
 "app.identity_authority" = 1
+"app.identity_fold" = 1  # 2026-09-02 新增：WS2-C 从 app.identity_authority 拆出
+                         # 的注册路由/本批折叠路由冲突裁决，零 app 内部依赖，
+                         # 只被 app.identity_authority 单向导入（同层允许）；
+                         # 不放 app/ 根目录散文件，遵守「app/ 根目录不再新增
+                         # 散文件」红线（与 app.novel 同一先例）。
 "app.ingest" = 1
 "app.model_capabilities" = 1
 "app.novel" = 1  # 2026-09-02 新增：WS1 从 app.ingest 拆出的章节结构判据包

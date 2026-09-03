@@ -184,12 +184,12 @@ def _mentions_with_segment_indexes(
             mentions.append(new_mention)
     return mentions
 
+@pytest.fixture(autouse=True)  # WS2-A 默认桩：本文件不测试叙述向称谓归属
+def _stub_narration_appellations(monkeypatch):
+    patch_prep_pack_everywhere(monkeypatch, "resolve_narration_appellations", lambda *a, **k: asyncio.sleep(0))
 
 def _resolve(conn, **kwargs):
-    defaults = dict(
-        project_id="p1", episode_id="ep-test", episode_no=2,
-        source_text="占位原文。", run_id=None,
-    )
+    defaults = dict(project_id="p1", episode_id="ep-test", episode_no=2, source_text="占位原文。", run_id=None)
     defaults.update(kwargs)
     events = defaults.pop("events", [])
     source_text = defaults["source_text"]

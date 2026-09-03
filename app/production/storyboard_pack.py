@@ -53,6 +53,7 @@ from app.evidence import repository as evidence_repository
 from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
 from app.production.storyboard_capacity_normalize import normalize_and_assert_capacity
+from app.production.storyboard_pack_identity import resolve_persisted_character_ids
 from app.production.storyboard_dialects import (
     MINIMAX_H3_DIALECT_INSTRUCTIONS,  # noqa: F401 -- 重新导出，测试按旧路径 import
     SEEDANCE_DIALECT_INSTRUCTIONS,  # noqa: F401 -- 重新导出，测试按旧路径 import
@@ -88,7 +89,8 @@ from app.production.storyboard_narrative_arc import (
     phase2_segment_rules,
     segment_narrative_arc_payload_fields,
 )
-from app.schemas import Bible, Dialogue
+from app.schemas import Bible, Dialogue, MontageBeat
+from app.validators import resource_advisories_for_segment
 from app.source_chapters import _episode_source_text
 from app.source_excerpt import SourceSegment, index_source_segments
 
@@ -419,11 +421,7 @@ class StoryboardPackBudgetError(RuntimeError):
 
         source = ""
         try:
-            source = str(
-                active_model_token_limits(
-                    provider or "", model, get_setting,
-                ).get("token_limits_source") or ""
-            )
+            source = str(active_model_token_limits(provider or "", model, get_setting).get("token_limits_source") or "")
         except Exception:  # noqa: BLE001 取不到来源不该盖掉真正的预算错误
             source = ""
         remedy = (
@@ -937,6 +935,10 @@ class _AiStoryboardSegmentDraft(BaseModel):
     #: 跨调用传递 + 落库审计，与 camera_digest 同一先例——见
     #: app.production.storyboard_continuity_memo 模块 docstring。
     continuity_memo: _AiContinuityMemo = Field(default_factory=_AiContinuityMemo)
+    #: WS7 蒙太奇形态（app.schemas.shot_montage）：判据文本已在 dialect_instructions
+    #: 排比/列举段落一节给过，这里不重复写第二份。
+    form: str = "scene"
+    beats: list[MontageBeat] = Field(default_factory=list)
 
 
 def _segment_relevant_assets(
@@ -1032,9 +1034,8 @@ def _speaker_absent_advisory(
 def _segment_content_advisories(
     draft: _AiStoryboardSegmentDraft,
     *,
-    known_character_ids: set[str],
-    known_scene_ids: set[str],
     source_segment_indexes: list[int],
+    manifest: dict[str, Any] | None,
     segment_relevant_scene_ids: set[str] = frozenset(),
 ) -> list[str]:
     """Non-blocking content checks: computed every time, never gate generation.
@@ -1063,9 +1064,7 @@ def _segment_content_advisories(
     # 数字数，与 app/spoken_contract.py 的口播统计同口径，不另起一套算法。
     # 实测（EP1，改提示词之前）：段 6 写了 172 字、段 11 写了 175 字，都是上限
     # 的三倍多。超出的部分模型只能抢读或整句吞掉，而吞哪句不可预测。
-    spoken_chars = sum(
-        spoken_contract.content_char_count(line.line) for line in draft.dialogue
-    )
+    spoken_chars = sum(spoken_contract.content_char_count(line.line) for line in draft.dialogue)
     if spoken_chars > config.MAX_SPOKEN_CHARS_PER_SHOT:
         advisories.append(
             f"[STORYBOARD_PACK_DIALOGUE_OVER_CAPACITY][未拦截] 本段台词共 "
@@ -1086,59 +1085,26 @@ def _segment_content_advisories(
                 f".source_segment_index={line.source_segment_index} "
                 f"不在本段引用的原文段号 {sorted(allowed_segments)} 内"
             )
-    # 真实 EP7 回归（2026-08-26）：这两条判断曾经是
-    # `if known_character_ids and identity_id not in known_character_ids`（scene
-    # 侧同构）。EP7 的 prep_pack 这次没能把「孟浩」解析进 asset_manifest.
-    # characters/functional_extras——本集 known_character_ids 因此恰好是空
-    # 集，`known_character_ids and ...` 短路成 False，整条判断被跳过：模型
-    # 对同一个角色一口气自造了「character:」「char:」「ch:」三种前缀，8 条
-    # 引用一条告警都没有，比 EP6 用旧映射包跑、至少还挂出
-    # CHARACTER_UNKNOWN 降级标记的年代更静默。空取值域不是「这一项没什么好
-    # 查的，跳过」，而是「取值域里什么都不合法，任何非空 identity_id 都必须
-    # 判越界」——`set()` 对任何非空字符串的 `not in` 天然为真，去掉真值
-    # 判断后空取值域会自动让每一条引用都不合法，不需要为它另开分支。
-    for index, character in enumerate(draft.resources.characters):
-        if character.identity_id not in known_character_ids:
-            advisories.append(
-                f"[STORYBOARD_PACK_RESOURCE_CHARACTER_UNKNOWN][未拦截] "
-                f"resources.characters[{index}].identity_id=「{character.identity_id}」"
-                "不是映射台已知的人物身份，没有可绑定的人物参考图；"
-                "该角色的长相只能由 prompt_text 里的文字负责"
-            )
-    for index, scene in enumerate(draft.resources.scenes):
-        if scene.scene_id not in known_scene_ids:
-            advisories.append(
-                f"[STORYBOARD_PACK_RESOURCE_SCENE_UNKNOWN][未拦截] "
-                f"resources.scenes[{index}].scene_id=「{scene.scene_id}」"
-                "不是映射台已知场景，已按纯文字描述处理"
-            )
-    # 场景资源漏填 vs 本来就没有可引用场景（2.0.5，真实 EP4 回归：9 段里 5 段
-    # resources.scenes 是空，起初怀疑是"整集批量产出稀释了注意力"，但核对
-    # 这 5 段各自的 relevant_assets.scenes 后发现它们本身就是空列表——映射台
-    # 的 asset_manifest.scenes 只覆盖了 EP4 全部 54 段原文里的前 20 段，后
-    # 34 段（含这 5 段）从未被登记进任何场景条目，模型没有任何合法 scene_id
-    # 可用，留空是唯一诚实的选择，不是模型的错。两种情况必须分开报告，不能
-    # 用同一个判断掩盖：relevant_assets.scenes 非空却仍留空，是"可能漏填"，
-    # 需要人核对（也可能是这段确实没有独立场景，比如纯特写/纯对话，代码不
-    # 替模型做这个判断）；relevant_assets.scenes 本身为空，是"映射台没有为
-    # 这段原文范围登记场景资源"，根子在上游，不是这次分镜生成能补的。
-    if not draft.resources.scenes:
-        if segment_relevant_scene_ids:
-            advisories.append(
-                "[STORYBOARD_PACK_RESOURCE_SCENE_MISSING][未拦截] 本段 "
-                f"relevant_assets.scenes 提供了可引用场景"
-                f"（{sorted(segment_relevant_scene_ids)}），但 resources.scenes 为空："
-                "可能是本段确实没有独立场景（例如纯特写/纯对话），也可能是遗漏，"
-                "需要人工核对"
-            )
-        else:
-            advisories.append(
-                "[STORYBOARD_PACK_RESOURCE_SCENE_MANIFEST_GAP][未拦截] 本段原文段号"
-                f"{sorted(source_segment_indexes)} 在映射台 asset_manifest.scenes 里"
-                "没有任何登记条目覆盖，relevant_assets.scenes 为空，resources.scenes "
-                "留空是诚实的选择，不是这次分镜生成的遗漏；如需为本段挂场景参考图，"
-                "需要先补齐映射台对这段原文范围的场景发现"
-            )
+    # WS8 接线：人物/场景资源判据统一用 app.validators.resource_advisories_
+    # for_segment（与生成台同判据，[拦截]/[未拦截] 一致）。manifest 是调用方
+    # 必传的显式决定——manifest=None（bible 缺失/解析不到）时该判据本身按
+    # 最严处理（见 app.multiview.manifest_production_blockers 对非 dict
+    # manifest 的"依赖 manifest 缺失"分支），本函数不再另开一条回退文案。
+    advisories.extend(resource_advisories_for_segment(
+        resources=draft.resources.model_dump(mode="json"), manifest=manifest,
+    ))
+    # 场景资源漏填 vs 本来就没有可引用场景（2.0.5，真实 EP4 回归）：两种情况
+    # 必须分开报告——relevant_assets.scenes 非空却仍留空，是"可能漏填"，需要
+    # 人核对；本身为空由上面 resource_advisories_for_segment 的 MANIFEST_GAP
+    # 兜底覆盖（其内部 `not resources.get("scenes")` 判据同源，不重复实现）。
+    if not draft.resources.scenes and segment_relevant_scene_ids:
+        advisories.append(
+            "[STORYBOARD_PACK_RESOURCE_SCENE_MISSING][未拦截] 本段 "
+            f"relevant_assets.scenes 提供了可引用场景"
+            f"（{sorted(segment_relevant_scene_ids)}），但 resources.scenes 为空："
+            "可能是本段确实没有独立场景（例如纯特写/纯对话），也可能是遗漏，"
+            "需要人工核对"
+        )
     # 2.3.0：continuity_memo.characters 只做 advisory，不阻断——见
     # app.production.storyboard_continuity_memo.continuity_memo_character_advisories。
     advisories.extend(
@@ -1215,6 +1181,8 @@ async def _generate_all_segment_prompts(
     target_video_model: str,
     bible: Bible | None,
     required_dialogue_by_segment_no: dict[int, list[dict[str, Any]]],
+    conn: Any,
+    project_id: str,
 ) -> dict[int, _AiStoryboardSegmentDraft]:
     """逐段独立调用产出全部段落的 prompt_text（2.0.8 起，替代整集批量调用）。
 
@@ -1234,23 +1202,9 @@ async def _generate_all_segment_prompts(
     changelog 里的超时/串行代价评估。返回值按 segment_no 建索引，供调用方
     按 beat_draft.segments 的顺序取回，签名与返回形状均与批量版本一致。
     """
-    profile, target_model_literal, dialect_instructions = _dialect_for_target_video_model(
-        target_video_model
-    )
+    profile, target_model_literal, dialect_instructions = _dialect_for_target_video_model(target_video_model)
     beats_by_id = {beat.beat_id: beat for beat in beat_draft.beat_sheet}
     paratext_indexes = _paratext_segment_indexes(payload)
-    # functional_extras（群演/一次性人物）没有 identity_id，用自己的
-    # visual_entity_id 当作 resources.characters[].identity_id 的合法来源
-    # （问题三：模型确实会正确引用群演的 visual_entity_id，例如真实 EP1
-    # 第10段绿袍男子=entity:fdd28fea634a6cdc；漏掉这一路会让本来合法的引用
-    # 被 _segment_content_advisories 误判成"不是映射台已知的人物身份"）。
-    known_character_ids = {
-        str(c.get("identity_id") or "") for c in (payload.get("asset_manifest") or {}).get("characters") or []
-    } | {
-        str(e.get("visual_entity_id") or "")
-        for e in (payload.get("asset_manifest") or {}).get("functional_extras") or []
-    }
-    known_scene_ids = {str(s.get("scene_id") or "") for s in (payload.get("asset_manifest") or {}).get("scenes") or []}
     visual_style = bible.world.visual_style_canonical if bible is not None and bible.world is not None else ""
     shared_rules = _segment_shared_rules()
 
@@ -1265,13 +1219,10 @@ async def _generate_all_segment_prompts(
         previous_segment_no = plan.segment_no - 1 if previous_draft is not None else None
         previous_memo = previous_draft.continuity_memo if previous_draft is not None else None
         camera_history = _camera_digest_window_payload(
-            camera_digest_by_segment_no,
-            segment_no=plan.segment_no,
-            window=CAMERA_DIGEST_WINDOW,
+            camera_digest_by_segment_no, segment_no=plan.segment_no, window=CAMERA_DIGEST_WINDOW,
         )
         continuity_rules = _segment_continuity_rules(
-            previous_segment_no=previous_segment_no,
-            camera_history=camera_history,
+            previous_segment_no=previous_segment_no, camera_history=camera_history,
         )
         source_text = _segment_source_block(segments, plan.source_segment_indexes, paratext_indexes)
         segment_paratext_hit = set(plan.source_segment_indexes) & paratext_indexes
@@ -1383,6 +1334,9 @@ async def _generate_all_segment_prompts(
         camera_digest_by_segment_no[plan.segment_no] = draft.camera_digest
         by_segment_no[plan.segment_no] = draft
 
+    # 延迟导入：app.multiview<->app.validators 互相依赖，模块级导入会触发循环导入。
+    from app.multiview import _storyboard_pack_asset_dependencies
+
     result: dict[int, _AiStoryboardSegmentDraft] = {}
     for plan in beat_draft.segments:
         draft = by_segment_no[plan.segment_no]
@@ -1390,12 +1344,13 @@ async def _generate_all_segment_prompts(
             str(s.get("scene_id") or "")
             for s in relevant_assets_by_segment_no[plan.segment_no]["scenes"]
         }
+        manifest = _storyboard_pack_asset_dependencies(
+            project_id=project_id, episode_no=episode_no, shot_id=f"draft:{plan.segment_no}",
+            segment={"resources": draft.resources.model_dump(mode="json")}, conn=conn, bible=bible,
+        ) if conn is not None and bible is not None else None
         advisories = _segment_content_advisories(
-            draft,
-            known_character_ids=known_character_ids,
-            known_scene_ids=known_scene_ids,
-            source_segment_indexes=plan.source_segment_indexes,
-            segment_relevant_scene_ids=relevant_scene_ids,
+            draft, source_segment_indexes=plan.source_segment_indexes,
+            segment_relevant_scene_ids=relevant_scene_ids, manifest=manifest,
         )
         if advisories:
             draft.degraded_capabilities = [*draft.degraded_capabilities, *advisories]
@@ -1441,6 +1396,8 @@ class StoryboardPackSegment(BaseModel):
     #: 2.3.0 跨段连贯性备忘（_AiContinuityMemo.model_dump），落库供审计核对；
     #: 默认空 dict 兼容旧行（旧行没有这个字段）。
     continuity_memo: dict[str, Any] = Field(default_factory=dict)
+    form: str = "scene"  # WS7：同 _AiStoryboardSegmentDraft.form/beats 契约
+    beats: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class StoryboardPack(BaseModel):
@@ -1532,6 +1489,7 @@ async def generate_storyboard_pack(
         target_video_model=target_video_model,
         bible=bible,
         required_dialogue_by_segment_no=required_dialogue_by_segment_no,
+        conn=conn, project_id=ep["project_id"],
     )
     pack_segments = [
         StoryboardPackSegment(
@@ -1557,6 +1515,8 @@ async def generate_storyboard_pack(
             required_dialogue=required_dialogue_by_segment_no.get(plan.segment_no, []),
             palette=plan.palette,
             continuity_memo=segment_drafts[plan.segment_no].continuity_memo.model_dump(mode="json"),
+            form=segment_drafts[plan.segment_no].form,
+            beats=[b.model_dump(mode="json") for b in segment_drafts[plan.segment_no].beats],
         )
         for plan in beat_draft.segments
     ]
@@ -1758,9 +1718,9 @@ def persist_storyboard_pack(
     beats_by_id = {beat.beat_id: beat for beat in pack.beat_sheet}
     shot_ids: list[str] = []
     for segment in pack.segments:
-        character_ids = [
+        character_ids = resolve_persisted_character_ids(payload, [
             str(c.get("identity_id") or "") for c in (segment.resources.get("characters") or [])
-        ]
+        ])
         scene_entries = segment.resources.get("scenes") or []
         scene_display_name = (
             _resource_scene_display_name(payload, scene_entries[0].get("scene_id"))
