@@ -1756,9 +1756,9 @@ def persist_storyboard_pack(
     }
     shot_ids: list[str] = []
     for segment in pack.segments:
-        character_ids = resolve_persisted_character_ids(payload, [
-            str(c.get("identity_id") or "") for c in (segment.resources.get("characters") or [])
-        ])
+        character_ids, extra_reconcile_notes = resolve_persisted_character_ids(
+            payload, [str(c.get("identity_id") or "") for c in (segment.resources.get("characters") or [])],
+            segment_source_indexes=segment.source_segment_indexes)
         scene_entries = segment.resources.get("scenes") or []
         scene_display_name = (
             _resource_scene_display_name(payload, scene_entries[0].get("scene_id"))
@@ -1778,6 +1778,10 @@ def persist_storyboard_pack(
         shot_id = new_id("shot")
         shot_uid = new_id("shotuid")
         segment_record = segment.model_dump(mode="json")
+        # WS12：归并歧义提示并入 degraded_capabilities（见 app.production.
+        # storyboard_extras_reconcile 模块 docstring）。
+        if extra_reconcile_notes:
+            segment_record["degraded_capabilities"] += extra_reconcile_notes
         # WS9：附加键，不覆盖既有 "beats"；供 resource_forecast 等读锚点详情。
         segment_record["timeline_anchors"] = segment_timeline_anchors
         # WS11：montage_beats 真源在这——不得再被下面 beat_ids 摘要重写覆盖

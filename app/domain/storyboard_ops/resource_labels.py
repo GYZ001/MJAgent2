@@ -11,6 +11,17 @@ display_name，群演有 ``functional_extras[].label`` + ``visual_entity_id``。
 按 id 反查、就地挂上 ``display_name``，查不到就不挂——由前端显示中性占位并把
 原始 id 放进 title，绝不按哈希编一个名字出来。
 
+WS12（群演描述性措辞归并）：``resources.characters[].identity_id`` 直接命中
+不了 ``names`` 时（模型没有逐字复制 functional_extras 的 visual_entity_id，
+写的是一段描述性文字），在放弃之前再试一次结构性归并——判据与持久化侧
+``app.production.storyboard_extras_reconcile`` 完全同一份（段落范围重叠 +
+label 逐字互为子串，两者缺一不可，多候选不猜），这里额外覆盖两类持久化侧
+够不到的情形：① 归并侧的 ``resolve_persisted_character_ids`` 只改写投影到
+``shots.characters`` 那份派生列表，不回写 ``resources.characters[]`` 本身
+（后者是模型自己的结构化自报，持久化时刻意保持原样，见
+``persist_storyboard_pack`` 调用点注释）；② 已经落库的历史分集，重新跑一遍
+归并只需要读，不需要重新持久化。
+
 注意：生成台（view=wall）的投影里没有 prep_pack 字段（只有 script/board 有），
 所以这里自己按 episode_id 读一次映射包，而不是读 detail["prep_pack"]——否则
 生成台恒查不到，正是用户看到哈希的那一页。
@@ -24,6 +35,7 @@ from typing import Any
 
 from app.db import get_conn
 from app.domain.common import episode_prep_pack_payload
+from app.production.storyboard_extras_reconcile import reconcile_descriptive_extra
 
 
 def _put(names: dict[str, str], key: Any, value: Any) -> None:
@@ -33,7 +45,7 @@ def _put(names: dict[str, str], key: Any, value: Any) -> None:
         names.setdefault(key_text, value_text)
 
 
-def _display_names(episode_id: str) -> dict[str, str]:
+def _display_names_and_extras(episode_id: str) -> tuple[dict[str, str], list[dict[str, Any]]]:
     row = get_conn().execute(
         "SELECT screenplay_json FROM episodes WHERE id=?", (episode_id,),
     ).fetchone()
@@ -48,13 +60,13 @@ def _display_names(episode_id: str) -> dict[str, str]:
         label = character.get("display_appellation") or character.get("display_name")
         _put(names, character.get("identity_id"), label)
         _put(names, character.get("visual_entity_id"), label)
-    for extra in manifest.get("functional_extras") or []:
-        if isinstance(extra, dict):
-            _put(names, extra.get("visual_entity_id"), extra.get("label"))
+    functional_extras = [e for e in (manifest.get("functional_extras") or []) if isinstance(e, dict)]
+    for extra in functional_extras:
+        _put(names, extra.get("visual_entity_id"), extra.get("label"))
     for scene in manifest.get("scenes") or []:
         if isinstance(scene, dict):
             _put(names, scene.get("scene_id"), scene.get("display_name"))
-    return names
+    return names, functional_extras
 
 
 def attach_resource_display_names(detail: dict[str, Any], view: str | None) -> None:
@@ -64,14 +76,18 @@ def attach_resource_display_names(detail: dict[str, Any], view: str | None) -> N
     episode_id = str(detail.get("id") or "")
     if not shots or not episode_id:
         return
-    names = _display_names(episode_id)
+    names, functional_extras = _display_names_and_extras(episode_id)
     if not names:
         return
     for shot in shots:
-        resources = ((shot or {}).get("storyboard_pack_segment") or {}).get("resources") or {}
+        segment = ((shot or {}).get("storyboard_pack_segment")) or {}
+        resources = segment.get("resources") or {}
+        segment_source_indexes = segment.get("source_segment_indexes") or []
         for character in resources.get("characters") or []:
             if isinstance(character, dict):
-                _put_display(character, names, character.get("identity_id"))
+                _put_character_display(
+                    character, names, functional_extras, segment_source_indexes,
+                )
         for scene in resources.get("scenes") or []:
             if isinstance(scene, dict):
                 _put_display(scene, names, scene.get("scene_id"))
@@ -79,5 +95,19 @@ def attach_resource_display_names(detail: dict[str, Any], view: str | None) -> N
 
 def _put_display(entry: dict[str, Any], names: dict[str, str], key: Any) -> None:
     name = names.get(str(key or "").strip())
+    if name:
+        entry["display_name"] = name
+
+
+def _put_character_display(
+    entry: dict[str, Any], names: dict[str, str],
+    functional_extras: list[dict[str, Any]], segment_source_indexes: list[int],
+) -> None:
+    identity_id = str(entry.get("identity_id") or "").strip()
+    name = names.get(identity_id)
+    if not name and functional_extras:
+        merge = reconcile_descriptive_extra(identity_id, segment_source_indexes, functional_extras)
+        if merge.merged:
+            name = names.get(merge.resolved_id)
     if name:
         entry["display_name"] = name

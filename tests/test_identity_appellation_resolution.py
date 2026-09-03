@@ -329,9 +329,10 @@ def test_display_names_resolves_functional_extra_entity_ids(monkeypatch):
             return _Cur()
 
     monkeypatch.setattr(resource_labels, "get_conn", lambda: _FakeConn())
-    names = resource_labels._display_names("ep_0a70ec56e8e9")
+    names, functional_extras = resource_labels._display_names_and_extras("ep_0a70ec56e8e9")
     assert names.get("entity:ee1fb41c79e4e33d") == "虎头虎脑的少年"
     assert names.get("bible:孟浩") == "孟浩"
+    assert functional_extras == manifest["functional_extras"]
 
 
 # ---------------------------------------------------------------------------
@@ -402,18 +403,36 @@ def test_resolve_persisted_character_ids_replaces_via_appellation_map():
             {"raw_mention": "球员", "identity_id": "bible:里奥"},
         ],
     }
-    resolved = resolve_persisted_character_ids(payload, ["少年", "球员", "旁白"])
+    resolved, notes = resolve_persisted_character_ids(
+        payload, ["少年", "球员", "旁白"], segment_source_indexes=[1],
+    )
     assert resolved == ["bible:里奥", "bible:里奥"]
+    assert notes == []
 
 
 def test_resolve_persisted_character_ids_keeps_already_registered_ids():
     payload = {"asset_manifest": {"characters": [{"identity_id": "bible:孟浩"}]}, "appellation_map": []}
-    assert resolve_persisted_character_ids(payload, ["bible:孟浩"]) == ["bible:孟浩"]
+    resolved, notes = resolve_persisted_character_ids(
+        payload, ["bible:孟浩"], segment_source_indexes=[1],
+    )
+    assert resolved == ["bible:孟浩"]
+    assert notes == []
 
 
 def test_resolve_persisted_character_ids_leaves_unmatched_alone_not_guessed():
     payload = {"asset_manifest": {"characters": []}, "appellation_map": []}
-    assert resolve_persisted_character_ids(payload, ["神秘人"]) == ["神秘人"]
+    resolved, notes = resolve_persisted_character_ids(
+        payload, ["神秘人"], segment_source_indexes=[1],
+    )
+    assert resolved == ["神秘人"]
+    assert notes == []
+
+
+# WS12（group-extra 描述性措辞与映射台已登记 functional_extras 的结构性
+# 归并）的 resolve_persisted_character_ids 接线测试搬到
+# tests/test_storyboard_pack_identity_extras.py——本文件已在 500 行基线
+# 上，纯搬移、不改行为，避免撞文件行数棘轮（CLAUDE.md「架构欠账治理」，
+# 新增文件严格达标而不是把新用例硬塞进已经到顶的旧文件）。
 
 
 if __name__ == "__main__":
