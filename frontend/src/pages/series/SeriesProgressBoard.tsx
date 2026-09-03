@@ -50,6 +50,25 @@ export function seriesRepairView(
   }
 }
 
+/** 修复入口指向哪一集、哪个工作台：优先第一个带「失败」格子的集（单集失败会被跳过、
+ *  任务继续跑后面的集，所以「当前集」不再等于「出错的集」）；没有失败格子时才退回
+ *  当前集/当前步（merge 或运行中报错的场景）。 */
+export function seriesRepairTarget(
+  episodes: EpisodeEntry[],
+  currentEpisodeNo: number | null,
+  currentStage: Stage | null,
+): { episode: EpisodeEntry; stage: EpisodeStage; view: NonNullable<ReturnType<typeof seriesRepairView>> } | null {
+  for (const ep of episodes) {
+    const failedStage = SERIES_STAGE_COLUMNS.find(col => ep.stages[col.key] === 'failed')?.key
+    const view = seriesRepairView(failedStage)
+    if (failedStage && view) return { episode: ep, stage: failedStage, view }
+  }
+  const current = episodes.find(ep => ep.episode_no === currentEpisodeNo)
+  const view = seriesRepairView(currentStage)
+  if (!current || !view || !currentStage || currentStage === 'merge') return null
+  return { episode: current, stage: currentStage, view }
+}
+
 /** 任务详情页的进度树：接收扁平字段（episodes/currentEpisodeNo/currentStage/
  *  error），不再接旧契约的 SeriesRun 整体对象——任务级进度现在挂在
  *  series_tasks.progress_json 上，不再有独立的 run 实体。 */
@@ -69,8 +88,7 @@ export default function SeriesProgressBoard({
   const { go } = useNav()
   if (!episodes.length) return null
 
-  const errorEpisode = episodes.find(ep => ep.episode_no === currentEpisodeNo)
-  const repairView = seriesRepairView(currentStage)
+  const repair = seriesRepairTarget(episodes, currentEpisodeNo, currentStage)
 
   return (
     <section className="series-board card">
@@ -105,13 +123,13 @@ export default function SeriesProgressBoard({
       </div>
       {error && (
         <OperationError title="连播任务遇到问题" guidance={error}>
-          {repairView && errorEpisode && (
+          {repair && (
             <button
               type="button"
               className="btn"
-              onClick={() => go(repairView, projectId, errorEpisode.episode_id)}
+              onClick={() => go(repair.view, projectId, repair.episode.episode_id)}
             >
-              去对应工作台修复
+              去第 {repair.episode.episode_no} 集的{SERIES_STAGE_LABEL[repair.stage]}修复
             </button>
           )}
         </OperationError>

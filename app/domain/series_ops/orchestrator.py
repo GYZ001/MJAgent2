@@ -5,8 +5,10 @@
 ``WorkflowRecorder``、决定下一个任务是谁，调用本模块的 ``run_task``；本模块只
 管单任务内部的串行推进，失败/取消都原样冒泡给调用方决定怎么办。
 
-fail-closed 语义不变：任一步失败即停在那一集（不跳过、不兜底），已满足完成
-判据的步骤直接标 ``skipped``。
+单集失败不拖住整个任务（2026-09-03 用户拍板）：某一集的某一步失败，把失败详情记进
+该集条目、跳过这一集剩余步骤，继续跑下一集；全部集跑完后若有失败集，**不合并成片**，
+任务以失败收尾并列出每一个失败的集。修好后重新入队，已满足完成判据的步骤标
+``skipped``，只补齐失败的集再合并。单集内部仍是 fail-closed：一步失败不进下一步。
 """
 from __future__ import annotations
 
@@ -95,11 +97,25 @@ async def _run_task_body(
     project_id: str, task_id: str, episode_from: int, episode_to: int,
     progress: dict, recorder,
 ) -> None:
+    failed: list[dict] = []
     for entry in progress["episodes"]:
         progress["current_episode_no"] = entry["episode_no"]
         state.persist_progress(task_id, progress)
-        await _run_episode(task_id, entry, progress, recorder)
+        try:
+            await _run_episode(task_id, entry, progress, recorder)
+        except StageFailure:
+            # 记下、跳过、继续：一集被卡住（供应商拒了某一镜、门禁没过）不该把后面的集全部拖住。
+            failed.append(entry)
+            progress["error"] = f"{entry['error']}（已跳过，继续后续集；结束后汇总）"[:1000]
+            state.persist_progress(task_id, progress)
     progress["current_episode_no"] = None
+    if failed:
+        progress["current_stage"] = None
+        message = _episodes_failed_message(failed, len(progress["episodes"]))
+        progress["error"] = message
+        state.persist_progress(task_id, progress)
+        recorder.fail_result(message, failure_code="SERIES_TASK_STAGE_FAILED", conn=None)
+        raise StageFailure(message)
     progress["current_stage"] = "merge"
     state.persist_progress(task_id, progress)
     await _run_merge(task_id, project_id, episode_from, episode_to, progress, recorder)
@@ -140,12 +156,25 @@ async def _run_single_stage(
 
 
 def _fail_stage(entry: dict, progress: dict, task_id: str, recorder, stage: str, detail: str) -> None:
+    """只把失败记进该集条目；运行级终态由 _run_task_body 在全部集跑完后统一落一次
+    （WorkflowRecorder 的 RUNNING→FAILED 只能转一次，不能每集失败都调）。"""
+    _ = recorder
     entry["stages"][stage] = "failed"
     message = f"第{entry['episode_no']}集 {stages.STAGE_LABELS[stage]} 失败：{detail}"[:1000]
     entry["error"] = message
     progress["error"] = message
     state.persist_progress(task_id, progress)
-    recorder.fail_result(message, failure_code="SERIES_TASK_STAGE_FAILED", conn=None)
+
+
+def _episodes_failed_message(failed: list[dict], total: int) -> str:
+    head = (
+        f"{len(failed)} 集失败（已跳过），其余 {total - len(failed)} 集已完成；成片未合并。"
+        "修好失败的集后重新加入队列，会只补齐失败的集并合并成片。"
+    )
+    lines = [head] + [
+        str(entry.get("error") or f"第{entry['episode_no']}集 失败")[:220] for entry in failed
+    ]
+    return "\n".join(lines)[:1000]
 
 
 async def _run_merge(

@@ -88,28 +88,32 @@ async def test_all_stages_skipped_then_merge_runs_and_succeeds(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_stage_failure_stops_serial_loop_before_next_episode(monkeypatch) -> None:
+async def test_stage_failure_skips_episode_and_continues_without_merge(monkeypatch) -> None:
+    """一集失败：记下、跳过、继续下一集；结束时不合并成片、任务失败并列出失败的集。"""
     conn, entries = _conn([1, 2])
     _patch_conn(monkeypatch, conn)
 
     done_stages: set[tuple[str, str]] = set()
     calls: list[tuple[str, str]] = []
+    merge_calls: list = []
 
     def fake_complete(stage, _conn, episode_id):
         return (stage, episode_id) in done_stages
 
     async def fake_run_stage(stage, episode_id, _run_id):
         calls.append((stage, episode_id))
-        if stage == "storyboard":
+        if stage == "storyboard" and episode_id == "e1":
             raise RuntimeError("分镜台炸了")
         done_stages.add((stage, episode_id))
 
     monkeypatch.setattr(series_stages, "stage_is_complete", fake_complete)
     monkeypatch.setattr(series_stages, "run_stage", fake_run_stage)
+    monkeypatch.setattr(merge, "merge_is_current", lambda *_a: False)
+    monkeypatch.setattr(merge, "build_series_film", lambda *a: merge_calls.append(a) or {})
 
     progress = state.new_progress(entries)
     recorder = WorkflowRecorder("run-task")
-    with pytest.raises(orchestrator.StageFailure):
+    with pytest.raises(orchestrator.StageFailure) as excinfo:
         await orchestrator.run_task("p", "task-1", 1, 2, progress, recorder)
 
     row = _row(conn)
@@ -119,10 +123,14 @@ async def test_stage_failure_stops_serial_loop_before_next_episode(monkeypatch) 
     assert ep1["stages"]["screenplay"] == "done"
     assert ep1["stages"]["storyboard"] == "failed"
     assert "分镜台" in ep1["error"]
-    assert ep1["stages"]["confirm"] == "pending"
+    assert ep1["stages"]["confirm"] == "pending"  # 本集内部仍 fail-closed：不进下一步
     ep2 = progress["episodes"][1]
-    assert all(v == "pending" for v in ep2["stages"].values())
-    assert not any(episode_id == "e2" for _stage, episode_id in calls)
+    assert all(v == "done" for v in ep2["stages"].values())  # 下一集照常跑完
+    assert any(episode_id == "e2" for _stage, episode_id in calls)
+    assert merge_calls == []  # 有失败集就不合并
+    assert progress["current_episode_no"] is None and progress["current_stage"] is None
+    assert "1 集失败" in str(excinfo.value) and "第1集 分镜台 失败" in str(excinfo.value)
+    assert progress["error"] == str(excinfo.value) and ep2["error"] is None
 
 
 @pytest.mark.asyncio

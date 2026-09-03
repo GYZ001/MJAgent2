@@ -61,7 +61,7 @@ export function seriesTaskProgressLabel(
   }
   if (task.status === 'succeeded') return '已完成'
   if (task.status === 'cancelled') return '已取消'
-  if (task.status === 'failed') return '已停在失败处'
+  if (task.status === 'failed') return '有失败的集（已跳过，其余已跑完）'
   return '尚未开始'
 }
 
