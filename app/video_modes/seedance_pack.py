@@ -362,6 +362,12 @@ def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
             )
         refs = meta.get("reference_images") or []
         if not refs:
+            if meta.get("reference_mode_text_only_fallback") is True:
+                # 门禁已裁定候选池本来就是空的（纯群演镜：人物不在人物谱、场景不在场景库），
+                # 外观描述已写进 prompt（reference_pool_gate.TEXT_ONLY_FALLBACK_NOTE_MARKER）。
+                # 这里没有图可装，按文本出片；再拿「缺少参考图」打回待人工就是两条规则打架——
+                # 373a7c7 加了门禁侧回退却没改这里，实测一镜重试 5 次全部卡死。
+                return []
             raise ProviderError(
                 "REFERENCE_IMAGE_MODE 缺少通过门禁的 reference_image，禁止纯文本提交"
             )

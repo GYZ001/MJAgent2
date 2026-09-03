@@ -276,3 +276,19 @@ def test_first_pass_ready_still_backs_pressure_when_high(monkeypatch) -> None:
     allow, demand = should_start_more_reference_work(episode_id="e1", conn=conn)
     assert allow is False
     assert demand == 0
+
+
+def test_gate_approved_text_only_fallback_counts_as_true_video_ready():
+    """纯群演镜的文本回退：没有参考图也算真正就绪；没有门禁裁定的空参考仍不就绪。"""
+    from app.media_pipeline.scheduler import is_true_video_ready
+
+    fallback = {
+        "video_input_manifest_frozen": True,
+        "reference_images": [],
+        "reference_mode_text_only_fallback": True,
+    }
+    assert is_true_video_ready(fallback, continuity_ok=True) is True
+    assert is_true_video_ready(fallback, continuity_ok=False) is False
+    assert is_true_video_ready({"video_input_manifest_frozen": True, "reference_images": []}, continuity_ok=True) is False
+    assert is_true_video_ready({"reference_images": [], "reference_mode_text_only_fallback": True}, continuity_ok=True) is True
+

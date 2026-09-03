@@ -296,11 +296,17 @@ def claim_video_submit_slot(
 
 
 def is_true_video_ready(meta: dict[str, Any], *, continuity_ok: bool) -> bool:
-    """真正可提交 Seedance 的就绪条件（PRD §4.1）。"""
+    """真正可提交 Seedance 的就绪条件（PRD §4.1）。
+
+    门禁裁定的纯文本回退（``reference_mode_text_only_fallback``，候选池本来就是空的
+    纯群演镜）没有图但同样可提交——与 seedance_pack.build_seedance_image_inputs 同一判据，
+    否则就绪计数/派发把它当成永远未就绪。
+    """
+    text_only = meta.get("reference_mode_text_only_fallback") is True
     if meta.get("video_input_manifest_frozen"):
-        return continuity_ok and bool(meta.get("reference_images"))
+        return continuity_ok and (bool(meta.get("reference_images")) or text_only)
     # 兼容旧路径：完整参考图完成 + 非连续或连续锚点已就绪
-    if not meta.get("reference_images"):
+    if not meta.get("reference_images") and not text_only:
         return False
     if meta.get("reference_generation_complete") is False:
         return False
