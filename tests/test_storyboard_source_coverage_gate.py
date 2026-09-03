@@ -1,16 +1,18 @@
 """分镜必须覆盖整集原文，否则不得进入付费生成（判据见 source_coverage 模块）。"""
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from app import db
+from app.source_paratext import _cache_key
 from app.domain.video_ops.source_coverage import (
     _merged_length,
     storyboard_source_coverage_gap,
 )
 
 
-def _conn(chapter_text: str) -> sqlite3.Connection:
+def _conn(chapter_text: str, *, title: str = "第1章", paratext_json: str | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(db.SCHEMA)
@@ -25,8 +27,8 @@ def _conn(chapter_text: str) -> sqlite3.Connection:
         " VALUES('e','p',1,'scripted','[1]',0)"
     )
     conn.execute(
-        "INSERT INTO chapters(project_id,idx,title,content) VALUES('p',1,'第1章',?)",
-        (chapter_text,),
+        "INSERT INTO chapters(project_id,idx,title,content,paratext_json) VALUES('p',1,?,?,?)",
+        (title, chapter_text, paratext_json),
     )
     conn.commit()
     return conn
@@ -104,3 +106,61 @@ def test_unknown_episode_is_not_blocked() -> None:
     conn = _conn("甲" * 300)
 
     assert storyboard_source_coverage_gap(conn, "missing") is None
+
+
+def test_title_line_and_blank_lines_are_not_plot_gaps() -> None:
+    """橘座在上 EP1 真实形态（2026-09-03）：被拦的 18 字 = 标题 14 字 + 两处段落空行。
+
+    分镜管线本来就不给章节标题与空行绑镜头，它们不是剧情；标题的判据是
+    ``chapters.title`` 数据库锚点，不是猜形状。
+    """
+    title = "第1集：招财奇喵搅局职场"
+    content = f"{title}\n\n" + "甲" * 252 + "\n\n" + "乙" * 216
+    conn = _conn(content, title=title)
+    _add_shot(conn, "s1", 1, (14, 266))
+    _add_shot(conn, "s2", 2, (268, 484))
+
+    assert storyboard_source_coverage_gap(conn, "e") is None
+
+
+def test_title_exemption_needs_the_db_title() -> None:
+    """同一段文字若不是本章的 chapters.title，就是普通正文，漏了照样是缺口。"""
+    content = "第1集：招财奇喵搅局职场\n\n" + "甲" * 252
+    conn = _conn(content, title="楔子")
+    _add_shot(conn, "s1", 1, (14, 266))
+
+    gap = storyboard_source_coverage_gap(conn, "e")
+
+    assert gap is not None and "招财奇喵" in gap
+
+
+def test_cached_paratext_region_is_not_a_gap_but_stale_cache_is_ignored() -> None:
+    """映射台已判定并落库的副文本（如「———— 全文完 ————」）不算剧情；缓存哈希
+    对不上当前 content 时不采信（fail closed：宁可多报缺口）。"""
+    content = "甲" * 100 + "\n\n———— 全文完 ————"
+    region = {"start": 102, "end": len(content)}
+    fresh = json.dumps({"content_hash": _cache_key(content), "spans": [region]})
+    conn = _conn(content, paratext_json=fresh)
+    _add_shot(conn, "s1", 1, (0, 100))
+    assert storyboard_source_coverage_gap(conn, "e") is None
+
+    stale = json.dumps({"content_hash": "not-this-content", "spans": [region]})
+    conn = _conn(content, paratext_json=stale)
+    _add_shot(conn, "s1", 1, (0, 100))
+    assert storyboard_source_coverage_gap(conn, "e") is not None
+
+
+def test_real_prose_gap_names_the_missing_text() -> None:
+    """跑不快的孩子 EP1 真实形态：整段正文没镜头。消息必须把漏掉的原文摘出来，
+    只报字数用户无从下手。"""
+    missing = "那是他人生中听到的第一句评价。"
+    content = "甲" * 100 + "\n\n" + missing + "\n\n" + "乙" * 100
+    conn = _conn(content)
+    _add_shot(conn, "s1", 1, (0, 100))
+    _add_shot(conn, "s2", 2, (102 + len(missing) + 2, len(content)))
+
+    gap = storyboard_source_coverage_gap(conn, "e")
+
+    assert gap is not None
+    assert f" {len(missing)} 字" in gap
+    assert "那是他人生中听到的第一句评价" in gap

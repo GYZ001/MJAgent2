@@ -262,6 +262,29 @@ def _load_chapter_paratext_cache(row: Any) -> dict[str, Any] | None:
     return data
 
 
+def _cached_chapter_regions(chapter_row: Any) -> list[tuple[int, int]] | None:
+    """已落库且哈希与当前 content 一致的 paratext 偏移；未算过/过期/格式不对返回 None。"""
+    content = _row_value(chapter_row, "content") or ""
+    cached = _load_chapter_paratext_cache(chapter_row)
+    if cached is None or cached.get("content_hash") != _cache_key(content):
+        return None
+    return [
+        (int(item["start"]), int(item["end"]))
+        for item in cached.get("spans", [])
+        if isinstance(item, dict) and "start" in item and "end" in item
+    ]
+
+
+def cached_chapter_paratext_offsets(chapter_row: Any) -> list[tuple[int, int]]:
+    """只读取已落库的 paratext 偏移（相对该章 ``content``），绝不发起模型调用。
+
+    给同步的门禁用（如分镜原文覆盖判据）：映射台已经算过并写回
+    ``chapters.paratext_json`` 的章直接复用同一份判定；没算过或缓存过期就当没有
+    副文本——门禁只会因此更严（多算缺口），不会放过真正的漏戏。
+    """
+    return _cached_chapter_regions(chapter_row) or []
+
+
 async def chapter_paratext_offsets(
     conn, chapter_row: Any, *, operation_id: str,
 ) -> tuple[list[tuple[int, int]], bool]:
@@ -286,14 +309,9 @@ async def chapter_paratext_offsets(
     """
     content = _row_value(chapter_row, "content") or ""
     content_hash = _cache_key(content)
-    cached = _load_chapter_paratext_cache(chapter_row)
-    if cached is not None and cached.get("content_hash") == content_hash:
-        spans = [
-            (int(item["start"]), int(item["end"]))
-            for item in cached.get("spans", [])
-            if isinstance(item, dict) and "start" in item and "end" in item
-        ]
-        return spans, True
+    cached_regions = _cached_chapter_regions(chapter_row)
+    if cached_regions is not None:
+        return cached_regions, True
 
     anchors = await paratext_spans(content, operation_id=operation_id)
     regions = _resolved_regions(content, list(anchors)) if anchors else []
