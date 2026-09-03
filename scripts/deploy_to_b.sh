@@ -20,7 +20,7 @@ ssh -o ConnectTimeout=10 "$B" true 2>/dev/null || { echo "连不上 $B（127.0.0
 echo "== rsync 代码与前端产物 -> $B:/root/MJAgent2 =="
 rsync -az --delete $DRY \
   --exclude '/data/' --exclude '/projects/' --exclude '/.env' --exclude '/logs/' \
-  --exclude '/.venv/' --exclude 'node_modules/' --exclude '/.git/' \
+  --exclude '/.venv/' --exclude 'node_modules/' --exclude '/.git' \
   --exclude '/frontend/dist-staging/' --exclude '/frontend/dist.superseded-*/' \
   --exclude '__pycache__/' --exclude '/.pytest_cache/' --exclude '/.ruff_cache/' \
   --exclude '/.claude/' --exclude '/.uploads/' --exclude '/_*' \

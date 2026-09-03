@@ -185,3 +185,15 @@ nginx `mjagent2.diag.log` 的 `up_resp`（后端耗时，含隧道）切换前�
   `127.0.0.1:8230`，在 A 是调试实例，在 B 就是生产库。
 - 排查线上问题到 B：`ssh mjb`，`logs/backend.log`、`journalctl -u mjagent2-backend`、
   `error_logs` 表（只读打开：`file:...?mode=ro`）。
+
+## 2026-09-03 事故：从 git worktree 跑 deploy_to_b.sh 会把 B 的仓库打坏
+
+worktree 的 `.git` 是一个**文件**（`gitdir: /root/MJAgent2/.git/worktrees/<name>`），旧的
+`--exclude '/.git/'`（带斜杠只匹配目录）拦不住它，rsync `--delete` 把 B 上的 `.git` 目录整个换成了
+这个 48 字节的指针文件；B 的后端照常跑（代码文件都在），但凌晨流水线的 `git push`/`reset` 全部
+`fatal: not a git repository`，`DEPLOYED_REV` 也被删。已改 `--exclude '/.git'`（文件与目录都拦）。
+修复步骤（已实施）：B 上 `rm .git && git init`，A 上 `git push mjb:/root/MJAgent2 <rev>:refs/remotes/a/main`，
+B 上 `git update-ref refs/heads/main refs/remotes/a/main && git symbolic-ref HEAD refs/heads/main && git reset --hard`
+（不用 checkout：新仓库里所有文件都是「未跟踪」，checkout 会拒绝覆盖）。
+**规矩：从干净 worktree 发布请用 `FORCE=1 scripts/deploy/nightly_deploy_to_b.sh`（它按 rev 推对象，不 rsync 工作区）；
+`deploy_to_b.sh` 只在 /root/MJAgent2 主工作区跑。**
