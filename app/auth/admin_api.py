@@ -113,6 +113,7 @@ def list_deleted_users():
 
 @router.post("/users", dependencies=[Depends(require_system_admin)])
 def create_user(body: dict):
+    """管理员开户：新建账号。默认要求首次登录改密。"""
     username = str(body.get("username") or "").strip()
     password = str(body.get("password") or "")
     if not username:
@@ -147,6 +148,7 @@ def create_user(body: dict):
 
 @router.put("/users/{user_id}", dependencies=[Depends(require_system_admin)])
 def update_user(user_id: str, body: dict, actor: Principal = Depends(require_system_admin)):
+    """管理员修改账号资料或状态。字段包括显示名/档位/启停/改密/管理员标记。"""
     conn = get_conn()
     row = conn.execute(
         "SELECT * FROM users WHERE id=? AND deleted_at IS NULL", (user_id,)

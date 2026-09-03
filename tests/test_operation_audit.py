@@ -151,6 +151,7 @@ def test_direct_rest_write_records_http_level_row(client: TestClient, admin_head
     row = matching[0]
     assert row["method"] == "PUT"
     assert row["http_status"] == 200
+    assert row["event_label"] == "管理员修改账号资料或状态"
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +243,23 @@ def test_event_detail_includes_args_and_facets_counts(client: TestClient, admin_
 def test_event_detail_404_for_unknown_id(client: TestClient, admin_headers: dict[str, str]):
     resp = client.get("/api/system/audit/events/no-such-id", headers=admin_headers)
     assert resp.status_code == 404
+
+
+def test_facets_excludes_anonymous_rows_from_user_and_project_buckets(
+    client: TestClient, admin_headers: dict[str, str]
+):
+    """匿名失败登录（user_id 为空）不该在 users 分桶里现身——NULL 渲染成界面
+    下拉里的空白选项，不是一个有意义的合法值（同理 project_id 为空的行不该
+    出现在 projects 分桶）。"""
+    resp = client.post(
+        "/api/auth/login", headers=_HEADERS,
+        json={"username": "no-such-anonymous-user", "password": "whatever"},
+    )
+    assert resp.status_code == 401
+
+    facets = client.get("/api/system/audit/facets", headers=admin_headers).json()
+    assert all(row["user_id"] is not None for row in facets["users"])
+    assert all(row["project_id"] is not None for row in facets["projects"])
 
 
 # ---------------------------------------------------------------------------

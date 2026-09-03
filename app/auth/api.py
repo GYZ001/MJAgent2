@@ -137,6 +137,7 @@ def login(body: dict, request: Request):
 
 @router.post("/logout")
 def logout(token: str = Depends(require_local_session)):
+    """登出：吊销当前会话。"""
     sid = token.split(".", 1)[0] if token else ""
     if sid:
         revoke_session(sid)
@@ -186,6 +187,7 @@ async def delete_my_account(confirm: bool = False, token: str = Depends(require_
 
 @router.post("/change-password")
 def change_password(body: dict, request: Request, token: str = Depends(require_local_session)):
+    """自助修改本账号密码。验旧密后签发新会话，原会话全部作废。"""
     principal = get_current_principal()
     if principal is None:  # pragma: no cover
         raise HTTPException(401, "缺少或无效的本机会话凭证")

@@ -67,11 +67,15 @@ def facets(*, since: float | None = None, until: float | None = None) -> dict[st
     where, params = _time_range_clause(since, until)
     return {
         "events": _facet_group(conn, "a.event, a.event_label", "a.event, a.event_label", where, params),
-        "users": _facet_group(conn, "a.user_id, a.username", "a.user_id, a.username", where, params),
+        "users": _facet_group(
+            conn, "a.user_id, a.username", "a.user_id, a.username",
+            _require_not_null(where, "a.user_id"), params,
+        ),
         "outcomes": _facet_group(conn, "a.outcome", "a.outcome", where, params),
         "sources": _facet_group(conn, "a.source", "a.source", where, params),
         "projects": _facet_group(
-            conn, "a.project_id, p.name AS project_name", "a.project_id, p.name", where, params
+            conn, "a.project_id, p.name AS project_name", "a.project_id, p.name",
+            _require_not_null(where, "a.project_id"), params,
         ),
     }
 
@@ -169,6 +173,12 @@ def _time_range_clause(since: float | None, until: float | None) -> tuple[str, l
     if until is not None:
         clauses.append("a.ts <= ?"); params.append(until)
     return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+
+def _require_not_null(where: str, column: str) -> str:
+    """匿名/无归属行（user_id 或 project_id 为空）不该在对应分桶里现身——桶名
+    要给人看，NULL 渲染出来是一个空白选项，不是"匿名"那类有意义的合法值。"""
+    return f"{where} AND {column} IS NOT NULL" if where else f" WHERE {column} IS NOT NULL"
 
 
 def _facet_group(conn, select_cols: str, group_cols: str, where: str, params: list[Any]) -> list[dict[str, Any]]:

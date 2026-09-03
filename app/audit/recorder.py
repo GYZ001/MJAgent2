@@ -14,6 +14,7 @@ Command Bus 的审计包装（``app.capabilities.bus_audit.run_audited``/
 from __future__ import annotations
 
 import contextvars
+import re
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -31,6 +32,8 @@ _MAX_TARGET_CHARS = 160
 _MAX_FIELD_CHARS = 40
 _MAX_LABEL_CHARS = 40
 _MAX_SUMMARY_CHARS = 2000
+_BACKTICK_RE = re.compile(r"`+")
+_WHITESPACE_RE = re.compile(r"\s+")
 _TARGET_EXCLUDED_KEYS = frozenset({"idempotency_key", "approval_token", "project_id"})
 
 # CommandStatus 是 app.capabilities.schemas 的枚举，本模块不 import 它（见模块
@@ -271,6 +274,10 @@ def _label_from_docstring(doc: str | None) -> str | None:
         if idx != -1:
             cut = min(cut, idx)
     text = text[:cut].strip()
+    # reST 反引号（``xx``）是给文档渲染器看的标记，不是给用户看的界面文案；
+    # 连同切分/换行残留的多余空白一起清理掉，再截断——不改切分口径本身
+    # （只按 。；\n 切，冒号后仍算同一句，保持现状）。
+    text = _WHITESPACE_RE.sub(" ", _BACKTICK_RE.sub("", text)).strip()
     return _truncate(text, _MAX_LABEL_CHARS) if text else None
 
 
