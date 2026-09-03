@@ -1710,7 +1710,10 @@ def apply_shot_contract(shot: Shot, payload: dict[str, Any] | str | None) -> Sho
         shot.storyboard_pack_segment = dict(segment) if segment else None
         if segment:  # WS7：form/beats 提升成 Shot 顶层字段，校验器/生成台读这两个
             shot.form = str(segment.get("form") or "scene")
-            shot.beats = [MontageBeat.model_validate(b) for b in (segment.get("beats") or [])]
+            # WS11：真源是 montage_beats，"beats" 键在真实持久化流程里是叙事节拍
+            # 摘要（见 storyboard_pack_montage 模块文档）；键缺失时退回 "beats"。
+            beats_src = segment["montage_beats"] if "montage_beats" in segment else segment.get("beats")
+            shot.beats = [MontageBeat.model_validate(b) for b in (beats_src or [])]
     return shot
 
 

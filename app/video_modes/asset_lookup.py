@@ -56,16 +56,30 @@ def _asset_from_path(*, path: str, ref_type: str, source: str, shot_id: str | No
     )
 
 
+def _shot_time_anchor(shot: Any) -> str | None:
+    """本镜时间线锚点键（WS11）：与 app.validators.resource_forecast.
+    character_time_anchor_advisories 同一判据（age/year 取最具体的一条），
+    返回可直接喂给 portrait_lookup_for_episode 的 anchor_key；shot 未带
+    storyboard_pack_segment 或没有可查询锚点（era/relative）时返回 None，
+    不兜底猜测。"""
+    from app.validators.resource_forecast import _best_time_anchor
+
+    segment = getattr(shot, "storyboard_pack_segment", None) or {}
+    anchor = _best_time_anchor(segment.get("timeline_anchors") or [])
+    return anchor["anchor_key"] if anchor else None
+
+
 def character_reference_assets(bible: Bible, character_names: list[str], *, limit: int,
                                project_id: str | None = None,
-                               episode_no: int | None = None) -> list[ReferenceImageAsset]:
+                               episode_no: int | None = None,
+                               shot: Any | None = None) -> list[ReferenceImageAsset]:
     """人物库图作为 keyframe_seed + qa_anchor；默认不直接 video_input。"""
     from app.multiview import (
         PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, portrait_views_for_episode,
         character_multiview_enabled,
     )
     assets: list[ReferenceImageAsset] = []
-    by_name = {c.name: c for c in bible.characters}
+    by_name, time_anchor = {c.name: c for c in bible.characters}, _shot_time_anchor(shot)
     for name in character_names:
         if len(assets) >= limit:
             break
@@ -112,8 +126,8 @@ def character_reference_assets(bible: Bible, character_names: list[str], *, limi
         # 回退单图
         path = None
         if c is not None and project_id is not None:
-            from app.portraits import portrait_for_episode
-            path = portrait_for_episode(project_id, name, episode_no)
+            from app.portraits.portrait_lookup import portrait_lookup_for_episode
+            path = portrait_lookup_for_episode(project_id, name, episode_no, time_anchor=time_anchor)["image_path"]
         if not path:
             path = getattr(c, "ref_image_path", None) if c else None
         if not path or not Path(path).exists():

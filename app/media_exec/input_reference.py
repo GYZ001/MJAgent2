@@ -1,10 +1,12 @@
 """参考图模式的视频输入准备（拆分自 ``run_job.py``）。
 
-单函数文件：``_prepare_reference_mode_inputs`` 是参考图（角色/场景画廊）驱动的
-视频输入组装，逐行搬移自 ``run_job.py``，未重写、未拆分——函数体本身较长（超
-过 ``max_function_lines_python`` 默认阈值），已在 ``app/FILE_CONVENTIONS.toml``
-登记为已知的单一大函数基线（与 ``_prepare_first_last_mode_inputs`` 等同类模式
-准备函数同理，CLAUDE.md「移动，不是重写」）。
+单函数文件：``_prepare_reference_mode_inputs_impl`` 是参考图（角色/场景画廊）
+驱动的视频输入组装，逐行搬移自 ``run_job.py``，未重写、未拆分——函数体本身
+较长（超过 ``max_function_lines_python`` 默认阈值），已在
+``app/FILE_CONVENTIONS.toml`` 登记为已知的单一大函数基线（与
+``_prepare_first_last_mode_inputs`` 等同类模式准备函数同理，CLAUDE.md「移动，
+不是重写」）。``_prepare_reference_mode_inputs`` 是它外面的薄壳（WS11 新加，
+补造型-时间锚点告警），真正的调用方仍然只认这个不带 ``_impl`` 后缀的名字。
 """
 
 from __future__ import annotations
@@ -22,10 +24,28 @@ from .fences import VideoInputRepairRequired
 from .input_boundary import _ContinuityWait
 from .job_state import _set_version
 from .reference_progress import _narrative_keyframe_candidate_progress
-from .reference_pool_gate import finish_reference_mode_without_assets
+from .reference_checkpoint_ops import apply_reference_checkpoint_invalidation
+from .reference_pool_gate import _time_anchor_advisories_for_job, finish_reference_mode_without_assets
 
 
 async def _prepare_reference_mode_inputs(
+    conn, job, version, shot, ep, meta: dict, prompt_text: str,
+    *, lease_owner: str | None = None,
+) -> tuple[dict, str]:
+    """真实产出成功后补一份造型-时间锚点 [未拦截] 告警（WS11），与
+    ``reference_pool_gate`` 纯文本回退分支同一键 ``portrait_time_anchor_
+    advisories``、同一判据函数。主体逻辑在 ``_impl``，本壳不占用它的基线。"""
+    meta, prompt_text = await _prepare_reference_mode_inputs_impl(
+        conn, job, version, shot, ep, meta, prompt_text, lease_owner=lease_owner,
+    )
+    if meta.get("mode") == video_modes.REFERENCE_IMAGE_MODE:
+        meta["portrait_time_anchor_advisories"] = _time_anchor_advisories_for_job(
+            conn, job, _load_shot_model(shot),
+        )
+    return meta, prompt_text
+
+
+async def _prepare_reference_mode_inputs_impl(
     conn, job, version, shot, ep, meta: dict, prompt_text: str,
     *, lease_owner: str | None = None,
 ) -> tuple[dict, str]:
@@ -37,29 +57,7 @@ async def _prepare_reference_mode_inputs(
             _assert_job_lease(job["id"], lease_owner)
 
     def _invalidate_reference_checkpoint(reason: str) -> None:
-        meta["stale_reference_reason"] = reason
-        meta["stale_keyframe_prompt_contract_version"] = meta.get("keyframe_prompt_contract_version")
-        meta["keyframe_prompt_contract_version"] = video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION
-        meta["reference_input_policy_version"] = video_modes.REFERENCE_INPUT_POLICY_VERSION
-        meta.pop("keyframe_contract_fingerprint", None)
-        meta["reference_images"] = []
-        meta["reference_slots"] = {}
-        meta.pop("keyframe_sequence", None)
-        meta["reference_manifest_frozen"] = False
-        meta["reference_manifest_asset_stale"] = True
-        meta["reference_generation_complete"] = False
-        meta["reference_static_ready"] = False
-        meta["continuity_anchor_ready"] = False
-        meta["reference_group_gate_passed"] = False
-        meta["video_input_manifest_frozen"] = False
-        meta.pop("narrative_keyframe_missing", None)
-        # 新画廊不得沿用旧 fingerprint/refset，否则 reference_store 会早返并指回旧图。
-        for stale_key in (
-            "reference_set_id", "reference_gallery_fingerprint", "reference_gallery_revision",
-            "reference_gallery_source_version_id", "reference_gallery_edited",
-            "reference_gallery_contract_override", "video_input_fingerprint",
-        ):
-            meta.pop(stale_key, None)
+        apply_reference_checkpoint_invalidation(meta, reason)
 
     # Historical galleries predate this marker and are complete.  A gallery
     # explicitly marked incomplete is a streamed checkpoint from an interrupted

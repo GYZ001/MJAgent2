@@ -54,6 +54,7 @@ from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
 from app.production.storyboard_capacity_normalize import normalize_and_assert_capacity
 from app.production.storyboard_pack_identity import resolve_persisted_character_ids
+from app.production.storyboard_pack_montage import fill_montage_beat_time_anchors
 from app.production.storyboard_dialects import (
     MINIMAX_H3_DIALECT_INSTRUCTIONS,  # noqa: F401 -- 重新导出，测试按旧路径 import
     SEEDANCE_DIALECT_INSTRUCTIONS,  # noqa: F401 -- 重新导出，测试按旧路径 import
@@ -1398,6 +1399,9 @@ class StoryboardPackSegment(BaseModel):
     continuity_memo: dict[str, Any] = Field(default_factory=dict)
     form: str = "scene"  # WS7：同 _AiStoryboardSegmentDraft.form/beats 契约
     beats: list[dict[str, Any]] = Field(default_factory=list)
+    #: WS11：蒙太奇拍点独立键——上面的 beats 在 persist 时会被改写成叙事节拍
+    #: 摘要（beat_id/summary/segment_indexes），蒙太奇拍点写这里才不会被覆盖。
+    montage_beats: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class StoryboardPack(BaseModel):
@@ -1516,7 +1520,7 @@ async def generate_storyboard_pack(
             palette=plan.palette,
             continuity_memo=segment_drafts[plan.segment_no].continuity_memo.model_dump(mode="json"),
             form=segment_drafts[plan.segment_no].form,
-            beats=[b.model_dump(mode="json") for b in segment_drafts[plan.segment_no].beats],
+            montage_beats=[b.model_dump(mode="json") for b in segment_drafts[plan.segment_no].beats],
         )
         for plan in beat_draft.segments
     ]
@@ -1774,33 +1778,25 @@ def persist_storyboard_pack(
         shot_id = new_id("shot")
         shot_uid = new_id("shotuid")
         segment_record = segment.model_dump(mode="json")
-        # WS9：附加键，不覆盖既有 "beats"（叙事节拍摘要，见下方重写块）；供
-        # resource_forecast 等读取本段锚点详情（含 anchor_key，按锚点选造型）。
+        # WS9：附加键，不覆盖既有 "beats"；供 resource_forecast 等读锚点详情。
         segment_record["timeline_anchors"] = segment_timeline_anchors
-        # Single source of truth: the model's own self-declared segment.beat_ids
-        # (_AiSegmentPlan.beat_ids, carried through StoryboardPackSegment) --
-        # the same list that built this segment's own prompt (see
-        # _generate_all_segment_prompts's segment_units[].beats). _validate_beat_sheet_draft
-        # already rejects any beat_id that doesn't exist in pack.beat_sheet, so
-        # the lookup below cannot silently drop a real beat; the ``in
-        # beats_by_id`` guard is defense in depth, not a coverage gap.
-        # Previously this was re-derived from
-        # ``set(beat.segment_indexes) & set(segment.source_segment_indexes)`` --
-        # a different field (segment_indexes) standing in for beat_ids, which
-        # could disagree with what the model actually declared/was prompted
-        # with at the edges. See the "拿一个维度的代理担保另一个维度" note.
+        # WS11：montage_beats 真源在这——不得再被下面 beat_ids 摘要重写覆盖
+        # （见 app.production.storyboard_pack_montage 模块文档的陈年 bug）；
+        # 没填 time_anchor 的拍用本段确定性锚点回填。
+        segment_record["montage_beats"] = fill_montage_beat_time_anchors(
+            segment_record.get("montage_beats") or [], segment_timeline_anchors,
+        )
+        # 段落自报的 beat_ids（_AiSegmentPlan.beat_ids）是唯一真源，与本段
+        # prompt 用的同一份关联；_validate_beat_sheet_draft 已保证每个
+        # beat_id 都在 pack.beat_sheet 里。不再靠 segment_indexes 与
+        # beat.segment_indexes 的交集代理判定——交集在边界处可能与模型自报
+        # 的结果不一致（例如原文范围调整但 beat_ids 未变，或反之）。
         matched_beats = [
             beats_by_id[beat_id] for beat_id in segment.beat_ids if beat_id in beats_by_id
         ]
-        # ``beat_ids`` (bare id list) is the pre-existing key frontend/api.ts and
-        # BoardPage.tsx already read (StoryboardPackSegment.beat_ids) -- kept
-        # unchanged for that consumer plus any historical row shape. ``beats``
-        # is the new self-contained field: each shot dict must be renderable on
-        # its own (docs/STORYBOARD_PROMPT_IR_DESIGN.md's beat_sheet exists for
-        # 留痕 -- a bare id conveys nothing without the summary next to it), so
-        # this carries the frozen contract's own per-beat shape
-        # (beat_id/summary/segment_indexes, no invented field names) rather
-        # than making the frontend join against the episode-level beat_sheet.
+        # beat_ids（裸 id 列表）是前端既有读取键，原样保留；beats 是自包含
+        # 字段——拿到这一个 shot 就能知道它承载的节拍在讲什么，字段名沿用
+        # 冻结契约（beat_id/summary/segment_indexes），不发明新名。
         segment_record["beat_ids"] = [beat.beat_id for beat in matched_beats]
         segment_record["beats"] = [
             {

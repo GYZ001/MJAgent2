@@ -127,7 +127,7 @@ async def _build_library_reference_assets(
             identity_names,
             limit=max(1, len(identity_names)),
             project_id=project_id,
-            episode_no=episode_no,
+            episode_no=episode_no, shot=shot,
         ))
     if not any(asset.entity_type == "scene" for asset in assets):
         assets.extend(scene_reference_assets(
