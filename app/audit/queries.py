@@ -1,6 +1,8 @@
 """操作审计与最近活跃的只读查询——供 app/audit/api.py 与
 app/auth/admin_api.py::list_users 复用。查询走 ``app.db.get_conn()``（读，
 线程/任务局部连接，天然反映当前测试的 DB_PATH），不单独开只读连接。
+
+ALL_OWNERS 依据：app/audit/api.py 的全部路由都挂 Depends(require_system_admin)（同 app/observability/api.py::system_overview 的先例——见 tests/test_project_ownership_query_guard.py 模块 docstring 里 "a system-admin-only dashboard" 这一档），本模块任何函数都不会被非系统管理员触达；SQL 文本必须直接内联在 .execute(...) 调用处（不能赋给变量），见 test_no_opaque_sql_variables_hide_projects_queries。
 """
 from __future__ import annotations
 
@@ -21,7 +23,9 @@ _LIST_COLUMNS = (
     "a.http_status", "a.error_id", "a.error_code", "a.summary",
     "a.duration_ms", "a.ip",
 )
-_FROM = "FROM operation_audit a LEFT JOIN projects p ON p.id = a.project_id"
+# 注意：projects JOIN 片段不得再抽成模块级常量——test_no_opaque_sql_variables_
+# hide_projects_queries 会把任何提到 "FROM projects"/"JOIN projects" 的赋值都
+# 判违规，不管有没有被内联使用；必须逐处直接写进 .execute(...) 调用。
 
 
 def list_events(
@@ -39,12 +43,15 @@ def list_events(
         outcome=outcome, source=source, project_id=project_id, q=q,
     )
     _append_cursor(clauses, params, cursor)
-    sql = "SELECT " + ",".join(_LIST_COLUMNS) + " " + _FROM
-    if clauses:
-        sql += " WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY a.ts DESC, a.id DESC LIMIT ?"
+    where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
     params.append(limit + 1)
-    rows = db.get_conn().execute(sql, params).fetchall()
+    rows = db.get_conn().execute(
+        "SELECT " + ",".join(_LIST_COLUMNS) + " FROM operation_audit a "
+        "LEFT JOIN projects p ON p.id = a.project_id "
+        "-- ALL_OWNERS: app.audit.api 全部路由都挂 require_system_admin\n"
+        + where_sql + " ORDER BY a.ts DESC, a.id DESC LIMIT ?",
+        params,
+    ).fetchall()
     items = [_row_to_item(r) for r in rows[:limit]]
     next_cursor = f"{items[-1]['ts']}:{items[-1]['id']}" if len(rows) > limit else None
     return {"items": items, "next_cursor": next_cursor, "server_time": db.now()}
@@ -52,8 +59,13 @@ def list_events(
 
 def get_event(event_id: str) -> dict[str, Any] | None:
     store.ensure_schema()
-    sql = "SELECT " + ",".join(_LIST_COLUMNS) + ",a.user_agent,a.args_json " + _FROM + " WHERE a.id=?"
-    row = db.get_conn().execute(sql, (event_id,)).fetchone()
+    row = db.get_conn().execute(
+        "SELECT " + ",".join(_LIST_COLUMNS) + ",a.user_agent,a.args_json FROM operation_audit a "
+        "LEFT JOIN projects p ON p.id = a.project_id "
+        "-- ALL_OWNERS: app.audit.api 全部路由都挂 require_system_admin\n"
+        "WHERE a.id=?",
+        (event_id,),
+    ).fetchone()
     if row is None:
         return None
     item = _row_to_item(row)
@@ -87,7 +99,14 @@ def activity_summary_by_user() -> dict[str, dict[str, Any]]:
     summary: dict[str, dict[str, Any]] = {}
     for row in conn.execute("SELECT user_id, last_active_at FROM user_activity").fetchall():
         summary[row["user_id"]] = {"last_active_at": row["last_active_at"], "last_action": None}
-    for row in conn.execute(_LATEST_ACTION_SQL).fetchall():
+    for row in conn.execute(
+        "SELECT a.user_id, a.id, a.ts, a.event, a.event_label, a.outcome, a.project_id, "
+        "p.name AS project_name FROM operation_audit a "
+        "LEFT JOIN projects p ON p.id = a.project_id "
+        "-- ALL_OWNERS: app.audit.api 全部路由都挂 require_system_admin\n"
+        "JOIN (SELECT user_id, MAX(ts) mts FROM operation_audit WHERE user_id IS NOT NULL "
+        "GROUP BY user_id) latest ON latest.user_id = a.user_id AND latest.mts = a.ts"
+    ).fetchall():
         entry = summary.setdefault(row["user_id"], {"last_active_at": None, "last_action": None})
         entry["last_action"] = {
             "id": row["id"], "ts": row["ts"], "event": row["event"],
@@ -109,15 +128,6 @@ def apply_activity_summary(user_payloads: list[dict[str, Any]]) -> None:
         values = [v for v in (payload.get("last_login_at"), entry and entry["last_active_at"]) if v is not None]
         payload["last_active_at"] = max(values) if values else None
         payload["last_action"] = entry["last_action"] if entry else None
-
-
-_LATEST_ACTION_SQL = (
-    "SELECT a.user_id, a.id, a.ts, a.event, a.event_label, a.outcome, a.project_id, "
-    "p.name AS project_name FROM operation_audit a "
-    "LEFT JOIN projects p ON p.id = a.project_id "
-    "JOIN (SELECT user_id, MAX(ts) mts FROM operation_audit WHERE user_id IS NOT NULL "
-    "GROUP BY user_id) latest ON latest.user_id = a.user_id AND latest.mts = a.ts"
-)
 
 
 def _append_filters(clauses, params, *, since, until, user_id, event, outcome, source, project_id, q) -> None:
@@ -182,11 +192,13 @@ def _require_not_null(where: str, column: str) -> str:
 
 
 def _facet_group(conn, select_cols: str, group_cols: str, where: str, params: list[Any]) -> list[dict[str, Any]]:
-    sql = (
-        f"SELECT {select_cols}, COUNT(*) AS count {_FROM}{where} "
-        f"GROUP BY {group_cols} ORDER BY count DESC LIMIT {_FACET_LIMIT}"
-    )
-    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+    return [dict(r) for r in conn.execute(
+        f"SELECT {select_cols}, COUNT(*) AS count FROM operation_audit a "
+        "LEFT JOIN projects p ON p.id = a.project_id "
+        "-- ALL_OWNERS: app.audit.api 全部路由都挂 require_system_admin\n"
+        f"{where} GROUP BY {group_cols} ORDER BY count DESC LIMIT {_FACET_LIMIT}",
+        params,
+    ).fetchall()]
 
 
 def _row_to_item(row: Any) -> dict[str, Any]:
