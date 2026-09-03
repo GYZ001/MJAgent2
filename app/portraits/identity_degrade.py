@@ -50,12 +50,54 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app.observability.metrics import inc
+
 from .evidence_merge import (
     _current_identity_declared_signature,
     _merge_current_identity_occurrences,
 )
 
 log = logging.getLogger(__name__)
+
+# WS14：只观测，不改判定。规则→类别是结构前缀表，不是正则猜中文——每条前缀
+# 逐字取自产生该错误的那个 errors.append(...) 调用处的字面量段（见
+# identity_response_projection.py / identity_literal_evidence.py
+# named_literal_miss_verdict），动态内容（source_label/decision_id 等）严格
+# 跟在前缀之后，未命中已知前缀一律落 other，不猜测。
+IDENTITY_CONTRACT_HARD_FAIL_METRIC = "identity_contract_hard_fail_total"
+_CURRENT_IDENTITY_HARD_FAIL_RULE_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("current 后续batch的同称谓必须用P token显式复用 prior group：", "p_token_reuse_missing"),
+    ("current K decision absorbed_functional_keys 越界：", "absorbed_keys_out_of_bounds"),
+    ("current named 缺少逐字 owned evidence：", "owned_evidence_missing"),
+    ("source_label 重复：", "source_label_duplicate"),
+    ("current 同一 source_label 对应多个 identity_group：", "authority_multi_group"),
+)
+
+
+def _current_identity_hard_fail_rule(error: str) -> str:
+    text = str(error or "")
+    for prefix, rule in _CURRENT_IDENTITY_HARD_FAIL_RULE_PREFIXES:
+        if text.startswith(prefix):
+            return rule
+    return "other"
+
+
+def record_current_identity_hard_fail_metrics(
+    errors: list[str],
+    *,
+    project_id: str | None,
+    episode_no: int,
+    batch_index: int,
+) -> None:
+    """v6 errors 按规则类别计数，仅观测；inc() 失败静默，不产生新的失败点。"""
+    for error in errors:
+        inc(
+            IDENTITY_CONTRACT_HARD_FAIL_METRIC,
+            rule=_current_identity_hard_fail_rule(error),
+            project_id=project_id or "",
+            episode_no=episode_no,
+            batch_index=batch_index,
+        )
 
 
 def _label_has_literal_occurrence(source_label: str, evidence_by_ref: dict[str, Any]) -> bool:

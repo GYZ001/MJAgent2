@@ -43,7 +43,7 @@ from .evidence_merge import (
     _merge_current_identity_occurrences,
     _normalize_current_identity_payload,
 )
-from . import identity_investigation
+from . import identity_degrade, identity_investigation
 from .identity_response_projection import _project_current_identity_response
 from .identity_schemas import CurrentIdentityCandidateResponse
 
@@ -526,6 +526,13 @@ async def _discover_character_candidates_legacy(
                 )
                 captured_candidates[:] = projected
                 captured_errors[:] = errors
+                # WS14：只观测不改判定，errors 收集处按规则类别计数。
+                identity_degrade.record_current_identity_hard_fail_metrics(
+                    errors,
+                    project_id=project_id,
+                    episode_no=episode_no,
+                    batch_index=current_batch,
+                )
                 return [
                     error for error in errors
                     if not _current_identity_is_schema_violation(error)
