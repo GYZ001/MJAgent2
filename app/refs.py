@@ -512,11 +512,12 @@ async def _generate_one_character_portrait(
 
 def refs_as_image_inputs(bible: Bible, character_names: list[str], limit: int,
                          *, project_id: str | None = None,
-                         episode_no: int | None = None) -> list[tuple[str, str]]:
+                         episode_no: int | None = None, time_anchor: str | None = None) -> list[tuple[str, str]]:
     """出场角色定妆照 →(data_url, role) 列表，按出场顺序最多 limit 张。
 
     传入 project_id+episode_no 时，按集号选用 character_portraits 中覆盖该集的定妆照（分镜阶段按集
     反应式重绘形成的分段，时间维一致性）；未命中或未传时回退到 bible 里的初始 ref_image_path。
+    time_anchor（WS9）非空时锚点优先，未命中回退同上；look_mismatch 信号本函数不返回。
     """
     out: list[tuple[str, str]] = []
     by_name = {c.name: c for c in bible.characters}
@@ -526,8 +527,8 @@ def refs_as_image_inputs(bible: Bible, character_names: list[str], limit: int,
             continue
         path = None
         if project_id is not None:
-            from app.portraits import portrait_for_episode
-            path = portrait_for_episode(project_id, name, episode_no)
+            from app.portraits.portrait_lookup import portrait_lookup_for_episode
+            path = portrait_lookup_for_episode(project_id, name, episode_no, time_anchor=time_anchor)["image_path"]
         path = path or c.ref_image_path
         if path:
             try:

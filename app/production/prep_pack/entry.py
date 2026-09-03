@@ -6,12 +6,35 @@ Split out of app/production/prep_pack.py.
 from __future__ import annotations
 
 import json
+from app.db import get_conn
 from app.harness.contracts import get_contract
 from typing import Any
 
 from .contracts import PrepPackGateError
 from .generate_once import _generate_prep_pack_once
 from .publish import _publish_prep_pack
+from .timeline_segments import attach_episode_timeline
+
+
+def _reconcile_degraded_retry(
+    exc: PrepPackGateError, prior_had_events: bool, prior_reason: str,
+) -> tuple[PrepPackGateError, bool, str]:
+    """退化重试护栏（ERR-20260824-7ab7cb）：本次重试事件链归零，但此前一次
+    尝试确实抽到过事件时，拒绝让这次退化静默覆盖——把两次的失败原因合并成
+    一条具名错误；否则原样记录本次结果，供下一轮判断沿用。见
+    ``run_episode_prep_pack`` docstring 的完整案情。"""
+    had_events = bool(getattr(exc, "had_events", True))
+    if not had_events and prior_had_events:
+        exc = PrepPackGateError(
+            "本次重试事件链退化为空，拒绝采纳该退化结果（此前一次"
+            f"尝试已抽到事件，但因以下原因被拒：{prior_reason}）；"
+            f"本次重试事件抽取本身失败：{exc}",
+            had_events=False,
+        )
+    if had_events:
+        prior_had_events = True
+        prior_reason = str(exc)[:500]
+    return exc, prior_had_events, prior_reason
 
 
 async def run_episode_prep_pack(
@@ -75,6 +98,10 @@ async def run_episode_prep_pack(
                 run_id=run_id,
                 attempt_hint=attempt_hint,
             )
+            payload = await attach_episode_timeline(
+                payload, project_id=project_id, chapter_indexes=chapter_indexes,
+                source_text=source_text, conn=get_conn(),
+            )
             _publish_prep_pack(
                 episode_id=episode_id, payload=payload, run_id=run_id,
                 rejected_paratext_claims=rejected_paratext_claims,
@@ -85,21 +112,10 @@ async def run_episode_prep_pack(
             )
             return payload
         except PrepPackGateError as exc:
-            had_events = bool(getattr(exc, "had_events", True))
-            if not had_events and prior_attempt_had_events:
-                # 退化重试护栏（ERR-20260824-7ab7cb）：本次重试事件链归零，
-                # 但此前一次尝试确实抽到过事件——拒绝让这次退化静默覆盖，
-                # 把两次的失败原因合并成一条具名错误。
-                exc = PrepPackGateError(
-                    "本次重试事件链退化为空，拒绝采纳该退化结果（此前一次"
-                    f"尝试已抽到事件，但因以下原因被拒：{prior_attempt_reason}）；"
-                    f"本次重试事件抽取本身失败：{exc}",
-                    had_events=False,
-                )
+            exc, prior_attempt_had_events, prior_attempt_reason = _reconcile_degraded_retry(
+                exc, prior_attempt_had_events, prior_attempt_reason,
+            )
             last_error = exc
             attempt_hint = str(exc)[:2000]
-            if had_events:
-                prior_attempt_had_events = True
-                prior_attempt_reason = str(exc)[:500]
             continue
     raise last_error if last_error is not None else RuntimeError("分集映射包生成失败")

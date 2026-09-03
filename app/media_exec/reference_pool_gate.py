@@ -150,6 +150,22 @@ def _append_text_only_reference_notes(
     return prompt_body + " " + note + prompt_args
 
 
+def _time_anchor_advisories_for_job(conn: Any, job: Any, shot_model: Any) -> list[str]:
+    """WS9：本镜命中的时间线锚点若与当前实际选用造型不符，取一份 ``[未拦截]``
+    告警，记进 image_inputs meta——不影响候选池是否为空的既有判定，只是把
+    ``app.validators.resource_forecast.character_time_anchor_advisories`` 的
+    结论顺带落一份到本次纯文本回退的产物里，供分镜台/生成台展示。"""
+    from app.validators.resource_forecast import character_time_anchor_advisories
+
+    episode_row = conn.execute(
+        "SELECT episode_no FROM episodes WHERE id=?", (job["episode_id"],),
+    ).fetchone()
+    return character_time_anchor_advisories(
+        shot=shot_model, project_id=job["project_id"],
+        episode_no=episode_row["episode_no"] if episode_row else None, conn=conn,
+    )
+
+
 async def _complete_reference_mode_as_text_only(
     *, conn: Any, job: Any, meta: dict[str, Any], prompt_text: str, version: Any,
     shot_model: Any, bible: Any, screenplay: Any, decision: Any,
@@ -185,6 +201,7 @@ async def _complete_reference_mode_as_text_only(
     meta["video_input_manifest_frozen"] = True
     meta["reference_mode_text_only_fallback"] = True
     meta["reference_mode_text_only_reason"] = "empty_candidate_pool"
+    meta["portrait_time_anchor_advisories"] = _time_anchor_advisories_for_job(conn, job, shot_model)
     meta.pop("first_frame_path", None)
     meta.pop("last_frame_path", None)
     set_pipeline_stage(

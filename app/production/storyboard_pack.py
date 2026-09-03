@@ -1595,6 +1595,32 @@ def _largest_contiguous_source_run(indexes: list[int]) -> list[int]:
     return max(runs, key=lambda run: (len(run), -run[0]))
 
 
+def _segment_matched_timeline_anchors(
+    timeline_by_segment: dict[int, list[dict[str, Any]]], source_segment_indexes: list[int],
+) -> list[dict[str, Any]]:
+    """WS9：本段命中的 ``episode_prep_pack.timeline.segments`` 锚点，按段号去重合并。"""
+    seen: set[str] = set()
+    matched: list[dict[str, Any]] = []
+    for index in source_segment_indexes:
+        for anchor in timeline_by_segment.get(index, []):
+            key = f"{anchor.get('kind')}:{anchor.get('value')}:{anchor.get('chapter_index')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            matched.append(anchor)
+    return matched
+
+
+def _timeline_anchor_scene_time(anchors: list[dict[str, Any]]) -> str:
+    """段落锚点 -> ``shots.scene_time``：没有锚点保持空串（不兜底）；有锚点取
+    原文逐字 ``value``，多个候选按 age > year > era > relative 取最具体的一条。"""
+    if not anchors:
+        return ""
+    priority = {"age": 0, "year": 1, "era": 2, "relative": 3}
+    best = min(anchors, key=lambda a: priority.get(a.get("kind"), 9))
+    return str(best.get("value") or "")
+
+
 def _resolve_segment_source_binding(
     *,
     segment_no: int,
@@ -1702,7 +1728,9 @@ def persist_storyboard_pack(
     ``prompt_contract_version=STORYBOARD_PACK_CONTRACT_MARKER`` is how every
     consumer (app/continuity.py, app/validators.py, app/domain/video_ops.py) knows to
     stop treating those columns as authoritative for this row instead of
-    silently failing or silently passing on empty values.
+    silently failing or silently passing on empty values. ``scene_time`` is the
+    one exception (WS9): still means "when, not where", populated verbatim
+    from this segment's matched timeline anchor when the source text had one.
     """
     from app.domain.storyboard_ops.mutation_primitives import (
         _assert_storyboard_write_authorized,
@@ -1716,6 +1744,12 @@ def persist_storyboard_pack(
     authorized_sources = chapter_sources(episode_id, conn=conn)
     conn.execute("DELETE FROM shots WHERE episode_id=?", (episode_id,))
     beats_by_id = {beat.beat_id: beat for beat in pack.beat_sheet}
+    # WS9：payload["timeline"]["segments"]（见 .prep_pack.timeline_segments）
+    # 按段号匹配回本段；旧 payload 无此字段时下面每段拿到空列表，行为不变。
+    timeline_by_segment = {
+        int(entry.get("index") or 0): entry.get("anchors") or []
+        for entry in ((payload.get("timeline") or {}).get("segments") or [])
+    }
     shot_ids: list[str] = []
     for segment in pack.segments:
         character_ids = resolve_persisted_character_ids(payload, [
@@ -1733,9 +1767,16 @@ def persist_storyboard_pack(
             full_source_text=full_source_text,
             authorized_sources=authorized_sources,
         )
+        segment_timeline_anchors = _segment_matched_timeline_anchors(
+            timeline_by_segment, segment.source_segment_indexes,
+        )
+        scene_time = _timeline_anchor_scene_time(segment_timeline_anchors)
         shot_id = new_id("shot")
         shot_uid = new_id("shotuid")
         segment_record = segment.model_dump(mode="json")
+        # WS9：附加键，不覆盖既有 "beats"（叙事节拍摘要，见下方重写块）；供
+        # resource_forecast 等读取本段锚点详情（含 anchor_key，按锚点选造型）。
+        segment_record["timeline_anchors"] = segment_timeline_anchors
         # Single source of truth: the model's own self-declared segment.beat_ids
         # (_AiSegmentPlan.beat_ids, carried through StoryboardPackSegment) --
         # the same list that built this segment's own prompt (see
@@ -1796,7 +1837,7 @@ def persist_storyboard_pack(
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 shot_id, shot_uid, episode_id, None, segment.segment_no, segment.duration_s,
-                "", "", "", "",
+                "", "", scene_time, "",
                 scene_display_name or None,
                 json.dumps(
                     _resource_identity_display_names(payload, character_ids),

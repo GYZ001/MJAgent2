@@ -12,6 +12,7 @@ scenes`` 为空——这正是「候选池天生为空、生成台会回退纯�
 """
 from __future__ import annotations
 
+import sqlite3
 from types import SimpleNamespace
 
 from app.media_exec.reference_pool_gate import _reference_repair_guidance
@@ -21,6 +22,7 @@ from app.validators.resource_forecast import (
     TEXT_ONLY_FALLBACK,
     WILL_BLOCK,
     blocked_consequence_text,
+    character_time_anchor_advisories,
     forecast_shot_production,
     resource_advisories_for_segment,
     shot_resource_advisories,
@@ -231,3 +233,71 @@ class TestReferencePoolGateSharesGuidanceText:
         时，文案维持"重新生成"而不是"补齐"——两种缺口的出路不一样，不能被
         共用文案覆盖掉。"""
         assert _reference_repair_guidance([]) == "请到「人物谱」或「场景库」重新生成对应定妆照/场景图后重试。"
+
+
+def _portrait_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE character_portraits(id TEXT, project_id TEXT, character_name TEXT, "
+        "visual_entity_id TEXT, ep_start INTEGER, ep_end INTEGER, appearance TEXT, image_path TEXT, "
+        "created_at REAL)"
+    )
+    conn.commit()
+    return conn
+
+
+_TIME_ANCHOR_SEGMENT = {
+    "resources": {"characters": [{"identity_id": "里奥", "portrait_id": None, "description": ""}]},
+    "timeline_anchors": [{
+        "kind": "age", "value": "三十五岁", "evidence": "他三十五岁那年",
+        "anchor_key": "age:35", "label": "35岁",
+    }],
+}
+
+
+class TestCharacterTimeAnchorAdvisories:
+    """WS9：本镜时间线锚点与实际选用造型不符时的 [未拦截] 告警。"""
+
+    def test_no_advisory_without_timeline_anchors(self):
+        shot = SimpleNamespace(storyboard_pack_segment={"resources": {"characters": []}, "timeline_anchors": []})
+        conn = _portrait_conn()
+        assert character_time_anchor_advisories(shot=shot, project_id="p1", episode_no=1, conn=conn) == []
+
+    def test_mismatch_advisory_when_fallback_used(self, tmp_path):
+        conn = _portrait_conn()
+        path = tmp_path / "seg1.jpg"
+        path.write_bytes(b"x")
+        conn.execute(
+            "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, "
+            "appearance, image_path, created_at) VALUES(?,?,?,?,?,?,?,?)",
+            ("seg1", "p1", "里奥", 1, None, "十六岁少年", str(path), 1.0),
+        )
+        conn.commit()
+        shot = SimpleNamespace(storyboard_pack_segment=_TIME_ANCHOR_SEGMENT)
+        advisories = character_time_anchor_advisories(shot=shot, project_id="p1", episode_no=1, conn=conn)
+        assert len(advisories) == 1
+        line = advisories[0]
+        assert "[未拦截]" in line
+        assert "里奥" in line and "35岁" in line and "age:35" in line
+
+    def test_no_advisory_when_anchor_hit(self, tmp_path):
+        conn = _portrait_conn()
+        conn.execute("ALTER TABLE character_portraits ADD COLUMN anchor_key TEXT")
+        path = tmp_path / "anchor1.jpg"
+        path.write_bytes(b"x")
+        conn.execute(
+            "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, "
+            "appearance, image_path, anchor_key, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            ("anchor1", "p1", "里奥", 1, None, "三十五岁中年", str(path), "age:35", 1.0),
+        )
+        conn.commit()
+        shot = SimpleNamespace(storyboard_pack_segment=_TIME_ANCHOR_SEGMENT)
+        assert character_time_anchor_advisories(shot=shot, project_id="p1", episode_no=1, conn=conn) == []
+
+    def test_no_advisory_when_no_portrait_at_all(self):
+        # used=="none" 的情形交给 resource_advisories_for_segment 的既有
+        # CHARACTER_UNKNOWN 告警覆盖，本函数不重复报。
+        conn = _portrait_conn()
+        shot = SimpleNamespace(storyboard_pack_segment=_TIME_ANCHOR_SEGMENT)
+        assert character_time_anchor_advisories(shot=shot, project_id="p1", episode_no=1, conn=conn) == []

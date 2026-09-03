@@ -29,8 +29,8 @@ CHARACTER_UNKNOWN``/``STORYBOARD_PACK_RESOURCE_SCENE_MANIFEST_GAP`` 等，见
 各话）。
 
 层号：本模块随 ``app.validators`` 包前缀归 L4（app/LAYERS.toml），只依赖同层的
-``app.multiview``（显式声明为 L4），不依赖任何 L5 编排/领域模块——
-``app.media_exec.reference_pool_gate``（L5）向下依赖本模块是合法方向。
+``app.multiview``/``app.portraits``（均显式声明为 L4），不依赖任何 L5 编排/
+领域模块——``app.media_exec.reference_pool_gate``（L5）向下依赖本模块是合法方向。
 """
 from __future__ import annotations
 
@@ -192,6 +192,65 @@ def resource_advisories_for_segment(
             "本镜没有声明任何场景资源，生成台将按纯文本出片（画面完全由分镜文字"
             "决定）；如需为本镜挂场景参考图，请先在映射台为这段原文补齐场景发现"
         )
+    return advisories
+
+
+def _time_anchor_lookup_targets(resources: dict[str, Any]) -> list[str]:
+    return [
+        _display_name(str(entry.get("identity_id") or ""))
+        for entry in resources.get("characters") or []
+        if entry.get("identity_id")
+    ]
+
+
+def _best_time_anchor(anchors: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """本镜锚点里可用于按锚点查造型的那条——``anchor_key`` 为 None（era/
+    relative，或数字解析失败）的锚点天然不构成可查询键，不参与挑选。"""
+    keyed = [a for a in anchors if a.get("anchor_key")]
+    if not keyed:
+        return None
+    priority = {"age": 0, "year": 1}
+    return min(keyed, key=lambda a: priority.get(a.get("kind"), 9))
+
+
+def _time_anchor_mismatch_line(name: str, anchor: dict[str, Any]) -> str:
+    label = anchor.get("label") or anchor.get("value") or ""
+    evidence = anchor.get("evidence") or ""
+    key = anchor.get("anchor_key") or ""
+    return (
+        "[STORYBOARD_PACK_PORTRAIT_TIME_ANCHOR_MISMATCH][未拦截] "
+        f"人物「{name}」本镜为{label}（原文『{evidence}』），当前用的是按集段选用的默认造型，"
+        f"非「{key}」专属；到人物谱为该角色添加对应造型后重新生成"
+    )
+
+
+def character_time_anchor_advisories(
+    *, shot: Any, project_id: str, episode_no: int | None, conn: Any,
+) -> list[str]:
+    """WS9：本镜命中的时间线锚点若与当前实际选用造型不符，给一条 ``[未拦截]``
+    告警——不挡生成，只提醒"这一镜的人物形象可能不是原文这个时间点该有的
+    样子"。与本模块其余函数不同，本函数真的做 I/O（须查
+    ``character_portraits``），``conn`` 必须由调用方显式传入（CLAUDE.md
+    「Ownership Must Be Explicit」）。只在确有回退（``look_mismatch.used ==
+    "episode_segment"``）时才报；完全没有任何定妆照的情形已由
+    ``resource_advisories_for_segment`` 的既有告警覆盖，不在这里重复。
+    """
+    segment = getattr(shot, "storyboard_pack_segment", None)
+    if segment is None:
+        return []
+    anchor = _best_time_anchor(segment.get("timeline_anchors") or [])
+    if anchor is None:
+        return []
+    from app.portraits.portrait_lookup import portrait_lookup_for_episode
+
+    advisories: list[str] = []
+    for name in _time_anchor_lookup_targets(segment.get("resources") or {}):
+        result = portrait_lookup_for_episode(
+            project_id, name, episode_no, time_anchor=anchor["anchor_key"], conn=conn,
+        )
+        mismatch = result.get("look_mismatch")
+        if mismatch and mismatch.get("used") == "episode_segment":
+            advisories.append(_time_anchor_mismatch_line(name, anchor))
     return advisories
 
 
