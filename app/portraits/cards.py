@@ -23,7 +23,7 @@ from .bible_compat import (  # noqa: F401 -- 重新导出，见下方模块末�
     bible_with_provisional_characters,
 )
 from .card_merge import courtesy_name_redirect, resolve_card_build_or_merge, resolve_card_name
-from .card_verdict import unimportant_verdict_result
+from .card_verdict import non_character_or_unimportant_result, reconsider_verdict_with_presence_evidence
 from .constants import (
     APPEARANCE_MAX,
     APPEARANCE_MIN,
@@ -37,9 +37,9 @@ from .discovery_fragments import (
     _forward_fragments,
     _fragment_signature,
     _name_in_bible,
-    _non_character_skip_key,
 )
 from .portrait_io import _append_character_to_bible, _generate_discovered_character_portrait
+from .presence_evidence import collect_presence_evidence, fetch_project_shot_rows, presence_evidence_fingerprint
 
 # 人物谱是"可以被选角、被定妆、能出镜表演的人"的登记表。宗门、地点、器物、
 # 功法都不是人，它们属于场景库或 reference 身份，绝不能占据人物卡。
@@ -337,9 +337,10 @@ async def ensure_character_card(
             item for item in change_items if item.get("kind") in {"new_character", "character_discovery", "new_bible_character"}
             and item.get("character") == name and item.get("status") in {"pending", "processing", "auto_applied_asset_failed"}
         ), None)
-        # 负缓存：判过"戏份不足"的名字先不重判——判据挂在这次检索到的原文片段
-        # 内容上，不是挂在"过了多少集"（片段没变就仍是同一次判断的延续；片段变了
-        # 就必须重判，见 _fragment_signature/discovery_fragments.py）。
+        # 负缓存：判过"戏份不足/非角色"的名字先不重判——判据挂在这次检索到的
+        # 原文片段内容 + 画面存在证据上，不是挂在"过了多少集"。片段没变、证据
+        # 也没变（没有新的在场描写/分镜标注）才是同一次判断的延续；任一变了就
+        # 必须重判（见 _fragment_signature 与 presence_evidence.presence_evidence_fingerprint）。
         fragments, ep_label, forward_chapters_by_idx = _forward_fragments(conn, project_id, name, from_episode_no)
         # 字/改名先归位（「长生」→「关羽」，见 courtesy_name_redirect）：有卡则登记别名复用，无卡则改在全名下建卡。
         redirect = await courtesy_name_redirect(conn, project_id, name, forward_chapters_by_idx, write_guard)
@@ -350,9 +351,13 @@ async def ensure_character_card(
             return await ensure_character_card(project_id, redirect, from_episode_no, generate_portrait=generate_portrait,
                                                require_identity_card=require_identity_card, identity_source_labels=labels, write_guard=write_guard)
         fragment_signature = _fragment_signature(fragments)
+        presence = collect_presence_evidence(
+            name, forward_chapters_by_idx, fetch_project_shot_rows(conn, project_id),
+        )
+        cache_signature = f"{fragment_signature}:{presence_evidence_fingerprint(presence)}"
         skip_raw = get_setting(_discovery_skip_key(project_id, name))
         if skip_raw and existing_change is None and not require_identity_card:
-            if skip_raw == fragment_signature:
+            if skip_raw == cache_signature:
                 return {"status": "skipped_minor", "name": name, "reason": "recently judged minor"}
         bible_artifact_supported = _has_column(conn, "projects", "bible_artifact_id")
         select_cols = "bible_json, bible_version"
@@ -386,7 +391,7 @@ async def ensure_character_card(
                         "status": "error", "name": name,
                         "reason": "真名已确认，但人物卡缺少可核验的原文片段",
                     }
-                set_setting(_discovery_skip_key(project_id, name), fragment_signature)
+                set_setting(_discovery_skip_key(project_id, name), cache_signature)
                 return {"status": "skipped_minor", "name": name, "reason": "no fragments in novel"}
             try:
                 assessment_options = {"style": style, "known_names": known, "ep_label": ep_label, "chapters_by_idx": forward_chapters_by_idx}
@@ -399,6 +404,7 @@ async def ensure_character_card(
                 return {"status": "error", "name": name,
                         "reason": "新角色评估失败" + code_ref(exc, action="assess_new_character",
                                                               context={"project_id": project_id, "name": name})}
+            verdict = reconsider_verdict_with_presence_evidence(name, verdict, presence)
             if write_guard:
                 write_guard()
             card_complete = bool(verdict.get("card_complete")) or (
@@ -407,31 +413,17 @@ async def ensure_character_card(
                 <= len(str(verdict.get("appearance_canonical") or "").strip())
                 <= APPEARANCE_MAX
             )
-            # 以 subject_kind 为准（_build_verdict 一定会给出它），缺失同样拦截：
-            # 无法断言"这是一个人"时，保守的方向就是不进人物谱。
-            if str(
-                verdict.get("subject_kind") or ""
-            ).strip() != CHARACTER_SUBJECT_PERSON:
-                # 人格是独立的硬闸门，不能被 require_identity_card 绕过：身份消歧
-                # 确认的是"这是一个稳定的专名"，不是"这是一个人"。宗门、器物、
-                # 地点即使专名稳定、戏份很重，也只能留在场景库/reference 身份里。
-                set_setting(
-                    _discovery_skip_key(project_id, name), fragment_signature
-                )
-                set_setting(_non_character_skip_key(project_id, name), "1")
-                return {
-                    "status": "skipped_not_person",
-                    "name": name,
-                    "subject_kind": verdict.get("subject_kind") or "",
-                    "reason": verdict["reason"],
-                }
-            unimportant_result = unimportant_verdict_result(
+            # 人格是否成立、是否重要够格建卡，两道闸门 + 画面存在证据核对全部
+            # 收拢到 non_character_or_unimportant_result（见 card_verdict.py
+            # 模块 docstring）：本函数已顶格 function_lines 基线，新判据不能
+            # 再塞进这里。
+            gate_result = non_character_or_unimportant_result(
                 name, verdict, require_identity_card=require_identity_card,
                 card_complete=card_complete, project_id=project_id,
-                fragment_signature=fragment_signature,
+                cache_signature=cache_signature,
             )
-            if unimportant_result is not None:
-                return unimportant_result
+            if gate_result is not None:
+                return gate_result
             named = await resolve_card_name(conn, project_id, name, verdict, fragments, forward_chapters_by_idx, write_guard)
             if isinstance(named, dict):
                 return named

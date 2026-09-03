@@ -24,7 +24,80 @@ from __future__ import annotations
 
 from app.db import set_setting
 
-from .discovery_fragments import _discovery_skip_key
+from .discovery_fragments import _discovery_skip_key, _non_character_skip_key
+from .presence_evidence import has_onscreen_evidence, presence_evidence_citation
+
+
+def reconsider_verdict_with_presence_evidence(name: str, verdict: dict, evidence: dict) -> dict:
+    """非角色（``subject_kind != person``）的模型判定必须与画面存在证据对照
+    （WS3：人物发现按叙事分量与画面存在判定，非角色判定不再与画面事实相反）。
+
+    证据里有 ≥1 处在场出现（对白/动作描写邻接候选称谓，或已有分镜把它标成
+    在场角色）时，不能直接采信模型"这不是一个人"的结论——按证据把
+    ``subject_kind`` 改判为 ``"person"``。生产事故：马拉多纳（"赛后马拉多纳
+    哭了"）、姆巴佩（"姆巴佩刚刚跑过他身边"）先后被判 subject_kind 非人，
+    写进 ``char_not_character`` 永久负缓存，proj_ce9fcf749b23——哭、跑都是
+    只有人才做得出的动作，模型的"这不是人"判定本身就与画面事实矛盾。
+
+    刻意只纠正 subject_kind，不代管"重要与否"这个独立的叙事分量判断：结构
+    信号能可靠证明"这能哭/能跑/能开口说话，所以是人"，但不能可靠证明"这段
+    戏份值不值得建卡"——一句话路人同样会命中动作邻接（"路人甲走过"里"走"
+    与候选称谓紧邻，结构上与"马拉多纳哭了"同形），见
+    ``tests/test_character_discovery.py::test_minor_character_is_skipped_and_negatively_cached``
+    的既有预期：那类候选就应该保持"戏份不足"，不能被本函数误伤。important
+    的取舍原样交还给 ``model_important``（subject_kind 硬闸门生效前模型的
+    真实判断，被 ``cards._build_verdict`` 强制压低前的值——``require_identity_
+    card=True`` 时按合同应为 True，见 ``assess_new_character`` 的
+    identity_contract）与下游 ``unimportant_verdict_result``。
+
+    已经判为 ``subject_kind=="person"`` 的 verdict 原样返回，不做任何改写——
+    本函数只能把 subject_kind 从非人改成人，不会让任何现有角色被降级。
+    """
+    subject_kind = str(verdict.get("subject_kind") or "").strip()
+    if subject_kind == "person" or not has_onscreen_evidence(evidence):
+        return verdict
+    citation = presence_evidence_citation(evidence)
+    overridden = dict(verdict)
+    overridden["subject_kind"] = "person"
+    overridden["is_person"] = True
+    overridden["important"] = bool(verdict.get("model_important"))
+    overridden["reason"] = (
+        f"模型原判「{verdict.get('reason') or subject_kind or '非人'}」，"
+        f"但原文有画面在场证据（{citation}），按画面存在证据判定为人物"
+    )
+    return overridden
+
+
+def non_character_or_unimportant_result(
+    name: str, verdict: dict, *, require_identity_card: bool, card_complete: bool,
+    project_id: str, cache_signature: str,
+) -> dict | None:
+    """``ensure_character_card`` 的"非人 / 不重要"终态判定：subject_kind 硬闸门
+    + ``unimportant_verdict_result`` 收拢到一处（从 ``cards.py`` 内联搬出——
+    该函数已顶格 function_lines 基线，新判据装不下就得先搬家，不能靠加基线）。
+
+    ``cache_signature`` 取代裸的 ``fragment_signature`` 作为负缓存键的值：必须
+    把画面存在证据折进去（见 ``presence_evidence.presence_evidence_fingerprint``
+    docstring），否则同一段原文永远不会因为"分镜后来标出了在场证据"而重判。
+    """
+    subject_kind = str(verdict.get("subject_kind") or "").strip()
+    if subject_kind != "person":
+        # 人格是独立的硬闸门，不能被 require_identity_card 绕过：身份消歧确认的
+        # 是"这是一个稳定的专名"，不是"这是一个人"。宗门、器物、地点即使专名
+        # 稳定、戏份很重，也只能留在场景库/reference 身份里。
+        set_setting(_discovery_skip_key(project_id, name), cache_signature)
+        set_setting(_non_character_skip_key(project_id, name), "1")
+        return {
+            "status": "skipped_not_person",
+            "name": name,
+            "subject_kind": subject_kind,
+            "reason": verdict["reason"],
+        }
+    return unimportant_verdict_result(
+        name, verdict, require_identity_card=require_identity_card,
+        card_complete=card_complete, project_id=project_id,
+        fragment_signature=cache_signature,
+    )
 
 
 def unimportant_verdict_result(

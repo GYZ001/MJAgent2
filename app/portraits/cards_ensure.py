@@ -30,6 +30,7 @@ from .discovery_resample import (
 )
 from .evidence_receipt import _validate_current_identity_receipt_bundle
 from .portrait_io import _generate_discovered_character_portrait
+from .presence_evidence import collect_presence_evidence, functional_card_worthy
 from .resolution_store import load_screenplay_character_resolutions
 from .structural_coverage import (
     _identity_resolution,
@@ -160,6 +161,91 @@ def _future_identity_resolutions(known_named_candidates: list[dict]) -> list[dic
     return out
 
 
+def _functional_identity_resolutions(functional_candidates: list[dict]) -> list[dict]:
+    """功能身份保留原文稳定称谓的 route_name 消歧 + 决议。从
+    ``ensure_cards_for_text`` 内联搬出（该函数已顶格 function_lines 基线，见
+    调用处注释）。是否需要人物卡与是否具备真名是两件事，不得通过改成
+    "路人甲/乙/丙"来降低角色重要性或抹掉来源身份。
+
+    真实第20轮 EP4 回归 ERR-20260824-407c9b 结构性排查命中：identity_group
+    已经是可靠的按人区分键，但当两个不同的 identity_group 都退回同一个裸
+    source_label 当 route_name（比如两个不同的"外宗弟子"）时，两者的
+    route_name 字符串会变成完全相同的值——route_name 是这个函数唯一往外传
+    的东西，下游（app.production.prep_pack 的 functional_extras，按这个
+    字符串当 key 聚合 event_ids）拿到手就已经分不清是谁了，会把两个人的
+    出场事件悄悄合并进同一条群演记录。用确定性序号区分（"外宗弟子（乙）"），
+    不是"路人甲/乙/丙"式的泛化替换——原有的功能性描述原样保留，只在真的
+    撞车时追加后缀。
+    """
+    resolutions: list[dict] = []
+    assigned_identity_groups: dict[str, str] = {}
+    route_name_first_owner: dict[str, str] = {}
+    route_name_collisions: dict[str, int] = {}
+    for item in functional_candidates:
+        source_label = str(item.get("source_label") or item.get("name") or "").strip()
+        identity_group = str(item.get("identity_group") or f"source:{source_label}").strip()
+        route_name = str(item.get("existing_route_name") or "").strip()
+        if not route_name:
+            route_name = assigned_identity_groups.get(identity_group, "")
+        if not route_name:
+            first_owner = route_name_first_owner.setdefault(source_label, identity_group)
+            if first_owner == identity_group:
+                route_name = source_label
+            else:
+                route_name_collisions[source_label] = route_name_collisions.get(source_label, 1) + 1
+                suffix = _identity_disambiguating_suffix(route_name_collisions[source_label])
+                route_name = f"{source_label}（{suffix}）"
+        assigned_identity_groups[identity_group] = route_name
+        resolutions.append(_identity_resolution(
+            item, route_name, "functional_identity",
+            reason="模型依据当前来源确认该实体为本集功能身份",
+        ))
+    return resolutions
+
+
+async def _ensure_qualifying_functional_cards(
+    project_id: str, episode_no: int, source_text: str,
+    functional_candidates: list[dict],
+    *, generate_portraits: bool, write_guard: Callable[[], None] | None,
+) -> tuple[list[dict], list[str]]:
+    """无名但反复在场/处于高潮的功能身份也建卡定妆，不再只留裸标签资源
+    （WS3：人物发现按叙事分量与画面存在判定）。生产事故：奶奶（"矮墙"意象
+    贯穿全文）、机场哭喊"梅西，别走"的八岁男孩等无专名角色因为只有称谓、
+    没有真名，从未进入 unknown_by_name（``_candidate_requires_identity_card``
+    要求 ``identity_kind=="named"``），只能以功能身份留在决议里，永远没有卡
+    也没有定妆照，proj_ce9fcf749b23。
+
+    只对同一 source_label 只属于一个 identity_group 的情形建卡：命中 ≥2 个
+    不同 identity_group（真实歧义，例如两个不同的"外宗弟子"）时，
+    ``_forward_fragments`` 按裸文本检索会把两个人的原文证据混进同一张卡，
+    这里不试图解决——称谓消歧仍交给上面已有的 route_name/scope_qualifier
+    机制，只是那条路径不建卡（见函数调用处 docstring）。
+    """
+    groups_by_label: dict[str, set[str]] = {}
+    for item in functional_candidates:
+        label = str(item.get("source_label") or item.get("name") or "").strip()
+        group = str(item.get("identity_group") or f"source:{label}").strip()
+        if label:
+            groups_by_label.setdefault(label, set()).add(group)
+    added: list[dict] = []
+    warnings: list[str] = []
+    for label, groups in sorted(groups_by_label.items()):
+        if len(groups) != 1:
+            continue
+        presence = collect_presence_evidence(label, {episode_no: source_text})
+        if not functional_card_worthy(presence):
+            continue
+        result = await ensure_character_card(
+            project_id, label, episode_no,
+            generate_portrait=generate_portraits, write_guard=write_guard,
+        )
+        if result.get("status") == "added":
+            added.append(result)
+            if not result.get("has_portrait"):
+                warnings.append(f"{label}：功能身份画面证据充分，人物卡已添加，定妆资产将补齐")
+    return added, warnings
+
+
 async def ensure_cards_for_text(
     project_id: str,
     episode_no: int,
@@ -285,20 +371,6 @@ async def ensure_cards_for_text(
     ]
     warnings: list[str] = []
     resolutions: list[dict] = []
-    assigned_extra_names: dict[str, str] = {}
-    assigned_identity_groups: dict[str, str] = {}
-    # 真实第20轮 EP4 回归 ERR-20260824-407c9b 结构性排查命中：identity_group
-    # 已经是可靠的按人区分键，但当两个不同的 identity_group 都退回同一个
-    # 裸 source_label 当 route_name（比如两个不同的"外宗弟子"）时，两者的
-    # route_name 字符串会变成完全相同的值——route_name 是这个函数唯一往
-    # 外传的东西，下游（app.production.prep_pack 的 functional_extras，按
-    # 这个字符串当 key 聚合 event_ids）拿到手就已经分不清是谁了，会把两个
-    # 人的出场事件悄悄合并进同一条群演记录。用确定性序号区分（"外宗弟子
-    # （乙）"），不是"路人甲/乙/丙"式的泛化替换——原有的功能性描述原样
-    # 保留，只在真的撞车时追加后缀（见函数上方"不得通过改成路人甲/乙/丙
-    # 来...抹掉来源身份"的既有原则，这里遵循同一原则：只加后缀，不换描述）。
-    _route_name_first_owner: dict[str, str] = {}
-    _route_name_collisions: dict[str, int] = {}
 
     resolutions.extend(_reference_identity_resolutions(mentioned_only_candidates))
     resolutions.extend(_future_identity_resolutions(known_named_candidates))
@@ -313,38 +385,17 @@ async def ensure_cards_for_text(
     )
     warnings.extend(portrait_backfill_warnings)
 
-    # 功能身份保留原文稳定称谓。是否需要人物卡与是否具备真名是两件事，
-    # 不得通过改成“路人甲/乙/丙”来降低角色重要性或抹掉来源身份。
-    for item in functional_candidates:
-        source_label = str(item.get("source_label") or item.get("name") or "").strip()
-        identity_group = str(
-            item.get("identity_group") or f"source:{source_label}"
-        ).strip()
-        route_name = str(item.get("existing_route_name") or "").strip()
-        if not route_name:
-            route_name = assigned_identity_groups.get(identity_group, "")
-        if not route_name:
-            first_owner = _route_name_first_owner.setdefault(
-                source_label, identity_group,
-            )
-            if first_owner == identity_group:
-                route_name = source_label
-            else:
-                _route_name_collisions[source_label] = (
-                    _route_name_collisions.get(source_label, 1) + 1
-                )
-                route_name = (
-                    f"{source_label}"
-                    f"（{_identity_disambiguating_suffix(_route_name_collisions[source_label])}）"
-                )
-        assigned_identity_groups[identity_group] = route_name
-        assigned_extra_names[source_label] = route_name
-        resolutions.append(_identity_resolution(
-            item,
-            route_name,
-            "functional_identity",
-            reason="模型依据当前来源确认该实体为本集功能身份",
-        ))
+    # 功能身份的 route_name 消歧 + 决议（见 _functional_identity_resolutions
+    # docstring：本函数已顶格 function_lines 基线，这段搬到独立函数）。
+    resolutions.extend(_functional_identity_resolutions(functional_candidates))
+
+    # 无名但反复在场/处于高潮的功能身份也建卡定妆（见函数 docstring）。
+    functional_added, functional_card_warnings = await _ensure_qualifying_functional_cards(
+        project_id, episode_no, source_text, functional_candidates,
+        generate_portraits=generate_portraits, write_guard=write_guard,
+    )
+    added.extend(functional_added)
+    warnings.extend(functional_card_warnings)
 
     for name, items in unknown_by_name.items():
         ensure_kwargs = {
