@@ -23,6 +23,19 @@ from app.capabilities.schemas import (
 DEFAULT_APPROVAL_TTL_S = 15 * 60
 DESTRUCTIVE_APPROVAL_TTL_S = 5 * 60
 
+# 必须提供稳定 idempotency_key 才能执行的命令集合（挪自 app.capabilities.bus，
+# 2026-09-02：那个文件是 560 行零余量的棘轮基线，这张纯数据表搬到这里给它腾
+# 位置）。全仓只有 app.capabilities.bus._idempotency_rejection 一处消费。
+STRICT_IDEMPOTENCY_COMMANDS = frozenset({
+    "video.generate_episode",
+    "video.generate_shot",
+    "video.complete_episode",
+    "video.complete_project",
+    "delivery.concatenate",
+    "delivery.create_package",
+    "delivery.review",
+})
+
 _TOKEN_SECRET = secrets.token_bytes(32)
 _APPROVALS: dict[str, ApprovalTokenPayload] = {}
 _APPROVALS_LOCK = threading.RLock()

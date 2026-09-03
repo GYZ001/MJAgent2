@@ -142,6 +142,14 @@ allowed_exceptions = []
                                  # 不依赖 app.db（避免与 app.db 互相 import 成
                                  # 环——app.db.insert_monitor_audit 反过来
                                  # import 本模块做失败兜底，同层允许）
+"app.audit" = 2  # 2026-09-02 新增：账号管理「最近活跃」+「操作审计」，前缀覆盖
+                 # store/redact/recorder/activity/queries/retention 全部子模块，
+                 # 只 import app.db / app.config / app.auth.principal /
+                 # app.monitor_audit_buffer（均 <=2）+ stdlib；总线钩子
+                 # （app.capabilities.bus）把 status/summary 等以纯字符串传进
+                 # 来，依赖方向永远是「高层 import 本包」，不能反过来
+"app.audit.api" = 5  # 覆盖 "app.audit" = 2 前缀：挂 APIRouter，只被 app.main
+                     # 引用，与 app.auth.admin_api 同一种"路由→域"入口角色
 
 # ---- L3 供应商适配：可依赖 L0-L2 ----
 "app.harness.model_gateway" = 3

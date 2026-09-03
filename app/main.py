@@ -15,6 +15,13 @@ from starlette.middleware.gzip import GZipMiddleware
 from app import errors, task_registry, worker
 from app.agent.api import router as agent_conversation_router
 from app.api import purge_legacy_screenplays, router
+from app.audit import activity as audit_activity
+from app.audit.api import router as audit_router
+from app.audit.recorder import begin_http_request, finish_http_request, note_error_id
+from app.audit.redact import _redact_sensitive as _redact_sensitive
+from app.audit.redact import _SENSITIVE_KEYS as _SENSITIVE_KEYS
+from app.audit.retention import operation_audit_sweep_loop
+from app.audit.store import ensure_schema as ensure_audit_schema
 from app.auth.admin_api import router as auth_admin_router
 from app.auth.api import router as auth_router
 from app.auth.principal import set_current_principal
@@ -82,6 +89,7 @@ async def lifespan(_: FastAPI):
     # 真正的第二实例超时后仍会按被动实例启动，不会中断主实例任务。
     recovery_owner = acquire_runtime_recovery_lock(wait_timeout_s=5.0)
     init_db(reconcile_interrupted=recovery_owner)
+    ensure_audit_schema()
     ensure_catalog_loaded()
     ensure_bootstrap_token()
     ensure_session_secret()
@@ -116,6 +124,10 @@ async def lifespan(_: FastAPI):
         task_registry.spawn(
             "system", "monitor_audit_flush", monitor_audit_flush_loop(),
         )
+        # operation_audit 365 天保留期巡检；同一份恢复协调者独占逻辑，理由同上。
+        task_registry.spawn(
+            "system", "operation_audit_sweep", operation_audit_sweep_loop(),
+        )
     else:
         record_passive_instance()
     try:
@@ -137,16 +149,24 @@ app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 
 @app.middleware("http")
 async def _inject_session_and_approval(request: Request, call_next):
-    """注入本机会话与 approval_token，供 Command Bus 绑定批准令牌（Todolist T4）。"""
+    """注入本机会话与 approval_token，供 Command Bus 绑定批准令牌（Todolist T4）；
+    同时开始/收尾本请求的操作审计上下文（app.audit.recorder）与最近活跃打点。
+    """
     token = request.headers.get(APPROVAL_HEADER)
     set_request_approval_token(token)
     bind_verified_session(request)
     # Principal 必须在这里注入：同步依赖里写 ContextVar 会被 threadpool 丢弃，
     # 详见 local_session.bind_request_principal 的说明。
-    bind_request_principal(request)
+    principal = bind_request_principal(request)
+    begin_http_request(request)
+    if request.url.path.startswith("/api/"):
+        audit_activity.touch(principal, request.url.path)
+    response = None
     try:
-        return await call_next(request)
+        response = await call_next(request)
+        return response
     finally:
+        finish_http_request(request, response.status_code if response is not None else 500)
         set_request_approval_token(None)
         set_request_session_id(None)
         set_current_principal(None)
@@ -176,19 +196,6 @@ def get_local_session(request: Request):
     if legacy_shared_session_enabled():
         return public_session_payload()
     raise HTTPException(401, "缺少或无效的用户会话")
-
-
-_SENSITIVE_KEYS = {"api_key", "apikey", "authorization", "password", "secret", "token", "access_token"}
-
-
-def _redact_sensitive(value: Any) -> Any:
-    """递归清理错误上下文，任何密钥都不得进入 error_logs。"""
-    if isinstance(value, dict):
-        return {key: ("***" if str(key).lower() in _SENSITIVE_KEYS else _redact_sensitive(item))
-                for key, item in value.items()}
-    if isinstance(value, list):
-        return [_redact_sensitive(item) for item in value]
-    return value
 
 
 async def _request_context(request: Request) -> dict[str, Any]:
@@ -245,6 +252,7 @@ async def _on_request_validation(request: Request, exc: RequestValidationError):
         message=json.dumps(exc.errors(), ensure_ascii=False, default=str),
         public_message="请求参数不合法，请检查必填项与字段类型",
     )
+    note_error_id(rec.error_id)
     return _error_json(rec)
 
 
@@ -255,6 +263,7 @@ async def _on_http_exception(request: Request, exc: HTTPException):
         exc, action=f"{request.method} {request.url.path}", context=ctx,
         http_status=exc.status_code,
     )
+    note_error_id(rec.error_id)
     return _error_json(
         rec,
         headers=getattr(exc, "headers", None),
@@ -268,12 +277,14 @@ async def _on_unhandled(request: Request, exc: Exception):
     rec = errors.log_error(
         exc, action=f"{request.method} {request.url.path}", context=ctx, http_status=500,
     )
+    note_error_id(rec.error_id)
     return _error_json(rec)
 
 
 app.include_router(system_public_router)  # health 等公开探活，不要求会话
 app.include_router(auth_router)  # /api/auth/*：login 本身必须公开，路由自身按需挂 session deps
 app.include_router(auth_admin_router)  # /api/system/users：路由自身逐条挂 require_system_admin
+app.include_router(audit_router)  # /api/system/audit/*：路由自身逐条挂 require_system_admin
 app.include_router(payments_router)  # /api/payments/orders*：账号级自助购买，路由自身挂 require_local_session
 app.include_router(payments_public_router)  # /api/payments/notify/*：渠道回调，公开端点，验签是唯一防线
 app.include_router(router, dependencies=_PROJECT_OWNER_DEPS)

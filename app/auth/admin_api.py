@@ -29,6 +29,7 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from app.audit.queries import apply_activity_summary
 from app.auth.deps import require_system_admin
 from app.auth.passwords import hash_password
 from app.auth.principal import Principal
@@ -63,6 +64,10 @@ def _user_payload(user_row) -> dict:
         "deleted_at": (
             user_row["deleted_at"] if "deleted_at" in user_row.keys() else None
         ),
+        # 「最近活跃」：由 list_users() 用 apply_activity_summary() 原地填充，
+        # 恒带这两个键（不是可选字段）——界面承诺展示的字段必须永远存在。
+        "last_active_at": None,
+        "last_action": None,
     }
 
 
@@ -76,7 +81,9 @@ def list_users():
     rows = conn.execute(
         "SELECT * FROM users WHERE deleted_at IS NULL ORDER BY created_at DESC"
     ).fetchall()
-    return {"items": [_user_payload(r) for r in rows]}
+    items = [_user_payload(r) for r in rows]
+    apply_activity_summary(items)
+    return {"items": items}
 
 
 @router.get("/users/deleted", dependencies=[Depends(require_system_admin)])

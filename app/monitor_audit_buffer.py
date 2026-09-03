@@ -45,6 +45,12 @@ def _error_log_buffer_path() -> Path:
     return DATA_DIR / "error_log_pending.jsonl"
 
 
+def _operation_audit_buffer_path() -> Path:
+    from app.config import DATA_DIR
+
+    return DATA_DIR / "operation_audit_pending.jsonl"
+
+
 # error_logs 走同一套缓冲（2026-09-02 ERR-20260902-30223f：刘备定妆包重试的真实异常因
 # database is locked 没写进 error_logs，排障时只剩一行进程日志）。列顺序与 error_logs 表一致。
 _ERROR_LOG_INSERT = (
@@ -55,6 +61,20 @@ _ERROR_LOG_INSERT = (
 _MONITOR_AUDIT_INSERT = (
     "INSERT OR IGNORE INTO monitor_audit(id,ts,action,object_type,object_id,outcome,detail_json)"
     " VALUES(:id,:ts,:action,:object_type,:object_id,:outcome,:detail_json)"
+)
+# operation_audit 是 app.audit 的表（2026-09-02，账号管理「最近活跃」+「操作审计」
+# 功能，见 app/audit/store.py），列顺序与该模块的 _INSERT_COLUMNS 一致。这里不反
+# 向 import app.audit（会把 app.monitor_audit_buffer 从零依赖的 L2 拖进对 app.audit
+# 的耦合），INSERT 语句照抄一份列名，与上面两条缓冲通道同一种处理方式。
+_OPERATION_AUDIT_COLUMNS = (
+    "id", "ts", "user_id", "username", "is_system_admin", "source", "event",
+    "event_label", "method", "path", "project_id", "episode_id", "target",
+    "outcome", "http_status", "error_id", "error_code", "summary",
+    "duration_ms", "ip", "user_agent", "args_json",
+)
+_OPERATION_AUDIT_INSERT = (
+    "INSERT OR IGNORE INTO operation_audit(" + ",".join(_OPERATION_AUDIT_COLUMNS) + ") VALUES("
+    + ",".join(f":{c}" for c in _OPERATION_AUDIT_COLUMNS) + ")"
 )
 
 
@@ -92,6 +112,11 @@ def append_error_log(row: dict[str, Any]) -> None:
     _append_row(_error_log_buffer_path, row)
 
 
+def append_operation_audit(row: dict[str, Any]) -> None:
+    """把一条写失败的 operation_audit 行落进本地缓冲；键与该表列名一致。不抛出。"""
+    _append_row(_operation_audit_buffer_path, row)
+
+
 def _append_row(path_factory: Any, row: dict[str, Any]) -> None:
     try:
         path = path_factory()
@@ -125,13 +150,19 @@ def _insert_rows(rows: list[dict[str, Any]], insert_sql: str = _MONITOR_AUDIT_IN
 
 
 def flush() -> int:
-    """把两个缓冲文件里攒下的行一次性补写回库（monitor_audit 与 error_logs）；返回补写行数。
+    """把三个缓冲文件里攒下的行一次性补写回库（monitor_audit / error_logs /
+    operation_audit）；返回补写行数。
 
     只在 DB 事务确认提交后才截断文件——中途失败（例如这一刻写锁仍被别的事务
-    占着）原样保留，下一轮循环重试；不丢也不重复（重放靠 id 主键
+    占着，或 operation_audit 表尚未由 app.audit.store.ensure_schema() 建出来）
+    原样保留，下一轮循环重试；不丢也不重复（重放靠 id 主键
     ``INSERT OR IGNORE`` 天然幂等，见模块 docstring）。
     """
-    return _flush_file(_buffer_path(), _MONITOR_AUDIT_INSERT) + _flush_file(_error_log_buffer_path(), _ERROR_LOG_INSERT)
+    return (
+        _flush_file(_buffer_path(), _MONITOR_AUDIT_INSERT)
+        + _flush_file(_error_log_buffer_path(), _ERROR_LOG_INSERT)
+        + _flush_file(_operation_audit_buffer_path(), _OPERATION_AUDIT_INSERT)
+    )
 
 
 def _flush_file(path: Path, insert_sql: str) -> int:

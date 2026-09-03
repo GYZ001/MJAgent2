@@ -14,6 +14,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from app.auth.principal import get_current_principal
+from app.capabilities import bus_audit
 from app.capabilities import idempotency as idem_store
 from app.capabilities import policy
 from app.capabilities.registry import CapabilityRegistry, CommandSpec, get_registry
@@ -31,15 +32,6 @@ _request_approval_token: contextvars.ContextVar[str | None] = contextvars.Contex
     "request_approval_token", default=None
 )
 
-_STRICT_IDEMPOTENCY_COMMANDS = frozenset({
-    "video.generate_episode",
-    "video.generate_shot",
-    "video.complete_episode",
-    "video.complete_project",
-    "delivery.concatenate",
-    "delivery.create_package",
-    "delivery.review",
-})
 
 def canonical_command_request_fingerprint(
     name: str,
@@ -129,12 +121,16 @@ class CommandBus:
         return result
 
     def execute(self, name: str, raw_args: dict[str, Any] | BaseModel, *, session_id: str | None = None) -> CommandResult:
-        return self._execute_sync(name, raw_args, session_id=session_id)
+        return bus_audit.run_audited_sync(
+            self.registry, name, raw_args, lambda: self._execute_sync(name, raw_args, session_id=session_id)
+        )
 
     async def execute_async(
         self, name: str, raw_args: dict[str, Any] | BaseModel, *, session_id: str | None = None
     ) -> CommandResult:
-        return await self._execute(name, raw_args, session_id=session_id, allow_await=True)
+        return await bus_audit.run_audited(
+            self.registry, name, raw_args, self._execute(name, raw_args, session_id=session_id, allow_await=True)
+        )
 
     def _execute_sync(
         self, name: str, raw_args: dict[str, Any] | BaseModel, *, session_id: str | None = None
@@ -174,13 +170,9 @@ class CommandBus:
         if authz_rejection is not None:
             return authz_rejection
         args = self._inject_approval(self._parse_input(spec, raw_args))
-        if name in _STRICT_IDEMPOTENCY_COMMANDS and not args.idempotency_key:
-            return CommandResult(
-                status=CommandStatus.REJECTED,
-                summary="该命令必须提供稳定的 idempotency_key",
-                command=name,
-                error_code="idempotency_key_required",
-            )
+        rejected = self._idempotency_rejection(name, args)
+        if rejected is not None:
+            return rejected
         payload = args.model_dump(mode="json")
         idem_key = self._resolve_idempotency_key(spec, args)
         request_fingerprint = canonical_command_request_fingerprint(name, payload)
@@ -278,13 +270,9 @@ class CommandBus:
         if authz_rejection is not None:
             return authz_rejection
         args = self._inject_approval(self._parse_input(spec, raw_args))
-        if name in _STRICT_IDEMPOTENCY_COMMANDS and not args.idempotency_key:
-            return CommandResult(
-                status=CommandStatus.REJECTED,
-                summary="该命令必须提供稳定的 idempotency_key",
-                command=name,
-                error_code="idempotency_key_required",
-            )
+        rejected = self._idempotency_rejection(name, args)
+        if rejected is not None:
+            return rejected
         payload = args.model_dump(mode="json")
         idem_key = self._resolve_idempotency_key(spec, args)
         request_fingerprint = canonical_command_request_fingerprint(name, payload)
@@ -373,6 +361,17 @@ class CommandBus:
                     claim_token=claim_token,
                 )
             raise
+
+    def _idempotency_rejection(self, name: str, args: StandardCommandInput) -> CommandResult | None:
+        if name not in policy.STRICT_IDEMPOTENCY_COMMANDS or args.idempotency_key:
+            return None
+        return CommandResult(
+            status=CommandStatus.REJECTED,
+            summary="该命令必须提供稳定的 idempotency_key",
+            command=name,
+            error_code="idempotency_key_required",
+        )
+
     def _authorize(self, name: str, spec: CommandSpec) -> CommandResult | None:
         """Command Bus 层的准入闸门：只回答“系统管理员专属命令，你碰不碰得”。
 

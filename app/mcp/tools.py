@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from app.capabilities import get_command_bus, get_registry
+from app.capabilities import bus_audit, get_registry
 from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.registry import CommandSpec
 from app.capabilities.schemas import CommandStatus, IdempotencyPolicy, RiskLevel
@@ -69,9 +69,11 @@ async def call_tool(name: str, arguments: dict[str, Any], *, claims: "TokenClaim
             f"token 缺少调用 {name} 所需 scope：{sorted(missing_scopes)}"
         )
 
-    bus = get_command_bus()
+    actor_username = f"mcp:{claims.name or claims.token_id}"
     try:
-        result = await bus.execute_async(name, arguments, session_id=claims.token_id)
+        result = await bus_audit.execute_as(
+            "mcp", name, arguments, session_id=claims.token_id, actor_username=actor_username,
+        )
     except ValueError as exc:
         raise McpError(-32602, str(exc)) from exc
 

@@ -17,7 +17,7 @@ from app.agent import approvals, events, resources, store
 from app.agent import tools as agent_tools
 from app.agent.redaction import redact_value
 from app.agent.schemas import ContextEnvelope
-from app.capabilities import get_command_bus, get_registry
+from app.capabilities import bus_audit, get_registry
 from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.schemas import CommandStatus
 from app.db import get_setting
@@ -199,9 +199,8 @@ async def _execute_domain_command(
     )
     events.append_event(turn_id, "tool.started", {"tool_call_id": tool_call["id"], "tool": name})
 
-    bus = get_command_bus()
     try:
-        result = await bus.execute_async(name, call_args, session_id=conversation_id)
+        result = await bus_audit.execute_as("agent", name, call_args, session_id=conversation_id)
     except (ValueError, KeyError) as exc:
         store.update_tool_call(
             tool_call["id"], status="failed", result_summary={"error": str(exc)}, finished_at=time.time(),
@@ -507,8 +506,9 @@ async def approve_tool_call(tool_call_id: str, *, decided_by: str | None = None,
     # policy.args_hash 的输入，导致 approval_token 与新参数不匹配而被判定为换参重放。
     call_args = dict(tool_call["arguments"])
     call_args["approval_token"] = token
-    bus = get_command_bus()
-    result = await bus.execute_async(tool_call["command_name"], call_args, session_id=turn["conversation_id"])
+    result = await bus_audit.execute_as(
+        "agent", tool_call["command_name"], call_args, session_id=turn["conversation_id"]
+    )
     _record_command_result(turn["id"], tool_call_id, tool_call["command_name"], result)
     result_text = _summarize_result_for_model(result)
 

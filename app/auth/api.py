@@ -12,6 +12,8 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from app.audit.activity import touch as touch_activity
+from app.audit.recorder import note_actor
 from app.auth.passwords import hash_password, verify_password
 from app.auth.principal import Principal, get_current_principal
 from app.auth.sessions import create_session, resolve_session, revoke_all_for_user, revoke_session
@@ -114,6 +116,7 @@ def login(body: dict, request: Request):
     verified = verify_password(password, active_hash or _DUMMY_PASSWORD_HASH)
     if row is None or row["status"] != "active" or not active_hash or not verified:
         _record_login_failure(username)
+        note_actor(None, username, False)
         raise generic_error
     _clear_login_failures(username)
 
@@ -127,6 +130,8 @@ def login(body: dict, request: Request):
     payload = _profile_payload(principal)
     payload["session_token"] = token
     payload["header"] = "X-Manju-Session"
+    note_actor(user_id, username, principal.is_system_admin)
+    touch_activity(principal, "/api/auth/login")
     return payload
 
 
