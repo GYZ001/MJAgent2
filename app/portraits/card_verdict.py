@@ -25,7 +25,11 @@ from __future__ import annotations
 from app.db import set_setting
 
 from .discovery_fragments import _discovery_skip_key, _non_character_skip_key
-from .presence_evidence import has_onscreen_evidence, presence_evidence_citation
+from .presence_evidence import (
+    functional_card_worthy,
+    has_onscreen_evidence,
+    presence_evidence_citation,
+)
 
 
 def reconsider_verdict_with_presence_evidence(name: str, verdict: dict, evidence: dict) -> dict:
@@ -134,3 +138,40 @@ def unimportant_verdict_result(
         }
     set_setting(_discovery_skip_key(project_id, name), fragment_signature)
     return {"status": "skipped_minor", "name": name, "reason": verdict["reason"]}
+
+
+def portrait_generation_decision(*, require_identity_card: bool, presence: dict) -> tuple[bool, str]:
+    """身份已确认的真名是否值得【自动】出定妆照（WS10-A：一句话真名过度收录）。
+
+    生产事故（跑不快的孩子）：德科、埃托奥、莱曼、蒙铁尔、马丁内斯各只在一句话
+    里被提到——「队里有罗纳尔迪尼奥，有德科，有埃托奥」「莱曼扑出点球」「蒙铁尔
+    罚进」——却因 ``require_identity_card=True`` 时 ``assess_new_character`` 的
+    合同固定 ``important=true``，全部被当成「重要配角」建卡并自动出图。根因是
+    "身份消歧确认了这是稳定真名"（决定该不该建卡登记进人物谱）与"这段戏份值不
+    值得花一次定妆照的生成开销"（决定该不该自动出图）被当成了同一件事。
+
+    人物谱条目该不该建——不受本函数影响，`important=true` 的合同原样保留，
+    真名一律登记（未来章节可能还会用到这个名字，需要一个可解析的稳定身份）。
+    这里只决定新建的卡是否【自动】触发定妆照生成：判据复用
+    ``app.portraits.presence_evidence.functional_card_worthy`` 同一套画面存在
+    证据（在场 ≥2 段，或单段但对白+动作齐备）——与
+    ``cards_ensure._ensure_qualifying_functional_cards`` 给无名功能身份建卡的
+    门槛完全同一份判据，不写死名单，也不因为是"已确认真名"就放宽。够格的
+    立即出图；不够格的人物卡仍然落库（role/appearance_canonical 都有），只是
+    不自动生成定妆照——下一次该角色真的出现在某一集生成的剧本里时，
+    ``app.portraits.portrait_drift.ensure_cards_for_screenplay`` 的自愈补图会
+    按同一份 ``bible_auto_changes_json`` 状态重试（见 ``cards.ensure_character_
+    card`` 对 ``auto_applied_asset_pending`` 的复用），也可以在人物谱页手动
+    单独生成——两条路径都不需要这里的判定介入。
+
+    ``require_identity_card=False``（模型自主判断戏份、非身份确认路径）时原样
+    放行：那条路径的 ``important`` 本来就是模型自己给出的戏份判断，不是被合同
+    强制的常量，不需要再加一层画面存在证据闸门。
+    """
+    if not require_identity_card or functional_card_worthy(presence):
+        return True, ""
+    return False, (
+        "戏份不足（原文仅一句话提及/单次在场，未达到在场 ≥2 段或对白+动作齐备的"
+        "门槛），人物卡已登记但未自动出图；角色后续如在剧本里实际出场会自动补图，"
+        "也可在人物谱页手动生成定妆照"
+    )

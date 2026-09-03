@@ -23,7 +23,11 @@ from .bible_compat import (  # noqa: F401 -- 重新导出，见下方模块末�
     bible_with_provisional_characters,
 )
 from .card_merge import courtesy_name_redirect, resolve_card_build_or_merge, resolve_card_name
-from .card_verdict import non_character_or_unimportant_result, reconsider_verdict_with_presence_evidence
+from .card_verdict import (
+    non_character_or_unimportant_result,
+    portrait_generation_decision,
+    reconsider_verdict_with_presence_evidence,
+)
 from .constants import (
     APPEARANCE_MAX,
     APPEARANCE_MIN,
@@ -480,10 +484,13 @@ async def ensure_character_card(
             return {"status": "error", "name": name, "reason": "character card commit failed"}
         set_setting(_discovery_skip_key(project_id, name), "")
 
-        if not generate_portrait:
+        portrait_worthy, defer_reason = portrait_generation_decision(
+            require_identity_card=require_identity_card, presence=presence,
+        )
+        if not generate_portrait or not portrait_worthy:
             existing["status"] = "auto_applied_asset_pending"
             existing["decided_at"] = now()
-            existing["decision_reason"] = "人物卡已加入；定妆包等待独立资产环节确认"
+            existing["decision_reason"] = defer_reason or "人物卡已加入；定妆包等待独立资产环节确认"
             conn.execute(
                 "UPDATE projects SET bible_auto_changes_json=? WHERE id=?",
                 (json.dumps(change_items, ensure_ascii=False), project_id),
@@ -495,6 +502,7 @@ async def ensure_character_card(
                 "change_id": existing["id"],
                 "has_portrait": False,
                 "portrait_deferred": True,
+                "portrait_on_demand": not portrait_worthy,
                 "reason": verdict["reason"],
                 "character_card": card,
             }

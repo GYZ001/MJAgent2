@@ -141,10 +141,13 @@ def _create_project_core(
             "INSERT INTO projects(id, name, status, novel_chars, created_at, owner_user_id) "
             "VALUES(?,?,'ingested',?,?,?)",
             (project_id, project_name, report["total_chars"], now(), owner_user_id))
+        # ingest_novel 已经算好本章的小节边界（app.novel.structure._extract_sections），
+        # 装在 ch["paratext_json"] 里；此前这里没写这一列，小节信息落地即丢——见
+        # app/source_paratext.py::chapter_paratext_offsets 的合并写入注释。
         conn.executemany(
-            "INSERT INTO chapters(project_id, idx, title, content, char_count) VALUES(?,?,?,?,?)",
+            "INSERT INTO chapters(project_id, idx, title, content, char_count, paratext_json) VALUES(?,?,?,?,?,?)",
             [
-                (project_id, ch["idx"], ch["title"], ch["content"], len(ch["content"]))
+                (project_id, ch["idx"], ch["title"], ch["content"], len(ch["content"]), ch.get("paratext_json"))
                 for ch in report["chapters"]
             ])
         if import_token_hash:

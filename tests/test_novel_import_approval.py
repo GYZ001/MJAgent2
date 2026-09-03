@@ -411,6 +411,11 @@ def test_create_project_rolls_back_partial_rows(monkeypatch) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             project_id TEXT NOT NULL, idx INTEGER NOT NULL, title TEXT,
             content TEXT NOT NULL, char_count INTEGER,
+            -- WS10-C：INSERT 语句现在多写一列 paratext_json（小节边界，见
+            -- app/domain/projects/create.py 与 app/source_paratext.py 的合并写入
+            -- 注释），简化版 schema 要跟着补，否则本用例会以缺列的
+            -- OperationalError 收场，掩盖它真正要验的回滚行为。
+            paratext_json TEXT,
             UNIQUE(project_id, idx)
         );
         """

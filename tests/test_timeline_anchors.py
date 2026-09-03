@@ -21,6 +21,7 @@ from app.portraits.timeline_anchors import (
     apply_world_era,
     derive_world_era,
     extract_chapter_timeline_anchors,
+    extract_project_timeline_anchors,
 )
 
 
@@ -188,3 +189,117 @@ def test_apply_world_era_idempotent_when_value_unchanged() -> None:
     conn.commit()
     written = apply_world_era(conn, "p1", [_anchor("year", "2004年"), _anchor("year", "2022年")])
     assert written is False
+
+
+# ==================== WS10-B：地名/门派名误标 era ====================
+#
+# 生产事故（我欲封天）：era 推导退化成地名拼接——「赵国」「靠山宗」是地点/门派
+# 专名，被模型标成了 kind="era"。提示词已改成正面陈述只接受真正的时代/朝代/
+# 纪年表述；这里另加一道结构性复核：value 若逐字等于本项目场景库名/人物谱名/
+# 已判非角色名（数据里实际存在的集合，不是词表），直接拒绝这一条。
+
+
+async def test_era_candidate_matching_known_scene_name_is_rejected(monkeypatch) -> None:
+    chapter = {"idx": 1, "title": "第一章", "content": "少年从赵国出发，一路向北。"}
+    monkeypatch.setattr(
+        ta.model_gateway, "chat_structured",
+        _fake_chat_structured([
+            {"kind": "era", "value": "赵国", "subject": "", "evidence": "少年从赵国出发"},
+        ]),
+    )
+    anchors = await extract_chapter_timeline_anchors(
+        chapter, rejected_era_values=frozenset({"赵国"}),
+    )
+    assert anchors == []
+
+
+async def test_era_candidate_without_project_context_is_kept(monkeypatch) -> None:
+    """不传 ``rejected_era_values``（默认空集合）时行为与改动前一致——这是一层
+    结构性复核（对照本次输入实际存在的数据），不是新增一张地名/门派词表；
+    没有项目上下文可比对时，逐字核验通过的候选原样保留。"""
+    chapter = {"idx": 1, "title": "第一章", "content": "少年从赵国出发，一路向北。"}
+    monkeypatch.setattr(
+        ta.model_gateway, "chat_structured",
+        _fake_chat_structured([
+            {"kind": "era", "value": "赵国", "subject": "", "evidence": "少年从赵国出发"},
+        ]),
+    )
+    anchors = await extract_chapter_timeline_anchors(chapter)
+    assert len(anchors) == 1
+
+
+async def test_era_candidate_only_rejects_era_kind_not_other_kinds(monkeypatch) -> None:
+    """``rejected_era_values`` 只影响 ``kind=="era"``——同名文本若被模型（错误地）
+    标成其它类别，不受这道复核影响，问题留给各自既有的逐字核验处理。"""
+    chapter = {"idx": 1, "title": "第一章", "content": "赵国二十年，风调雨顺。"}
+    monkeypatch.setattr(
+        ta.model_gateway, "chat_structured",
+        _fake_chat_structured([
+            {"kind": "relative", "value": "赵国", "subject": "", "evidence": "赵国二十年，风调雨顺"},
+        ]),
+    )
+    anchors = await extract_chapter_timeline_anchors(
+        chapter, rejected_era_values=frozenset({"赵国"}),
+    )
+    assert len(anchors) == 1
+
+
+def test_project_known_non_era_names_from_scenes_characters_and_settings() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT)")
+    conn.execute("CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT)")
+    bible = {
+        "world": {"visual_style_canonical": "国风", "scenes": [{"name": "赵国", "scene_canonical": "边境城池"}]},
+        "characters": [{"name": "楚天", "role": "主角", "appearance_canonical": "少年剑客"}],
+    }
+    conn.execute(
+        "INSERT INTO projects(id, bible_json) VALUES(?,?)",
+        ("p1", json.dumps(bible, ensure_ascii=False)),
+    )
+    conn.execute(
+        "INSERT INTO settings(key, value) VALUES(?, '1')", ("char_not_character:p1:靠山宗",),
+    )
+    conn.commit()
+
+    names = ta._project_known_non_era_names(conn, "p1")
+    assert names == frozenset({"赵国", "楚天", "靠山宗"})
+
+
+def test_project_known_non_era_names_empty_without_bible() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT)")
+    conn.execute("CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT)")
+    conn.commit()
+    assert ta._project_known_non_era_names(conn, "does-not-exist") == frozenset()
+
+
+async def test_extract_project_timeline_anchors_filters_known_scene_name(monkeypatch) -> None:
+    """端到端：场景库里已有「靠山宗」时，同名 era 候选在整本提取流程里被拒绝。"""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT)")
+    conn.execute("CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT)")
+    bible = {
+        "world": {"visual_style_canonical": "国风", "scenes": [{"name": "靠山宗", "scene_canonical": "山门"}]},
+        "characters": [],
+    }
+    conn.execute(
+        "INSERT INTO projects(id, bible_json) VALUES(?,?)",
+        ("p1", json.dumps(bible, ensure_ascii=False)),
+    )
+    conn.commit()
+    monkeypatch.setattr(ta, "get_conn", lambda: conn)
+    monkeypatch.setattr(ta, "_persist_timeline_anchors_artifact", lambda *_a, **_k: {"id": "art1"})
+    monkeypatch.setattr(
+        ta.model_gateway, "chat_structured",
+        _fake_chat_structured([
+            {"kind": "era", "value": "靠山宗", "subject": "", "evidence": "他自幼长在靠山宗"},
+        ]),
+    )
+    chapters = [{"idx": 1, "title": "第一章", "content": "他自幼长在靠山宗，从未离开。"}]
+
+    anchors = await extract_project_timeline_anchors("p1", chapters)
+
+    assert anchors == []

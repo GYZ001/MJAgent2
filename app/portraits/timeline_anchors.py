@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Literal
@@ -83,8 +84,13 @@ def _timeline_anchor_prompt(chapter_title: str, content: str) -> str:
    填年龄本身的逐字文本（如"八岁"/"9岁"），subject 填这个年龄属于谁——必须是
    原文里出现的称谓原文（人名、代称均可，但必须逐字取自原文，不得替换成你知道
    的正式名字或后世通称）。
-3. era（时代/朝代表述）：原文逐字写出的时代背景，如"东汉末年""黄巾起义"；
-   value 填这段表述的逐字文本。
+3. era（时代/朝代表述）：原文逐字写出的、表示【历史时期/朝代/纪年/时代背景】
+   的表述，如"东汉末年""贞观年间""黄巾起义""2000年代"；value 填这段表述的
+   逐字文本。地名、国名、势力/门派/组织的专名本身不是时代表述，即使原文把它
+   当反复出现的背景设定也不算——例如"赵国""靠山宗"是地点/组织的名字，不是
+   在说"这是什么年代"，不得标成 era；只有当原文明确把年代/纪年信息写在同一
+   处表述里（如"赵国迁都后的第三年""东汉末年"这类本身含时间意味的说法）时，
+   才按这一类提取，且 value 只填那段真正表达时间的逐字文本。
 4. relative（相对时间推移）：原文逐字写出的相对时间推移表述，如"三年后""又过
    了半载"；value 填这段表述的逐字文本。
 
@@ -100,7 +106,10 @@ def _timeline_anchor_prompt(chapter_title: str, content: str) -> str:
 {{"anchors": [{{"kind": "year|age|era|relative", "value": str, "subject": str, "evidence": str}}]}}"""
 
 
-def _anchor_is_literal(candidate: _TimelineAnchorCandidate, chapter_text: str) -> bool:
+def _anchor_is_literal(
+    candidate: _TimelineAnchorCandidate, chapter_text: str,
+    *, rejected_era_values: frozenset[str] = frozenset(),
+) -> bool:
     """逐字核验：evidence 是该章原文子串，value（age 时还有 subject）是 evidence 子串。
 
     与 ``app.stages.identity_evidence._alias_declaration_verified`` 同一套
@@ -111,6 +120,12 @@ def _anchor_is_literal(candidate: _TimelineAnchorCandidate, chapter_text: str) -
     比对后逐字内容完全一致——例如原文「堕下泪\\n来」，模型给出的引句是自然
     连续的「堕下泪来」），这是数据里的排版噪声不是模型编造，不应该按不通过
     处理；空白之外的任何字符差异仍然按不通过处理（不放松真正的逐字要求）。
+
+    ``rejected_era_values``：era 锚点的结构性复核（WS10-B）——``value`` 若逐字
+    等于本项目场景库名/人物谱名/已判非角色名中的任一个（``_project_known_non_
+    era_names`` 从本次输入数据推导，不是词表），说明模型把地名/组织名当成了
+    时代表述（生产事故：我欲封天「赵国」「靠山宗」），直接判不通过。只对
+    ``kind=="era"`` 生效，不影响 year/age/relative。
     """
     value = (candidate.value or "").strip()
     evidence = (candidate.evidence or "").strip()
@@ -122,6 +137,8 @@ def _anchor_is_literal(candidate: _TimelineAnchorCandidate, chapter_text: str) -
         subject = (candidate.subject or "").strip()
         if not subject or subject not in evidence:
             return False
+    if candidate.kind == "era" and value in rejected_era_values:
+        return False
     return True
 
 
@@ -129,8 +146,14 @@ def _strip_whitespace(text: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
-async def extract_chapter_timeline_anchors(chapter: dict) -> list[TimelineAnchor]:
-    """单章提取并逐字核验时间线锚点；未通过核验的单条丢弃，不影响同章其它条目。"""
+async def extract_chapter_timeline_anchors(
+    chapter: dict, *, rejected_era_values: frozenset[str] = frozenset(),
+) -> list[TimelineAnchor]:
+    """单章提取并逐字核验时间线锚点；未通过核验的单条丢弃，不影响同章其它条目。
+
+    ``rejected_era_values`` 见 ``_anchor_is_literal`` docstring；默认空集合，
+    不传时行为与改动前完全一致（既有调用方/测试不受影响）。
+    """
     content = (chapter.get("content") or "").strip()
     if not content:
         return []
@@ -153,7 +176,7 @@ async def extract_chapter_timeline_anchors(chapter: dict) -> list[TimelineAnchor
     )
     verified: list[TimelineAnchor] = []
     for candidate in response.anchors:
-        if not _anchor_is_literal(candidate, content):
+        if not _anchor_is_literal(candidate, content, rejected_era_values=rejected_era_values):
             logger.warning(
                 "时间线锚点未通过逐字核验，丢弃：chapter=%s kind=%s value=%r",
                 chapter_idx, candidate.kind, candidate.value,
@@ -185,13 +208,57 @@ def _persist_timeline_anchors_artifact(
     )
 
 
+def _project_known_non_era_names(conn, project_id: str) -> frozenset[str]:
+    """本项目场景库名 ∪ 人物谱名 ∪ 已判非角色名——供 era 锚点的结构性复核使用
+    （WS10-B）。三类名字都是本次输入里实际存在的数据，不是词表：命中其中
+    任一个，说明候选把地名/组织/人名当成了时代表述，不是真的推不出"这是什么
+    年代"，与 ``app.portraits.discovery_fragments._non_character_skip_key`` 记录
+    的"已判非角色"负缓存同一份数据来源。缺表/解析失败按空集合处理（fail-open
+    到"不额外拒绝"，不阻塞锚点提取本身——这只是一层结构性复核，不是唯一的
+    核验闸门，逐字核验仍由 ``_anchor_is_literal`` 的其它条件把关）。
+    """
+    names: set[str] = set()
+    row = conn.execute(
+        "SELECT bible_json FROM projects WHERE id=?", (project_id,),
+    ).fetchone()
+    if row and row["bible_json"]:
+        try:
+            bible = json.loads(row["bible_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            bible = {}
+        if isinstance(bible, dict):
+            for character in bible.get("characters", []) or []:
+                name = str((character or {}).get("name") or "").strip()
+                if name:
+                    names.add(name)
+            for scene in (bible.get("world") or {}).get("scenes", []) or []:
+                name = str((scene or {}).get("name") or "").strip()
+                if name:
+                    names.add(name)
+    prefix = f"char_not_character:{project_id}:"
+    try:
+        rows = conn.execute(
+            "SELECT key FROM settings WHERE key LIKE ?", (prefix + "%",),
+        ).fetchall()
+    except Exception:  # noqa: BLE001 -- settings 表结构差异不应拖垮锚点提取
+        rows = []
+    for setting_row in rows:
+        key = str(setting_row["key"] or "")
+        if key.startswith(prefix):
+            names.add(key[len(prefix):])
+    return frozenset(names)
+
+
 async def extract_project_timeline_anchors(
     project_id: str, chapters: list[dict],
 ) -> list[TimelineAnchor]:
     """遍历全部章节提取锚点，落一条 project 级 ``timeline_anchors`` artifact。"""
+    rejected_era_values = _project_known_non_era_names(get_conn(), project_id)
     anchors: list[TimelineAnchor] = []
     for chapter in chapters:
-        anchors.extend(await extract_chapter_timeline_anchors(chapter))
+        anchors.extend(await extract_chapter_timeline_anchors(
+            chapter, rejected_era_values=rejected_era_values,
+        ))
     _persist_timeline_anchors_artifact(project_id, len(chapters), anchors)
     return anchors
 

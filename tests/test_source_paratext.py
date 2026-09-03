@@ -335,6 +335,42 @@ def test_chapter_paratext_offsets_no_id_computes_but_does_not_persist(monkeypatc
     assert regions
 
 
+def test_chapter_paratext_offsets_merges_into_existing_sections_not_overwrites(monkeypatch) -> None:
+    """WS10-C 回归：导入时已经写过 ``paratext_json={"sections": [...]}``（小节
+    边界，见 app.novel.structure._extract_sections）；第一次调用
+    ``chapter_paratext_offsets`` 必须把 content_hash/spans 合并写入，不能把
+    整个 paratext_json 列覆盖掉，让 sections 悄悄消失。"""
+    conn = db.get_conn()
+    content = STORY * 3 + NOTE  # >= 200 字，避免撞上短文本早退
+    sections_only = json.dumps({"sections": [{"start": 0, "end": 5, "label": "一"}]})
+    chapter = _seed_chapter(
+        conn, project_id="p_paratext_sections", content=content, paratext_json=sections_only,
+    )
+
+    async def fake_chat_structured(_messages, **_kwargs):
+        return ParatextSpans(spans=[_anchor(NOTE)])
+
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+    source_paratext.paratext_cache_clear()
+
+    regions, cache_hit = asyncio.run(
+        chapter_paratext_offsets(conn, chapter, operation_id="op_test_sections_merge")
+    )
+
+    assert cache_hit is False
+    assert regions
+
+    persisted = json.loads(conn.execute(
+        "SELECT paratext_json FROM chapters WHERE id=?", (chapter["id"],),
+    ).fetchone()["paratext_json"])
+    # 原有的 sections 键原样保留，不是被整体覆盖。
+    assert persisted["sections"] == [{"start": 0, "end": 5, "label": "一"}]
+    # 自己负责的三个键正常写入。
+    assert persisted["content_hash"] == source_paratext._cache_key(content)
+    assert persisted["spans"] == [{"start": s, "end": e} for s, e in regions]
+    assert "computed_at" in persisted
+
+
 def test_remove_offsets_matches_remove_spans_on_the_same_region() -> None:
     """偏移版删除是纯算术切割：给它 `remove_spans` 内部算出的同一个区间，
     产出必须逐字节相同——不是另起一套判据。"""

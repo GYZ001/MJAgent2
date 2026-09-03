@@ -299,12 +299,29 @@ async def chapter_paratext_offsets(
     regions = _resolved_regions(content, list(anchors)) if anchors else []
     chapter_id = _row_value(chapter_row, "id")
     if chapter_id is not None:
-        payload = json.dumps({
+        # 合并写入，不整体覆盖：paratext_json 在导入时已经写过 sections（小节边界，
+        # 见 app.novel.structure._extract_sections），这里只负责 content_hash/spans/
+        # computed_at 三个自己的键，其它键原样保留（WS10-C：此前整体覆盖会把导入时
+        # 已经算好的 sections 悄悄冲掉）。刻意不用 _load_chapter_paratext_cache——
+        # 它对"是否是一份可信的已算缓存"是 fail-closed 的（缺 content_hash/spans
+        # 就判 None），会把导入时写的纯 sections JSON 当成空，合并时反而把 sections
+        # 冲掉；这里只是想读出已有的任意字段原样带走，不判断可信度。
+        raw_existing = _row_value(chapter_row, "paratext_json")
+        try:
+            merged = json.loads(raw_existing) if raw_existing else {}
+        except (TypeError, ValueError):
+            merged = {}
+        if not isinstance(merged, dict):
+            merged = {}
+        merged.update({
             "content_hash": content_hash,
             "spans": [{"start": s, "end": e} for s, e in regions],
             "computed_at": time.time(),
         })
-        conn.execute("UPDATE chapters SET paratext_json=? WHERE id=?", (payload, chapter_id))
+        conn.execute(
+            "UPDATE chapters SET paratext_json=? WHERE id=?",
+            (json.dumps(merged, ensure_ascii=False), chapter_id),
+        )
         conn.commit()
     return regions, False
 
