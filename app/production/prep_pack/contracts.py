@@ -1057,9 +1057,9 @@ PREP_PACK_VERSION = "2.0.4"  # 1.1.0: event_chain entries carry source_span (P1 
 #      离开才停止延续——针对性回应上面第 3 点证据，不是通用的"别漏报"
 #      重复表述（那句已经存在，没能挡住这次退化）。
 #   b) coverage_ledger 新增一个并列账目 scene_coverage（scene_delivered/
-#      scene_uncovered，语义见 _prep_pack_scene_coverage_account 的
-#      docstring）：不影响、不参与既有五账或 assert_prep_pack_coverage_
-#      complete 门禁（该门禁只读 ledger["uncovered"]），单纯让"这一章
+#      scene_uncovered，语义见 _prep_pack_build_coverage_ledger 的 docstring，
+#      WS6 起与五账合并计算）：不影响、不参与既有五账或 assert_prep_pack_
+#      coverage_complete 门禁（该门禁只读 ledger["uncovered"]），单纯让"这一章
 #      有多少段落完全没有任何场景归属"在映射台自己的产出里就可见，不用
 #      等分镜台的三态告警才第一次被看见。scene_uncovered 非空是合法状态
 #      （例如确实没有场景描写的纯心理/纯对白段），这里只记账、不拦截、

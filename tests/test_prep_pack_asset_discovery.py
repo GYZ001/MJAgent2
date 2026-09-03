@@ -896,9 +896,8 @@ def test_discovery_explicit_named_error_still_gate_fails(monkeypatch):
     assert functional_extras == [], "明确失败的称谓不能被兜底成 functional_extras"
 
 
-def test_scene_discovery_finding_nothing_still_gate_fails(monkeypatch):
-    """场景没有 functional_extras 兜底概念（不存在"确定性群演场景"）：discovery
-    对未解析场景没有任何结论时，仍必须门禁失败，行为不变。"""
+def test_scene_discovery_finding_nothing_degrades_instead_of_gate_fail(monkeypatch):
+    """未解析场景不再整批门禁失败（WS6 追加：真实事故橘座在上 ×2/神墓 ×1）——降级见 test_coverage_ledger_honesty.py。"""
     conn = _make_conn()
 
     async def noop_scene_discovery(project_id, episode_no, labels):
@@ -908,9 +907,10 @@ def test_scene_discovery_finding_nothing_still_gate_fails(monkeypatch):
     events = [_event("ev_001", scenes_=[{"display_name": "无名之地"}])]
     characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
 
-    assert stats["scene_discovery_calls"] == 1
-    assert errors, "场景 discovery 无结果时必须门禁失败，不能静默放行"
-    assert scene_list == []
+    assert stats["scene_discovery_calls"] == 1 and any("无名之地" in m for m in errors)
+    entry = scene_list[0]
+    assert (entry["unresolved"], entry["asset_required"], entry["scene_reference_id"]) == (True, False, None)
+    assert entry["segment_indexes"] == [] and entry["reason"] == errors[0]
 
 
 def test_discovery_error_entries_surface_in_final_gate_message(monkeypatch):
@@ -1561,7 +1561,7 @@ def test_scene_label_aliased_to_two_scenes_still_resolves_via_this_calls_own_ver
         "前提条件失败：历史别名平局没有复现，这个测试就没有意义"
     )
 
-    async def fake_assess_new_scene(label, spatial_context, *, style, known_names, ep_label):
+    async def fake_assess_new_scene(label, spatial_context, *, style, known_scenes, ep_label):
         assert label == "洞府"
         # 真实两次调用（round 30/32）的裁决完全一致：这是既有场景"南峰山脚
         # 洞府"的简称，不是新场景。

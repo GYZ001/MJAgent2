@@ -13,7 +13,7 @@ import json
 from app.harness import model_gateway
 from app.refs import SCENE_CANONICAL_MAX_CHARS
 from app.scene_contract import SCENE_ONE_LOCATION_RULE, SCENE_SAME_LOCATION_MATCH_RULE
-from app.schemas import Bible, World
+from app.schemas import Bible, Scene, World
 
 
 def _bible() -> Bible:
@@ -53,12 +53,17 @@ def test_assess_new_scene_prompt_treats_time_qualified_names_as_same_location(mo
         return json.dumps({
             "important": False, "existing_scene_name": "白日神魔陵园",
             "reason": "同一地点", "name": "", "scene_canonical": "", "location_kind": "",
+            "location_key": "", "role": "transitional", "era_anchor": "", "anchor_phrase": "",
         }, ensure_ascii=False)
 
+    known_scenes = [
+        Scene(name="白日神魔陵园", scene_canonical="日间神魔陵园碑林成片，仙气氤氲，青灰石碑，国漫厚涂"),
+        Scene(name="夜晚神魔陵园", scene_canonical="夜间神魔陵园碑林成片，魔气汹涌，青灰石碑，国漫厚涂"),
+    ]
     monkeypatch.setattr(model_gateway, "chat", capture)
     verdict = asyncio.run(scenes.assess_new_scene(
         "神魔陵园", "陵园内碑林成片", style="国漫风格",
-        known_names=["白日神魔陵园", "夜晚神魔陵园"], ep_label="第 1 集",
+        known_scenes=known_scenes, ep_label="第 1 集",
     ))
     assert SCENE_SAME_LOCATION_MATCH_RULE in seen["prompt"]
     assert verdict["important"] is False

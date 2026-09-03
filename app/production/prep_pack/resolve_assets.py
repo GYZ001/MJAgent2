@@ -43,6 +43,7 @@ from .provenance import (
     _prep_pack_provenance,
     _prep_pack_scene_alias_provenance,
 )
+from .scene_degrade import degrade_unresolved_scene
 from .true_name import (
     _prep_pack_collect_true_name_verification_requests,
     _prep_pack_gather_concurrent,
@@ -667,12 +668,11 @@ async def _resolve_assets(
                 scene_card_matched
                 and (resolved_via_discovery or _prep_pack_mention_has_text_evidence(name, source_text))
             ):
-                errors.append(
-                    f"场景「{name}」（段 {mention_segment_indexes}）未解析到已有 "
-                    "scene_reference_id"
-                )
+                message = f"场景「{name}」（段 {mention_segment_indexes}）未解析到已有 scene_reference_id"
+                errors.append(message)
                 if name not in unresolved_scenes:
                     unresolved_scenes.append(name)
+                degrade_unresolved_scene(scenes, name=name, segment_indexes=mention_segment_indexes, reason=message)
                 continue
             # 场景别名锚定（task①）：证据闸已经确认这次绑定成立——把本集
             # 实际用到的原文措辞（name）记为该场景的新别名（幂等，见

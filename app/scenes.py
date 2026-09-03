@@ -33,6 +33,13 @@ from app.evidence import repository as evidence_repository
 from app.evidence.media import record_reference_asset
 from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
+from app.production.scene_granularity import (
+    ROLE_TRANSITIONAL,
+    anchor_discovery_sources,
+    resolve_existing_anchor_name,
+    resolve_scene_granularity_verdict,
+    scene_granularity_prompt,
+)
 from app.refs import _safe_name, scene_visual_style_lock
 from app.scene_contract import SCENE_SAME_LOCATION_MATCH_RULE, split_legacy_scene_setting
 from app.schemas import Bible, Scene, extract_json
@@ -818,54 +825,30 @@ async def _generate_one_scene_reference(
 # ---------- 分镜阶段反应式发现新场景（对照 portraits.ensure_character_card 的新角色路径） ----------
 
 async def assess_new_scene(label: str, spatial_context: str, *, style: str,
-                           known_names: list[str], ep_label: str) -> dict:
-    """把已确认剧本场次解析为新场景或已有场景别名，并产出自动建库字段。"""
+                           known_scenes: list[Scene], ep_label: str) -> dict:
+    """把已确认剧本场次解析为新场景或已有场景别名，并产出粒度判定字段（location_key/
+    role/era_anchor/anchor_phrase，判据见 app.production.scene_granularity）。"""
     from app.visual_styles import is_photographic_style_prompt
-    known = "、".join(known_names) or "（无）"
     scene_canonical_style_rule = (
         f"必须贴合画风「{style}」，是照片级摄影质感的实景环境描述，允许并鼓励真实材质、自然光影与摄影级细节。"
         if is_photographic_style_prompt(style)
         else f"必须贴合画风「{style}」，是 CG/动画/漫画类非真人渲染场景，严禁真人实拍/实景照片描述。"
     )
-    prompt = f"""任务：把已确认剧本场次地点「{label}」解析成可用于分镜的规范场景。
-
-全片画风（场景锚点必须与之一致）：{style}
-已有规范场景（若「{label}」其实是这些场景的同一地点/别称，则 important=false，并在 existing_scene_name 返回下列某个完整名称）：
-{known}
-
-本场景的空间信息（{ep_label}）：
-{spatial_context[:1000]}
-
-判定口径：
-- 这是已确认剧本中真实开拍的场次，不得因一次性过场而省略场景。
-- important=true：它是已有列表之外的真正新地点，必须自动加入场景库并生成场景图。
-- important=false：仅当它确实是已有场景的别名/简称；existing_scene_name 必须返回已有列表中的完整名称。
-- {SCENE_SAME_LOCATION_MATCH_RULE}
-- name：稳定的场景短标签（4~10 字），不要与已有场景重名。
-- scene_canonical 是"固定场景锚点串"：30~60 字，须含 地点/室内外/光线时段/标志陈设/氛围色调；只写视觉可见的环境信息，不写人物、不写剧情动作。{scene_canonical_style_rule}
-
-只输出一个 JSON 对象：
-{{"important": true/false, "existing_scene_name": "已有规范场景完整名称或空字符串", "reason": "一句话依据", "name": str, "scene_canonical": str, "location_kind": "室内|室外|其他"}}"""
+    prompt = scene_granularity_prompt(
+        label, spatial_context, style=style, style_rule=scene_canonical_style_rule,
+        known_scenes=[(s.name, s.scene_canonical) for s in known_scenes],
+        ep_label=ep_label, canonical_min=SCENE_CANONICAL_MIN, canonical_max=SCENE_CANONICAL_MAX,
+        same_location_match_rule=SCENE_SAME_LOCATION_MATCH_RULE,
+    )
     raw = await model_gateway.chat(
         [{"role": "user", "content": prompt}], temperature=0.3, max_tokens=600,
         call_meta={"stage": "assess_new_scene", "scene_label": label},
     )
-    obj = extract_json(raw)
-    important = bool(obj.get("important"))
-    name = (obj.get("name") or "").strip() or label.strip()
-    canonical = (obj.get("scene_canonical") or "").strip()
-    if len(canonical) > SCENE_CANONICAL_MAX:
-        canonical = canonical[:SCENE_CANONICAL_MAX]
-    if important and len(canonical) < SCENE_CANONICAL_MIN:
-        important = False  # 锚点太稀薄不足以稳定定场 → 不入库
-    return {
-        "important": important,
-        "existing_scene_name": (obj.get("existing_scene_name") or "").strip(),
-        "reason": (obj.get("reason") or "").strip(),
-        "name": name,
-        "scene_canonical": canonical,
-        "location_kind": (obj.get("location_kind") or "其他").strip() or "其他",
-    }
+    verdict = resolve_scene_granularity_verdict(
+        extract_json(raw), label=label, spatial_context=spatial_context,
+        canonical_min=SCENE_CANONICAL_MIN, canonical_max=SCENE_CANONICAL_MAX,
+    )
+    return verdict.as_dict()
 
 
 def _commit_scene_bible_mutation(
@@ -1128,6 +1111,15 @@ def _mark_scene_auto_change(
     conn.commit()
 
 
+async def _apply_scene_alias(conn, project_id: str, anchor_name: str, label: str) -> list[Scene]:
+    """把 label 登记为 anchor_name 的别名并回读最新场景列表（两个 ensure_scenes_for_* 共用）。"""
+    bible_lock = await _reactive_bible_lock(project_id)
+    async with bible_lock:
+        _append_scene_alias(conn, project_id, anchor_name, label)
+    project_row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+    return Bible.model_validate(json.loads(project_row["bible_json"])).scenes
+
+
 async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenplay, bible) -> dict:
     """分镜前反应式维护本集场景：AI 自动建库，再交给分镜。不内联等图落盘——分镜
     产出的是文本（场景锚点 + 镜头描述），图只在发起付费视频时才真的需要，那道闸
@@ -1154,13 +1146,14 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
     evolved: list[dict] = []
     errors: list[str] = []
     blocking_errors: list[str] = []
+    transitional_only: set[str] = set()
     for label in unmatched:
         _scene_time, location = split_legacy_scene_setting(label)
         spatial_context = location or label
         try:
             verdict = await assess_new_scene(
                 label, spatial_context, style=style,
-                known_names=[s.name for s in scenes],
+                known_scenes=scenes,
                 ep_label=f"第 {episode_no} 集")
         except Exception as exc:  # noqa: BLE001
             message = f"{label}：场景识别失败" + code_ref(
@@ -1170,20 +1163,20 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
             errors.append(message)
             blocking_errors.append(message)
             continue
+        anchor_name = resolve_existing_anchor_name(
+            location_key=verdict.get("location_key") or verdict.get("name") or "", scenes=scenes,
+            era_anchor=verdict.get("era_anchor") or "", existing_scene_name=verdict.get("existing_scene_name") or "",
+        )
+        if anchor_name:
+            scenes = await _apply_scene_alias(conn, project_id, anchor_name, label)
+            continue
         if not verdict["important"]:
-            existing_name = verdict.get("existing_scene_name") or ""
-            if existing_name not in {scene.name for scene in scenes}:
-                message = f"{label}：AI 未能解析为新场景或已有场景别名"
-                errors.append(message)
-                blocking_errors.append(message)
+            if verdict.get("role") == ROLE_TRANSITIONAL:
+                transitional_only.add(label)  # 一句带过/抒情提及，无需独立画面，不算失败
                 continue
-            bible_lock = await _reactive_bible_lock(project_id)
-            async with bible_lock:
-                _append_scene_alias(conn, project_id, existing_name, label)
-            project_row = conn.execute(
-                "SELECT bible_json FROM projects WHERE id=?", (project_id,),
-            ).fetchone()
-            scenes = Bible.model_validate(json.loads(project_row["bible_json"])).scenes
+            message = f"{label}：AI 未能解析为新场景或已有场景别名"
+            errors.append(message)
+            blocking_errors.append(message)
             continue
         name = verdict["name"]
         if _exact_known_scene_name(name, scenes):
@@ -1193,7 +1186,9 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
             "scene_canonical": verdict["scene_canonical"],
             "location_kind": verdict["location_kind"],
             "first_episode": episode_no,
-            "discovery_sources": [spatial_context[:500]],
+            "discovery_sources": anchor_discovery_sources(
+                spatial_context[:500], verdict.get("location_key") or name, verdict.get("era_anchor") or "",
+            ),
             "aliases": [label] if label != name else [],
         }
         queued = _queue_scene_auto_change(
@@ -1246,6 +1241,8 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
     for label in labels:
         matched = match_scene_name(label, scenes, allow_fuzzy=False)
         if not matched:
+            if label in transitional_only:
+                continue  # 已判定为一句带过/抒情提及，不需要场景，不是失败
             message = f"{label}：相关场景仍未完成自动建库"
             if message not in blocking_errors:
                 blocking_errors.append(message)
@@ -1378,13 +1375,14 @@ async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: lis
     # 调用的权威结果，不该再喂给一个对历史别名冲突免疫力为零的通用反查函数
     # 重新赌一次。
     direct_resolutions: dict[str, str] = {}
+    transitional_only: set[str] = set()
     for label in unmatched:
         _scene_time, location = split_legacy_scene_setting(label)
         spatial_context = location or label
         try:
             verdict = await assess_new_scene(
                 label, spatial_context, style=style,
-                known_names=[s.name for s in scenes],
+                known_scenes=scenes,
                 ep_label=f"第 {episode_no} 集")
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{label}：场景识别失败" + code_ref(
@@ -1392,19 +1390,19 @@ async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: lis
                 context={"project_id": project_id, "scene": label, "episode_no": episode_no},
             ))
             continue
+        anchor_name = resolve_existing_anchor_name(
+            location_key=verdict.get("location_key") or verdict.get("name") or "", scenes=scenes,
+            era_anchor=verdict.get("era_anchor") or "", existing_scene_name=verdict.get("existing_scene_name") or "",
+        )
+        if anchor_name:
+            scenes = await _apply_scene_alias(conn, project_id, anchor_name, label)
+            direct_resolutions[label] = anchor_name
+            continue
         if not verdict["important"]:
-            existing_name = verdict.get("existing_scene_name") or ""
-            if existing_name not in {scene.name for scene in scenes}:
-                errors.append(f"{label}：AI 未能解析为新场景或已有场景别名")
+            if verdict.get("role") == ROLE_TRANSITIONAL:
+                transitional_only.add(label)  # 同 ensure_scenes_for_storyboard：无需独立画面
                 continue
-            bible_lock = await _reactive_bible_lock(project_id)
-            async with bible_lock:
-                _append_scene_alias(conn, project_id, existing_name, label)
-            project_row = conn.execute(
-                "SELECT bible_json FROM projects WHERE id=?", (project_id,),
-            ).fetchone()
-            scenes = Bible.model_validate(json.loads(project_row["bible_json"])).scenes
-            direct_resolutions[label] = existing_name
+            errors.append(f"{label}：AI 未能解析为新场景或已有场景别名")
             continue
         name = verdict["name"]
         if _exact_known_scene_name(name, scenes):
@@ -1415,7 +1413,9 @@ async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: lis
             "scene_canonical": verdict["scene_canonical"],
             "location_kind": verdict["location_kind"],
             "first_episode": episode_no,
-            "discovery_sources": [spatial_context[:500]],
+            "discovery_sources": anchor_discovery_sources(
+                spatial_context[:500], verdict.get("location_key") or name, verdict.get("era_anchor") or "",
+            ),
             "aliases": [label] if label != name else [],
         }
         queued = _queue_scene_auto_change(
@@ -1473,7 +1473,7 @@ async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: lis
             label, scenes, allow_fuzzy=False,
         )
         if not matched:
-            continue  # 未解析成功已在上面记过 errors
+            continue  # 未解析成功：已在上面记过 errors，或已归入 transitional_only
         resolved_names[label] = matched
         if matched not in relevant_names:
             relevant_names.append(matched)

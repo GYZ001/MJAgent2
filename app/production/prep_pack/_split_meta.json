@@ -13,6 +13,7 @@
     "resolve_assets",
     "chunk_extraction",
     "generate_once",
+    "scene_degrade",
     "publish",
     "entry"
   ],
@@ -101,9 +102,14 @@
     "_call_structured": "chunk_extraction",
     "_extract_chunk": "chunk_extraction",
     "_prep_pack_build_coverage_ledger": "generate_once",
-    "_prep_pack_scene_coverage_account": "generate_once",
+    "_prep_pack_finalize_scene_coverage": "generate_once",
     "_prep_pack_build_appellation_map": "generate_once",
     "_generate_prep_pack_once": "generate_once",
+    "resolution_hint": "scene_degrade",
+    "degrade_unresolved_scene": "scene_degrade",
+    "split_scene_errors": "scene_degrade",
+    "degrade_scene_provenance_failures": "scene_degrade",
+    "resolved_scene_delivered_indexes": "scene_degrade",
     "_publish_prep_pack": "publish",
     "run_episode_prep_pack": "entry"
   },

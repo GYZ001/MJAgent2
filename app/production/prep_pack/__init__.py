@@ -10,7 +10,8 @@
 解析编排 `_resolve_assets`（resolve_assets）、分块抽取与 step/telemetry
 （chunk_extraction）、单次生成编排 `_generate_prep_pack_once`
 （generate_once）、原子发布 `_publish_prep_pack`（publish）、Run/Step 入口
-`run_episode_prep_pack`（entry）。
+`run_episode_prep_pack`（entry）、未解析/自校验失败场景的就地降级
+（scene_degrade，WS6 追加，见该模块 docstring）。
 
 本文件是唯一的稳定入口：全仓所有 `from app.production.prep_pack import X` /
 `import app.production.prep_pack` / `prep_pack.X` 使用方式必须不经改动继续
@@ -118,7 +119,7 @@ from .generate_once import (
     _generate_prep_pack_once,
     _prep_pack_build_appellation_map,
     _prep_pack_build_coverage_ledger,
-    _prep_pack_scene_coverage_account,
+    _prep_pack_finalize_scene_coverage,
     assert_prep_pack_coverage_complete,
     chapter_title_segment_indexes,
     get_conn,
@@ -153,6 +154,13 @@ from .resolve_assets import (
     _prep_pack_build_prop_manifest,
     _resolve_assets,
     visual_entity_id_for_resolution,
+)
+from .scene_degrade import (
+    degrade_scene_provenance_failures,
+    degrade_unresolved_scene,
+    resolution_hint,
+    resolved_scene_delivered_indexes,
+    split_scene_errors,
 )
 from .schemas import (
     Any,

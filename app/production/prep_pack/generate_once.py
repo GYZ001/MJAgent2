@@ -31,6 +31,11 @@ from .contracts import (
 )
 from .provenance import _prep_pack_verify_manifest_provenance
 from .resolve_assets import _resolve_assets
+from .scene_degrade import (
+    degrade_scene_provenance_failures,
+    resolved_scene_delivered_indexes,
+    split_scene_errors,
+)
 from .true_name import _prep_pack_gather_concurrent
 
 
@@ -39,6 +44,14 @@ def _prep_pack_build_coverage_ledger(
     delivered_indexes: set[int],
     paratext_indexes: set[int],
 ) -> tuple[dict[str, Any], list[int]]:
+    """映射台五账。``scene_coverage``（场景专项覆盖账，2.0.3 引入，见
+    ``_prep_pack_finalize_scene_coverage`` 的完整案情/WS6 覆盖账本诚实条目）
+    有意不在这里算——它必须等 ``_resolve_assets`` + provenance 自校验都跑完、
+    未能解析/自校验失败的场景条目已经原地降级之后才能诚实反映"哪些段落
+    真的有可用场景绑定"，这里跑得太早看不到那些结果（见 WS6 追加条目：
+    未解析场景要进 scene_uncovered，不能因为"模型确实报过一条场景提及"就
+    先被计成 delivered）。
+    """
     all_indexes = set(range(1, total_segments + 1))
     delivered = delivered_indexes & all_indexes
     paratext_claims = paratext_indexes & all_indexes
@@ -58,33 +71,39 @@ def _prep_pack_build_coverage_ledger(
     return ledger, rejected_paratext_claims
 
 
-# 2.0.3 新增（见 PREP_PACK_VERSION 上方 2.0.3 大注释的完整案情）：场景专项
-# 覆盖账，跟上面五账并列、互不干扰的独立视角——五账的 delivered 只要角色/
-# 场景/道具任一维度覆盖到某段就算 delivered，天然看不见"场景这一个维度
-# 单独漏覆盖、角色/道具仍覆盖"的情形，这正是 EP4 真实回归暴露的缺陷：54
-# 段章节里 scenes 只覆盖到 20 段，21~54 段因为角色提及（主角孟浩本人）
-# 仍然贯穿在场，五账的 delivered/uncovered 完全看不出场景那部分已经断供，
-# 这个缺口一路悄悄传导到分镜台三态告警才第一次现形。本账目让它在映射台
-# 自己的产出里就可见。
-#
-# 不做的事（刻意）：不拦截、不重新定义"delivered"的既有语义、不往
-# assert_prep_pack_coverage_complete 那道门禁塞新的阻断条件（该门禁签名
-# 只读 ledger["uncovered"]，本账目是全新键，结构上不可能触发它）、不对
-# scene_uncovered 做任何解释性判断——scene_uncovered 非空可能是真的漏报，
-# 也可能是这些段落本来就没有场景描写（纯心理活动、纯对白），两种情况在
-# 数据层面无法区分，交付判据仍然是逐条对原文，这里只负责让分母/分子可见，
-# 不越权下结论。也不做"没覆盖就借用上一个场景的 segment_indexes 顺延"这
-# 类兜底——那是编造场景归属，比空着更危险，比空着更难被发现是假的。
-def _prep_pack_scene_coverage_account(
+def _prep_pack_finalize_scene_coverage(
+    ledger: dict[str, Any],
     total_segments: int,
     scene_delivered_indexes: set[int],
     paratext_indexes: set[int],
-) -> dict[str, Any]:
+) -> None:
+    """场景专项覆盖账（2.0.3 引入）：五账的 delivered 只要角色/场景/道具任一
+    维度覆盖到某段就算 delivered，天然看不见"场景这一个维度单独漏覆盖、
+    角色/道具仍覆盖"的情形——真实回归：54 段章节里 scenes 只覆盖到 20 段，
+    21~54 段因为角色提及（主角孟浩本人）仍然贯穿在场，五账完全看不出场景
+    那部分已经断供，这个缺口一路悄悄传导到分镜台三态告警才第一次现形。
+
+    ``scene_delivered_indexes`` 必须是资产解析/provenance 自校验都跑完、
+    降级条目（见 app.production.prep_pack.scene_degrade）已清空
+    segment_indexes 之后的最终结果，不是原始模型提及——否则一个"模型报了
+    但没解析成功"的场景会被误记成已覆盖（WS6 派单追加条目的真实案例：
+    橘座在上 ×2、神墓 ×1，未解析/自校验失败的场景过去直接整集判死，现在
+    降级为可见记录，但覆盖账本不能因此假装它们被覆盖了）。
+
+    原地把 ``scene_coverage`` 挂到 ``ledger`` 上，并断言 ``retained_as_
+    context`` 恒为其子集——结构性保证，见 tests/test_coverage_ledger_
+    honesty.py，不是"两处分开算、指望它们碰巧一致"的默契。
+    """
     all_indexes = set(range(1, total_segments + 1))
     scene_delivered = scene_delivered_indexes & all_indexes
     paratext = paratext_indexes & all_indexes
     scene_uncovered = all_indexes - scene_delivered - paratext
-    return {
+    retained = set(ledger["retained_as_context"])
+    assert retained <= scene_uncovered, (
+        "[PREP_PACK_COVERAGE_LEDGER_INCONSISTENT] retained_as_context 必须是 "
+        "scene_coverage.scene_uncovered 的子集，出现不一致是实现缺陷"
+    )
+    ledger["scene_coverage"] = {
         "total_segments": total_segments,
         "scene_delivered": sorted(scene_delivered),
         "scene_uncovered": sorted(scene_uncovered),
@@ -310,20 +329,6 @@ async def _generate_prep_pack_once(
     ledger, rejected_paratext_claims = _prep_pack_build_coverage_ledger(
         len(segments), delivered_indexes, paratext_indexes,
     )
-    # 2.0.3（见 PREP_PACK_VERSION 上方 2.0.3 大注释）：跟上面五账并列的
-    # 场景专项覆盖账，读的是 scene_mentions 自己的 segment_indexes 并集
-    # ——跟 delivered_indexes 同一个数据源（模型申报、已过结构闸），不是
-    # 发布后的 asset_manifest.scenes 重新算一遍；两者在一次成功发布里
-    # 恒等（_resolve_assets 只会把已声明的 mention 解析进 manifest 或
-    # 让整个生成因 asset_errors 失败重试，不会把已声明的 mention 悄悄
-    # 丢弃却仍然发布成功），用前者可以在 _resolve_assets 调用之前就算好，
-    # 不需要为了这一个账目改动下面的调用顺序。
-    scene_delivered_indexes: set[int] = set()
-    for mention in scene_mentions:
-        scene_delivered_indexes.update(mention["segment_indexes"])
-    ledger["scene_coverage"] = _prep_pack_scene_coverage_account(
-        len(segments), scene_delivered_indexes, paratext_indexes,
-    )
     try:
         assert_prep_pack_coverage_complete(ledger)
     except ValueError as exc:
@@ -349,12 +354,17 @@ async def _generate_prep_pack_once(
             appellation_resolutions=character_appellation_resolutions,
         ),
     )
-    if asset_errors:
+    # 场景 mention 未解析到 scene_reference_id 的失败已由 _resolve_assets 就地
+    # 降级（见 app.production.prep_pack.scene_degrade），不再阻断整集——WS6
+    # 追加条目，真实事故：橘座在上 ×2、神墓 ×1，此前一律整集判死。角色/道具/
+    # 群演的同类失败维持既有阻断，范围不变。
+    _degraded_scene_errors, blocking_asset_errors = split_scene_errors(asset_errors)
+    if blocking_asset_errors:
         raise PrepPackGateError(
             "资产映射未能 100% 解析（已尝试身份/场景发现，调用次数："
             f"角色 {discovery_stats['character_discovery_calls']}、"
             f"场景 {discovery_stats['scene_discovery_calls']}）："
-            + "；".join(asset_errors[:10])
+            + "；".join(blocking_asset_errors[:10])
         )
 
     asset_manifest = {
@@ -364,16 +374,23 @@ async def _generate_prep_pack_once(
     # provenance 发布前自校验（1.6.0，第25轮收口）：见
     # _prep_pack_verify_manifest_provenance 上方完整说明——每一条非空
     # anchor_phrase 必须真的逐字命中它自己 anchor_segments 指向的原文段，
-    # 不成立即门禁拦，不静默发布一份自称有证据、实际验不过的 manifest。
+    # 不成立即门禁拦，不静默发布一份自称有证据、实际验不过的 manifest。场景
+    # 侧的失败同上一段一样就地降级、不阻断（scene_degrade.degrade_scene_
+    # provenance_failures）。
     provenance_errors = _prep_pack_verify_manifest_provenance(
         segments, asset_manifest, source_text,
     )
-    if provenance_errors:
+    blocking_provenance_errors = degrade_scene_provenance_failures(asset_manifest, provenance_errors)
+    if blocking_provenance_errors:
         raise PrepPackGateError(
-            "资产来源证明自校验失败：" + "；".join(provenance_errors[:10])
+            "资产来源证明自校验失败：" + "；".join(blocking_provenance_errors[:10])
         )
 
     appellation_map = _prep_pack_build_appellation_map(character_appellation_resolutions)
+    _prep_pack_finalize_scene_coverage(
+        ledger, len(segments),
+        resolved_scene_delivered_indexes(asset_manifest["scenes"]), paratext_indexes,
+    )
 
     payload = {
         "prep_pack_version": PREP_PACK_VERSION,
