@@ -75,6 +75,10 @@ async def run_task(
     取消原样冒泡 ``asyncio.CancelledError``（不在这里落终态，由 ``queue.py``
     按暂停/取消/服务重启分类后处理）。
     """
+    # 重新入队的任务带着上一轮的失败信息进来：tasks.enqueue_many 只清 series_tasks.error 列，
+    # 进度树里的 progress.error 由本模块负责——任务一开跑就是新一轮，旧错误不再成立。
+    # 不清的话 task_summary 取「列 or 进度树」会让界面在"进行中"时还挂着上一轮的失败横幅。
+    progress["error"] = None
     recorder.start()
     state.persist_progress(task_id, progress)
     try:
@@ -106,6 +110,7 @@ async def _run_task_body(
 
 async def _run_episode(task_id: str, entry: dict, progress: dict, recorder) -> None:
     episode_id = entry["episode_id"]
+    entry["error"] = None  # 本集重新进入处理，上一轮留在条目上的失败信息作废
     for stage in stages.STAGE_SEQUENCE:
         progress["current_stage"] = stage
         state.persist_progress(task_id, progress)

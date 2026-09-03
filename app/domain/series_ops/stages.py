@@ -138,10 +138,24 @@ def _active_video_run(conn, episode_id: str) -> dict | None:
 
 
 def _stalled_video_reason(episode_id: str) -> str:
-    run = _active_video_run(get_conn(), episode_id)
+    conn = get_conn()
+    run = _active_video_run(conn, episode_id)
     if not run:
         return ""
-    return f"：{run['failure_message'] or run['status']}"
+    reason = f"：{run['failure_message'] or run['status']}"
+    # 运行级结论只说「需人工」，不说是哪一镜、供应商说了什么；把待人工镜头的原话带上，
+    # 用户在连播台就能看到出路（CLAUDE.md「拦住用户时必须给出出路」）。
+    blocked = conn.execute(
+        """SELECT s.shot_no, j.error FROM jobs j JOIN shots s ON s.id=j.shot_id
+            WHERE j.episode_id=? AND j.kind='video' AND j.status='waiting_human'
+            ORDER BY s.shot_no LIMIT 3""",
+        (episode_id,),
+    ).fetchall()
+    if blocked:
+        reason += "；待人工处理：" + "；".join(
+            f"第{row['shot_no']}镜 {str(row['error'] or '').strip()[:200]}" for row in blocked
+        )
+    return reason
 
 
 # 补齐 Supervisor 停在这些 checkpoint 阶段时都不能静默发起新的 fresh 尝试：

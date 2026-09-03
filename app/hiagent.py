@@ -693,18 +693,18 @@ def _structured_failure_from_http_body(body: str) -> ProviderFailure | None:
 
 def _classify_http_error(status: int, body: str, key_name: str = "HIAGENT_API_KEY") -> ProviderError:
     structured_failure = _structured_failure_from_http_body(body)
-    explicit_not_accepted = False
+    explicit_not_accepted = refused = False
     try:
         raw_payload = json.loads(body)
+        error_obj = raw_payload.get("error") if isinstance(raw_payload, dict) else None
         failure_payload = (
-            (raw_payload.get("error") or {}).get("failure")
-            if isinstance(raw_payload, dict) and isinstance(raw_payload.get("error"), dict)
+            error_obj.get("failure") if isinstance(error_obj, dict)
             else raw_payload.get("failure") if isinstance(raw_payload, dict) else None
         )
-        explicit_not_accepted = bool(
-            isinstance(failure_payload, dict)
-            and failure_payload.get("create_not_accepted") is True
-        )
+        explicit_not_accepted = isinstance(failure_payload, dict) and failure_payload.get("create_not_accepted") is True
+        # 4xx + 结构化 error 信封（OpenAI 风格）= 网关明确拒绝了这次请求，任务没有被创建，
+        # create 不必再按「结果不确定」处理；408（超时）/409（冲突）结果仍不确定，不在此列。
+        refused = isinstance(error_obj, dict) and 400 <= status < 500 and status not in (408, 409)
     except (TypeError, ValueError, json.JSONDecodeError):
         pass
     if structured_failure is not None:
@@ -745,9 +745,8 @@ def _classify_http_error(status: int, body: str, key_name: str = "HIAGENT_API_KE
         )
     return ProviderError(
         f"请求被拒绝（HTTP {status}）：{body[:300]}",
-        raw=body,
-        failure_kind="provider_rejected",
-        delivery_state="responded",
+        raw=body, failure_kind="provider_rejected", delivery_state="responded",
+        create_not_accepted=refused,
     )
 
 

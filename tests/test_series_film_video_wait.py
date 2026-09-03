@@ -186,3 +186,34 @@ async def test_paused_external_resume_conflict_falls_back_to_wait_message(
     message = str(exc.value)
     assert "自动恢复未成功" in message
     assert "全片补齐任务已在启动或运行" in message
+
+
+def _insert_minimal(conn: sqlite3.Connection, table: str, **values) -> None:
+    """按 pragma 把 NOT NULL 且无默认值的列补上占位，只关心测试点名的列。"""
+    cols = conn.execute(f"pragma table_info({table})").fetchall()
+    row = dict(values)
+    for col in cols:
+        name, ctype, notnull, default = col[1], (col[2] or "").upper(), col[3], col[4]
+        if name in row or not notnull or default is not None:
+            continue
+        row[name] = 0 if ("INT" in ctype or "REAL" in ctype) else f"{name}-x"
+    conn.execute(
+        f"INSERT INTO {table}({','.join(row)}) VALUES({','.join('?' for _ in row)})",
+        tuple(row.values()),
+    )
+
+
+def test_stalled_reason_names_the_blocked_shot_with_provider_words(monkeypatch) -> None:
+    """运行级结论只说「需人工」；连播台必须把是哪一镜、供应商说了什么带出来。"""
+    conn = _conn("run-1")
+    _insert_run(conn, "run-1", "PARTIAL")
+    conn.execute("UPDATE workflow_runs SET failure_message='外部终态或不可自动修复问题，已停止自动重试，需人工处理' WHERE id='run-1'")
+    _insert_minimal(conn, "shots", id="s1", episode_id="e", shot_no=1)
+    _insert_minimal(conn, "jobs", id="j1", project_id="p", episode_id="e", shot_id="s1", kind="video",
+                    status="waiting_human", error="请求被拒绝（HTTP 400）：不符合安全合规要求")
+    conn.commit()
+    monkeypatch.setattr(series_stages, "get_conn", lambda: conn)
+    reason = series_stages._stalled_video_reason("e")
+    assert "需人工处理" in reason
+    assert "第1镜" in reason and "不符合安全合规要求" in reason
+

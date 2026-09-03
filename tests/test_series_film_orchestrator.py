@@ -280,3 +280,30 @@ async def test_stage_failure_with_confirmation_gate_detail_shows_human_message(
     assert "处理办法：返回分镜台继续修复" in ep1["error"]
     assert "contract_version" not in ep1["error"]
     assert "'passed': False" not in ep1["error"]
+
+
+async def test_requeued_task_clears_previous_round_errors(monkeypatch) -> None:
+    """重新入队：上一轮的 progress.error / 分集 error 必须在开跑时清掉，
+    否则界面在"进行中"时还挂着上一轮的失败横幅（2026-09-03 连播台实测）。"""
+    conn, entries = _conn([1, 2])
+    _patch_conn(monkeypatch, conn)
+    monkeypatch.setattr(series_stages, "stage_is_complete", lambda *_a: True)
+    monkeypatch.setattr(merge, "merge_is_current", lambda *_a: True)
+    conn.execute(
+        "INSERT INTO series_tasks(id,project_id,episode_from,episode_to,progress_json,created_at,updated_at) "
+        "VALUES('task-1','p',1,2,'{}',0,0)"
+    )
+    progress = state.new_progress(entries)
+    progress["error"] = "第1集 生成台 失败：上一轮的旧错误"
+    progress["episodes"][0]["error"] = "第1集 生成台 失败：上一轮的旧错误"
+    progress["episodes"][0]["stages"]["video"] = "failed"
+    recorder = WorkflowRecorder("run-task")
+    await orchestrator.run_task("p", "task-1", 1, 2, progress, recorder)
+    assert progress["error"] is None
+    assert all(entry["error"] is None for entry in progress["episodes"])
+    assert progress["episodes"][0]["stages"]["video"] == "skipped"
+    persisted = state.load_progress(dict(conn.execute(
+        "SELECT progress_json FROM series_tasks WHERE id='task-1'"
+    ).fetchone()))
+    assert persisted["error"] is None and persisted["episodes"][0]["error"] is None
+
