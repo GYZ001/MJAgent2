@@ -55,12 +55,18 @@ _QUOTE_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 
 class DialogueQuote(BaseModel):
-    """原文里确定性抽取出的一句引号台词——阶段一的「取值域」本身。"""
+    """原文里确定性抽取出的一句台词——阶段一的「取值域」本身。speaker/note/
+    start_offset/end_offset 供 storyboard_dialogue_extract 的说话人行路径
+    使用；本文件的 extract_dialogue_targets（纯引号正则）留默认值不填。"""
 
     quote_id: str
     source_segment_index: int
     text: str
     content_chars: int
+    speaker: str = ""
+    note: str = ""
+    start_offset: int = -1  # 相对 segment.text 的偏移，-1 表示未知
+    end_offset: int = -1
 
 
 class _AiKeptLine(BaseModel):
