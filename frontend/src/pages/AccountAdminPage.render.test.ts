@@ -17,16 +17,19 @@ const { mockApi, mockMe, mockDeleteMyAccount, MockApiError, mockUsers, mockDelet
       id: 'user_admin', username: 'lnuyasha', display_name: '系统管理员',
       status: 'active', is_system_admin: true, must_change_password: false,
       tier: 'free', quota_period_started_at: 1000, created_at: 1000, last_login_at: 2000, deleted_at: null,
+      last_active_at: 3000, last_action: { id: 'ae_1', ts: 3000, event: 'storyboard.generate', event_label: '生成分镜', outcome: 'ok', project_id: 'p1', project_name: '斗破苍穹' },
     },
     {
       id: 'user_free', username: 'demo', display_name: 'demo',
       status: 'active', is_system_admin: false, must_change_password: false,
       tier: 'free', quota_period_started_at: 1000, created_at: 1200, last_login_at: null, deleted_at: null,
+      last_active_at: null, last_action: null,
     },
     {
       id: 'user_pro_disabled', username: 'old-hand', display_name: '',
       status: 'disabled', is_system_admin: false, must_change_password: true,
       tier: 'pro', quota_period_started_at: 1000, created_at: 1500, last_login_at: null, deleted_at: null,
+      last_active_at: null, last_action: null,
     },
   ]
   const mockDeletedUsers = [
@@ -95,10 +98,14 @@ function installWindowStub() {
     setTimeout: (...args: Parameters<typeof setTimeout>) => setTimeout(...args),
     clearTimeout: (id: ReturnType<typeof setTimeout>) => clearTimeout(id),
     location: { reload: () => undefined },
+    history: { pushState: vi.fn() }, dispatchEvent: vi.fn(),
   }
+  // "查看操作记录" 按钮 new PopStateEvent(...) 要这个构造函数存在，node 环境没有。
+  ;(globalThis as { PopStateEvent?: unknown }).PopStateEvent = class { type: string; constructor(t: string) { this.type = t } }
 }
 function uninstallWindowStub() {
   delete (globalThis as { window?: unknown }).window
+  delete (globalThis as { PopStateEvent?: unknown }).PopStateEvent
 }
 
 async function renderPage() {
@@ -277,5 +284,17 @@ describe('账号管理页', () => {
       confirmAfter.props.onClick()
     })
     expect(mockDeleteMyAccount).toHaveBeenCalledWith(true)
+  })
+
+  it('卡片显示"最近活跃"与"最近操作"；点"查看操作记录"跳转带 user_id 的审计页', async () => {
+    const renderer = await renderPage()
+    const metas = renderer.root.findAll((node) => hasClass(node, 'account-card-meta'))
+    expect(textOf(metas[0])).toContain('最近活跃')
+    expect(textOf(metas[1])).toContain('最近操作：生成分镜（成功）')
+    expect(textOf(metas[2])).toContain('最近活跃 从未') // demo 从未活跃，空值必须显式说明
+    expect(textOf(metas[3])).toBe('最近操作：暂无记录')
+    const viewBtn = renderer.root.findAll((node) => node.type === 'button' && textOf(node) === '查看操作记录')[0]
+    act(() => { viewBtn.props.onClick() })
+    expect((window as any).history.pushState).toHaveBeenCalledWith({}, '', '/system/audit?user_id=user_admin')
   })
 })

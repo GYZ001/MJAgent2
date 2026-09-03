@@ -1,0 +1,165 @@
+/* OperationAuditPage 独占样式——沿用 AccountAdminPage.css 的拆分口径：只放这一页
+   （及其 pages/audit/* 子组件）用到的类，随懒加载分包一起下载。跨页复用的
+   `.btn`/`.empty`/`.query-error`/`.desk-head`/`.stamp`/`table.ledger` 留在
+   全局 index.css，这里不重复定义；`.monitor-toolbar`/`.monitor-table-wrap`/
+   `.mono`/`.monitor-refresh` 只在 MonitorPage.css（随观测台分包）里，本页不
+   引入那个包，所以下面用 audit- 前缀自成一套等价样式，不是随手照抄。 */
+
+.audit-muted {
+  color: var(--ink-faint);
+  font-size: 12px;
+}
+.mono {
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 12px;
+}
+
+.audit-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.audit-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.audit-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px 14px;
+}
+.audit-toolbar label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--ink-soft);
+}
+.audit-toolbar select,
+.audit-toolbar input {
+  min-width: 140px;
+  padding: 6px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--ink);
+  font-size: 12.5px;
+}
+.audit-search input {
+  min-width: 200px;
+}
+.audit-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--ink);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.audit-refresh:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.audit-table-wrap {
+  width: 100%;
+  overflow: auto;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+}
+table.audit-ledger {
+  min-width: 960px;
+}
+table.audit-ledger th {
+  padding: 9px 10px;
+  background: rgba(241, 235, 222, 0.55);
+}
+table.audit-ledger td {
+  padding: 9px 10px;
+  vertical-align: top;
+}
+.audit-event-code {
+  margin-top: 2px;
+  color: var(--ink-faint);
+  font-size: 11px;
+}
+.audit-expand-toggle {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink);
+  cursor: pointer;
+  line-height: 1;
+}
+.audit-detail-row td {
+  background: rgba(241, 235, 222, 0.35);
+}
+.audit-row-detail {
+  padding: 4px 0;
+}
+.audit-row-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 4px 16px;
+  margin: 0 0 8px;
+  font-size: 12px;
+}
+.audit-row-facts > div {
+  display: flex;
+  gap: 6px;
+}
+.audit-row-facts dt {
+  color: var(--ink-faint);
+}
+.audit-row-facts dd {
+  margin: 0;
+  color: var(--ink);
+  word-break: break-word;
+}
+.audit-row-args {
+  margin-top: 6px;
+}
+.audit-row-meta {
+  margin: 0 0 4px;
+  color: var(--ink-soft);
+  font-size: 11.5px;
+}
+.audit-row-args pre {
+  max-width: 100%;
+  max-height: 260px;
+  margin: 0;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 6px;
+  background: rgba(181, 68, 52, 0.05);
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 11px/1.5 "SF Mono", Menlo, monospace;
+}
+
+.audit-load-more {
+  display: flex;
+  justify-content: center;
+  margin-top: 14px;
+}
+
+@media (max-width: 620px) {
+  .audit-toolbar select,
+  .audit-toolbar input {
+    min-width: 0;
+    width: 100%;
+  }
+}

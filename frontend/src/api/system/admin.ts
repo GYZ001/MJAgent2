@@ -1,4 +1,5 @@
 import { get, mutate } from "../client";
+import type { AuditOutcome } from "./audit";
 
 /** 五档会员，见 app/quota.py::TIER_TABLE。is_system_admin=1 的账号不受此字段
  *  限制——tier 对系统管理员而言只是个未使用的历史值，界面必须把这点显式标出，
@@ -17,6 +18,20 @@ export interface UserRow {
   quota_period_started_at: number | null;
   created_at: number;
   last_login_at: number | null;
+  /** 「最近活跃」≠「最近登录」：有历史登录后，直接打开页面（不重新登录）也算
+   *  活跃，覆盖登录动作之外的真实使用信号。恒存在（可为 null，即从未活跃过）。 */
+  last_active_at: number | null;
+  /** 最近一次被记录的操作审计事件摘要，供账号卡片直接展示，不必跳转
+   *  操作审计页也能看到「这个账号最后做了什么」。恒存在，可为 null。 */
+  last_action: {
+    id: string;
+    ts: number;
+    event: string;
+    event_label: string | null;
+    outcome: AuditOutcome;
+    project_id: string | null;
+    project_name: string | null;
+  } | null;
   /** 软删除时间戳；活跃账号列表（GET /system/users）里恒为 null，只有回收站
    *  列表（GET /system/users/deleted）会真正带值。 */
   deleted_at: number | null;

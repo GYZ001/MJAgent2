@@ -10,6 +10,7 @@ import * as models from "./models";
 import * as overview from "./overview";
 import * as admin from "./admin";
 import * as trace from "./trace";
+import * as audit from "./audit";
 
 export * from "./jobs";
 export * from "./calls";
@@ -18,6 +19,7 @@ export * from "./models";
 export * from "./overview";
 export * from "./admin";
 export * from "./trace";
+export * from "./audit";
 
 export const api_system = {
   // jobs
@@ -59,4 +61,8 @@ export const api_system = {
   // trace
   getTraceView: trace.getTraceView,
   getTraceNodeDetail: trace.getTraceNodeDetail,
+  // audit
+  listAuditEvents: audit.listAuditEvents,
+  getAuditEvent: audit.getAuditEvent,
+  getAuditFacets: audit.getAuditFacets,
 };

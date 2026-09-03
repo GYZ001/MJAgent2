@@ -34,6 +34,7 @@ import {
   loadCinemaPage,
   loadEpisodesPage,
   loadMonitorPage,
+  loadOperationAuditPage,
   loadReaderPage,
   loadScenesPage,
   loadScriptPage,
@@ -57,6 +58,7 @@ const SeriesPage = lazy(loadSeriesPage);
 const MonitorPage = lazy(loadMonitorPage);
 const ReaderPage = lazy(loadReaderPage);
 const AccountAdminPage = lazy(loadAccountAdminPage);
+const OperationAuditPage = lazy(loadOperationAuditPage);
 
 /** 项目清单拉取失败后的重试退避区间。 */
 const PROJECTS_RETRY_MIN_MS = 2000;
@@ -1024,7 +1026,9 @@ function AppShell() {
         {view === "system" && isSystemAdminUser && (
           currentPathname.endsWith("/accounts")
             ? <AccountAdminPage />
-            : <MonitorPage mode="system" />
+            : currentPathname.endsWith("/audit")
+              ? <OperationAuditPage />
+              : <MonitorPage mode="system" />
         )}
         </Suspense>
         </ErrorBoundary>

@@ -128,6 +128,12 @@
   color: var(--ink-soft);
   font-size: 12px;
 }
+.account-card-last-action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
 .account-card-actions {
   display: flex;
   flex-wrap: wrap;

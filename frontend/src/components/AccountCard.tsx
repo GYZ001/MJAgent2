@@ -1,6 +1,7 @@
 import { useId, useState } from "react";
 import type { DeletedUserRow, UserRow, UserTier } from "../api";
 import { ADDON_HINT, TIERS, TIER_HINTS, TIER_LABELS } from "../lib/tier";
+import { outcomeLabel } from "../pages/audit/auditLabels";
 
 /** 账号管理页的两种卡片。从 AccountAdminPage.tsx 抽出：该页当时 398/400 行，
  *  已经贴着前端单文件 400 行上限，再往里加东西就必然撞线（CLAUDE.md
@@ -69,7 +70,17 @@ export function AccountCard(props: AccountCardProps) {
           </select>
         )}
       </div>
-      <p className="account-card-meta">创建于 {formatTime(user.created_at)} · 最近登录 {formatTime(user.last_login_at)}</p>
+      <p className="account-card-meta">创建于 {formatTime(user.created_at)} · 最近登录 {formatTime(user.last_login_at)} · 最近活跃 {formatTime(user.last_active_at)}</p>
+      <p className="account-card-meta account-card-last-action">
+        最近操作：{user.last_action
+          ? `${user.last_action.event_label || user.last_action.event}（${outcomeLabel(user.last_action.outcome)}）· ${formatTime(user.last_action.ts)}`
+          : "暂无记录"}
+        <button type="button" className="btn small ghost" onClick={() => {
+          const target = `/system/audit?user_id=${encodeURIComponent(user.id)}`;
+          window.history.pushState({}, "", target);
+          window.dispatchEvent(new PopStateEvent("popstate"));
+        }}>查看操作记录</button>
+      </p>
       <div className="account-card-actions">
         <button type="button" className="btn small" disabled={busy} onClick={() => onResetPassword(user)}>重置密码</button>
         <button type="button" className="btn small ghost" disabled={busy} onClick={() => onToggleAdmin(user)}>
