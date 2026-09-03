@@ -30,6 +30,12 @@ from .normalize import (
     apply_scene_boundary_strategy,
     normalize_ai_shot_plan_candidate,
 )
+from .planner_contract import (
+    DEPENDENCY_ENUM_CONTRACT,
+    cached_window_is_valid,
+    planner_output_contract,
+    planner_system_prompt,
+)
 from .primitives import VideoPlanValidationError, _hash, _json
 from .publish import load_latest_plan, publish_plan
 from .release_manifest import (
@@ -429,30 +435,13 @@ async def generate_episode_plan(
         "storyboard_release_manifest": release_manifest,
         "capability_snapshot": capability_payload,
         "relation_enum_contract": SHOT_RELATION_ENUM_CONTRACT,
+        "dependency_enum_contract": DEPENDENCY_ENUM_CONTRACT,
         "shots": shot_payload,
     }
-    system = (
-        "你是视频生产工具层规划器，只能引用输入中的 shot/database_shot ID，不得改写剧情、"
-        "新增/删除/调换镜头。输入可能是整集的一个按请求体大小切分的窗口，只输出输入 shots。"
-        "你只负责分析每镜的时空、剪辑、动作阶段、状态依赖、运动依赖与置信度；"
-        "不得输出执行模式、镜头依赖、视频输入意图或 required_assets。"
-        "执行模式和素材合同由程序根据真实场景顺序统一编译。关系判断只基于时空、剪辑、动作阶段、"
-        "状态依赖和运动依赖，禁止按人物名、地点名、题材、打斗词或动作词表决定模式。"
-        "new_domain、new_space 或 scene_cut 表示新场景首镜。"
-        "relations 四个字段必须逐字使用 relation_enum_contract 对应数组中的枚举值，禁止自造同义词。"
-        "只输出 JSON，不要 Markdown。"
-    )
-    output_contract = (
-        "\n输出：{\"shots\":[{\"shot_id\":数据库或发布shot ID,"
-        "\"relations\":{\"temporal\":\"same_moment|elapsed|jump|new_domain|unknown\","
-        "\"spatial\":\"same_space|adjacent_space|new_space|unknown\","
-        "\"edit\":\"continuous_take|match_cut|angle_cut|reaction_cut|reverse_angle|insert_cut|montage|scene_cut|unknown\","
-        "\"action\":\"continues_same_action|starts_new_action|shows_result|observes_result|no_action|unknown\"},"
-        "\"state_dependency\":\"none|start_only|start_and_end|full_trajectory\","
-        "\"motion_dependency\":\"none|pose|trajectory|camera|rhythm|audio\","
-        "\"reason_codes\":[通用关系码],\"confidence\":0到1,\"unknown_dimensions\":[],"
-        "\"estimated_latency_ms\":整数}]}"
-    )
+    # 提示词与输出契约同源于 planner_contract：合法值从 Pydantic 字面量派生，带语义的
+    # 正面陈述在那边维护（见该模块 docstring 里 2026-09-03 的 end_only 事故）。
+    system = planner_system_prompt()
+    output_contract = planner_output_contract()
     planner_payload_base = {
         key: value for key, value in prompt_payload.items() if key != "shots"
     }
@@ -518,6 +507,11 @@ async def generate_episode_plan(
             except (
                 KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError,
             ):
+                continue
+            if not cached_window_is_valid(response):
+                # 台账里 status=OK 只说明供应商调用成功，不说明输出合法；同一份提示词
+                # 会一直命中这条坏响应，用户重试也会原样失败——跳过它，重新问模型。
+                response = None
                 continue
             cached_call_id = int(cached["id"])
             break
