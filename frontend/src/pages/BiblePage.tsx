@@ -11,7 +11,7 @@ import PrepSubnav from '../components/PrepSubnav'
 import { SINGLE_ROW_ASSET_PAGE, useFillPageSize } from '../hooks/useFillPageSize'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { usePrepListState } from '../hooks/usePrepListState'
-import { characterIsFitting } from '../lib/bibleAssets'
+import { characterIsFitting, characterPortraitStatusDetail } from '../lib/bibleAssets'
 import { formatBookTitle } from '../lib/bookTitle'
 import { sceneStepStatus } from '../lib/prepSteps'
 import { retryBibleGenerationAction } from '../lib/retryBibleGeneration'
@@ -1078,7 +1078,7 @@ export default function BiblePage() {
               return (
               <article key={c.name} className="figure character-card">
                 <div className="f-name">{c.name} <span className="f-role">{c.role}</span>
-                  <span className={`stamp ${stamp.color}`}>{stamp.label}</span>
+                  <span className={`stamp ${stamp.color}`}>{stamp.label}</span>{characterPortraitStatusDetail(c) && <span className="portrait-status-detail hint" role="status">　{characterPortraitStatusDetail(c)}</span>}
                 </div>
                 {(c.ref_image_url || hasPortraitImage) && (
                   <CharacterPortraitGallery

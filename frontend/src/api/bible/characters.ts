@@ -141,6 +141,11 @@ export interface Character {
   presence_status?: "onstage" | "mentioned_only" | "unresolved";
   portrait_eligible?: boolean;
   appearance_status?: "grounded" | "insufficient_evidence" | "deferred";
+  /** WS13 未出图归因（app.domain.bible_ops.portrait_status，只读投影）：
+   *  ready/generating/deferred(戏份不足)/failed(生成失败)/missing(无归因数据)。 */
+  portrait_status?: "ready" | "generating" | "deferred" | "failed" | "missing";
+  /** deferred/failed 时的具体原因，逐字取自 decision_reason。 */
+  portrait_reason?: string;
 }
 
 /** 定妆照生成/补齐/单角色重做共用的入口，见 BiblePage.tsx 的 retryRefs /

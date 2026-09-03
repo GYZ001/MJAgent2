@@ -209,6 +209,50 @@ export type ImageGenTaskLike = RefsTaskLike & SceneRefsTaskLike
  * WallPage.tsx 通过 `export { referenceImageLabel } from '../lib/bibleAssets'`
  * 保持对外接口（含既有测试的导入路径）不变。
  */
+/**
+ * 人物谱页「未出图」角标的归因说明（WS13，用户拍板 2026-09-03）：
+ * 一句话真名（画面在场证据不足）入谱后不自动出定妆照，此前界面只显示一个笼统
+ * 的「未出图」角标，用户会误以为是出图失败去反复重试，看不到
+ * ``app.portraits.card_verdict.portrait_generation_decision`` 判定时写下的真实
+ * 原因（如"戏份不足……人物卡已登记但未自动出图……也可在人物谱页手动生成"）。
+ *
+ * 后端 ``GET /projects/{id}?view=bible`` 现在给每个角色投出
+ * ``portrait_status``（app.domain.bible_ops.portrait_status 模块，只读投影，
+ * 不新造状态机）与 ``portrait_reason``（逐字取 decision_reason/失败原因）。
+ * 这里只做纯展示拼接：category 前缀由 status 这个"数据驱动的枚举"决定，具体
+ * 原因文案一律取自后端 reason 字段逐字拼接，不在前端重新判断"为什么没出图"
+ * ——那道判断只应该在后端一处发生。``portrait_status`` 缺失、或落在
+ * ready/missing（没有可归因的队列数据，比如从未走过 discovery 队列的初始
+ * 批次角色）时返回 null，调用方沿用既有的笼统「未出图」角标，不编造原因。
+ *
+ * ``deferred`` 的前缀刻意只写「未出图」，不写死「戏份不足」——用 B 生产库
+ * proj_ecabd38b7261（三国白话）/proj_ce9fcf749b23（跑不快的孩子）实测核对时
+ * 发现，``auto_applied_asset_pending`` 的 decision_reason 既可能是
+ * ``portrait_generation_decision`` 给出的具体"戏份不足（原文仅一句话提及……）"
+ * 长句，也可能是身份消歧确认真名后结构性延后出图的通用兜底句"人物卡已加入；
+ * 定妆包等待独立资产环节确认"（``app/identity_adjudication.py``/``app/
+ * production/prep_pack/persistent_appellation.py`` 都以 ``generate_portrait=
+ * False`` 调用建卡，与"戏份不够"无关）——把"戏份不足"焊进前缀会在后一种情形
+ * 下断言一个数据不支持的具体原因，界面承诺就跟实际不一致了。真正的原因始终
+ * 由 reason 逐字兜底表达，前缀只负责说"这是未出图状态"。
+ */
+const PORTRAIT_STATUS_DETAIL_PREFIX: Record<'deferred' | 'failed' | 'generating', string> = {
+  deferred: '未出图',
+  failed: '未出图 · 生成失败',
+  generating: '定妆照生成中',
+}
+
+export function characterPortraitStatusDetail(character: {
+  portrait_status?: string | null
+  portrait_reason?: string | null
+}): string | null {
+  const status = character.portrait_status
+  if (status !== 'deferred' && status !== 'failed' && status !== 'generating') return null
+  const prefix = PORTRAIT_STATUS_DETAIL_PREFIX[status]
+  const reason = (character.portrait_reason || '').trim()
+  return reason ? `${prefix}：${reason}` : prefix
+}
+
 export function referenceImageLabel(ref: ReferenceImage): string {
   if (ref.type === 'character' || ref.entity_type === 'character') return `人物 · ${ref.entity_name || '未命名'}`
   if (ref.type === 'scene' || ref.entity_type === 'scene') return `场景 · ${ref.entity_name || '未命名'}`

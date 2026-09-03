@@ -294,7 +294,7 @@ def project_detail(
         p["chapters"] = []
     # 把每个角色的定妆照分段（适用集区间 + 图生图谱系）挂到 bible.characters 上，供横向预览。
     if p["bible"] and (full or view == "bible"):
-        _attach_character_portraits(conn, project_id, p["bible"])
+        _attach_character_portraits(conn, project_id, p["bible"], p.get("bible_auto_changes_json"))
     # The prep navigation is also shown on the character page. Attach current
     # scene-reference status there so it can report actual video usability
     # instead of a stale project-level warning from an older multi-view run.

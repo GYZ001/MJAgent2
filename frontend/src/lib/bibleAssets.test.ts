@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { AdaptivePoller } from '../adaptivePoller'
 import {
+  characterPortraitStatusDetail,
   refsBusyPollInterval,
   resolvePortraitPlaceholderKind,
   resolveSceneRefPlaceholderKind,
@@ -126,5 +127,44 @@ describe('refsBusyPollInterval（出图结束后轮询停止）', () => {
     await new Promise<void>(resolve => setTimeout(resolve, 0))
     expect(received.at(-1)).toEqual({ refs_status: 'ready' })
     expect(timers).toHaveLength(0) // 出图已结束：不再排定下一次轮询
+  })
+})
+
+describe('characterPortraitStatusDetail（WS13：人物谱「未出图」角标归因说明）', () => {
+  it('deferred·戏份不足：前缀只写"未出图"，具体原因逐字来自后端，不改写', () => {
+    const detail = characterPortraitStatusDetail({
+      portrait_status: 'deferred',
+      portrait_reason: '戏份不足（原文仅一句话提及），人物卡已登记但未自动出图',
+    })
+    expect(detail).toBe('未出图：戏份不足（原文仅一句话提及），人物卡已登记但未自动出图')
+  })
+
+  it('deferred·结构性延后（B 库实测：身份消歧确认真名后 generate_portrait=False，' +
+    '与"戏份不够"无关）：前缀不得断言"戏份不足"，只如实转述后端通用原因', () => {
+    const detail = characterPortraitStatusDetail({
+      portrait_status: 'deferred',
+      portrait_reason: '人物卡已加入；定妆包等待独立资产环节确认',
+    })
+    expect(detail).toBe('未出图：人物卡已加入；定妆包等待独立资产环节确认')
+  })
+
+  it('failed：拼出"生成失败"前缀 + 后端错误引用', () => {
+    const detail = characterPortraitStatusDetail({
+      portrait_status: 'failed',
+      portrait_reason: '（ERR-20260903-abc123 · err_1）',
+    })
+    expect(detail).toBe('未出图 · 生成失败：（ERR-20260903-abc123 · err_1）')
+  })
+
+  it('generating：无原因时只显示"定妆照生成中"，不留多余的冒号', () => {
+    expect(characterPortraitStatusDetail({ portrait_status: 'generating', portrait_reason: '' }))
+      .toBe('定妆照生成中')
+    expect(characterPortraitStatusDetail({ portrait_status: 'generating' })).toBe('定妆照生成中')
+  })
+
+  it('ready/missing/未知状态：没有可归因数据，返回 null（不编造原因，沿用原有角标）', () => {
+    expect(characterPortraitStatusDetail({ portrait_status: 'ready', portrait_reason: '' })).toBeNull()
+    expect(characterPortraitStatusDetail({ portrait_status: 'missing' })).toBeNull()
+    expect(characterPortraitStatusDetail({})).toBeNull()
   })
 })

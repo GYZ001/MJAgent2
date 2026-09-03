@@ -6,12 +6,22 @@ from __future__ import annotations
 import json
 
 from app.db import rows_to_dicts
+from app.domain.bible_ops.portrait_status import attach_portrait_projection
 from app.domain.common import _media_url
 from app.evidence import repository as evidence_repository
 
 
-def _attach_character_portraits(conn, project_id: str, bible: dict) -> None:
-    """为 bible.characters 挂上 character_portraits 表里的分段定妆照（含多视角）。"""
+def _attach_character_portraits(
+    conn, project_id: str, bible: dict, bible_auto_changes_json: str | None = None,
+) -> None:
+    """为 bible.characters 挂上 character_portraits 表里的分段定妆照（含多视角），
+    并投出 portrait_status/portrait_reason（WS13：见 bible_ops.portrait_status
+    模块 docstring——「未出图」角标缺理由，用户误以为出图失败反复重试）。
+
+    ``bible_auto_changes_json`` 由调用方传入（``projects`` 表原始列，调用方
+    ``project_detail`` 已经整行取过，这里不重新查库）；未传时按"没有队列数据"
+    处理，portrait_status 只会落在 ready/missing 两态，不影响既有调用方
+    （历史测试/脚本仍可只传 3 个位置参数）。"""
     from app.portraits import STAGED_INITIAL_EP_START
 
     try:
@@ -98,6 +108,7 @@ def _attach_character_portraits(conn, project_id: str, bible: dict) -> None:
             ), None)
             if latest_ready:
                 c["ref_image_url"] = latest_ready["image_url"]
+    attach_portrait_projection(bible, bible_auto_changes_json)
 
 
 def _attach_scene_refs(conn, project_id: str, bible: dict) -> None:

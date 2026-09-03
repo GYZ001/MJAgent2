@@ -1,6 +1,6 @@
 """人物谱（Bible）与角色/场景引用图生成的路由与业务逻辑。
 
-``app/domain/bible_ops.py``（4,386 行 / 123 个顶层定义）拆成本包，按关注点分 15 个子模块：共享原语（primitives）、场景素材缺口判据（scene_assets）、人物谱改动影响预检（precheck）、角色引用图生成任务（refs_generation）与场景引用图/场景圣经准备任务（scene_bible_prep）、人物谱生成任务体（task_run）与开机孤儿任务恢复（task_recovery，依赖 task_run 故排其后）、单场景引用图生命周期（scene_refs）、整体画风切换与草稿存取（style_and_drafts）、人物谱/角色卡编辑（edit）、立绘候选查询与采纳（portrait_candidates）、变更后自动改配裁决（auto_change）、场景提示词/锚点编辑（scene_edit）、角色/场景单视图重绘（view_redo）、用户提名建卡（nominate，2026-08-31 新增：用户看到角色没被自动选上时的手动入口，复用既有建卡判据，不新写一套）、共用上传校验（manual_upload，2026-08-31 新增）、角色手动新增/替换定妆照（manual_character，2026-08-31 新增：图像描述与图片完全由用户提供，不走模型；去重仍过 resolve_card_owner，替换复用 portrait_candidates 的 adopt/rollback 语义）、场景手动新增/替换场景图（manual_scene，2026-08-31 新增：与 manual_character 同一用户拍板的场景侧镜像）。移动未重写，逻辑/签名/格式不变。
+``app/domain/bible_ops.py``（4,386 行 / 123 个顶层定义）拆成本包，按关注点分 15 个子模块：共享原语（primitives）、场景素材缺口判据（scene_assets）、人物谱改动影响预检（precheck）、角色引用图生成任务（refs_generation）与场景引用图/场景圣经准备任务（scene_bible_prep）、人物谱生成任务体（task_run）与开机孤儿任务恢复（task_recovery，依赖 task_run 故排其后）、单场景引用图生命周期（scene_refs）、整体画风切换与草稿存取（style_and_drafts）、人物谱/角色卡编辑（edit）、立绘候选查询与采纳（portrait_candidates）、变更后自动改配裁决（auto_change）、场景提示词/锚点编辑（scene_edit）、角色/场景单视图重绘（view_redo）、用户提名建卡（nominate，2026-08-31 新增：用户看到角色没被自动选上时的手动入口，复用既有建卡判据，不新写一套）、共用上传校验（manual_upload，2026-08-31 新增）、角色手动新增/替换定妆照（manual_character，2026-08-31 新增：图像描述与图片完全由用户提供，不走模型；去重仍过 resolve_card_owner，替换复用 portrait_candidates 的 adopt/rollback 语义）、场景手动新增/替换场景图（manual_scene，2026-08-31 新增：与 manual_character 同一用户拍板的场景侧镜像）、人物谱「未出图」角标归因投影（portrait_status，2026-09-03 新增：从 bible_auto_changes_json 只读投影出 portrait_status/portrait_reason，不新造状态机）。移动未重写，逻辑/签名/格式不变。
 
 本文件是稳定入口：所有既有 ``from app.domain.bible_ops import X`` / ``app.domain.bible_ops.X`` 调用点必须原样可用。每个符号从**真源**导出一次：包内定义的符号从定义它的子模块导出；来自其它模块的符号（``app.db``、``app.schemas``、``app.domain.common``、``app.visual_styles`` 等）直接从真正定义它们的模块导出，不借道某个碰巧 ``import`` 了它的子模块转手——这条正是之前踩过的坑：2026-09-01 成本预算体系退役时删掉 ``refs_generation.py`` 里一行未使用的 ``get_setting`` import，直接打断了这条借道再导出链，整个工作区 ``import app.main`` 失败；``current_actor_name`` 同理（候选采纳路由退场后 ``view_redo.py`` 不再用它，只剩包属性靠"子模块碰巧还导入着"续命）。用 ``name as name`` 显式再导出（PEP 484 显式重导出写法，与 ``app/validators/__init__.py``、``app/narrative/__init__.py`` 同一先例），不用 ``from .x import *``（``app/FILE_CONVENTIONS.toml`` 的 ``star_import`` 闸门禁止后者）。``worker``/``task_registry``/``errors`` 是 ``app.worker``/``app.task_registry``/``app.errors`` 三个共享单例模块本身（不是各子文件独立持有的值副本），`tests/conftest.py::patch_api_everywhere` 的文档明确把 ``api.worker.X``/``api.task_registry.X`` 排除在"包拆分打桩陷阱"之外，因此仍从真源 ``app`` 导出。stdlib（``annotations``、``asyncio``、``json``）不再作为包属性导出——纯子模块实现细节导入，全仓 grep 确认没有 ``bible_ops.<名字>`` 读取或打桩依赖。新增人物谱相关逻辑请加进对应关注点的子模块，不要加回本文件。
 """
@@ -112,6 +112,10 @@ from .portrait_candidates import (
     adopt_portrait_candidate as adopt_portrait_candidate,
     list_portrait_candidates as list_portrait_candidates,
     rollback_portrait_candidate as rollback_portrait_candidate,
+)
+from .portrait_status import (
+    attach_portrait_projection as attach_portrait_projection,
+    character_portrait_projection as character_portrait_projection,
 )
 from .precheck import (
     _artifact_type_counts as _artifact_type_counts,
