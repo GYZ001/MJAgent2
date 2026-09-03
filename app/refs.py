@@ -378,14 +378,15 @@ async def _generate_one_character_portrait(
     """
     conn = get_conn()
     from app import portraits as _portraits
+    from app.portraits.appearance_style_guard import strip_visual_style_leak
 
     c.ref_image_path = None
     override = (c.portrait_prompt_override or "").strip()
     base_prompt = effective_portrait_prompt(
         style, c.appearance_canonical, override, c.period_costume_canonical,
     )
-    effective_appearance = portrait_override_appearance_anchor(
-        c.appearance_canonical, override,
+    effective_appearance, _ = strip_visual_style_leak(
+        portrait_override_appearance_anchor(c.appearance_canonical, override), style,
     )
     last_error: Exception | None = None
     # Score-only：只生成一次；QA 低分不带 critique 重生（PRD QA-SO #14）。
@@ -444,9 +445,7 @@ async def _generate_one_character_portrait(
                 qa=qa,
             )
             if artifact["status"] not in {"approved", "validated"}:
-                last_error = ContentGenerationError(
-                    f"定妆照技术校验未通过：{c.name}"
-                )
+                last_error = ContentGenerationError(f"定妆照技术校验未通过：{c.name}")
                 continue
             portrait_id = _portraits.stage_initial_portrait(
                 conn, project_id, c.name, path, effective_appearance, prompt,
