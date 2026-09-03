@@ -47,6 +47,13 @@ PAGES = {
         # 不登记就会被判成「共享/全局」而要求挪进 index.css。
         'components/AccountCard.tsx',
     ],
+    'OperationAuditPage': [
+        'pages/OperationAuditPage.tsx',
+        # 2026-09-02 新增操作审计页：筛选条/表格/行详情拆到 pages/audit/ 下的
+        # 独立文件，不登记就会被判成「不属于任何页面」（同 ScriptPage/SeriesPage
+        # 的先例）。
+        'pages/audit/',
+    ],
 }
 CLS_RE = re.compile(r'className=(?:"([^"]*)"|\{`([^`]*)`\}|\{([^}]*)\})', re.S)
 

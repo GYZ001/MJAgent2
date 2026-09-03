@@ -73,7 +73,7 @@ export function AuditTable({ items }: { items: AuditEvent[] }) {
                   <td>{sourceLabel(item.source)}</td>
                   <td>{item.target || "—"}</td>
                   <td>{item.project_name || item.project_id || "—"}</td>
-                  <td className="mono">{fmtTime(item.ts)}</td>
+                  <td className="audit-mono">{fmtTime(item.ts)}</td>
                 </tr>
                 {expanded && (
                   <tr className="audit-detail-row">

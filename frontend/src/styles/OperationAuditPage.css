@@ -5,11 +5,17 @@
    `.mono`/`.monitor-refresh` 只在 MonitorPage.css（随观测台分包）里，本页不
    引入那个包，所以下面用 audit- 前缀自成一套等价样式，不是随手照抄。 */
 
+.operation-audit-page {
+  /* 与 MonitorPage.css 的 .monitor-page 同款：页面顶层容器裹在 .desk 的
+     flex/grid 布局里，没有这条 min-width:0 时长内容（如未换行的 JSON pre）
+     会把整个页面撑宽溢出，不是纯占位符——真的解决了溢出问题。 */
+  min-width: 0;
+}
 .audit-muted {
   color: var(--ink-faint);
   font-size: 12px;
 }
-.mono {
+.audit-mono {
   font-family: "SF Mono", Menlo, monospace;
   font-size: 12px;
 }
@@ -162,4 +168,15 @@ table.audit-ledger td {
     min-width: 0;
     width: 100%;
   }
+}
+
+/* 暗色覆盖：两处亮色专属底色（浅米色水洗）在暗色皮肤下要翻成白色低透明度水洗，
+   数值与 MonitorPage.css 里同 alpha 的 table.monitor-ledger th / .settings-preview
+   一致（同一份 py scripts/check_dark_theme.py 换算公式：alpha*0.16，夹在
+   [0.035, 0.09] 之间）。 */
+:where(:root[data-theme="dark"]) table.audit-ledger th {
+  background: rgba(255, 255, 255, 0.088);
+}
+:where(:root[data-theme="dark"]) .audit-detail-row td {
+  background: rgba(255, 255, 255, 0.056);
 }

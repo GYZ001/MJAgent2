@@ -35,17 +35,25 @@ export function AuditFilters({
   return (
     <div className="audit-filters">
       <div className="audit-presets" role="group" aria-label="时间范围">
-        {TIME_PRESETS.map((preset) => (
-          <button
-            key={preset.key}
-            type="button"
-            className={`btn small ${filters.presetKey === preset.key ? "primary" : "ghost"}`}
-            aria-pressed={filters.presetKey === preset.key}
-            onClick={() => onPreset(preset.key)}
-          >
-            {preset.label}
-          </button>
-        ))}
+        {TIME_PRESETS.map((preset) => {
+          const isActive = filters.presetKey === preset.key;
+          // 注意：className 模板字符串里不要再嵌 preset.key 这类属性访问——
+          // scripts/check_css_split.py 的归属判定会把模板字符串里出现的任意
+          // 标识符都当成候选 class 名字（含 "key" 这种和 MonitorPage.css
+          // 里 .key-list/.key-lines-paged-frame 撞前缀的词），把本页错误地
+          // 计入那些选择器的归属候选，制造假阳性违规。
+          return (
+            <button
+              key={preset.key}
+              type="button"
+              className={`btn small ${isActive ? "primary" : "ghost"}`}
+              aria-pressed={isActive}
+              onClick={() => onPreset(preset.key)}
+            >
+              {preset.label}
+            </button>
+          );
+        })}
       </div>
       <div className="audit-toolbar">
         <label>
