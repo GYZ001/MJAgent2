@@ -12,11 +12,21 @@ from pathlib import Path
 import time
 from typing import Any
 
-from app.config import DATA_DIR
+from app.config import DATA_DIR, TIMEOUT_CHAT_STORYBOARD_PACK_READ
 
 
 _last_report: dict[str, Any] = {}
 _runtime_lock_handle = None
+
+# WS8-B：运行收尾（见 _finalize_stale_workflow_runs）判定"陈旧"的阈值——不新
+# 造魔数，从仓库最长的单次具名 HiAgent 调用超时
+# ``TIMEOUT_CHAT_STORYBOARD_PACK_READ``（960s，分镜台单段生成读超时，全仓最长）
+# 乘安全倍数推导。recover_all() 只在服务启动、还未对外接客前跑一次：任何到了
+# 这一步仍停在 RUNNING/PAUSED_EXTERNAL 的运行，其 started_at 必然早于本次进程
+# 启动；乘 4 只是为长链路（一个运行内多个串行步骤）与"更靠前的恢复步骤本该
+# 重新激活它但还没来得及"这类边界留安全余量，不是真的指望有运行会合法卡住
+# 超过 1 小时。
+_STALE_RUN_THRESHOLD_S = 4 * TIMEOUT_CHAT_STORYBOARD_PACK_READ
 
 
 def _try_lock(handle) -> None:
@@ -173,6 +183,7 @@ async def recover_all() -> dict[str, Any]:
     run_step("project_video_completion", recover_project_video_completion_queues)
     run_step("series_film", recover_series_film_runs)
     run_step("delivery", recover_delivery_tasks)
+    run_step("stale_run_finalize", _finalize_stale_workflow_runs)
     finished_at = time.time()
     report["recovery_meta"] = {
         "started_at": started_at,
@@ -187,6 +198,22 @@ async def recover_all() -> dict[str, Any]:
     global _last_report
     _last_report = report
     return dict(report)
+
+
+def _finalize_stale_workflow_runs() -> dict[str, int]:
+    """recover_all() 的最后一步：收尾逐类恢复步骤都处理不到的残留 RUNNING/
+    PAUSED_EXTERNAL 运行（WS8-B）。实际判据在
+    app.domain.orchestration_ops.stale_run_finalize——本函数只负责接上
+    这一步跑起来所需的 conn/now/阈值。
+    """
+    from app import db
+    from app.domain.orchestration_ops.stale_run_finalize import (
+        finalize_stale_workflow_runs,
+    )
+
+    return finalize_stale_workflow_runs(
+        db.get_conn(), now_ts=time.time(), stale_after_s=_STALE_RUN_THRESHOLD_S,
+    )
 
 
 def _repair_legacy_screenplay_warning_status(conn) -> int:

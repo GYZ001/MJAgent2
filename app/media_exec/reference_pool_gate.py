@@ -44,9 +44,17 @@ def _reference_pool_blockers(manifest: dict[str, Any] | None) -> list[str]:
 
 
 def _reference_repair_guidance(blockers: list[str]) -> str:
-    """拦住用户时必须给出路：明确缺口与修复入口，不留「核对状态」式空话。"""
+    """拦住用户时必须给出路：明确缺口与修复入口，不留「核对状态」式空话。
+
+    ``blockers`` 非空分支的文案与分镜台的资源警告
+    （``app.validators.resource_forecast.shot_resource_advisories``）共用
+    ``app.validators.resource_forecast.blocked_consequence_text`` 这一份来源，
+    避免两处各说各话（WS8-A）。
+    """
     if blockers:
-        return "缺口：" + "；".join(blockers) + "。请到「人物谱」或「场景库」补齐后重试。"
+        from app.validators.resource_forecast import blocked_consequence_text
+
+        return blocked_consequence_text(blockers)
     return "请到「人物谱」或「场景库」重新生成对应定妆照/场景图后重试。"
 
 

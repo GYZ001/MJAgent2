@@ -1131,6 +1131,7 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
         "character_references": 1, "portrait_view_redo": 1, "scene_references": 1,
         "episode_mapping": 1, "screenplay": 1, "storyboard": 1,
         "video_completion": 1, "project_video_completion": 1, "series_film": 1, "delivery": 1,
+        "stale_run_finalize": {},  # WS8-B 最后一步，真实运行，测试库无残留运行故为空
     }
     assert report["recovery_meta"]["failed_steps"] == []
     assert report["recovery_meta"]["duration_ms"] >= 0

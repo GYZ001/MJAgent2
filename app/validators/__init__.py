@@ -268,6 +268,11 @@ from .screenplay_validate import (
     validate_screenplay as validate_screenplay,
     validate_screenplay_spine_delivery as validate_screenplay_spine_delivery,
 )
+from .resource_forecast import (
+    forecast_shot_production as forecast_shot_production,
+    resource_advisories_for_segment as resource_advisories_for_segment,
+    shot_resource_advisories as shot_resource_advisories,
+)
 from .storyboard_core import (
     storyboard_pack_dialogue_errors as storyboard_pack_dialogue_errors,
     validate_storyboard as validate_storyboard,
@@ -284,5 +289,10 @@ from .storyboard_delivery import (
     validate_storyboard_preserves_key_content as validate_storyboard_preserves_key_content,
     validate_storyboard_shot_covers_outline as validate_storyboard_shot_covers_outline,
     validate_storyboard_soundtrack as validate_storyboard_soundtrack,
+)
+from .storyboard_montage import (
+    storyboard_montage_shot_errors as storyboard_montage_shot_errors,
+    storyboard_narrator_label_errors as storyboard_narrator_label_errors,
+    validate_storyboard_pack_montage as validate_storyboard_pack_montage,
 )
 
