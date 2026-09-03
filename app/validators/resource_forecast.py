@@ -37,7 +37,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.multiview import manifest_production_blockers
 
 WILL_BLOCK = "will_block"
 TEXT_ONLY_FALLBACK = "text_only_fallback"
@@ -68,6 +67,12 @@ def forecast_shot_production(manifest: dict[str, Any] | None) -> ShotProductionF
     文本"的真实运行时行为（该模块判定"候选池是否本该有东西"用的也是
     ``manifest_production_blockers``，见其 ``_reference_pool_blockers``）。
     """
+    # 延迟导入，不能放模块级：app.multiview 模块级 `from app.validators import match_scene_name`
+    # 会触发 validators 门面 __init__ → 本模块 → 再 import app.multiview（此时它只初始化了一半），
+    # 任何先 import app.multiview 的进程（单跑 tests/test_storyboard_gate_consistency.py、脚本）
+    # 都会 ImportError；全量测试只是碰巧导入顺序不同才没红。tests/test_import_cycle_multiview_validators.py 守着。
+    from app.multiview import manifest_production_blockers
+
     blockers = manifest_production_blockers(manifest)
     if blockers:
         return ShotProductionForecast(verdict=WILL_BLOCK, blockers=blockers)
