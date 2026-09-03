@@ -1,21 +1,27 @@
-"""小说摄入：编码识别、章节切分、广告清洗（PRD §4.1）。纯本地处理，不调模型。"""
+"""小说摄入：编码识别、章节切分、广告清洗（PRD §4.1）。纯本地处理，不调模型。
+
+章节标题的正面定义、小节边界与尺寸拆分/合并判据在 ``app.novel.structure``
+（拆分原因见该模块 docstring）；本模块负责解码/清洗/去重与整条摄入流水线。
+"""
 from __future__ import annotations
 
+import json
 import re
 
-_CHAPTER_NUMERALS = "0-9一二三四五六七八九十百千万零〇两壹贰叁肆伍陆柒捌玖拾佰仟"
-_CHAPTER_CORE = (
-    rf"(?:第[{_CHAPTER_NUMERALS}]+[章卷回节]"
-    r"|序章|楔子|引子|前言|后记|尾声|终章|番外(?:[0-9一二三四五六七八九十]+)?"
-    r"|Chapter\s+\d+)"
+from app.novel.structure import (
+    CHAPTER_ID_RE as CHAPTER_ID_RE,
+    CHAPTER_RE as CHAPTER_RE,
+    _CHAPTER_NUMERALS,
+    _extract_sections,
+    _find_heading_matches,
+    _merge_undersized_ending_chapters,
+    _parse_chapter_number,
+    _preamble_chapters,
+    _split_oversized_chapters,
 )
-CHAPTER_RE = re.compile(
-    rf"^\s*[【\[]?\s*({_CHAPTER_CORE}[^\n】\]]{{0,40}}?)\s*[】\]]?\s*$",
-    re.MULTILINE | re.IGNORECASE,
-)
-CHAPTER_ID_RE = re.compile(
-    rf"^(第[{_CHAPTER_NUMERALS}]+[章卷回节])(.*)$",
-)
+
+_RTF_SIGNATURE_RE = re.compile(r"^\s*\{\\rtf\d", re.IGNORECASE)
+_HTML_DOCUMENT_RE = re.compile(r"^\s*(?:<!DOCTYPE\s+html|<html[\s>])", re.IGNORECASE)
 
 SEPARATOR_ONLY_RE = re.compile(r"^(?:[-_=~*]{4,}|[－—～·]{4,})$")
 TRAILING_JUNK_ONLY_RE = re.compile(r"^[;；,，:：|丨]+$")
@@ -50,6 +56,22 @@ def validate_novel_text(text: str) -> None:
         raise ValueError("文件没有可读取的正文内容，请检查后重新选择")
     if "\x00" in text:
         raise ValueError("文件包含二进制内容，不是可读取的 TXT 小说")
+    # RTF/HTML 是纯 ASCII/文字编码，不会被上面的空字节或控制符占比拦下——
+    # 但正文其实是格式标记（`{\rtf1...}`、`<html>...`），不是可读小说：曾有
+    # 项目把 RTF 文件当 TXT 上传，全书被当无标题正文按 3000 字硬切，11/11
+    # 次下游剧本生成失败。只在文档**开头**匹配，避免正文里偶然提到「html」
+    # 之类词语被误拦。
+    head = text.lstrip()
+    if _RTF_SIGNATURE_RE.match(head):
+        raise ValueError(
+            "上传的是 RTF 富文本文件，不是纯文本小说，无法解析章节。"
+            "请在文字处理软件里「另存为」，格式选 TXT（或改导出 EPUB）后重新导入"
+        )
+    if _HTML_DOCUMENT_RE.match(head):
+        raise ValueError(
+            "上传的是网页/HTML 文件，不是纯文本小说，无法解析章节。"
+            "请把正文另存为 TXT（或改导出 EPUB）后重新导入"
+        )
     controls = sum(
         1 for char in text
         if ord(char) < 32 and char not in {"\n", "\r", "\t", "\f"}
@@ -91,31 +113,6 @@ def normalize_chapter_title(title: str) -> tuple[str, str]:
     # comparing a short stub with its adjacent rich chapter.
     subject = re.sub(r"[上下中]$", "", subject)
     return ordinal, subject
-
-
-def _parse_chapter_number(value: str) -> int | None:
-    if value.isdigit():
-        return int(value)
-    digits = {
-        "零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
-        "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
-        "壹": 1, "贰": 2, "叁": 3, "肆": 4, "伍": 5,
-        "陆": 6, "柒": 7, "捌": 8, "玖": 9,
-    }
-    units = {"十": 10, "拾": 10, "百": 100, "佰": 100, "千": 1000, "仟": 1000}
-    total = section = number = 0
-    for char in value:
-        if char in digits:
-            number = digits[char]
-        elif char == "万":
-            total += (section + number) * 10000
-            section = number = 0
-        elif char in units:
-            section += (number or 1) * units[char]
-            number = 0
-        else:
-            return None
-    return total + section + number
 
 
 def _chapter_ordinal(title: str) -> int | None:
@@ -252,21 +249,16 @@ def dedupe_stub_chapters(
 
 
 def _split_chapters_with_removed(text: str) -> tuple[list[dict], list[dict]]:
-    matches = list(CHAPTER_RE.finditer(text))
+    matches = _find_heading_matches(text)
     chapters: list[dict] = []
     if matches:
-        for i, m in enumerate(matches):
-            start = m.start()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        for i, (start, m_end, title) in enumerate(matches):
+            end = matches[i + 1][0] if i + 1 < len(matches) else len(text)
             body = text[start:end].strip()
-            remainder = text[m.end():end].strip()
+            remainder = text[m_end:end].strip()
             if remainder:
-                chapters.append({"idx": len(chapters) + 1, "title": m.group(1).strip(), "content": body})
-        preamble = text[: matches[0].start()].strip()
-        if len(preamble) > 200:
-            chapters.insert(0, {"idx": 0, "title": "楔子", "content": preamble})
-            for n, ch in enumerate(chapters):
-                ch["idx"] = n + 1
+                chapters.append({"idx": len(chapters) + 1, "title": title, "content": body})
+        chapters = _preamble_chapters(text, text[: matches[0][0]].strip()) + chapters
     if not chapters:
         for i in range(0, len(text), FALLBACK_CHUNK_CHARS):
             chunk = text[i:i + FALLBACK_CHUNK_CHARS].strip()
@@ -274,6 +266,13 @@ def _split_chapters_with_removed(text: str) -> tuple[list[dict], list[dict]]:
                 chapters.append({"idx": len(chapters) + 1, "title": f"第{len(chapters) + 1}段（自动切分）", "content": chunk})
     chapters = _recover_missing_unit_headings(chapters)
     chapters, removed = dedupe_stub_chapters(chapters)
+    chapters = _merge_undersized_ending_chapters(chapters)
+    chapters = _split_oversized_chapters(chapters)
+    for number, chapter in enumerate(chapters, start=1):
+        chapter["idx"] = number
+        chapter["paratext_json"] = json.dumps(
+            {"sections": _extract_sections(str(chapter["content"]))}, ensure_ascii=False,
+        )
     return chapters, removed
 
 

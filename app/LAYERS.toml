@@ -259,6 +259,10 @@ allowed_exceptions = []
 "app.identity_authority" = 1
 "app.ingest" = 1
 "app.model_capabilities" = 1
+"app.novel" = 1  # 2026-09-02 新增：WS1 从 app.ingest 拆出的章节结构判据包
+                 # （app.novel.structure：标题正面定义/小节边界/尺寸拆分合并），
+                 # 零 app 内部依赖，只被 app.ingest 单向导入（同层允许）；不放
+                 # app/ 根目录散文件，遵守「app/ 根目录不再新增散文件」红线
 "app.novel_formats" = 1
 "app.scene_contract" = 1
 "app.screenplay_retry_authority" = 1
