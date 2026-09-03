@@ -60,8 +60,16 @@ from app.production.storyboard_dialects import (
     SEEDANCE_DIALECT_INSTRUCTIONS,  # noqa: F401 -- 重新导出，测试按旧路径 import
     _dialect_for_target_video_model,
 )
-from app.production.storyboard_context_segments import (
-    context_only_segment_errors, context_segment_indexes, context_segment_rule,
+from app.production.storyboard_beat_sheet import (
+    _AiBeat as _AiBeat,
+    _AiBeatSheetDraft as _AiBeatSheetDraft,
+    _AiSegmentPlan as _AiSegmentPlan,
+    _beat_sheet_rules as _beat_sheet_rules,
+    _generate_beat_sheet,
+    _paratext_exclusion_rule as _paratext_exclusion_rule,
+    _paratext_segment_indexes as _paratext_segment_indexes,
+    _source_block_for_prompt as _source_block_for_prompt,
+    _validate_beat_sheet_draft as _validate_beat_sheet_draft,
 )
 from app.production.storyboard_continuity_memo import (
     _AiContinuityMemo,
@@ -70,25 +78,27 @@ from app.production.storyboard_continuity_memo import (
     continuity_memo_output_contract_text,
     continuity_memo_payload,
 )
+from app.production.storyboard_dialogue_extract import extract_dialogue_targets
 from app.production.storyboard_dialogue_ledger import (
-    DialogueQuote,
-    _AiDroppedLine,
-    _AiKeptLine,
-    beat_sheet_dialogue_ledger_rules,
-    dialogue_density_by_source_segment,
-    dialogue_ledger_errors,
     dialogue_ledger_summary,
-    extract_dialogue_targets,
     required_dialogue_for_segments,
     required_dialogue_missing_errors,
     required_dialogue_rule,
 )
+from app.production.storyboard_dialogue_repeat import (
+    already_delivered_dialogue_rule,
+    already_delivered_payload,
+    repeated_delivery_errors,
+)
 from app.production.storyboard_narrative_arc import (
     _segment_continuity_rules,
     _segment_shared_rules,
-    beat_sheet_narrative_arc_rules,
     phase2_segment_rules,
     segment_narrative_arc_payload_fields,
+)
+from app.production.storyboard_segment_ranges import (
+    _PARATEXT_PLACEHOLDER_TEXT,
+    segment_source_payload,
 )
 from app.schemas import Bible, Dialogue, MontageBeat
 from app.validators import resource_advisories_for_segment
@@ -358,7 +368,39 @@ from app.source_excerpt import SourceSegment, index_source_segments
 #: 落库新增 StoryboardPackSegment.continuity_memo 字段，MARKER 必须跟着换
 #: 版本号：旧行没有这个字段，resume 短路如果继续认旧 marker，会把这些缺字段
 #: 的旧行误判为"已经用新契约生成过"而不重新生成，跳过本次真正要修的时段漂移。
-STORYBOARD_PACK_VERSION = "2.3.0"
+#:
+#: 2.4.0（真实故障，2026-09-03「橘座在上」EP1，B 库实测）：节拍表把原文场
+#: 1-3（761 字、无空行的一个原文段）拆成 6 段，但 6 段的 source_segment_
+#: indexes 全是 [4]，每段拿到**整场**原文，只靠一句节拍摘要区分该拍哪一块——
+#: 猫跳上桌在段 4/6 各拍一次，黄总抓猫在段 7/8/9 拍了三次，全集最后一句内心
+#: 独白在段 4/6 各说一遍。旧校验只查段号越界，不查各段是否按顺序各占一块，
+#: 因为节拍表压根没有"块"这个概念可查。三项改造对应三个根因：
+#: ① 每段各占一块原文、按顺序不回退——节拍表新增 segments[].source_unit_
+#: ranges（对每个非 paratext 原文段号声明一段句单元范围，句单元由新模块
+#: app.production.storyboard_segment_ranges.split_source_units 确定性切出，
+#: 不依赖模型），阻断式判据 segment_unit_range_errors 要求同一原文段被多段
+#: 引用时范围首尾相接、不回退、并集覆盖全部单元；kept_line_unit_binding_
+#: errors 进一步核对每条 kept 台词的单元号是否落在它被分到的那一段声明的
+#: 范围内。阶段二只喂 segment_source_payload 算出的本段范围内单元 + 前后各
+#: 两个单元的衔接上下文，不再是整段原文——这是同一原文段被拆给多段后，各段
+#: 物理上看不到别的段负责的那几句、因此不可能拍重复的根本原因。
+#: ② 时长维度：评估后用户拍板保留固定 15 秒/段（不引入 5/10/15 分档），改成
+#: 节拍表 rules[] 里一条正面陈述——一个段必须承载足够撑满 15 秒的内容，内容
+#: 单薄的相邻节拍要合并，不要为了凑段数把一场戏拆薄；只有台词容量装不下时
+#: 才拆多段。判据来源仍是既有 config.MAX_SPOKEN_CHARS_PER_SHOT 与
+#: dialogue_ledger_errors/容量归一化，不新增维度。
+#: ③ 跨段台词去重——新模块 app.production.storyboard_dialogue_repeat：阶段二
+#: 逐段调用互相看不到彼此写过什么台词，第 k 段生成时喂一份前 k-1 段已交付
+#: 台词清单（already_delivered_dialogue），同一说话人重复交付同一句台词
+#: （归一化后逐字相同）即阻断重试，判据 repeated_delivery_errors。
+#: 搬移：storyboard_pack.py 已在 line_count 棘轮基线上零余量，阶段一（节拍表
+#: schema/生成/校验/paratext 账处理）整体搬到新模块 app.production.
+#: storyboard_beat_sheet（纯搬移，行为不变，见该模块 docstring）为上述三项
+#: 新逻辑腾行数。落库新增 StoryboardPackSegment.source_unit_ranges 字段，
+#: MARKER 必须跟着换版本号：旧行没有这个字段，resume 短路如果继续认旧
+#: marker，会把这些缺字段的旧行误判为"已经用新契约生成过"而不重新生成，跳过
+#: 本次真正要修的段落重复。
+STORYBOARD_PACK_VERSION = "2.4.0"
 
 #: Written to Shot.prompt_contract_version for every row this module writes;
 #: downstream consumers key off it to know this row's legacy per-shot fields
@@ -367,8 +409,9 @@ STORYBOARD_PACK_VERSION = "2.3.0"
 #: 生成，marker 不动会让 resume 短路继续复用那些低保真产物。2.2.0 起改到
 #: storyboard_pack/2.2.0（同上方 changelog）：新增 palette 落库字段，旧行
 #: 没有这个字段，resume 短路必须判过期重生成。2.3.0 起改到
-#: storyboard_pack/2.3.0：新增 continuity_memo 落库字段，同一理由。
-STORYBOARD_PACK_CONTRACT_MARKER = "storyboard_pack/2.3.0"
+#: storyboard_pack/2.3.0：新增 continuity_memo 落库字段，同一理由。2.4.0 起
+#: 改到 storyboard_pack/2.4.0：新增 source_unit_ranges 落库字段，同一理由。
+STORYBOARD_PACK_CONTRACT_MARKER = "storyboard_pack/2.4.0"
 
 SEGMENT_DURATION_S = 15
 MIN_SHOTS_PER_SEGMENT = 2
@@ -489,174 +532,15 @@ def _ensure_segment_prompt_budget() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 阶段一：节拍表 + 分段
+# 阶段一（节拍表 + 分段的 schema/生成/校验/paratext 账处理）2.4.0 起搬到
+# app.production.storyboard_beat_sheet（纯搬移，行为不变，见该模块 docstring
+# 与文件顶部 import：_AiBeat/_AiSegmentPlan/_AiBeatSheetDraft/
+# _validate_beat_sheet_draft/_beat_sheet_rules/_generate_beat_sheet/
+# _paratext_segment_indexes/_paratext_exclusion_rule/_source_block_for_prompt/
+# _PARATEXT_PLACEHOLDER_TEXT 均从那边以 `import X as X` 再导出，测试与其余
+# 调用方 import 路径不变）——为句单元范围声明与跨段台词去重两项新增闸门腾
+# 出行数，storyboard_pack.py 已在 line_count 棘轮基线上零余量。
 # ---------------------------------------------------------------------------
-
-class _AiBeat(BaseModel):
-    beat_id: str
-    summary: str
-    segment_indexes: list[int] = Field(min_length=1)
-
-
-class _AiSegmentPlan(BaseModel):
-    segment_no: int
-    synopsis: str
-    source_segment_indexes: list[int] = Field(min_length=1)
-    beat_ids: list[str] = Field(default_factory=list)
-    #: 2.2.0 色温弧线：开放词汇，不设枚举；默认空串兼容模型截断导致的漏填。
-    palette: str = ""
-
-
-class _AiBeatSheetDraft(BaseModel):
-    beat_sheet: list[_AiBeat] = Field(min_length=1)
-    segments: list[_AiSegmentPlan] = Field(min_length=1)
-    #: 2.1.0 对白台账：平铺列表，不用条件 schema；"逐一决定去留" 由
-    #: _validate_beat_sheet_draft 的 dialogue_ledger_errors 检查兜底。
-    kept_lines: list[_AiKeptLine] = Field(default_factory=list)
-    dropped_lines: list[_AiDroppedLine] = Field(default_factory=list)
-
-
-def _validate_beat_sheet_draft(
-    draft: _AiBeatSheetDraft, *, total_segments: int, dialogue_quotes: list[DialogueQuote],
-    context_indexes: set[int] = frozenset(), paratext_indexes: set[int] = frozenset(),
-) -> list[str]:
-    errors = context_only_segment_errors(draft.segments, set(context_indexes), set(paratext_indexes))
-    beat_ids = {beat.beat_id for beat in draft.beat_sheet}
-    if len(beat_ids) != len(draft.beat_sheet):
-        errors.append("beat_sheet 中 beat_id 必须唯一")
-    for beat in draft.beat_sheet:
-        bad = [i for i in beat.segment_indexes if i < 1 or i > total_segments]
-        if bad:
-            errors.append(f"beat {beat.beat_id} 引用了不存在的原文段号 {bad}")
-    expected_nos = list(range(1, len(draft.segments) + 1))
-    actual_nos = [s.segment_no for s in draft.segments]
-    if actual_nos != expected_nos:
-        errors.append(f"segments[].segment_no 必须为连续递增 1..{len(draft.segments)}，当前为 {actual_nos}")
-    for seg in draft.segments:
-        bad = [i for i in seg.source_segment_indexes if i < 1 or i > total_segments]
-        if bad:
-            errors.append(f"段 {seg.segment_no} 引用了不存在的原文段号 {bad}")
-        unknown_beats = [b for b in seg.beat_ids if b not in beat_ids]
-        if unknown_beats:
-            errors.append(f"段 {seg.segment_no} 引用了不存在的 beat_id {unknown_beats}")
-    segment_source_indexes = {s.segment_no: s.source_segment_indexes for s in draft.segments}
-    # 2.1.2：容量检查不在这里跑，改由 storyboard_capacity_normalize 兜底。
-    errors.extend(dialogue_ledger_errors(
-        quotes=dialogue_quotes,
-        kept_lines=draft.kept_lines,
-        dropped_lines=draft.dropped_lines,
-        segment_source_indexes=segment_source_indexes,
-        max_chars_per_segment=config.MAX_SPOKEN_CHARS_PER_SHOT,
-        include_capacity=False,
-    ))
-    return errors
-
-
-def _manifest_brief_for_prompt(payload: dict[str, Any]) -> dict[str, Any]:
-    """Compact asset_manifest summary handed to the model as light context.
-
-    Only names/ids/segment_indexes -- not portrait binaries or provenance --
-    so phase 1 (which only needs to recognize named entities while drafting
-    the beat sheet) doesn't pay for the full manifest payload twice.
-    """
-    manifest = payload.get("asset_manifest") or {}
-    return {
-        "characters": [
-            {
-                "identity_id": c.get("identity_id"),
-                "display_name": c.get("display_name"),
-                "aliases": c.get("aliases") or [],
-                "segment_indexes": c.get("segment_indexes") or [],
-            }
-            for c in (manifest.get("characters") or [])
-        ],
-        "scenes": [
-            {
-                "scene_id": s.get("scene_id"),
-                "display_name": s.get("display_name"),
-                "segment_indexes": s.get("segment_indexes") or [],
-            }
-            for s in (manifest.get("scenes") or [])
-        ],
-        "props": [
-            {
-                "label": p.get("label"),
-                "segment_indexes": p.get("segment_indexes") or [],
-            }
-            for p in (manifest.get("props") or [])
-        ],
-    }
-
-
-# ---------------------------------------------------------------------------
-# 作者的话（paratext）复用映射台已算好的账（2.0.4，用户从链路观测里发现
-# 「生成可执行分镜」节点的原文里混着作者感言并拍板）。判据不在本文件重新
-# 造：直接读 payload["coverage_ledger"]["paratext"]，那是
-# app.production.prep_pack._prep_pack_build_coverage_ledger 的既有产出
-# （章节标题的确定性识别 ∪ 模型自报且未被拒的作者话/求票/报字数尾记）。
-# ---------------------------------------------------------------------------
-
-#: 占位说明不含任何原文字符——这是本次改造要保证的底线（用户验收标准：
-#: provider_calls.request_json 里不能再出现作者感言原文），单纯提示"这里
-#: 本来有一段但不是正文"，段号本身仍然保留在 "[段N] ..." 里。
-_PARATEXT_PLACEHOLDER_TEXT = (
-    "（作者的话，非正文——已按映射台 coverage_ledger.paratext 账略去原文，"
-    "不要据此生成画面、台词或节拍）"
-)
-
-
-def _paratext_segment_indexes(payload: dict[str, Any]) -> set[int]:
-    """映射台已经算好的 paratext 段号集合，直接读、不重新判定。
-
-    旧契约分集兜底：``coverage_ledger`` 缺失、不是 dict，或者
-    ``coverage_ledger.paratext`` 缺失、不是 list 时，返回空集——效果是两处
-    source_block 构造函数退化成"每个段号都不是 paratext"，即改造前的全量
-    路径。绝不能把"账不存在"误读成"全部段落都是 paratext"（那会让模型看到
-    的原文变成清一色占位符，属于比不过滤更差的静默失效）。
-    """
-    ledger = payload.get("coverage_ledger")
-    if not isinstance(ledger, dict):
-        return set()
-    raw = ledger.get("paratext")
-    if not isinstance(raw, list):
-        return set()
-    result: set[int] = set()
-    for item in raw:
-        try:
-            result.add(int(item))
-        except (TypeError, ValueError):
-            continue
-    return result
-
-
-def _source_block_for_prompt(
-    segments: list[SourceSegment], paratext_indexes: set[int]
-) -> str:
-    """拼出喂给模型的 "[段N] 原文" 文本块，paratext 段落原文替换成占位说明。
-
-    段号绝不重新编号——source_segment_indexes 与 storyboard_source_bindings
-    整条链路都靠"段号=index_source_segments 的 1-based 位置"这个假设成立，
-    这里只替换某些行的正文内容，行本身（连同段号）照常出现在输出里，模型
-    看到的是"段号有跳空内容"而不是"段号本身消失了"。
-    """
-    lines = []
-    for index, segment in enumerate(segments, start=1):
-        text = _PARATEXT_PLACEHOLDER_TEXT if index in paratext_indexes else segment.text
-        lines.append(f"[段{index}] {text}")
-    return "\n".join(lines)
-
-
-def _paratext_exclusion_rule(paratext_indexes: set[int]) -> str | None:
-    """给 rules[] 用的显式禁令文案；没有 paratext 段落时返回 None（不往
-    rules[] 里塞一条空列表的噪音）。"""
-    if not paratext_indexes:
-        return None
-    return (
-        f"以下原文段号是作者的话/非正文（映射台已判定为 paratext，原文已略去，"
-        f"只剩占位说明）：{sorted(paratext_indexes)}——不得把它们编入任何 beat 的 "
-        "segment_indexes 或任何 segment 的 source_segment_indexes，也不得据此"
-        "编造情节"
-    )
 
 
 def _strip_paratext_from_beat_draft(
@@ -695,6 +579,13 @@ def _strip_paratext_from_beat_draft(
                 f"段 {seg.segment_no} 的 source_segment_indexes 全部落在 paratext 账内"
                 f"（{seg.source_segment_indexes}），已保留未过滤，避免产出空引用"
             )
+        # 2.4.0：source_unit_ranges 同步清掉指向 paratext 段号的条目——paratext
+        # 段落没有真实原文可切单元，range 声明本就不该存在；不受上面"保留未过滤"
+        # 兜底的影响（那条只保护 source_segment_indexes 不变空引用，range 本身
+        # 对 paratext 段号永远非法）。
+        seg.source_unit_ranges = [
+            r for r in seg.source_unit_ranges if r.source_segment_index not in paratext_indexes
+        ]
     return notes
 
 
@@ -780,93 +671,6 @@ def _enrich_asset_manifest_canonical_visuals(
             conn, scene.get("scene_reference_id"),
             bible_scene_canonical=bible_scenes.get(str(scene.get("display_name") or "")),
         ) or _NO_CANONICAL_SCENE_NOTE
-
-
-def _dialogue_targets_payload(dialogue_quotes: list[DialogueQuote]) -> dict[str, Any]:
-    """阶段一 payload 里对白台账相关的两个字段：台账本身 + 2.1.2 新增的密度表。"""
-    return {
-        "dialogue_targets": [q.model_dump(mode="json") for q in dialogue_quotes],
-        "dialogue_density_by_source_segment": dialogue_density_by_source_segment(
-            dialogue_quotes, max_chars_per_segment=config.MAX_SPOKEN_CHARS_PER_SHOT,
-        ),
-    }
-
-
-def _beat_sheet_rules(paratext_indexes: set[int], context_indexes: set[int] = frozenset()) -> list[str]:
-    """阶段一 rules[]：段落归组形状要求 + 2.1.0 对白台账正面陈述（见 beat_sheet_dialogue_ledger_rules）。"""
-    rules = [
-        "beat_sheet[].segment_indexes 与 segments[].source_segment_indexes 必须引用"
-        "下方原文自带的 [段N] 编号，不得虚构或越界",
-        "segments[].segment_no 必须从 1 开始连续递增",
-        "segments[].synopsis 用一句话概括这个段落在讲什么",
-        "段落数量由节拍的叙事单元数量决定，不是按原文段数或时长机械平分；剧情"
-        "密度高、台词多的地方应该拆成更多段，宁多勿少，不要为了少分段而压缩剧情",
-        "内心独白/叙述性交代如果既无法转成画面、也不影响读者理解因果，可以不进入"
-        "任何节拍；但凡是承载因果关系、人物动机或关键设定的内心独白/叙述性交代，"
-        "不能因为「无法视觉化」直接丢弃——保留进节拍，下一步会把它改写成一句简短的"
-        "角色画外音说出来（这属于内容改编，不算 dialogue_targets 里的引号台词）",
-        *beat_sheet_dialogue_ledger_rules(),
-        *beat_sheet_narrative_arc_rules(),
-    ]
-    extra = (_paratext_exclusion_rule(paratext_indexes), context_segment_rule(set(context_indexes)))
-    rules.extend(rule for rule in extra if rule is not None)
-    return rules
-
-
-async def _generate_beat_sheet(
-    *,
-    episode_id: str,
-    episode_no: int,
-    segments: list[SourceSegment],
-    payload: dict[str, Any],
-    dialogue_quotes: list[DialogueQuote],
-) -> _AiBeatSheetDraft:
-    paratext_indexes = _paratext_segment_indexes(payload)
-    context_indexes = context_segment_indexes(payload)
-    source_block = _source_block_for_prompt(segments, paratext_indexes)
-    task_payload = {
-        "task": (
-            "通读本章原文，列出节拍表（beat_sheet）：每个节拍是一次情绪或信息的变化，"
-            "不是一个句子；合并同质描写。然后把节拍按叙事单元归入段（一个段要能用"
-            "一句话概括，例如「他扔掉了理想」「反派现身」），不是按时长平均切；段与段"
-            "之间硬切。每段固定 15 秒、内含 2-4 个镜头（对话交锋段可用 2 镜正反打，"
-            "叙事推进段用 3-4 镜；这不是你要填的字段，是下一步的产出约束，这里只需要"
-            "正确分段）。dialogue_targets 里的每一句原文台词都要显式决定去留，见 rules。"
-        ),
-        "rules": _beat_sheet_rules(paratext_indexes, context_indexes),
-        "episode_no": episode_no,
-        "known_assets": _manifest_brief_for_prompt(payload),
-        "source_text_by_segment": source_block,
-        **_dialogue_targets_payload(dialogue_quotes),
-        "output_schema": _AiBeatSheetDraft.model_json_schema(),
-    }
-    fingerprint = hashlib.sha256(
-        json.dumps(task_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()[:24]
-    return await model_gateway.chat_structured(
-        [
-            {"role": "system", "content": "你是短剧分镜师。只输出符合 Schema 的一个 JSON 对象，不输出 Markdown或解释。"},
-            {"role": "user", "content": json.dumps(task_payload, ensure_ascii=False)},
-        ],
-        model_type=_AiBeatSheetDraft,
-        validate=lambda value: _validate_beat_sheet_draft(
-            value, total_segments=len(segments), dialogue_quotes=dialogue_quotes,
-            context_indexes=context_indexes, paratext_indexes=paratext_indexes,
-        ),
-        operation_id=f"storyboard_pack_beat_sheet_{episode_id}_{fingerprint}",
-        max_tokens=6000,
-        format_retry_limit=1,
-        semantic_retry_limit=2,
-        temperature=0.4,
-        call_meta={
-            "stage_key": "storyboard_pack_beat_sheet",
-            "call_role": "storyboard_beat_sheet",
-            "initiator_label": "分镜台节拍表",
-            "episode_id": episode_id,
-            "contract_version": STORYBOARD_PACK_VERSION,
-        },
-        repair_context=f"原文共 {len(segments)} 段，段号范围 1..{len(segments)}",
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -973,6 +777,8 @@ def _validate_segment_draft(
     *,
     dialect_render_format: str,
     required_dialogue: list[dict[str, Any]],
+    delivered_lines: list[tuple[int, str, str]],
+    current_segment_no: int,
     previous_memo: _AiContinuityMemo | None = None,
     segment_source_text: str = "",
 ) -> list[str]:
@@ -988,12 +794,20 @@ def _validate_segment_draft(
 
     2.3.0：新增 ``continuity_memo_errors`` 阻断检查（真实回归「白天说着说着
     变成黑夜」驱动，完整判据见 app.production.storyboard_continuity_memo 模块
-    docstring）。``previous_memo``/``segment_source_text`` 两个新参数带默认值
+    docstring）。``previous_memo``/``segment_source_text`` 两个参数带默认值
     只是为了不必逐一改写本文件里既有的、与连贯性备忘无关的直接调用点
     （它们测的是 prompt_text/H3 字段/required_dialogue 这几件事，默认值下等
     价于「本集第一段、原文为空」，_draft() 测试 fixture 已配一份合法备忘让
     这些用例继续通过）；``_generate_all_segment_prompts`` 唯一的生产调用点
     两个参数都显式传递，不依赖默认值。
+
+    2.4.0：新增 ``delivered_lines``/``current_segment_no`` 两个必传参数（无
+    默认值——CLAUDE.md「可选参数是缺陷的温床」：跨段去重必须每次显式传入
+    截至当前的已交付台词，漏传会让重复检查悄悄失效而不是报错），接
+    ``app.production.storyboard_dialogue_repeat.repeated_delivery_errors``。
+    真实故障：猫跳上桌在段 4/6 各拍一次，黄总抓猫在段 7/8/9 拍了三次——阶段二
+    逐段调用互相看不到彼此写过的台词，没有任何信号能让模型知道"这句已经说过
+    了"。
     """
     errors: list[str] = []
     if not draft.prompt_text.strip():
@@ -1010,6 +824,11 @@ def _validate_segment_draft(
         required_dialogue, [line.line for line in draft.dialogue],
     ))
     errors.extend(continuity_memo_errors(draft.continuity_memo, previous_memo, segment_source_text))
+    errors.extend(repeated_delivery_errors(
+        delivered_lines,
+        [(line.speaker_identity_id, line.line) for line in draft.dialogue],
+        current_segment_no=current_segment_no,
+    ))
     return errors
 
 
@@ -1212,6 +1031,9 @@ async def _generate_all_segment_prompts(
     by_segment_no: dict[int, _AiStoryboardSegmentDraft] = {}
     camera_digest_by_segment_no: dict[int, _AiCameraDigest] = {}
     relevant_assets_by_segment_no: dict[int, dict[str, Any]] = {}
+    # 2.4.0：截至当前段已交付的 (segment_no, speaker_identity_id, line)，用于
+    # 跨段台词去重（真实故障见 STORYBOARD_PACK_VERSION 2.4.0 changelog）。
+    delivered_lines: list[tuple[int, str, str]] = []
     for plan in beat_draft.segments:
         _ensure_segment_prompt_budget()
         relevant_assets = _segment_relevant_assets(payload, plan.source_segment_indexes)
@@ -1225,7 +1047,10 @@ async def _generate_all_segment_prompts(
         continuity_rules = _segment_continuity_rules(
             previous_segment_no=previous_segment_no, camera_history=camera_history,
         )
-        source_text = _segment_source_block(segments, plan.source_segment_indexes, paratext_indexes)
+        # 2.4.0：source_text_by_segment 只喂本段 source_unit_ranges 范围内的
+        # 单元 + 前后各两个单元的衔接上下文，不再是整段原文（见
+        # storyboard_segment_ranges 模块 docstring 的真实故障）。
+        source_payload = segment_source_payload(plan, segments, paratext_indexes)
         segment_paratext_hit = set(plan.source_segment_indexes) & paratext_indexes
         required_dialogue = required_dialogue_by_segment_no.get(plan.segment_no, [])
         palette_previous = beat_draft.segments[plan.segment_no - 2].palette if plan.segment_no > 1 else ""
@@ -1235,15 +1060,18 @@ async def _generate_all_segment_prompts(
                 "prompt_text 必须是完整、可直接复制使用的一整块文本，不要拆成多个片段或只写关键词"
                 "——你产出的字符串会被原样保存并原样提交给视频生成接口，不会再被代码拼接、改写或补充任何后缀。"
             ),
-            "rules": phase2_segment_rules(
-                continuity_rules=continuity_rules, shared_rules=shared_rules,
-                required_dialogue_rule_text=required_dialogue_rule(required_dialogue),
-                paratext_exclusion_rule=(
-                    _paratext_exclusion_rule(segment_paratext_hit) if segment_paratext_hit else None
+            "rules": [
+                *phase2_segment_rules(
+                    continuity_rules=continuity_rules, shared_rules=shared_rules,
+                    required_dialogue_rule_text=required_dialogue_rule(required_dialogue),
+                    paratext_exclusion_rule=(
+                        _paratext_exclusion_rule(segment_paratext_hit) if segment_paratext_hit else None
+                    ),
+                    palette_current=plan.palette, palette_previous=palette_previous,
+                    previous_memo=previous_memo,
                 ),
-                palette_current=plan.palette, palette_previous=palette_previous,
-                previous_memo=previous_memo,
-            ),
+                already_delivered_dialogue_rule(delivered_lines),
+            ],
             **segment_narrative_arc_payload_fields(
                 segment_no=plan.segment_no,
                 total_segments=len(beat_draft.segments),
@@ -1260,9 +1088,10 @@ async def _generate_all_segment_prompts(
             "duration_s": SEGMENT_DURATION_S,
             "shot_count_range": [MIN_SHOTS_PER_SEGMENT, MAX_SHOTS_PER_SEGMENT],
             "source_segment_indexes": plan.source_segment_indexes,
-            "source_text_by_segment": source_text,
+            **source_payload,
             "relevant_assets": relevant_assets,
             "required_dialogue": required_dialogue,
+            "already_delivered_dialogue": already_delivered_payload(delivered_lines),
             "previous_segment_prompt": previous_draft.prompt_text if previous_draft is not None else None,
             "previous_continuity_memo": continuity_memo_payload(previous_memo),
             "recent_camera_language": camera_history,
@@ -1311,9 +1140,11 @@ async def _generate_all_segment_prompts(
                 {"role": "user", "content": json.dumps(task_payload, ensure_ascii=False)},
             ],
             model_type=_AiStoryboardSegmentDraft,
-            validate=lambda value, _req=required_dialogue, _pm=previous_memo, _st=source_text: _validate_segment_draft(
+            validate=lambda value, _req=required_dialogue, _pm=previous_memo,
+            _st=source_payload["source_text_by_segment"], _dl=list(delivered_lines),
+            _no=plan.segment_no: _validate_segment_draft(
                 value, dialect_render_format=profile.render_format, required_dialogue=_req,
-                previous_memo=_pm, segment_source_text=_st,
+                previous_memo=_pm, segment_source_text=_st, delivered_lines=_dl, current_segment_no=_no,
             ),
             operation_id=f"storyboard_pack_segment_{episode_id}_{plan.segment_no}_{fingerprint}",
             max_tokens=SEGMENT_PROMPT_ANSWER_TOKENS,
@@ -1334,6 +1165,9 @@ async def _generate_all_segment_prompts(
         )
         camera_digest_by_segment_no[plan.segment_no] = draft.camera_digest
         by_segment_no[plan.segment_no] = draft
+        delivered_lines.extend(
+            (plan.segment_no, line.speaker_identity_id, line.line) for line in draft.dialogue
+        )
 
     # 延迟导入：app.multiview<->app.validators 互相依赖，模块级导入会触发循环导入。
     from app.multiview import _storyboard_pack_asset_dependencies
@@ -1390,6 +1224,10 @@ class StoryboardPackSegment(BaseModel):
     dialogue: list[dict[str, Any]]
     resources: dict[str, Any]
     degraded_capabilities: list[str]
+    #: 2.4.0：本段对它引用的每个非 paratext 原文段号声明的句单元范围
+    #: （_AiSourceUnitRange.model_dump 逐条落库），落库供审计核对；默认空列表
+    #: 兼容旧行（旧行没有这个字段）。
+    source_unit_ranges: list[dict[str, Any]] = Field(default_factory=list)
     #: 2.1.0 对白台账：本段 kept 的原文台词，供事后核对丢没丢；默认空列表兼容旧行。
     required_dialogue: list[dict[str, Any]] = Field(default_factory=list)
     #: 2.2.0 色温弧线，落库供审计核对；默认空串兼容旧行（旧行没有这个字段）。
@@ -1424,6 +1262,22 @@ def _load_indexed_source_segments(conn, ep) -> list[SourceSegment]:
     """
     source_text = _episode_source_text(conn, ep)
     return index_source_segments(source_text)
+
+
+def _manifest_speaker_names(payload: dict[str, Any]) -> list[str]:
+    """本集人物谱正名 + 别名，供 storyboard_dialogue_extract 判定"说话人行"用。
+
+    取自 ``payload["asset_manifest"]["characters"][].display_name``/``aliases``
+    ——与 ``_manifest_brief_for_prompt``（storyboard_beat_sheet.py）读的是同一
+    份数据，取值域来自映射台已经解析好的人物谱，不新造一套判定逻辑。
+    """
+    names: list[str] = []
+    for character in (payload.get("asset_manifest") or {}).get("characters") or []:
+        display_name = character.get("display_name")
+        if display_name:
+            names.append(str(display_name))
+        names.extend(str(alias) for alias in (character.get("aliases") or []))
+    return names
 
 
 async def generate_storyboard_pack(
@@ -1461,19 +1315,28 @@ async def generate_storyboard_pack(
     _enrich_asset_manifest_canonical_visuals(conn, payload, bible=bible)
 
     # 2.1.0：paratext 账提前算一次，抽取台词同时喂给阶段一（取值域）与阶段二（分配结果）。
+    # 2.4.0：接 storyboard_dialogue_extract 的剧本格式抽取路径（真实 EP1《橘座
+    # 在上》回归：剧本格式台词全写成「说话人（备注）：台词」，纯引号正则一句
+    # 都抽不到，见该模块 docstring）；speaker_names 取本集人物谱正名+别名。
     paratext_indexes = _paratext_segment_indexes(payload)
-    dialogue_quotes = extract_dialogue_targets(segments, paratext_indexes)
+    dialogue_quotes = extract_dialogue_targets(
+        segments, paratext_indexes, speaker_names=_manifest_speaker_names(payload),
+    )
 
     beat_draft = await _generate_beat_sheet(
         episode_id=episode_id, episode_no=episode_no, segments=segments, payload=payload,
-        dialogue_quotes=dialogue_quotes,
+        dialogue_quotes=dialogue_quotes, contract_version=STORYBOARD_PACK_VERSION,
     )
     # 防御性兜底（见 STORYBOARD_PACK_VERSION 2.0.4 changelog）：stage 1 的
     # rules[] 只是提示词层面的禁令，不是校验闸门，这里在通过格式校验之后、
     # 进入 phase 2 之前用同一份 paratext 账把漏网的引用滤掉。
     paratext_strip_notes = _strip_paratext_from_beat_draft(beat_draft, paratext_indexes)
     # 2.1.2：容量维度改成确定性归一化，不再打回模型重试（见 storyboard_capacity_normalize）。
-    capacity_normalization = normalize_and_assert_capacity(beat_draft, dialogue_quotes)
+    # 2.4.0：归一化拆段时必须同步拆 source_unit_ranges，因此需要真实原文
+    # （source_segments）与 paratext_indexes——见该模块 docstring。
+    capacity_normalization = normalize_and_assert_capacity(
+        beat_draft, dialogue_quotes, source_segments=segments, paratext_indexes=paratext_indexes,
+    )
     required_dialogue_by_segment_no = required_dialogue_for_segments(
         beat_draft.kept_lines, dialogue_quotes,
     )
@@ -1509,6 +1372,7 @@ async def generate_storyboard_pack(
                 for line in segment_drafts[plan.segment_no].dialogue
             ],
             resources=segment_drafts[plan.segment_no].resources.model_dump(mode="json"),
+            source_unit_ranges=[r.model_dump(mode="json") for r in plan.source_unit_ranges],
             # paratext_strip_notes 极罕见地非空时（见 _strip_paratext_from_beat_
             # draft 文档），留痕给每一段而不是挑一段单独记——这个信号描述的是
             # 整份 beat_draft 里出现的引用异常，不是某一段独有的问题。

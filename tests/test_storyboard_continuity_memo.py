@@ -309,6 +309,8 @@ def test_persist_storyboard_pack_writes_continuity_memo_per_segment():
     assert contract["prompt_contract_version"] == STORYBOARD_PACK_CONTRACT_MARKER
 
 
-def test_version_and_marker_are_2_3_0():
-    assert STORYBOARD_PACK_VERSION == "2.3.0"
-    assert STORYBOARD_PACK_CONTRACT_MARKER == "storyboard_pack/2.3.0"
+def test_version_and_marker_stay_in_sync():
+    """版本号本身随后续改造继续前进（当前 2.4.0，见 storyboard_pack 模块
+    docstring 的完整 changelog），这条测试只锁"marker 必须跟版本号同步"这个
+    不变式，不锁具体版本字符串——那会在每次版本前进时制造无关的红。"""
+    assert STORYBOARD_PACK_CONTRACT_MARKER == f"storyboard_pack/{STORYBOARD_PACK_VERSION}"
