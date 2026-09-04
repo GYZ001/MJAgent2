@@ -2924,3 +2924,13 @@ async def test_generate_raises_before_any_call_when_budget_cannot_fit_first_segm
         )
 
     assert called is False, "预算不够就不该真的发出请求"
+
+
+def test_validate_segment_draft_rejects_identity_prefixed_at_mentions():
+    """EP1 重跑实测：@bible:黄总 漏进正文后参考图绑不上，必须在阶段二就打回。"""
+    errors = _validate_segment_draft(
+        _draft(prompt_text="电影级预告片质感，多镜头叙事，镜头之间硬切。\n镜头1：@bible:黄总 站在地面上拍桌。"),
+        dialect_render_format="seedance_prose", required_dialogue=[],
+        delivered_lines=[], reserved_lines=[], current_segment_no=1,
+    )
+    assert any("@bible:黄总" in e for e in errors)

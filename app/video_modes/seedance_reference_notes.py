@@ -101,7 +101,10 @@ def _replace_at_mentions_with_picture_numbers(
     if not named_indices:
         return body
     ordered = sorted(named_indices, key=len, reverse=True)
-    pattern = re.compile("@(" + "|".join(re.escape(name) for name in ordered) + ")")
+    # EP1 重跑实测：模型从第 5 段起把 @李麦麦 写成了 @bible:李麦麦（identity_id 前缀漏进
+    # 正文），精确匹配 @名字 全部落空，Seedance 拿到的是一串无绑定的 @bible:xxx。可选的
+    # 「字母:」前缀一并吃掉，替换结果仍是 @图片N。
+    pattern = re.compile("@(?:[A-Za-z_]+:)?(" + "|".join(re.escape(name) for name in ordered) + ")")
     return pattern.sub(lambda m: f"@图片{named_indices[m.group(1)]}", body)
 
 

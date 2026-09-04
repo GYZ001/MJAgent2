@@ -19,6 +19,8 @@ docs/prompt-skills/{novel-to-storyboard,minimax-h3-prompts}/。H3 的字段名�
 """
 from __future__ import annotations
 
+import re
+
 from app import config
 from app.schemas import MontageBeat
 from app.video_prompt_profiles import VideoPromptProfile
@@ -39,7 +41,16 @@ JSON 字段或分点罗列）。
   特写，画面里除了袖口没有任何变化，这种镜头会让模型自行在中途插入切点，
   导致最终成片的镜头编号和分镜稿对不上，出问题也无法定点重跑那一镜。
 - 每个镜头描述顺序：一个运镜（推近/拉远/横摇/固定/跟随/环绕，只选一个，不
-  要复合运镜）→ 主体（用 @角色名 引用）→ 一个具体动作 → 场景 → 光影。
+  要复合运镜）→ 主体（用 @正名 引用）→ 一个具体动作 → 场景 → 光影。@ 后面
+  直接跟 relevant_assets.characters 里这个人的 display_name（例如 @黄总）；
+  identity_id（bible:黄总、entity:… 这类带前缀的 id）只用于 dialogue[] 的
+  speaker_identity_id 与 resources，不写进 prompt_text——正文里出现 @bible:黄总
+  会让人物参考图绑不上，这个人的长相就没有来源了。
+- 每个镜头里出现的人物都要写清脚下与依托：站在什么地面上、坐在哪把椅子上、
+  手撑在哪件家具的哪一侧（例如「站在长桌一端的地面上，上身前倾，双手撑在
+  桌沿」「坐在会议桌侧边的黑色转椅上」）。人只站在地面或坐在椅子上，桌面只
+  放道具和动物（橘座跳上桌是剧情，人不上桌）——实测「将一叠文件狠狠砸在
+  桌上」没写站位，模型把人物直接放在了桌面上，双腿穿进了桌子。
 - 角色的外观锚点在本段里只完整写一次，写在这个角色第一次出现的那个镜头。
   relevant_assets 里每个角色/场景都带一个外观/场景字段（角色是 appearance，
   场景是 scene_canonical）：内容是一段具体描述时，那就是这个角色/场景在本集
@@ -130,7 +141,7 @@ JSON 字段或分点罗列）。
   段落。
 - 结尾必须有一段「全片贯穿：环境音……；配乐……；风格……；约束……」，环境音
   与配乐不能留空，约束里必须包含「面部一致、手指正确、人数锁定、无字幕
-  水印」。这一段只负责环境音、配乐、风格与约束这四类信息，不写任何台词
+  水印、人物与家具不穿插」。这一段只负责环境音、配乐、风格与约束这四类信息，不写任何台词
   原话——每一句台词已经写在它发生的那个「镜头N」动作链里，这里不用引号
   重复台词，也不必写「XX说话声」这类概括去代替它；dialogue[] 与逐镜动作链
   两处台词逐字一致的要求见上一条，这一段不构成第三处、也不必对照。
@@ -362,3 +373,24 @@ def render_montage_beat_shots(beats: list[MontageBeat], *, duration_s: int) -> s
         lines.append(f"镜头{index}（约{start}-{end}秒）：{descriptor}")
         start = end
     return "\n".join(lines)
+
+
+_IDENTITY_PREFIXED_MENTION_RE = re.compile(r"@(?:bible|entity):\S+")
+
+
+def prompt_reference_prefix_errors(prompt_text: str) -> list[str]:
+    """prompt_text 里 @ 后面跟了 identity_id 前缀（@bible:黄总、@entity:…）时阻断。
+
+    EP1 重跑实测（2026-09-03）：模型从第 5 段起把 @李麦麦 写成 @bible:李麦麦，
+    打包时 @名字→@图片N 的替换落空，Seedance 收到一串无绑定的 @bible:xxx，人物
+    长相失去来源。这是「下一环节用不了」的形状问题，与 prompt_text 为空同类。
+    """
+    tokens = sorted(set(_IDENTITY_PREFIXED_MENTION_RE.findall(prompt_text or "")))
+    if not tokens:
+        return []
+    shown = "、".join(tokens[:6])
+    return [
+        f"prompt_text 里的 @ 引用带了 identity_id 前缀：{shown}；@ 后面只能直接跟 "
+        "relevant_assets.characters 的 display_name（例如 @黄总），bible:/entity: 前缀只用于 "
+        "speaker_identity_id 与 resources，不进正文"
+    ]

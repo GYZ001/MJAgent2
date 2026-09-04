@@ -59,17 +59,11 @@ from app.production.storyboard_dialects import (
     MINIMAX_H3_DIALECT_INSTRUCTIONS,  # noqa: F401 -- 重新导出，测试按旧路径 import
     SEEDANCE_DIALECT_INSTRUCTIONS,  # noqa: F401 -- 重新导出，测试按旧路径 import
     _dialect_for_target_video_model,
+    prompt_reference_prefix_errors,
 )
 from app.production.storyboard_beat_sheet import (
-    _AiBeat as _AiBeat,
-    _AiBeatSheetDraft as _AiBeatSheetDraft,
-    _AiSegmentPlan as _AiSegmentPlan,
-    _beat_sheet_rules as _beat_sheet_rules,
-    _generate_beat_sheet,
-    _paratext_exclusion_rule as _paratext_exclusion_rule,
-    _paratext_segment_indexes as _paratext_segment_indexes,
-    _source_block_for_prompt as _source_block_for_prompt,
-    _validate_beat_sheet_draft as _validate_beat_sheet_draft,
+    _AiBeat as _AiBeat, _AiBeatSheetDraft as _AiBeatSheetDraft, _AiSegmentPlan as _AiSegmentPlan, _beat_sheet_rules as _beat_sheet_rules,
+    _generate_beat_sheet, _paratext_exclusion_rule as _paratext_exclusion_rule, _paratext_segment_indexes as _paratext_segment_indexes, _source_block_for_prompt as _source_block_for_prompt, _validate_beat_sheet_draft as _validate_beat_sheet_draft,
 )
 from app.production.storyboard_continuity_memo import (
     _AiContinuityMemo,
@@ -814,6 +808,7 @@ def _validate_segment_draft(
         errors.append(
             f"prompt_text 长度 {len(draft.prompt_text)} 超过上限 {config.PROMPT_CHAR_LIMIT}"
         )
+    errors.extend(prompt_reference_prefix_errors(draft.prompt_text))
     if dialect_render_format == "minimax_h3_native_fields":
         for field in ("integrated_multimodal_description:", "overall_soundscape:", "non_diegetic_music:"):
             if field not in draft.prompt_text:

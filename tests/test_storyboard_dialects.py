@@ -261,3 +261,18 @@ def test_all_six_rules_present_symmetrically_in_both_dialects():
         if en_marker not in H3_FLAT:
             missing.append(f"H3 缺「{name}」标志短语：{en_marker!r}")
     assert not missing, "；".join(missing)
+
+
+def test_seedance_requires_footing_and_display_name_mentions():
+    from app.production.storyboard_dialects import (
+        SEEDANCE_DIALECT_INSTRUCTIONS,
+        prompt_reference_prefix_errors,
+    )
+
+    assert "脚下与依托" in SEEDANCE_DIALECT_INSTRUCTIONS
+    assert "人不上桌" in SEEDANCE_DIALECT_INSTRUCTIONS
+    assert "人物与家具不穿插" in SEEDANCE_DIALECT_INSTRUCTIONS
+    assert "@ 后面\n  直接跟 relevant_assets.characters" in SEEDANCE_DIALECT_INSTRUCTIONS or "display_name（例如 @黄总）" in SEEDANCE_DIALECT_INSTRUCTIONS
+    errors = prompt_reference_prefix_errors("镜头1：@bible:黄总 拍桌，@张姐 缩着脖子，@entity:a029ddf7 围观")
+    assert len(errors) == 1 and "@bible:黄总" in errors[0] and "@entity:a029ddf7" in errors[0]
+    assert prompt_reference_prefix_errors("镜头1：@黄总 拍桌") == []

@@ -139,3 +139,12 @@ def test_seedance_pack_wrapper_delegates_to_new_module():
     via_pack = seedance_pack.append_reference_prompt_notes_from_dicts(prompt, refs)
 
     assert direct == via_pack
+
+
+def test_at_mention_with_identity_prefix_is_still_replaced():
+    """EP1 重跑实测：模型写成 @bible:李麦麦，替换不能落空。"""
+    from app.video_modes.seedance_reference_notes import _replace_at_mentions_with_picture_numbers
+
+    body = "镜头1：@bible:李麦麦 站在地面上，@橘座 跳上桌，@entity:黄总 愣住。"
+    out = _replace_at_mentions_with_picture_numbers(body, {"李麦麦": 3, "橘座": 2, "黄总": 4})
+    assert out == "镜头1：@图片3 站在地面上，@图片2 跳上桌，@图片4 愣住。"
