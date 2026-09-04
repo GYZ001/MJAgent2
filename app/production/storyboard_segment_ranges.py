@@ -280,20 +280,24 @@ def kept_line_unit_binding_errors(
                 "匹配到），请核对台账抽取是否正确"
             )
             continue
-        own_range = next(
-            (r for r in plan.source_unit_ranges if r.source_segment_index == source_index), None,
-        )
-        if own_range is not None and own_range.from_unit <= unit_no <= own_range.to_unit:
+        own_ranges = [r for r in plan.source_unit_ranges if r.source_segment_index == source_index]
+        if any(r.from_unit <= unit_no <= r.to_unit for r in own_ranges):
             continue
+        # 同一段对同一原文段可以声明多个范围（如 S1-2 与 S5-6），元组首元素相同时
+        # 不能落到比较范围对象本身——那会 TypeError 把整集分镜打死（2026-09-04 B 实测）。
         covering_no = next(
-            (no for no, r in sorted(ranges_by_source.get(source_index, []))
-             if r.from_unit <= unit_no <= r.to_unit),
+            (no for no, r in sorted(
+                ranges_by_source.get(source_index, []),
+                key=lambda item: (item[0], item[1].from_unit, item[1].to_unit),
+            ) if r.from_unit <= unit_no <= r.to_unit),
             None,
         )
         where = f"覆盖单元 S{unit_no:02d} 的是第 {covering_no} 段" if covering_no is not None else (
             f"没有任何段的 source_unit_ranges 覆盖单元 S{unit_no:02d}"
         )
-        own_desc = "不存在" if own_range is None else f"是 S{own_range.from_unit:02d}-S{own_range.to_unit:02d}"
+        own_desc = "不存在" if not own_ranges else "是 " + "、".join(
+            f"S{r.from_unit:02d}-S{r.to_unit:02d}" for r in own_ranges
+        )
         errors.append(
             f"kept_lines 的 {item.quote_id}（原文段 {source_index} 单元 S{unit_no:02d}）被分到第 "
             f"{item.segment_no} 段，但该段对原文段 {source_index} 声明的单元范围{own_desc}未覆盖"
@@ -369,8 +373,10 @@ def reassign_kept_lines_to_covering_segments(
         unit_no = quote_unit_index(quote, source_segments[quote.source_segment_index - 1].text)
         if unit_no < 1:
             continue
-        own = next((r for r in plan.source_unit_ranges if r.source_segment_index == quote.source_segment_index), None)
-        if own is not None and own.from_unit <= unit_no <= own.to_unit:
+        if any(
+            r.source_segment_index == quote.source_segment_index and r.from_unit <= unit_no <= r.to_unit
+            for r in plan.source_unit_ranges
+        ):
             continue
         covering = sorted(
             p.segment_no for p in plans

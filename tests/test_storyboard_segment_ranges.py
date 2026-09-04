@@ -342,3 +342,29 @@ def test_reassign_kept_line_to_the_segment_whose_range_covers_its_unit():
     kept_hole = [_AiKeptLine(quote_id="Q08", segment_no=8)]
     assert reassign_kept_lines_to_covering_segments(kept_hole, quotes, plans_hole, segments) == []
     assert kept_hole[0].segment_no == 8
+
+
+def test_segment_declaring_two_ranges_on_one_source_segment_does_not_crash_the_sort():
+    """真实故障（2026-09-04 我欲封天第 12、13 集）：一段对同一原文段声明两个范围时，
+    覆盖查找里 sorted((段号, 范围)) 碰到相同段号就去比较范围对象 → TypeError 把整集分镜打死。
+    同时：台词落在该段第二个范围里也必须算合法。"""
+    from app.production.storyboard_beat_sheet import _AiSegmentPlan
+
+    two_ranges = _AiSegmentPlan(
+        segment_no=1, synopsis="段1", source_segment_indexes=[4],
+        source_unit_ranges=[
+            {"source_segment_index": 4, "from_unit": 1, "to_unit": 2},
+            {"source_segment_index": 4, "from_unit": 5, "to_unit": 6},
+        ],
+    )
+    plans = [two_ranges, _plan(2, 3, 4)]
+    quotes = [DialogueQuote(
+        quote_id="Q01", source_segment_index=4, text="猫忽然跳上了桌子", content_chars=8,
+    )]  # S03，只在段 2 的范围里
+    errors = kept_line_unit_binding_errors([_kept("Q01", 1)], quotes, plans, _scene_4_segments())
+    assert len(errors) == 1 and "第 2 段" in errors[0]
+    # 落在段 1 第二个范围（S05/S06）里的台词不得被误报
+    start, end = split_source_units(_SCENE_4_TEXT)[4]  # 单元是 (起, 止) 偏移
+    text5 = _SCENE_4_TEXT[start:end].strip()
+    quotes5 = [DialogueQuote(quote_id="Q05", source_segment_index=4, text=text5, content_chars=len(text5))]
+    assert kept_line_unit_binding_errors([_kept("Q05", 1)], quotes5, plans, _scene_4_segments()) == []

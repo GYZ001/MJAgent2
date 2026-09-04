@@ -462,3 +462,60 @@ async def test_cancel_one_running_task_keeps_the_other_running(monkeypatch) -> N
     release.set()
     await _await_runner("p", timeout=10.0)
     assert _task_row(conn, "st_b")["status"] == "succeeded"
+
+
+# ------------------------------------------------------------- runner 韧性 / 残留标记
+@pytest.mark.asyncio
+async def test_runner_survives_transient_db_error_and_still_runs_the_task(monkeypatch) -> None:
+    conn = _conn()
+    _patch_conn(monkeypatch, conn)
+    _seed_task(conn, "st_a", [1])
+    real_next = tasks.next_queued_task
+    calls = {"n": 0}
+
+    def flaky_next(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real_next(*args, **kwargs)
+    monkeypatch.setattr(tasks, "next_queued_task", flaky_next)
+
+    async def no_sleep(_s):
+        return None
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    import app.errors as errors_mod
+    monkeypatch.setattr(errors_mod, "log_error", lambda *_a, **_k: None)
+    done_pairs: set[tuple[str, str]] = set()
+
+    async def fake_run_stage(stage, episode_id, _run_id):
+        done_pairs.add((stage, episode_id))
+    monkeypatch.setattr(series_stages, "stage_is_complete", lambda stage, _c, eid: (stage, eid) in done_pairs)
+    monkeypatch.setattr(series_stages, "run_stage", fake_run_stage)
+    monkeypatch.setattr(merge, "merge_is_current", lambda *_a: False)
+    monkeypatch.setattr(merge, "build_series_film", lambda *_a: {})
+    await queue.enqueue("p", ["st_a"], False)
+    await _await_runner("p")
+    assert calls["n"] >= 2
+    assert _task_row(conn, "st_a")["status"] == "succeeded"
+
+
+def test_init_progress_resets_stale_running_markers_from_previous_process() -> None:
+    conn = _conn()
+    _seed_task(conn, "st_a", [1, 2])
+    stale = {
+        "episodes": [
+            {"episode_id": "e1", "episode_no": 1, "error": None, "waiting": "第1集正被映射台的任务占用",
+             "stages": {"screenplay": "done", "storyboard": "running", "confirm": "pending", "video": "pending", "final": "pending"}},
+            {"episode_id": "e2", "episode_no": 2, "error": None, "waiting": None,
+             "stages": {"screenplay": "running", "storyboard": "pending", "confirm": "pending", "video": "pending", "final": "pending"}},
+        ],
+        "current_episode_no": 1, "current_stage": "storyboard", "running_episode_nos": [1, 2], "error": None,
+    }
+    conn.execute("UPDATE series_tasks SET progress_json=? WHERE id='st_a'", (json.dumps(stale),))
+    conn.commit()
+    row = dict(conn.execute("SELECT * FROM series_tasks WHERE id='st_a'").fetchone())
+    progress = queue._init_progress(conn, "p", row)
+    assert progress["episodes"][0]["stages"]["storyboard"] == "pending"
+    assert progress["episodes"][0]["stages"]["screenplay"] == "done"  # 已完成的不动
+    assert progress["episodes"][1]["stages"]["screenplay"] == "pending"
+    assert all(e["waiting"] is None for e in progress["episodes"])

@@ -53,14 +53,23 @@ async def _run_queue(project_id: str) -> None:
     children: dict[str, asyncio.Task] = {}
     try:
         while True:
-            conn = get_conn()
-            if _is_paused(conn, project_id):
-                return
-            _reap_finished(children)
-            _spawn_children(conn, project_id, children)
-            if not children:
-                return
-            await asyncio.wait(list(children.values()), return_when=asyncio.FIRST_COMPLETED)
+            try:
+                conn = get_conn()
+                if _is_paused(conn, project_id):
+                    return
+                _reap_finished(children)
+                _spawn_children(conn, project_id, children)
+                if not children:
+                    return
+                await asyncio.wait(list(children.values()), return_when=asyncio.FIRST_COMPLETED)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 -- 启动期 database is locked 之类的瞬时错误
+                # runner 一死，排队的任务就永远停在 queued 而没人知道（2026-09-04 B 上两次重启后实测）。
+                # 记错误、歇 5 秒再来，不让一次瞬时错误变成静默停摆。
+                from app.errors import log_error  # 延迟导入：app.errors 反向依赖 db/quota 链
+                log_error(exc, action="series_queue.runner", context={"project_id": project_id})
+                await asyncio.sleep(5)
     except asyncio.CancelledError:
         for child in children.values():
             child.cancel()
@@ -145,6 +154,13 @@ def _preflight(conn, project_id: str, row: dict) -> dict:
 def _init_progress(conn, project_id: str, row: dict) -> dict:
     existing = state.load_progress(row)
     if existing.get("episodes"):
+        # 重启/重新入队时进度树里残留的「进行中」是上一轮进程留下的：那一步会按完成
+        # 判据重新跑或跳过，先复位成 pending，界面上不再显示一堆假的并行中。
+        for entry in existing["episodes"]:
+            entry["waiting"] = None
+            for stage, value in (entry.get("stages") or {}).items():
+                if value == "running":
+                    entry["stages"][stage] = "pending"
         return existing
     ordered, missing = tasks.fetch_range_episodes(conn, project_id, row["episode_from"], row["episode_to"])
     if missing:
