@@ -15,6 +15,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from app.video_plan.prev_frame_reference import prev_frame_reference_enabled, scene_chain_dependencies
 from app.db import get_conn, log_provider_call, new_id, now
 
 from .capability_snapshot import current_capability_snapshot
@@ -380,6 +381,7 @@ async def generate_episode_plan(
         db.commit()
         return plan
     if deterministic_only:
+        scene_chain = scene_chain_dependencies(list(rows)) if prev_frame_reference_enabled() else {}
         shot_plans = [
             ShotVideoGenerationPlan(
                 shot_plan_id=new_id("svp"),
@@ -390,6 +392,8 @@ async def generate_episode_plan(
                 published_shot_id=str(payload["shot_id"]),
                 shot_no=index + 1,
                 mode=VideoGenerationMode.REFERENCE_IMAGE_MODE,
+                depends_on_shot_id=scene_chain.get(str(row["id"])),
+                state_dependency="start_only" if scene_chain.get(str(row["id"])) else "none",
                 reason_codes=(
                     ["FIRST_SHOT_NO_PREDECESSOR"] if index == 0
                     else ["DETERMINISTIC_REFERENCE_IMAGE_PLAN"]

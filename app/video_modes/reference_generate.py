@@ -200,6 +200,34 @@ def previous_tail_reference_asset(conn: Any, prev_shot: Any, *, dest_dir: Path) 
     return None
 
 
+def previous_frame_reference_assets(conn: Any, prev_shot: Any, *, dest_dir: Path) -> list[ReferenceImageAsset]:
+    """上一段画面参考：开关打开时按内切镜头各取一帧（见 app.video_plan.prev_frame_reference），
+    关闭时退回单张尾帧（既有行为）。"""
+    from app.video_plan.prev_frame_reference import (
+        prev_frame_reference_enabled, sample_previous_segment_frames,
+    )
+    if not prev_frame_reference_enabled():
+        tail = previous_tail_reference_asset(conn, prev_shot, dest_dir=dest_dir)
+        return [tail] if tail else []
+    source_contract = previous_tail_source_contract(conn, prev_shot)
+    if not source_contract:
+        return []
+    signature = hashlib.sha256(
+        json.dumps(source_contract, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    assets: list[ReferenceImageAsset] = []
+    for index, path in sample_previous_segment_frames(source_contract["video_path"], dest_dir, signature):
+        asset = _asset_from_path(
+            path=str(path), ref_type="previous_shot_frame", source="previous_shot",
+            shot_id=source_contract["shot_id"], quality_score=1.0,
+            qa={"overall": 1.0, "issues": ["forced_continuity"]},
+            entity_type="previous_segment", entity_name=f"第{index}镜",
+        )
+        asset.dependency_manifest = {"continuity_source": source_contract, "frame_index": index}
+        assets.append(asset)
+    return assets
+
+
 def _portrait_seed_inputs(bible: Bible, character_names: list[str], *, project_id: str | None,
                           episode_no: int | None, limit: int = 2) -> list[str]:
     """出场角色定妆照的 data URL，作为新参考图的 i2i 种子（锁长相/发型/服饰，姿态仍走文字）。

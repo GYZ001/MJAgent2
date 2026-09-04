@@ -15,7 +15,7 @@ from .mode_selection import (
     max_character_reference_images,
 )
 from .reference_assemble import _enforce_reference_consistency
-from .reference_generate import previous_tail_reference_asset
+from .reference_generate import previous_frame_reference_assets
 from .seedance_pack import _dedupe_assets
 
 
@@ -114,9 +114,9 @@ async def assemble_continuity_tail(
             (episode_id, int(shot.shot_no) - 1)).fetchone()
     if prev is not None:
         ref_dir = reference_image_path(project_id, episode_no, shot.shot_no, "previous_shot_frame", 0).parent
-        tail = previous_tail_reference_asset(conn, prev, dest_dir=ref_dir)
-        if tail:
-            selected = [tail] + [a for a in selected if a.type != "previous_shot_frame"]
+        frames = previous_frame_reference_assets(conn, prev, dest_dir=ref_dir)
+        if frames:
+            selected = frames + [a for a in selected if a.type != "previous_shot_frame"]
 
     selected = await _enforce_reference_consistency(
         selected=selected, shot=shot, bible=bible, project_id=project_id, episode_no=episode_no,

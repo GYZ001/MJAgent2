@@ -40,7 +40,9 @@ _TYPE_PURPOSE_ZH: dict[str, str] = {
     "prop": "道具{who}参考，只用来锁定外观与材质",
     "prop_no_name": "道具参考，只用来锁定外观与材质",
     "style": "风格参考，只用来锁定画面风格",
-    "previous_shot_frame": "上一镜尾帧参考，只用来锁定衔接画面",
+    # 与 app.video_plan.prev_frame_reference.PREVIOUS_FRAME_PURPOSE_ZH 同一句（那边有测试锁住），
+    # 这里不 import：video_modes 包不能反向依赖 video_plan.generate 所在的包初始化链。
+    "previous_shot_frame": "上一段{who}画面参考，只用来锁定场景布局、家具与关键道具的位置和形态；人物的姿势与动作按本段文字描述，不沿用这张图",
 }
 
 

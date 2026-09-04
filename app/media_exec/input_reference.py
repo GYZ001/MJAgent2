@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from app.video_plan.prev_frame_reference import prev_frame_reference_enabled
 from app import config, video_modes
 from app.db import log_provider_call, now
 from app.hiagent import ProviderError
@@ -104,7 +105,8 @@ async def _prepare_reference_mode_inputs_impl(
     from app.continuity import apply_shot_contract
     apply_shot_contract(shot_model, meta.get("shot_contract_json"))
     prev_shot = conn.execute("SELECT * FROM shots WHERE id=?", (meta.get("after_shot_id"),)).fetchone() if meta.get("after_shot_id") else None
-    needs_tail = False
+    # 上一段末帧作空间参考（试验开关 app.video_modes.prev_frame_reference）：计划挂了上一镜依赖且开关打开才要尾帧。
+    needs_tail = prev_shot is not None and prev_frame_reference_enabled()
     if complete_gallery_candidate:
         # 提示词合同相同仍不代表人物/场景锚点未变。入队复用会把
         # manifest 一起带过来；兼容从关键帧 asset 内的冻结副本回退读取。
