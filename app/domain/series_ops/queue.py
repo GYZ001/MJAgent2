@@ -1,12 +1,14 @@
-"""项目级串行队列：runner 主循环、入队/出队/暂停/继续、连续失败自动停队。
+"""项目级连播队列：runner 主循环、入队/出队/暂停/继续、连续失败自动停队。
 
-并发度恒为 1（同一项目一次只跑一个任务，沿用 ``task_registry`` 的单活约束）。
-runner 本身就是登记进 ``task_registry`` 的那个 asyncio task；暂停/取消单个
-在跑任务都是通过取消 runner 本体 + 在 ``CancelledError`` 处理器里按「谁请求的
-取消」分类，退回 ``queued``（进度保留，暂停/服务重启）或 ``idle``（明确点了
-取消这一个任务）。
+2026-09-04 起并发度不再恒为 1（用户拍板「连播改成并行任务」）：同一项目同时在跑的连播任务数由
+``settings.series_queue_concurrency`` 决定（缺省 3，夹在 1..8）。runner（登记为 ``series_queue``）
+只做调度：按 queue_seq 依次把排队任务派成子任务（各自登记为 ``series_task_run``/task_id），子任务
+自己开连接、自己跑五步；runner 等任一子任务结束就补位。暂停/服务重启 = 取消 runner，runner 在
+``CancelledError`` 里把全部子任务一起取消，子任务按「谁请求的取消」分类：明确点了取消这一个任务
+→ ``idle``；其余（暂停/重启）→ 退回 ``queued`` 并保留进度。任务内部各集仍按顺序跑——要让多集
+并行，按 group_size=1 切任务即可。
 
-三个模块级可变单例（``_pause_requests``/``_cancel_current``）只 add/discard，
+两个模块级可变单例（``_pause_requests``/``_cancel_requests``）只 add/discard，
 不做 global 重绑定，写法照 ``state.py`` 旧版 ``_PAUSE_REQUESTS`` 的先例。
 """
 from __future__ import annotations
@@ -17,14 +19,17 @@ import time
 from fastapi import HTTPException
 
 from app import task_registry
-from app.db import get_conn, now
+from app.db import get_conn, get_setting, now
 
 from . import orchestrator, state, tasks
 
 TASK_KIND = "series_queue"
+CHILD_KIND = "series_task_run"
 WORKFLOW_TYPE = "series_task"
 
 _CONSECUTIVE_FAILURE_LIMIT = 3
+DEFAULT_QUEUE_CONCURRENCY = 3
+MAX_QUEUE_CONCURRENCY = 8
 
 #: 任务开跑前要确认没被占用的三种单集任务，值是给用户看的工作台名。检查放在
 #: 「取到任务、真要开跑」这一刻而不是入队时：入队到执行之间可能隔几小时，那时
@@ -36,7 +41,16 @@ _EPISODE_BUSY_KINDS: dict[str, str] = {
 }
 
 _pause_requests: set[str] = set()
-_cancel_current: dict[str, str] = {}
+_cancel_requests: set[str] = set()
+
+
+def queue_concurrency() -> int:
+    """同一项目同时在跑的连播任务数：settings.series_queue_concurrency，缺省 3，夹在 1..8。"""
+    try:
+        value = int(str(get_setting("series_queue_concurrency") or "").strip() or DEFAULT_QUEUE_CONCURRENCY)
+    except ValueError:
+        value = DEFAULT_QUEUE_CONCURRENCY
+    return max(1, min(MAX_QUEUE_CONCURRENCY, value))
 
 
 class _PreflightFailed(RuntimeError):
@@ -50,19 +64,47 @@ class _PreflightFailed(RuntimeError):
 # --------------------------------------------------------------------- runner
 
 async def _run_queue(project_id: str) -> None:
-    conn = get_conn()
-    while True:
-        if _is_paused(conn, project_id):
-            return
-        row = tasks.next_queued_task(conn, project_id)
+    """调度器：补位派发子任务直到没有排队任务或被暂停；被取消时连带取消全部子任务。"""
+    children: dict[str, asyncio.Task] = {}
+    try:
+        while True:
+            conn = get_conn()
+            if _is_paused(conn, project_id):
+                return
+            _reap_finished(children)
+            _spawn_children(conn, project_id, children)
+            if not children:
+                return
+            await asyncio.wait(list(children.values()), return_when=asyncio.FIRST_COMPLETED)
+    except asyncio.CancelledError:
+        for child in children.values():
+            child.cancel()
+        if children:
+            await asyncio.gather(*children.values(), return_exceptions=True)
+        raise
+
+
+def _reap_finished(children: dict[str, asyncio.Task]) -> None:
+    for task_id in [task_id for task_id, child in children.items() if child.done()]:
+        children.pop(task_id, None)
+
+
+def _spawn_children(conn, project_id: str, children: dict[str, asyncio.Task]) -> None:
+    """按 queue_seq 补位到并发上限；刚派出但还没把自己改成 running 的任务用 exclude 挡住重复派发。"""
+    while len(children) < queue_concurrency():
+        row = tasks.next_queued_task(conn, project_id, exclude=set(children))
         if row is None:
             return
-        await _run_one_task(conn, project_id, row)
-        if _is_paused(conn, project_id):
+        coro = _run_one_task(project_id, row)
+        try:
+            children[row["id"]] = task_registry.spawn(CHILD_KIND, row["id"], coro, project_id=project_id)
+        except RuntimeError:
+            coro.close()  # 同一任务的子任务已在跑（重启残留），这一轮不重复派发
             return
 
 
-async def _run_one_task(conn, project_id: str, row: dict) -> None:
+async def _run_one_task(project_id: str, row: dict) -> None:
+    conn = get_conn()  # 子任务自己的连接：与 runner、与别的子任务互不共享事务
     task_id = row["id"]
     recorder = _create_recorder(project_id, row)
     tasks.mark_running(conn, task_id, recorder.run_id)
@@ -140,7 +182,7 @@ def _create_recorder(project_id: str, row: dict):
         input_fingerprint=fingerprint(row["id"], row["episode_from"], row["episode_to"], time.time()),
         requested_by="user",
         trigger_type="manual",
-        policy_snapshot={"serial": True},
+        policy_snapshot={"serial": queue_concurrency() == 1, "concurrency": queue_concurrency()},
         config_snapshot={
             "project_id": project_id,
             "episode_from": row["episode_from"], "episode_to": row["episode_to"],
@@ -161,8 +203,8 @@ def _maybe_auto_pause(conn, project_id: str, task_id: str) -> None:
 
 
 def _handle_task_cancelled(conn, project_id: str, task_id: str, recorder) -> None:
-    if _cancel_current.get(project_id) == task_id:
-        del _cancel_current[project_id]
+    if task_id in _cancel_requests:
+        _cancel_requests.discard(task_id)
         tasks.mark_idle(conn, task_id)
         recorder.cancel("用户取消了这个连播任务", conn=None)
         return
@@ -204,7 +246,7 @@ def _ensure_runner(project_id: str) -> None:
 
 
 def queue_snapshot(conn, project_id: str) -> dict:
-    return tasks.queue_snapshot(conn, project_id)
+    return {**tasks.queue_snapshot(conn, project_id), "concurrency": queue_concurrency()}
 
 
 # --------------------------------------------------------------------- 路由核心
@@ -221,7 +263,7 @@ async def enqueue(project_id: str, task_ids: list[str], force: bool) -> dict:
 async def cancel(project_id: str, task_ids: list[str]) -> dict:
     conn = get_conn()
     cancelled: list[str] = []
-    running_target: str | None = None
+    running_targets: list[str] = []
     for task_id in dict.fromkeys(task_ids):
         row = tasks.get_task_row(conn, project_id, task_id)
         if row is None:
@@ -230,13 +272,17 @@ async def cancel(project_id: str, task_ids: list[str]) -> dict:
             tasks.mark_idle(conn, task_id)
             cancelled.append(task_id)
         elif row["status"] == "running":
-            running_target = task_id
-    if running_target is not None:
-        _cancel_current[project_id] = running_target
-        await task_registry.cancel_and_wait(TASK_KIND, project_id)
-        cancelled.append(running_target)
-        if not _is_paused(conn, project_id):
-            _ensure_runner(project_id)
+            running_targets.append(task_id)
+    for task_id in running_targets:
+        # 只取消这一个子任务，runner 与其它在跑的任务不受影响；子任务不在本进程
+        # （重启前的残留 running 行）时直接落 idle。
+        _cancel_requests.add(task_id)
+        if not await task_registry.cancel_and_wait(CHILD_KIND, task_id):
+            _cancel_requests.discard(task_id)
+            tasks.mark_idle(conn, task_id)
+        cancelled.append(task_id)
+    if running_targets and not _is_paused(conn, project_id):
+        _ensure_runner(project_id)
     return {"cancelled": cancelled, "queue": queue_snapshot(conn, project_id)}
 
 

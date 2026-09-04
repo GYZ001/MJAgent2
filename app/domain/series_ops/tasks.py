@@ -273,15 +273,18 @@ def queue_snapshot(conn, project_id: str) -> dict:
     row = conn.execute(
         "SELECT paused, stop_reason FROM series_queue_state WHERE project_id=?", (project_id,),
     ).fetchone()
-    running = conn.execute(
-        "SELECT id FROM series_tasks WHERE project_id=? AND status='running' LIMIT 1", (project_id,),
-    ).fetchone()
+    running_rows = conn.execute(
+        "SELECT id FROM series_tasks WHERE project_id=? AND status='running' ORDER BY queue_seq ASC",
+        (project_id,),
+    ).fetchall()
+    running = running_rows[0] if running_rows else None
     queued_count = conn.execute(
         "SELECT COUNT(*) AS n FROM series_tasks WHERE project_id=? AND status='queued'", (project_id,),
     ).fetchone()["n"]
     return {
         "paused": bool(row["paused"]) if row else False,
         "running_task_id": running["id"] if running else None,
+        "running_task_ids": [r["id"] for r in running_rows],
         "queued_count": int(queued_count),
         "stop_reason": (row["stop_reason"] if row else None),
     }
@@ -425,11 +428,14 @@ def _next_queue_seq(conn, project_id: str) -> float:
     return float(row["m"] or 0) + 1.0
 
 
-def next_queued_task(conn, project_id: str) -> dict | None:
-    row = conn.execute(
-        "SELECT * FROM series_tasks WHERE project_id=? AND status='queued' ORDER BY queue_seq ASC LIMIT 1",
-        (project_id,),
-    ).fetchone()
+def next_queued_task(conn, project_id: str, exclude: set[str] | None = None) -> dict | None:
+    """队首排队任务；``exclude`` 是调度器刚派出、子任务尚未来得及把状态改成 running 的任务。"""
+    excluded = sorted(exclude or ())
+    marks = ",".join("?" for _ in excluded)
+    sql = "SELECT * FROM series_tasks WHERE project_id=? AND status='queued'"
+    if excluded:
+        sql += f" AND id NOT IN ({marks})"
+    row = conn.execute(sql + " ORDER BY queue_seq ASC LIMIT 1", (project_id, *excluded)).fetchone()
     return dict(row) if row else None
 
 
