@@ -6,6 +6,14 @@ import pytest
 from app import db, hiagent
 import app.video_plan as video_plan
 from tests.conftest import patch_video_plan_everywhere
+import app.video_plan.normalize as normalize_mod
+
+
+@pytest.fixture(autouse=True)
+def _prev_frame_reference_off(monkeypatch):
+    """本文件守的是模型提案→编译、首镜固定与依赖 DAG 的旧语义；上一段画面空间参考
+    默认开启会给同场戏后续镜挂依赖，那条语义由 test_prev_frame_reference.py 覆盖。"""
+    monkeypatch.setattr(normalize_mod, "prev_frame_reference_enabled", lambda: False)
 from app.video_plan import (
     AssetSource,
     EpisodeVideoGenerationPlan,
