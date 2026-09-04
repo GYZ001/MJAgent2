@@ -1359,7 +1359,9 @@ export const useProject = (
   usePoll<Project>(
     () => api.getProject(projectId, view ? `view=${view}` : undefined),
     intervalMs,
-    [projectId, view],
+    // usePoll 见到 null/undefined 的 dep 就不启动轮询；不传 view 是合法用法，
+    // 不能让它变成「页面永远停在加载态」（2026-09-04 物件库页实测）。
+    [projectId, view ?? ""],
   );
 
 /** 全片补齐 Supervisor 仍在协调时视为忙碌（即使镜头队列暂时为空）。 */

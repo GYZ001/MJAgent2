@@ -14,7 +14,8 @@ import { formatBookTitle } from '../lib/bookTitle'
  */
 export default function PropsPage() {
   const { projectId, toast } = useNav()
-  const { data: p, refresh, error, status, loading } = useProject(projectId!)
+  // 只需要项目名与状态，用最轻的 episodes 投影（不带世界书 JSON）。
+  const { data: p, refresh, error, status, loading } = useProject(projectId!, undefined, 'episodes')
   const [items, setItems] = useState<PropItem[] | null>(null)
   const [listError, setListError] = useState<string | null>(null)
   const [busyName, setBusyName] = useState<string | null>(null)
