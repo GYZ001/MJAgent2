@@ -163,29 +163,39 @@ def test_prop_disappearing_from_previous_segment_does_not_block():
     assert continuity_memo_errors(memo, previous, "[段2] 少年下山。") == []
 
 
-def test_layout_change_without_quote_is_rejected():
-    previous = _memo(layout="猫窝在车底阴影里")
-    memo = _memo(layout="猫窝在后备箱里")
-    errors = continuity_memo_errors(memo, previous, "[段2] 少年发动了车子。")
-    assert any("layout_change_source_quote 为空" in e for e in errors)
+def test_layout_change_without_quote_is_not_blocking_but_advised():
+    """EP1 试验跑实测：布局变化常是原文没写的隐含过场（猫进包），逐字引用拦不住只会打死整集。"""
+    from app.production.storyboard_continuity_memo import layout_change_advisories
+
+    previous = _AiContinuityMemo(time_of_day="深夜", layout="猫包在椅子上")
+    memo = _AiContinuityMemo(time_of_day="深夜", time_of_day_basis="inherited", layout="猫包在李麦麦怀里")
+    assert continuity_memo_errors(memo, previous, "李麦麦翻出一个旧猫包，拉开拉链。") == []
+    advisories = layout_change_advisories(memo, previous, "李麦麦翻出一个旧猫包，拉开拉链。")
+    assert len(advisories) == 1 and "未拦截" in advisories[0]
 
 
-def test_layout_change_with_verbatim_source_quote_is_accepted():
-    previous = _memo(layout="猫窝在车底阴影里")
-    source_text = "[段2] 少年弯腰，把猫从车底抱进了后备箱。"
-    memo = _memo(
-        layout="猫窝在后备箱里",
-        layout_change_source_quote="把猫从车底抱进了后备箱",
-        time_of_day_basis="inherited",
+def test_layout_change_with_verbatim_source_quote_has_no_advisory():
+    from app.production.storyboard_continuity_memo import layout_change_advisories
+
+    previous = _AiContinuityMemo(time_of_day="深夜", layout="猫包在椅子上")
+    memo = _AiContinuityMemo(
+        time_of_day="深夜", time_of_day_basis="inherited", layout="猫包在李麦麦手里",
+        layout_change_source_quote="李麦麦翻出一个旧猫包",
     )
-    assert continuity_memo_errors(memo, previous, source_text) == []
+    assert layout_change_advisories(memo, previous, "李麦麦翻出一个旧猫包，拉开拉链。") == []
+    assert continuity_memo_errors(memo, previous, "李麦麦翻出一个旧猫包，拉开拉链。") == []
 
 
-def test_layout_change_with_fabricated_quote_is_rejected():
-    previous = _memo(layout="猫窝在车底阴影里")
-    memo = _memo(layout="猫窝在后备箱里", layout_change_source_quote="他把猫塞进了后备箱")
-    errors = continuity_memo_errors(memo, previous, "[段2] 少年发动了车子。")
-    assert any("找不到逐字匹配" in e for e in errors)
+def test_layout_change_with_fabricated_quote_is_advised_not_blocked():
+    from app.production.storyboard_continuity_memo import layout_change_advisories
+
+    previous = _AiContinuityMemo(time_of_day="深夜", layout="猫包在椅子上")
+    memo = _AiContinuityMemo(
+        time_of_day="深夜", time_of_day_basis="inherited", layout="猫在猫包里",
+        layout_change_source_quote="@李麦麦 弯腰将@橘座 抱进旧猫包，拉上拉链",
+    )
+    assert continuity_memo_errors(memo, previous, "李麦麦翻出一个旧猫包，拉开拉链。") == []
+    assert "找不到逐字匹配" in layout_change_advisories(memo, previous, "李麦麦翻出一个旧猫包，拉开拉链。")[0]
 
 
 def test_layout_carried_over_verbatim_is_accepted():

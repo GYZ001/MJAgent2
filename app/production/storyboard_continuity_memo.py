@@ -38,10 +38,14 @@
 """
 from __future__ import annotations
 
+import logging
+
 import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+log = logging.getLogger(__name__)
 
 
 class _AiCharacterState(BaseModel):
@@ -220,16 +224,30 @@ def _prop_form_errors(
     return errors
 
 
-def _layout_change_errors(
+def layout_change_advisories(
     memo: _AiContinuityMemo,
     previous_memo: _AiContinuityMemo | None,
     segment_source_text: str,
 ) -> list[str]:
-    """空间布局（layout）阻断判据：判据形状与 time_of_day_source_quote 完全
-    一样——本段 layout 与上一段不同时，必须有本段原文里逐字可查的引用支撑，
-    找不到就判定为编造。"""
+    """空间布局（layout）变化的**告警**判据（不阻断）。
+
+    起初与 time_of_day 一样做成阻断（引用找不到就打回）。EP1 试验跑实测（2026-09-04）：
+    段 4 的布局变化「把猫抱进猫包」在原文里没有一句能逐字引用——原文只写了「翻出旧猫包，
+    拉开拉链」，猫进包是隐含的过场，模型三次都引用了自己写的提示词，整集分镜失败。
+    这类合理推断的布局变化不是编造剧情，用「必须逐字引用」去拦会把一整集打死；改成
+    记告警日志供观测，布局连贯性靠「默认逐字沿用」的正面规则与上一段画面参考去保证。
+    道具外观（form）无据改变仍由 _prop_form_errors 阻断——那才是投诉的形态漂移。
+    """
     if previous_memo is None or not previous_memo.layout.strip():
         return []
+    if memo.layout == previous_memo.layout:
+        return []
+    quote = memo.layout_change_source_quote.strip()
+    if not quote:
+        return ["continuity_memo.layout 与上一段不同但没有给出 layout_change_source_quote（未拦截）"]
+    if not _quote_found_in_source(quote, segment_source_text):
+        return [f"continuity_memo.layout_change_source_quote『{quote}』在本段原文里找不到逐字匹配（未拦截）"]
+    return []
     if memo.layout == previous_memo.layout:
         return []
     quote = memo.layout_change_source_quote.strip()
@@ -256,12 +274,13 @@ def continuity_memo_errors(
     """阻断式闸门：判据只挂在 continuity_memo 自己的数据与本段原文上（不做
     同义归并，沿用必须逐字相同——见模块 docstring）。人物字段不在这里检查，
     只做 advisory，见 ``continuity_memo_character_advisories``。2026-09-03
-    追加道具外观（``_prop_form_errors``）与空间布局（``_layout_change_errors``）
+    追加道具外观（``_prop_form_errors``，阻断）与空间布局（``layout_change_advisories``，只告警）
     两条阻断判据。
     """
     errors: list[str] = []
     errors.extend(_prop_form_errors(memo, previous_memo))
-    errors.extend(_layout_change_errors(memo, previous_memo, segment_source_text))
+    for advisory in layout_change_advisories(memo, previous_memo, segment_source_text):
+        log.warning("[STORYBOARD_CONTINUITY_MEMO_LAYOUT][未拦截] %s", advisory)
     if not memo.time_of_day.strip():
         errors.append("continuity_memo.time_of_day 不能为空：每一帧画面都有时段")
     if memo.time_of_day_basis == "inherited":
