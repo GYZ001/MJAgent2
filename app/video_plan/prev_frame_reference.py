@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from app.db import get_setting
 
@@ -131,3 +132,20 @@ def sample_previous_segment_frames(video_path: str, dest_dir: Path, signature: s
         if (dest.is_file() and dest.stat().st_size > 0) or extract_frame(video_path, ts, dest):
             frames.append((index, dest))
     return frames
+
+
+def planned_previous_shot_id(conn: Any, shot_id: str) -> str | None:
+    """入队时的链依赖来源：非叙事权威集不加载视频计划（``enqueue_context.resolve_mode_decision``
+    刻意丢弃模型规划的模式/依赖），开关打开时单独从已发布计划里取本镜的 ``depends_on_shot_id``
+    ——这是 ``apply_scene_boundary_strategy`` 写进去的同场戏上一段，不是模型的自由声明。
+    EP1 对比跑实测：不取这一步，调度按计划串行了，但 ``jobs.after_shot_id`` 为空，参考图装配
+    阶段不知道上一段是谁，一张画面都没挂上。"""
+    if not prev_frame_reference_enabled():
+        return None
+    # 同包内延迟导入：本模块是 app.db 之上的叶子，mode_attempt 反过来依赖整个包的初始化链。
+    from app.video_plan.mode_attempt import get_shot_plan
+
+    plan = get_shot_plan(shot_id, conn=conn)
+    if plan is None or not plan.depends_on_shot_id:
+        return None
+    return str(plan.depends_on_shot_id)

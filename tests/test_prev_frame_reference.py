@@ -85,3 +85,17 @@ def test_scene_boundary_strategy_chains_same_scene_shots_only_when_flag_on(monke
     monkeypatch.setattr(normalize, "prev_frame_reference_enabled", lambda: False)
     normalize.apply_scene_boundary_strategy(shots_off, scene_identity_by_shot_id=scenes)
     assert [s.depends_on_shot_id for s in shots_off] == [None, None]
+
+
+def test_planned_previous_shot_id_reads_published_plan_only_when_flag_on(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from app.video_plan import mode_attempt
+
+    monkeypatch.setattr(mode_attempt, "get_shot_plan", lambda shot_id, conn=None: SimpleNamespace(depends_on_shot_id="s4"))
+    monkeypatch.setattr(pfr, "get_setting", lambda key: "")
+    assert pfr.planned_previous_shot_id(None, "s5") is None
+    monkeypatch.setattr(pfr, "get_setting", lambda key: "1")
+    assert pfr.planned_previous_shot_id(None, "s5") == "s4"
+    monkeypatch.setattr(mode_attempt, "get_shot_plan", lambda shot_id, conn=None: None)
+    assert pfr.planned_previous_shot_id(None, "s5") is None

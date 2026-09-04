@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from app import hiagent
+from app.video_plan.prev_frame_reference import planned_previous_shot_id
 
 
 def resolve_target_video_profile() -> tuple[str | None, str | None, Any, str]:
@@ -168,7 +169,10 @@ def _resolve_prev_and_boundary_rows(conn, shot_row, shot_plan, after_shot_id, bo
         and after_shot_id != planned_dependency_id
     ):
         raise ValueError("请求的前序镜头与已发布视频计划不一致")
-    dependency_id = planned_dependency_id if shot_plan is not None else after_shot_id
+    if shot_plan is None and planned_dependency_id is None:
+        # 上一段画面作空间参考（试验开关）：计划被丢弃时单独取同场戏链依赖。
+        planned_dependency_id = planned_previous_shot_id(conn, str(shot_row["id"]))
+    dependency_id = planned_dependency_id if (shot_plan is not None or planned_dependency_id) else after_shot_id
     if dependency_id:
         prev_row = conn.execute(
             "SELECT * FROM shots WHERE id=? AND episode_id=?",
@@ -338,7 +342,7 @@ def resolve_chain_dependency(shot, shot_plan, continuity_mode, prev_row, prev_st
         shot.state_in = prompt_prev_state_out
     chain_after_shot_id = (
         planned_dependency_id
-        if shot_plan is not None
+        if (shot_plan is not None or planned_dependency_id)
         else (
             (prev_row["id"] if prev_row else None)
             if uses_previous_tail_frame(continuity_mode) else None
