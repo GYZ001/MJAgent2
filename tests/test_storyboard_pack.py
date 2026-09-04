@@ -842,7 +842,7 @@ def test_segment_draft_rejects_shot_count_below_the_new_floor():
 def test_validate_segment_draft_accepts_well_formed_draft():
     errors = _validate_segment_draft(
         _draft(), dialect_render_format="seedance_compact_director_brief", required_dialogue=[],
-        delivered_lines=[], current_segment_no=1,
+        delivered_lines=[], reserved_lines=[], current_segment_no=1,
     )
     assert errors == []
 
@@ -851,7 +851,7 @@ def test_validate_segment_draft_rejects_empty_prompt_text():
     errors = _validate_segment_draft(
         _draft(prompt_text=" "), dialect_render_format="seedance_compact_director_brief",
         required_dialogue=[],
-        delivered_lines=[], current_segment_no=1,
+        delivered_lines=[], reserved_lines=[], current_segment_no=1,
     )
     assert any("为空" in e for e in errors)
 
@@ -861,7 +861,7 @@ def test_validate_segment_draft_requires_h3_literal_fields():
         _draft(prompt_text="没有按 H3 格式写的自由散文"),
         dialect_render_format="minimax_h3_native_fields",
         required_dialogue=[],
-        delivered_lines=[], current_segment_no=1,
+        delivered_lines=[], reserved_lines=[], current_segment_no=1,
     )
     assert any("integrated_multimodal_description:" in e for e in errors)
 
@@ -870,7 +870,7 @@ def test_validate_segment_draft_rejects_over_char_limit(monkeypatch):
     monkeypatch.setattr(config, "PROMPT_CHAR_LIMIT", 10)
     errors = _validate_segment_draft(
         _draft(), dialect_render_format="seedance_compact_director_brief", required_dialogue=[],
-        delivered_lines=[], current_segment_no=1,
+        delivered_lines=[], reserved_lines=[], current_segment_no=1,
     )
     assert any("超过上限" in e for e in errors)
 
@@ -882,7 +882,7 @@ def test_validate_segment_draft_does_not_block_on_dialogue_source_outside_segmen
         _draft(dialogue=[_AiDialogueLine(speaker_identity_id="id_a", line="走吧", source_segment_index=9)]),
         dialect_render_format="seedance_compact_director_brief",
         required_dialogue=[],
-        delivered_lines=[], current_segment_no=1,
+        delivered_lines=[], reserved_lines=[], current_segment_no=1,
     )
     assert errors == []
 
@@ -892,7 +892,7 @@ def test_validate_segment_draft_does_not_block_on_unknown_character_resource():
         _draft(resources=_AiSegmentResources(characters=[{"identity_id": "id_ghost", "description": "x"}])),
         dialect_render_format="seedance_compact_director_brief",
         required_dialogue=[],
-        delivered_lines=[], current_segment_no=1,
+        delivered_lines=[], reserved_lines=[], current_segment_no=1,
     )
     assert errors == []
 
@@ -907,7 +907,7 @@ def test_validate_segment_draft_rejects_missing_required_dialogue():
         _draft(dialogue=[]),
         dialect_render_format="seedance_compact_director_brief",
         required_dialogue=[{"quote_id": "Q01", "text": "我们走吧", "source_segment_index": 1}],
-        delivered_lines=[], current_segment_no=1,
+        delivered_lines=[], reserved_lines=[], current_segment_no=1,
     )
     assert any("必保台词" in e and "Q01" in e for e in errors)
 
@@ -917,7 +917,7 @@ def test_validate_segment_draft_accepts_required_dialogue_present_verbatim():
         _draft(dialogue=[_AiDialogueLine(speaker_identity_id="id_a", line="我们走吧", source_segment_index=1)]),
         dialect_render_format="seedance_compact_director_brief",
         required_dialogue=[{"quote_id": "Q01", "text": "我们走吧", "source_segment_index": 1}],
-        delivered_lines=[], current_segment_no=1,
+        delivered_lines=[], reserved_lines=[], current_segment_no=1,
     )
     assert errors == []
 
@@ -930,7 +930,7 @@ def test_validate_segment_draft_accepts_required_dialogue_with_minor_connective_
         )]),
         dialect_render_format="seedance_compact_director_brief",
         required_dialogue=[{"quote_id": "Q01", "text": "我们走吧", "source_segment_index": 1}],
-        delivered_lines=[], current_segment_no=1,
+        delivered_lines=[], reserved_lines=[], current_segment_no=1,
     )
     assert errors == []
 
@@ -939,7 +939,7 @@ def test_validate_segment_draft_empty_required_dialogue_is_noop():
     errors = _validate_segment_draft(
         _draft(dialogue=[]), dialect_render_format="seedance_compact_director_brief",
         required_dialogue=[],
-        delivered_lines=[], current_segment_no=1,
+        delivered_lines=[], reserved_lines=[], current_segment_no=1,
     )
     assert errors == []
 

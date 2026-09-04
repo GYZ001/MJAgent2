@@ -209,8 +209,11 @@ def test_normalize_beat_sheet_capacity_new_segments_inherit_source_indexes_and_b
         segments=[_plan(1, source=(3, 4), beat_ids=("B7",))],
         kept_lines=[_AiKeptLine(quote_id="Q01", segment_no=1), _AiKeptLine(quote_id="Q02", segment_no=1)],
     )
+    draft.segments[0].palette = "冷调惨白"
     normalize_beat_sheet_capacity(draft, quotes, source_segments=_fake_source_segments(5))
     spawned = draft.segments[1]
+    # 拆出的新段仍是同一场戏，色温方向必须原样继承（EP1 重跑实测：空 palette 让灯光又闪了两次）。
+    assert spawned.palette == "冷调惨白"
     # source_unit_ranges 未声明（这条测试不关心单元范围）时，2.4.0 的拆分点
     # 定位不到（quote_unit_index 在假原文里搜不到占位 text="a"/"b"），按已知
     # 限制原样降级成旧行为：source_segment_indexes 整段继承，不裁剪。

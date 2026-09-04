@@ -160,6 +160,9 @@ def _split_one_segment(
             synopsis=f"{segment.synopsis}（容量拆分·承接前段台词）",
             source_segment_indexes=list(segment.source_segment_indexes),
             beat_ids=list(segment.beat_ids),
+            # 拆出的新段仍是同一场戏：色温方向必须原样继承，否则阶段二会把空 palette
+            # 当成「换了色温」要求写渐变（EP1 重跑实测：段 5/段 10 为空，灯光又闪了两次）。
+            palette=segment.palette,
         )
         new_segments.append(spawned)
         indices.append(len(new_segments) - 1)

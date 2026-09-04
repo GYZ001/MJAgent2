@@ -85,11 +85,8 @@ from app.production.storyboard_dialogue_ledger import (
     required_dialogue_missing_errors,
     required_dialogue_rule,
 )
-from app.production.storyboard_dialogue_repeat import (
-    already_delivered_dialogue_rule,
-    already_delivered_payload,
-    repeated_delivery_errors,
-)
+from app.production.storyboard_dialogue_repeat import (already_delivered_dialogue_rule, already_delivered_payload,
+                                                        repeated_delivery_errors, reserved_dialogue_payload, reserved_lines_for)
 from app.production.storyboard_narrative_arc import (
     _segment_continuity_rules,
     _segment_shared_rules,
@@ -778,6 +775,7 @@ def _validate_segment_draft(
     dialect_render_format: str,
     required_dialogue: list[dict[str, Any]],
     delivered_lines: list[tuple[int, str, str]],
+    reserved_lines: list[tuple[int, str]],
     current_segment_no: int,
     previous_memo: _AiContinuityMemo | None = None,
     segment_source_text: str = "",
@@ -828,6 +826,7 @@ def _validate_segment_draft(
         delivered_lines,
         [(line.speaker_identity_id, line.line) for line in draft.dialogue],
         current_segment_no=current_segment_no,
+        reserved=reserved_lines,
     ))
     return errors
 
@@ -1070,7 +1069,7 @@ async def _generate_all_segment_prompts(
                     palette_current=plan.palette, palette_previous=palette_previous,
                     previous_memo=previous_memo,
                 ),
-                already_delivered_dialogue_rule(delivered_lines),
+                already_delivered_dialogue_rule(delivered_lines, reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no)),
             ],
             **segment_narrative_arc_payload_fields(
                 segment_no=plan.segment_no,
@@ -1092,6 +1091,7 @@ async def _generate_all_segment_prompts(
             "relevant_assets": relevant_assets,
             "required_dialogue": required_dialogue,
             "already_delivered_dialogue": already_delivered_payload(delivered_lines),
+            "reserved_dialogue": reserved_dialogue_payload(reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no)),
             "previous_segment_prompt": previous_draft.prompt_text if previous_draft is not None else None,
             "previous_continuity_memo": continuity_memo_payload(previous_memo),
             "recent_camera_language": camera_history,
@@ -1141,10 +1141,10 @@ async def _generate_all_segment_prompts(
             ],
             model_type=_AiStoryboardSegmentDraft,
             validate=lambda value, _req=required_dialogue, _pm=previous_memo,
-            _st=source_payload["source_text_by_segment"], _dl=list(delivered_lines),
+            _st=source_payload["source_text_by_segment"], _dl=list(delivered_lines), _rv=reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no),
             _no=plan.segment_no: _validate_segment_draft(
                 value, dialect_render_format=profile.render_format, required_dialogue=_req,
-                previous_memo=_pm, segment_source_text=_st, delivered_lines=_dl, current_segment_no=_no,
+                previous_memo=_pm, segment_source_text=_st, delivered_lines=_dl, reserved_lines=_rv, current_segment_no=_no,
             ),
             operation_id=f"storyboard_pack_segment_{episode_id}_{plan.segment_no}_{fingerprint}",
             max_tokens=SEGMENT_PROMPT_ANSWER_TOKENS,
