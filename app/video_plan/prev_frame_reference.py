@@ -9,8 +9,8 @@
 空间布局却没有任何图像锚点。
 
 做法（用户拍板：**不用首尾帧模式**，只把上一段的末帧当一张普通参考图）：
-- 同一场戏的后续段（按落库镜头行的 ``scene_name`` 连续相同判定）在视频计划里挂
-  ``depends_on_shot_id`` = 上一段镜头，``state_dependency=start_only``；
+- 同一场戏的后续段（判定复用 ``normalize.apply_scene_boundary_strategy`` 的 scene-entry 分类）在视频
+  计划里挂 ``depends_on_shot_id`` = 上一段镜头，``state_dependency=start_only``；
 - 参考图装配阶段等上一段视频成功后抽末帧，作为 ``previous_shot_frame`` 类型的参考图
   挂入（既有 ``continuity_tail.assemble_continuity_tail`` 机器），定妆照与场景图照旧同时
   附上，所以身份仍由定妆照负责，不会重蹈只靠尾帧起画的漂移；
@@ -23,7 +23,6 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any
 
 from app.db import get_setting
 
@@ -48,31 +47,6 @@ def prev_frame_reference_enabled() -> bool:
         return int(str(get_setting(SETTING_KEY) or "0").strip() or 0) == 1
     except ValueError:
         return False
-
-
-def _row_get(row: Any, key: str) -> Any:
-    try:
-        return row[key]
-    except (KeyError, IndexError, TypeError):
-        return getattr(row, key, None)
-
-
-def scene_chain_dependencies(rows: list[Any]) -> dict[str, str]:
-    """按 shot_no 顺序，同一场戏的后续镜头 → {shot_id: 上一镜 shot_id}。
-
-    判据只看落库镜头行的 ``scene_name``（分镜台 2.x 从本段 resources.scenes[0] 的显示名
-    写入）：连续两镜 scene_name 非空且逐字相同才算同一场戏；为空或不同即换场，不挂依赖。
-    第一镜永远没有依赖。
-    """
-    ordered = sorted(rows, key=lambda r: int(_row_get(r, "shot_no") or 0))
-    chain: dict[str, str] = {}
-    previous: Any | None = None
-    for row in ordered:
-        scene = str(_row_get(row, "scene_name") or "").strip()
-        if previous is not None and scene and scene == str(_row_get(previous, "scene_name") or "").strip():
-            chain[str(_row_get(row, "id"))] = str(_row_get(previous, "id"))
-        previous = row
-    return chain
 
 
 def video_duration_s(video_path: str) -> float | None:

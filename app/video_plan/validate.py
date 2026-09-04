@@ -21,6 +21,7 @@ from .models import (
     ShotVideoGenerationPlan,
     VideoGenerationMode,
 )
+from .prev_frame_reference import prev_frame_reference_enabled
 from .primitives import VideoPlanValidationError, _row_value
 from .release_manifest import canonical_shot_contract_fingerprint
 from .capability_snapshot import capability_allows
@@ -211,7 +212,7 @@ def validate_episode_plan(
                 })
         roles = [asset.role for asset in item.required_assets]
         if item.mode == VideoGenerationMode.REFERENCE_IMAGE_MODE:
-            if item.video_input_intent is not None or item.depends_on_shot_id:
+            if item.video_input_intent is not None or (item.depends_on_shot_id and not prev_frame_reference_enabled()):
                 issues.append({"code": "REFERENCE_MODE_ROLE_CONFLICT", "shot_id": item.shot_id})
             if any(role in {"first_frame", "last_frame"} or role.endswith("_video") for role in roles):
                 issues.append({"code": "REFERENCE_MODE_ROLE_CONFLICT", "shot_id": item.shot_id})

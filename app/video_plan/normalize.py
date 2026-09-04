@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from .models import AssetSource, ShotVideoGenerationPlan, VideoGenerationMode
+from .prev_frame_reference import prev_frame_reference_enabled
 from .primitives import _json, _row_value
 
 
@@ -211,6 +212,11 @@ def apply_scene_boundary_strategy(
     matched what actually happened. Scene-entry classification is kept only to
     label *why* a shot's mode is what it is in the audit trail below, not to
     branch the outcome.
+
+    2026-09-04 试验开关 ``video_prev_frame_reference``（见 ``app.video_plan.prev_frame_reference``）：
+    打开时同场戏的后续段仍是参考图模式，但挂上一段的 ``depends_on_shot_id`` 与
+    ``state_dependency=start_only``——生成时等上一段视频出来、从它的三个内切镜头各抽一帧当
+    普通参考图（不是首帧）。判定复用这里的 scene-entry 分类，不另造一套。
     """
     changes: list[dict[str, Any]] = []
     ordered = sorted(shots, key=lambda item: item.shot_no)
@@ -242,6 +248,10 @@ def apply_scene_boundary_strategy(
             else "SCENE_ENTRY_REFERENCE_IMAGE" if scene_entry
             else "IN_SCENE_REFERENCE_IMAGE_ONLY"
         )
+        if previous is not None and not scene_entry and prev_frame_reference_enabled():
+            item.depends_on_shot_id = previous.shot_id
+            item.state_dependency = "start_only"
+            reason_code = "PREVIOUS_SEGMENT_FRAMES_REFERENCE"
         if reason_code not in item.reason_codes:
             item.reason_codes.append(reason_code)
         if previous_mode != item.mode:

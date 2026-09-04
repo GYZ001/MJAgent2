@@ -1,26 +1,7 @@
 """上一段末帧作空间参考：同场戏串接判据与开关。"""
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 from app.video_plan import prev_frame_reference as pfr
-
-
-def _row(shot_id: str, shot_no: int, scene: str) -> dict:
-    return {"id": shot_id, "shot_no": shot_no, "scene_name": scene}
-
-
-def test_consecutive_same_scene_shots_chain_and_scene_change_breaks_the_chain() -> None:
-    rows = [_row("s1", 1, "老小区路边"), _row("s2", 2, "老小区路边"), _row("s3", 3, "出租屋"),
-            _row("s4", 4, "会议室"), _row("s5", 5, "会议室"), _row("s6", 6, "会议室")]
-    assert pfr.scene_chain_dependencies(rows) == {"s2": "s1", "s5": "s4", "s6": "s5"}
-
-
-def test_empty_scene_name_never_chains_and_order_follows_shot_no() -> None:
-    rows = [_row("b", 2, ""), _row("a", 1, ""), _row("c", 3, "会议室"), _row("d", 4, "会议室")]
-    assert pfr.scene_chain_dependencies(rows) == {"d": "c"}
-    rows_obj = [SimpleNamespace(id="x", shot_no=1, scene_name="A"), SimpleNamespace(id="y", shot_no=2, scene_name="A")]
-    assert pfr.scene_chain_dependencies(rows_obj) == {"y": "x"}
 
 
 def test_flag_defaults_off_and_reads_setting(monkeypatch) -> None:
@@ -72,3 +53,35 @@ def test_previous_frame_assets_sample_one_frame_per_internal_shot_when_flag_on(m
     assets = rg.previous_frame_reference_assets(None, {"id": "s1"}, dest_dir=tmp_path)
     assert [a.entity_name for a in assets] == ["第1镜", "第2镜", "第3镜"]
     assert all(a.type == "previous_shot_frame" and a.source == "previous_shot" for a in assets)
+
+
+def _plan_item(shot_id: str, shot_no: int):
+    from types import SimpleNamespace
+
+    from app.video_plan.models import VideoGenerationMode
+
+    return SimpleNamespace(
+        shot_id=shot_id, shot_no=shot_no, mode=VideoGenerationMode.REFERENCE_IMAGE_MODE, planned_mode=None,
+        video_input_intent=None, depends_on_shot_id=None, state_dependency="none", motion_dependency="none",
+        required_assets=[], reason_codes=[],
+        relations=SimpleNamespace(temporal="same_moment", spatial="same_space", edit="continuous_take"),
+    )
+
+
+def test_scene_boundary_strategy_chains_same_scene_shots_only_when_flag_on(monkeypatch) -> None:
+    from app.video_plan import normalize
+
+    shots = [_plan_item("s1", 1), _plan_item("s2", 2), _plan_item("s3", 3), _plan_item("s4", 4)]
+    scenes = {"s1": "路边", "s2": "路边", "s3": "会议室", "s4": "会议室"}
+    monkeypatch.setattr(normalize, "prev_frame_reference_enabled", lambda: True)
+    normalize.apply_scene_boundary_strategy(shots, scene_identity_by_shot_id=scenes)
+    assert [(s.depends_on_shot_id, s.state_dependency) for s in shots] == [
+        (None, "none"), ("s1", "start_only"), (None, "none"), ("s3", "start_only"),
+    ]
+    assert "PREVIOUS_SEGMENT_FRAMES_REFERENCE" in shots[1].reason_codes
+    assert all(s.mode.value == "REFERENCE_IMAGE_MODE" for s in shots)
+
+    shots_off = [_plan_item("s1", 1), _plan_item("s2", 2)]
+    monkeypatch.setattr(normalize, "prev_frame_reference_enabled", lambda: False)
+    normalize.apply_scene_boundary_strategy(shots_off, scene_identity_by_shot_id=scenes)
+    assert [s.depends_on_shot_id for s in shots_off] == [None, None]
