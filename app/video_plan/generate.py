@@ -567,6 +567,8 @@ async def generate_episode_plan(
             }])
         raw_shots.extend(window_raw_shots)
     shot_plans: list[ShotVideoGenerationPlan] = []
+    scene_chain = scene_chain_dependencies(list(rows)) if prev_frame_reference_enabled() else {}
+    scene_chain.update({str(p["shot_id"]): scene_chain[str(r["id"])] for r, p in zip(rows, shot_payload) if str(r["id"]) in scene_chain})  # 模型可能按发布 id 回填；validate 再把依赖别名归一到库 id
     for index, raw in enumerate(raw_shots):
         if not isinstance(raw, dict):
             raise VideoPlanValidationError([{"code": "AI_PLAN_SCHEMA_INVALID", "index": index}])
@@ -598,9 +600,9 @@ async def generate_episode_plan(
                 shot_no=index + 1,
                 mode=VideoGenerationMode.REFERENCE_IMAGE_MODE,
                 video_input_intent=None,
-                depends_on_shot_id=None,
+                depends_on_shot_id=scene_chain.get(analysis.shot_id),
                 relations=analysis.relations,
-                state_dependency=analysis.state_dependency,
+                state_dependency="start_only" if scene_chain.get(analysis.shot_id) else analysis.state_dependency,
                 motion_dependency=analysis.motion_dependency,
                 required_assets=[],
                 reason_codes=analysis.reason_codes,
