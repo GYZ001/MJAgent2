@@ -35,6 +35,23 @@ STAGE_LABELS: dict[str, str] = {
     "final": "成片台",
 }
 
+#: 单集任务占用一集时的登记种类 → 台名。编排器在跑每一步之前都查一遍：占用着就等，
+#: 不抢、不失败——重启后平台自己会把上一轮的映射台/分镜台运行恢复起来，那正是这个
+#: 连播任务的产出，等它跑完再按完成判据跳过即可。
+EPISODE_BUSY_KINDS: dict[str, str] = {
+    "screenplay": "映射台",
+    "storyboard": "分镜台",
+    "video_completion": "生成台",
+}
+
+
+def busy_label(episode_id: str) -> str | None:
+    """这一集正被哪个台的单集任务占用；空闲返回 None。"""
+    for kind, label in EPISODE_BUSY_KINDS.items():
+        if task_registry.active(kind, episode_id):
+            return label
+    return None
+
 
 def _http_error_code(exc: HTTPException) -> str | None:
     detail = exc.detail

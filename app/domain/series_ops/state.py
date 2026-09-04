@@ -19,6 +19,7 @@ def new_episode_entry(episode_id: str, episode_no: int) -> dict:
         "episode_no": episode_no,
         "stages": {stage: "pending" for stage in STAGE_SEQUENCE},
         "error": None,
+        "waiting": None,
     }
 
 
@@ -44,6 +45,9 @@ def refresh_current(progress: dict) -> None:
     progress["running_episode_nos"] = sorted({no for no, _ in running})
     if running:
         progress["current_episode_no"], progress["current_stage"] = min(running)
+    progress["note"] = next(
+        (entry["waiting"] for entry in progress.get("episodes") or [] if entry.get("waiting")), None,
+    )
 
 
 def persist_progress(task_id: str, progress: dict) -> None:

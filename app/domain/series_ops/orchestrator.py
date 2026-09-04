@@ -162,9 +162,26 @@ async def _run_episode(task_id: str, entry: dict, progress: dict, recorder) -> N
         await _run_single_stage(stage, episode_id, task_id, entry, progress, recorder)
 
 
+async def _wait_until_episode_free(episode_id: str, task_id: str, entry: dict, progress: dict) -> None:
+    """这一集正被单集任务占用就等（每 5 秒看一次），等待原因写进条目供界面展示；
+    不抢也不判失败——占用者往往就是重启前本任务自己起的那一轮运行。"""
+    label = stages.busy_label(episode_id)
+    if label is None:
+        return
+    entry["waiting"] = f"第{entry['episode_no']}集正被{label}的任务占用，等它跑完后自动继续"
+    state.persist_progress(task_id, progress)
+    try:
+        while stages.busy_label(episode_id) is not None:
+            await asyncio.sleep(5)
+    finally:
+        entry["waiting"] = None
+        state.persist_progress(task_id, progress)
+
+
 async def _run_single_stage(
     stage: str, episode_id: str, task_id: str, entry: dict, progress: dict, recorder,
 ) -> None:
+    await _wait_until_episode_free(episode_id, task_id, entry, progress)
     if stages.stage_is_complete(stage, get_conn(), episode_id):
         entry["stages"][stage] = "skipped"
         state.persist_progress(task_id, progress)

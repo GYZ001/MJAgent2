@@ -34,12 +34,6 @@ _CONSECUTIVE_FAILURE_LIMIT = 3
 #: 任务开跑前要确认没被占用的三种单集任务，值是给用户看的工作台名。检查放在
 #: 「取到任务、真要开跑」这一刻而不是入队时：入队到执行之间可能隔几小时，那时
 #: 候的检查结论早就过期了，而这里的结论紧挨着实际使用。
-_EPISODE_BUSY_KINDS: dict[str, str] = {
-    "screenplay": "映射台",
-    "storyboard": "分镜台",
-    "video_completion": "生成台",
-}
-
 _pause_requests: set[str] = set()
 _cancel_requests: set[str] = set()
 
@@ -77,7 +71,25 @@ async def _run_queue(project_id: str) -> None:
 
 def _reap_finished(children: dict[str, asyncio.Task]) -> None:
     for task_id in [task_id for task_id, child in children.items() if child.done()]:
-        children.pop(task_id, None)
+        child = children.pop(task_id)
+        _record_unexpected_exit(task_id, child)
+
+
+def _record_unexpected_exit(task_id: str, child: asyncio.Task) -> None:
+    """子任务在落终态之前就异常退出（如启动期 database is locked）：任务行还是 running/
+    queued，调度器会立刻再派一次、再炸一次，空转到天亮。这里把它落成 failed 并记错误，
+    让人看得见；修好后重新入队即可。"""
+    if child.cancelled():
+        return
+    exc = child.exception()
+    if exc is None:
+        return
+    from app.errors import log_error  # 延迟导入：app.errors 反向依赖 db/quota 链，模块级会成环
+    rec = log_error(exc, action="series_task.child_exit", context={"task_id": task_id})
+    conn = get_conn()
+    row = conn.execute("SELECT status FROM series_tasks WHERE id=?", (task_id,)).fetchone()
+    if row and row["status"] in ("running", "queued"):
+        tasks.mark_failed(conn, task_id, f"连播任务异常退出（{rec.error_id}）：{exc}"[:1000])
 
 
 def _spawn_children(conn, project_id: str, children: dict[str, asyncio.Task]) -> None:
@@ -123,10 +135,11 @@ async def _run_one_task(project_id: str, row: dict) -> None:
 
 
 def _preflight(conn, project_id: str, row: dict) -> dict:
-    """开跑前的两道前置检查，任一不过就让这个任务失败并如实说明原因。"""
-    progress = _init_progress(conn, project_id, row)
-    _assert_episodes_free(progress)
-    return progress
+    """开跑前的前置检查（区间内缺集），不过就让这个任务失败并如实说明原因。
+    「某集正被单集任务占用」不再在这里拦：2026-09-04 实测服务重启后平台会把上一轮
+    的映射台运行恢复起来，占用者正是本任务自己的产出，拦下来等于每次重启都判一次
+    假失败；改由编排器逐步等待（``orchestrator._wait_until_episode_free``）。"""
+    return _init_progress(conn, project_id, row)
 
 
 def _init_progress(conn, project_id: str, row: dict) -> dict:
@@ -141,23 +154,6 @@ def _init_progress(conn, project_id: str, row: dict) -> dict:
         )
     entries = [state.new_episode_entry(r["id"], r["episode_no"]) for r in ordered]
     return state.new_progress(entries)
-
-
-def _assert_episodes_free(progress: dict) -> None:
-    """区间内任一集正被单集任务占用就拒绝开跑，并指名道姓说是哪一集哪个台。
-
-    没有这道检查，冲突会等到跑到那一步时才由领域函数抛出——用户拿到的是一句
-    看不出所以然的领域异常，而不是「去哪儿、做什么才能继续」。
-    """
-    for entry in progress.get("episodes") or []:
-        for kind, label in _EPISODE_BUSY_KINDS.items():
-            if not task_registry.active(kind, entry["episode_id"]):
-                continue
-            raise _PreflightFailed(
-                f"第 {entry['episode_no']} 集正被{label}的任务占用，"
-                f"请等它跑完（或在{label}停掉它）后重新把这个连播任务加入队列",
-                "SERIES_TASK_EPISODE_BUSY",
-            )
 
 
 def _create_recorder(project_id: str, row: dict):

@@ -53,6 +53,7 @@ export default function SeriesTaskDetail({ projectId, taskId }: { projectId: str
         <span className={`stamp ${seriesTaskStatusTone(data.status)}`}>{seriesTaskStatusLabel(data.status)}</span>
         <span>{seriesTaskProgressLabel(data)}</span>
         <span>{data.steps_done}/{data.steps_total} 步</span>
+        {data.note && <span className="hint" role="status">{data.note}</span>}
       </section>
       {data.missing_episode_nos.length > 0 && (
         <OperationError

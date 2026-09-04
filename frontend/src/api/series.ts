@@ -99,6 +99,8 @@ export interface SeriesTaskSummary {
   current_stage: Stage | null;
   /** 正在并行处理的集号（升序）；串行或空闲时最多一个。 */
   running_episode_nos?: number[];
+  /** 正在等待什么（如某集被映射台单集任务占用）；没有就为 null。 */
+  note?: string | null;
   steps_done: number;
   steps_total: number;
   error: string | null;

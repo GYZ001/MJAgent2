@@ -15,6 +15,7 @@ tests/test_series_tasks_api.py 的关键差异：那边测 HTTP 契约，这里�
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 
 import pytest
@@ -324,43 +325,64 @@ async def test_recovery_does_not_restart_a_paused_project_queue(monkeypatch) -> 
     assert resumed == 0
 
 
-# ------------------------------------------------------------- 开跑前占用检查
-
+# ------------------------------------------------------------- 开跑时占用等待
 @pytest.mark.asyncio
-async def test_task_refuses_to_start_when_an_episode_is_busy(monkeypatch) -> None:
-    """区间内某一集正被单集任务占用时，任务在跑第一步之前就失败并指名道姓。
-
-    检查放在「取到任务、真要开跑」这一刻而不是入队时：入队到执行之间可能隔几
-    小时，入队时的结论早就过期了。断言 ``ran == []`` 是这条测试的要害——占用必须
-    在跑任何一步之前拦下，而不是跑到一半再炸。
-    """
+async def test_task_waits_for_busy_episode_then_continues(monkeypatch) -> None:
+    """区间内某一集正被单集任务占用时，任务不判失败：等占用释放后自动继续。
+    重启后平台会把上一轮的映射台运行恢复起来，占用者就是本任务自己的产出，
+    判失败等于每次重启都制造一次假失败（2026-09-04 B 上实测）。"""
     conn = _conn()
     _patch_conn(monkeypatch, conn)
     _seed_task(conn, "st_busy", [1])
-
+    busy = {"storyboard": True}
     real_active = task_registry.active
     monkeypatch.setattr(
         task_registry, "active",
-        lambda kind, key: True if (kind, key) == ("storyboard", "e1") else real_active(kind, key),
+        lambda kind, key: busy.get(kind, False) if key == "e1" else real_active(kind, key),
     )
+    sleeps: list[float] = []
 
+    async def fast_sleep(seconds):
+        sleeps.append(seconds)
+        busy["storyboard"] = False  # 第一次等待后占用释放
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)  # 编排器等占用用的就是 asyncio.sleep
     ran: list[str] = []
 
     async def fake_run_stage(stage, _episode_id, _run_id):
         ran.append(stage)
-
-    monkeypatch.setattr(series_stages, "stage_is_complete", lambda *_a: False)
+    monkeypatch.setattr(series_stages, "stage_is_complete", lambda stage, _c, eid: stage in ran)
     monkeypatch.setattr(series_stages, "run_stage", fake_run_stage)
     monkeypatch.setattr(merge, "merge_is_current", lambda *_a: False)
     monkeypatch.setattr(merge, "build_series_film", lambda *_a: {})
-
     await queue.enqueue("p", ["st_busy"], False)
     await _await_runner("p")
-
     row = _task_row(conn, "st_busy")
-    assert row["status"] == "failed"
-    assert "第 1 集" in row["error"] and "分镜台" in row["error"]
-    assert ran == []
+    assert row["status"] == "succeeded", row["error"]
+    assert sleeps and ran[0] == "screenplay"
+    progress = json.loads(row["progress_json"])
+    assert progress["note"] is None and progress["episodes"][0]["waiting"] is None
+
+
+@pytest.mark.asyncio
+async def test_child_crash_before_terminal_state_marks_task_failed(monkeypatch) -> None:
+    """子任务在落终态前异常退出（如启动期 database is locked）必须落 failed，
+    否则调度器会对同一条 queued 行反复重派、空转。"""
+    conn = _conn()
+    _patch_conn(monkeypatch, conn)
+    _seed_task(conn, "st_crash", [1])
+
+    async def boom(_project_id, _row):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(queue, "_run_one_task", boom)
+
+    class _Rec:
+        error_id = "ERR-TEST"
+    import app.errors as errors_mod
+    monkeypatch.setattr(errors_mod, "log_error", lambda *_a, **_k: _Rec())
+    await queue.enqueue("p", ["st_crash"], False)
+    await _await_runner("p")
+    row = _task_row(conn, "st_crash")
+    assert row["status"] == "failed" and "database is locked" in row["error"]
 
 
 # --------------------------------------------------------------------- 并行
