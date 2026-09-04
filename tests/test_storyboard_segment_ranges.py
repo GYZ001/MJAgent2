@@ -311,3 +311,34 @@ def test_segment_source_payload_renders_paratext_segment_as_placeholder():
     payload = segment_source_payload(plan_index, _scene_4_segments(), {1})
     assert _PARATEXT_PLACEHOLDER_TEXT in payload["source_text_by_segment"]
     assert "第一章标题" not in payload["source_text_by_segment"]
+
+
+def test_reassign_kept_line_to_the_segment_whose_range_covers_its_unit():
+    """EP1 试验跑实测：Q08 在 S21，模型分给声明 S15-S20 的第 8 段，覆盖 S21 的是第 9 段。"""
+    from types import SimpleNamespace
+
+    from app.production.storyboard_dialogue_ledger import DialogueQuote, _AiKeptLine
+    from app.production.storyboard_segment_ranges import (
+        _AiSourceUnitRange,
+        reassign_kept_lines_to_covering_segments,
+    )
+    from app.source_excerpt import SourceSegment
+
+    text = "\n".join(f"第{i}句。" for i in range(1, 25))
+    segments = [SourceSegment(segment_id="SRC0001", text=text, start_offset=0, end_offset=len(text))]
+    quotes = [DialogueQuote(quote_id="Q08", source_segment_index=1, text="第21句。", content_chars=4)]
+    plans = [
+        SimpleNamespace(segment_no=8, source_unit_ranges=[_AiSourceUnitRange(source_segment_index=1, from_unit=15, to_unit=20)]),
+        SimpleNamespace(segment_no=9, source_unit_ranges=[_AiSourceUnitRange(source_segment_index=1, from_unit=21, to_unit=24)]),
+    ]
+    kept = [_AiKeptLine(quote_id="Q08", segment_no=8)]
+    moves = reassign_kept_lines_to_covering_segments(kept, quotes, plans, segments)
+    assert moves == [{"quote_id": "Q08", "from_segment_no": 8, "to_segment_no": 9, "unit": 21}]
+    assert kept[0].segment_no == 9
+    # 已经在自己范围内的不动；没有任何段覆盖的也不动（留给越界/洞检查）
+    kept_ok = [_AiKeptLine(quote_id="Q08", segment_no=9)]
+    assert reassign_kept_lines_to_covering_segments(kept_ok, quotes, plans, segments) == []
+    plans_hole = [plans[0]]
+    kept_hole = [_AiKeptLine(quote_id="Q08", segment_no=8)]
+    assert reassign_kept_lines_to_covering_segments(kept_hole, quotes, plans_hole, segments) == []
+    assert kept_hole[0].segment_no == 8

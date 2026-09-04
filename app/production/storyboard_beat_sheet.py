@@ -53,6 +53,7 @@ from app.production.storyboard_segment_ranges import (
     _AiSourceUnitRange,
     _PARATEXT_PLACEHOLDER_TEXT,
     kept_line_unit_binding_errors,
+    reassign_kept_lines_to_covering_segments,
     render_source_units,
     segment_unit_range_errors,
 )
@@ -128,6 +129,8 @@ def _validate_beat_sheet_draft(
         include_capacity=False,
     ))
     errors.extend(segment_unit_range_errors(draft.segments, source_segments, set(paratext_indexes)))
+    # 先按单元位置把分错段的台词挪到覆盖它的段（确定性，不打回模型），再查残余的越界。
+    reassign_kept_lines_to_covering_segments(draft.kept_lines, dialogue_quotes, draft.segments, source_segments)
     errors.extend(kept_line_unit_binding_errors(draft.kept_lines, dialogue_quotes, draft.segments, source_segments))
     errors.extend(palette_scene_consistency_errors(draft.segments))
     return errors

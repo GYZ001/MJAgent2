@@ -345,3 +345,41 @@ def segment_source_payload(
         "context_after": context_after,
         "context_note": _CONTEXT_NOTE,
     }
+
+
+def reassign_kept_lines_to_covering_segments(
+    kept_lines: list[Any], quotes: list[Any], plans: list[Any], source_segments: list[SourceSegment],
+) -> list[dict[str, Any]]:
+    """确定性归一化：kept 台词落在别的段声明的单元范围里时，直接把它挪到覆盖它的那一段。
+
+    EP1 试验跑实测（2026-09-04）：模型三次都把 Q08 分给第 8 段，而第 8 段声明的范围是
+    S15-S20、Q08 在 S21、覆盖 S21 的是第 9 段——这是唯一确定性的修法，打回模型重试三次仍
+    没改对，整集分镜因此失败。范围声明是主事实（它决定各段拍哪块原文），台词的段号只是
+    冗余信息，按单元位置归一化不引入任何猜测；多段共享边界单元时归到最早的那段。
+    返回 ``[{"quote_id", "from_segment_no", "to_segment_no", "unit"}]`` 供观测。
+    """
+    quotes_by_id = {q.quote_id: q for q in quotes}
+    plans_by_no = {p.segment_no: p for p in plans}
+    moves: list[dict[str, Any]] = []
+    for item in kept_lines:
+        quote = quotes_by_id.get(item.quote_id)
+        plan = plans_by_no.get(item.segment_no)
+        if quote is None or plan is None or not (1 <= quote.source_segment_index <= len(source_segments)):
+            continue
+        unit_no = quote_unit_index(quote, source_segments[quote.source_segment_index - 1].text)
+        if unit_no < 1:
+            continue
+        own = next((r for r in plan.source_unit_ranges if r.source_segment_index == quote.source_segment_index), None)
+        if own is not None and own.from_unit <= unit_no <= own.to_unit:
+            continue
+        covering = sorted(
+            p.segment_no for p in plans
+            for r in p.source_unit_ranges
+            if r.source_segment_index == quote.source_segment_index and r.from_unit <= unit_no <= r.to_unit
+        )
+        if not covering:
+            continue  # 留给 kept_line_unit_binding_errors / 洞检查去报
+        moves.append({"quote_id": item.quote_id, "from_segment_no": item.segment_no,
+                      "to_segment_no": covering[0], "unit": unit_no})
+        item.segment_no = covering[0]
+    return moves
