@@ -4,13 +4,15 @@ from __future__ import annotations
 from app.video_plan import prev_frame_reference as pfr
 
 
-def test_flag_defaults_off_and_reads_setting(monkeypatch) -> None:
+def test_flag_defaults_on_and_only_explicit_zero_turns_it_off(monkeypatch) -> None:
     monkeypatch.setattr(pfr, "get_setting", lambda key: "")
-    assert pfr.prev_frame_reference_enabled() is False
-    monkeypatch.setattr(pfr, "get_setting", lambda key: "1" if key == pfr.SETTING_KEY else "")
+    assert pfr.prev_frame_reference_enabled() is True  # 缺失/空 = 默认开
+    monkeypatch.setattr(pfr, "get_setting", lambda key: "0" if key == pfr.SETTING_KEY else "")
+    assert pfr.prev_frame_reference_enabled() is False  # 只有显式 0 才关
+    monkeypatch.setattr(pfr, "get_setting", lambda key: "1")
     assert pfr.prev_frame_reference_enabled() is True
     monkeypatch.setattr(pfr, "get_setting", lambda key: "yes")
-    assert pfr.prev_frame_reference_enabled() is False
+    assert pfr.prev_frame_reference_enabled() is True  # 非数字不当成关闭
 
 
 def test_purpose_note_locks_layout_not_pose() -> None:
@@ -35,7 +37,7 @@ def test_previous_frame_assets_fall_back_to_single_tail_when_flag_off(monkeypatc
 
     from app.video_modes import reference_generate as rg
 
-    monkeypatch.setattr(pfr, "get_setting", lambda key: "")
+    monkeypatch.setattr(pfr, "get_setting", lambda key: "0")
     sentinel = SimpleNamespace(type="previous_shot_frame")
     monkeypatch.setattr(rg, "previous_tail_reference_asset", lambda conn, prev, dest_dir: sentinel)
     assert rg.previous_frame_reference_assets(None, {"id": "s1"}, dest_dir=tmp_path) == [sentinel]
@@ -93,7 +95,7 @@ def test_planned_previous_shot_id_reads_published_plan_only_when_flag_on(monkeyp
     from app.video_plan import mode_attempt
 
     monkeypatch.setattr(mode_attempt, "get_shot_plan", lambda shot_id, conn=None: SimpleNamespace(depends_on_shot_id="s4"))
-    monkeypatch.setattr(pfr, "get_setting", lambda key: "")
+    monkeypatch.setattr(pfr, "get_setting", lambda key: "0")
     assert pfr.planned_previous_shot_id(None, "s5") is None
     monkeypatch.setattr(pfr, "get_setting", lambda key: "1")
     assert pfr.planned_previous_shot_id(None, "s5") == "s4"
@@ -115,5 +117,5 @@ def test_library_policy_accepts_previous_segment_frames_only_when_flag_on(monkey
     }
     monkeypatch.setattr(pfr, "get_setting", lambda key: "1")
     assert rp.reference_gallery_matches_library_policy(meta) is True
-    monkeypatch.setattr(pfr, "get_setting", lambda key: "")
+    monkeypatch.setattr(pfr, "get_setting", lambda key: "0")
     assert rp.reference_gallery_matches_library_policy(meta) is False

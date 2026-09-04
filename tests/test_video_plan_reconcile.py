@@ -280,7 +280,12 @@ def test_same_space_relation_does_not_force_a_mode() -> None:
     assert normalized["mode"] == "FIRST_LAST_FRAME_MODE"
 
 
-def test_scene_boundary_strategy_waits_for_each_previous_video_tail() -> None:
+def test_scene_boundary_strategy_waits_for_each_previous_video_tail(monkeypatch) -> None:
+    # 这两个用例守的是场景入口分类与「无首帧资产」的旧语义；上一段画面空间参考
+    # 2026-09-04 起默认开启会给同场戏后续段挂依赖，那条语义由
+    # tests/test_prev_frame_reference.py 专门覆盖，这里把开关钉死为关。
+    import app.video_plan.normalize as normalize_mod
+    monkeypatch.setattr(normalize_mod, "prev_frame_reference_enabled", lambda: False)
     shots = [
         ShotVideoGenerationPlan(
             source_storyboard_revision_id="rev",
@@ -343,7 +348,12 @@ def test_scene_boundary_strategy_waits_for_each_previous_video_tail() -> None:
     ]
 
 
-def test_published_scene_identity_overrides_ai_boundary_drift() -> None:
+def test_published_scene_identity_overrides_ai_boundary_drift(monkeypatch) -> None:
+    # 这两个用例守的是场景入口分类与「无首帧资产」的旧语义；上一段画面空间参考
+    # 2026-09-04 起默认开启会给同场戏后续段挂依赖，那条语义由
+    # tests/test_prev_frame_reference.py 专门覆盖，这里把开关钉死为关。
+    import app.video_plan.normalize as normalize_mod
+    monkeypatch.setattr(normalize_mod, "prev_frame_reference_enabled", lambda: False)
     shots = [
         ShotVideoGenerationPlan(
             source_storyboard_revision_id="rev",
