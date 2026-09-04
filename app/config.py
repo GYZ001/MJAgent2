@@ -481,8 +481,6 @@ DEFAULT_SETTINGS = {
     "minimax_h3_base_url": MINIMAX_H3_BASE_URL,
     "text_generation_concurrency": "6", # 剧本与分镜共享文本模型资源池；见 monitoring.py 同名项注释的 RCA
     "text_generation_workflow_concurrency": "10", # 活跃文本工作流；真实请求另受 provider call gate 约束
-    "series_queue_concurrency": "3",  # 连播台同一项目并行任务数（app/domain/series_ops/queue.py）
-    "video_prev_frame_reference": "true",  # 同场戏后续段拿上一段三帧作空间参考（app/video_plan/prev_frame_reference.py）
     "screenplay_scene_shards_enabled": "true",
     "screenplay_targeted_identity_enabled": "true",
     "screenplay_targeted_blueprint_review_enabled": "true",

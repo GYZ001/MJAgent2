@@ -5,6 +5,14 @@ import pytest
 
 from app import db, hiagent, worker
 from tests.conftest import patch_worker_everywhere
+import app.video_plan.normalize as normalize_mod
+
+
+@pytest.fixture(autouse=True)
+def _prev_frame_reference_off(monkeypatch):
+    """本文件守的是不串接时的计划语义（场景入口分类、无首帧资产）；上一段画面空间参考
+    2026-09-04 起默认开启会给同场戏后续段挂依赖，那条语义由 test_prev_frame_reference.py 覆盖。"""
+    monkeypatch.setattr(normalize_mod, "prev_frame_reference_enabled", lambda: False)
 from app.video_plan import (
     AssetSource,
     EpisodeVideoGenerationPlan,
@@ -280,12 +288,7 @@ def test_same_space_relation_does_not_force_a_mode() -> None:
     assert normalized["mode"] == "FIRST_LAST_FRAME_MODE"
 
 
-def test_scene_boundary_strategy_waits_for_each_previous_video_tail(monkeypatch) -> None:
-    # 这两个用例守的是场景入口分类与「无首帧资产」的旧语义；上一段画面空间参考
-    # 2026-09-04 起默认开启会给同场戏后续段挂依赖，那条语义由
-    # tests/test_prev_frame_reference.py 专门覆盖，这里把开关钉死为关。
-    import app.video_plan.normalize as normalize_mod
-    monkeypatch.setattr(normalize_mod, "prev_frame_reference_enabled", lambda: False)
+def test_scene_boundary_strategy_waits_for_each_previous_video_tail() -> None:
     shots = [
         ShotVideoGenerationPlan(
             source_storyboard_revision_id="rev",
@@ -310,21 +313,9 @@ def test_scene_boundary_strategy_waits_for_each_previous_video_tail(monkeypatch)
 
     apply_scene_boundary_strategy(shots)
 
-    # 2026-08-26: first/last-frame chaining is retired (product decision frozen
-    # by the user, see apply_scene_boundary_strategy's docstring) -- the function
-    # no longer branches its *output* on relations at all; every shot becomes
-    # REFERENCE_IMAGE_MODE with no dependency and no first_frame asset, no matter
-    # what the model reported. What's lost: the old dependency-chain-wiring
-    # coverage (FIRST_FRAME_MODE + depends_on_shot_id + PREVIOUS_ADOPTED_TAIL
-    # first_frame asset resetting at each scene boundary) has no replacement --
-    # that behavior was deleted, not relocated, so there is nothing left to
-    # protect it.
-    # What's kept: the scene-entry classification is still computed internally
-    # (for the audit-trail reason_codes below) exactly as before, so this test
-    # still protects that _is_scene_entry's relation-based fallback keeps working
-    # when no published scene_identity is supplied (see the companion test
-    # test_published_scene_identity_overrides_ai_boundary_drift below for the
-    # published-identity-overrides-relations precedence case).
+    # 2026-08-26 首尾帧串接已废止：每镜都是 REFERENCE_IMAGE_MODE、无 first_frame 资产；
+    # 这里守的是 _is_scene_entry 在没有 published scene_identity 时按 relations 兜底的分类
+    # （精度覆盖见 test_published_scene_identity_overrides_ai_boundary_drift）。
     assert [item.mode for item in shots] == [VideoGenerationMode.REFERENCE_IMAGE_MODE] * 6
     assert [item.depends_on_shot_id for item in shots] == [None] * 6
     assert [
@@ -348,12 +339,7 @@ def test_scene_boundary_strategy_waits_for_each_previous_video_tail(monkeypatch)
     ]
 
 
-def test_published_scene_identity_overrides_ai_boundary_drift(monkeypatch) -> None:
-    # 这两个用例守的是场景入口分类与「无首帧资产」的旧语义；上一段画面空间参考
-    # 2026-09-04 起默认开启会给同场戏后续段挂依赖，那条语义由
-    # tests/test_prev_frame_reference.py 专门覆盖，这里把开关钉死为关。
-    import app.video_plan.normalize as normalize_mod
-    monkeypatch.setattr(normalize_mod, "prev_frame_reference_enabled", lambda: False)
+def test_published_scene_identity_overrides_ai_boundary_drift() -> None:
     shots = [
         ShotVideoGenerationPlan(
             source_storyboard_revision_id="rev",
