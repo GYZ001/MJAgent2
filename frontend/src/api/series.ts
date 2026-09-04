@@ -97,6 +97,8 @@ export interface SeriesTaskSummary {
   queue_position: number | null;
   current_episode_no: number | null;
   current_stage: Stage | null;
+  /** 正在并行处理的集号（升序）；串行或空闲时最多一个。 */
+  running_episode_nos?: number[];
   steps_done: number;
   steps_total: number;
   error: string | null;

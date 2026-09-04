@@ -19,6 +19,7 @@ from fastapi import HTTPException
 from app.db import get_conn
 
 from . import merge, stages, state
+from .concurrency import episode_slots
 
 
 class StageFailure(RuntimeError):
@@ -98,17 +99,9 @@ async def _run_task_body(
     progress: dict, recorder,
 ) -> None:
     failed: list[dict] = []
-    for entry in progress["episodes"]:
-        progress["current_episode_no"] = entry["episode_no"]
-        state.persist_progress(task_id, progress)
-        try:
-            await _run_episode(task_id, entry, progress, recorder)
-        except StageFailure:
-            # 记下、跳过、继续：一集被卡住（供应商拒了某一镜、门禁没过）不该把后面的集全部拖住。
-            failed.append(entry)
-            progress["error"] = f"{entry['error']}（已跳过，继续后续集；结束后汇总）"[:1000]
-            state.persist_progress(task_id, progress)
+    await _run_episodes_in_parallel(project_id, task_id, progress, recorder, failed)
     progress["current_episode_no"] = None
+    progress["current_stage"] = None
     if failed:
         progress["current_stage"] = None
         message = _episodes_failed_message(failed, len(progress["episodes"]))
@@ -124,12 +117,48 @@ async def _run_task_body(
     recorder.succeed("连播任务已完成，成片已生成", conn=None)
 
 
+async def _run_episodes_in_parallel(
+    project_id: str, task_id: str, progress: dict, recorder, failed: list[dict],
+) -> None:
+    """按集序逐集拿项目级并行槽位（``concurrency.episode_slots``）再起子任务；一集失败
+    只记进该集条目、其余集照跑；本协程被取消（暂停/取消/重启）时连带取消所有在跑的集。"""
+    children: set[asyncio.Task] = set()
+    try:
+        for entry in progress["episodes"]:
+            await episode_slots.acquire(project_id)
+            child = asyncio.create_task(
+                _run_episode_holding_slot(project_id, task_id, entry, progress, recorder, failed),
+            )
+            children.add(child)
+            child.add_done_callback(children.discard)
+        if children:
+            await asyncio.gather(*children)
+    except BaseException:
+        for child in children:
+            child.cancel()
+        if children:
+            await asyncio.gather(*children, return_exceptions=True)
+        raise
+
+
+async def _run_episode_holding_slot(
+    project_id: str, task_id: str, entry: dict, progress: dict, recorder, failed: list[dict],
+) -> None:
+    try:
+        await _run_episode(task_id, entry, progress, recorder)
+    except StageFailure:
+        # 记下、跳过、继续：一集被卡住（供应商拒了某一镜、门禁没过）不该把别的集全部拖住。
+        failed.append(entry)
+        progress["error"] = f"{entry['error']}（已跳过，继续其余集；结束后汇总）"[:1000]
+        state.persist_progress(task_id, progress)
+    finally:
+        await episode_slots.release(project_id)
+
+
 async def _run_episode(task_id: str, entry: dict, progress: dict, recorder) -> None:
     episode_id = entry["episode_id"]
     entry["error"] = None  # 本集重新进入处理，上一轮留在条目上的失败信息作废
     for stage in stages.STAGE_SEQUENCE:
-        progress["current_stage"] = stage
-        state.persist_progress(task_id, progress)
         await _run_single_stage(stage, episode_id, task_id, entry, progress, recorder)
 
 

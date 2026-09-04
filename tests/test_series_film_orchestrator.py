@@ -315,3 +315,101 @@ async def test_requeued_task_clears_previous_round_errors(monkeypatch) -> None:
     ).fetchone()))
     assert persisted["error"] is None and persisted["episodes"][0]["error"] is None
 
+
+
+# --------------------------------------------------------------------- 集级并行
+@pytest.mark.asyncio
+async def test_episodes_inside_one_task_run_in_parallel_up_to_slots(monkeypatch) -> None:
+    """并行集数 2、一个任务三集：前两集交错运行，第三集只能在某集整体结束后开跑。"""
+    from app.domain.series_ops import concurrency
+
+    conn, entries = _conn([1, 2, 3])
+    _patch_conn(monkeypatch, conn)
+    monkeypatch.setattr(concurrency, "queue_concurrency", lambda: 2)
+    order: list[str] = []
+    done_pairs: set[tuple[str, str]] = set()
+
+    async def fake_run_stage(stage, episode_id, _run_id):
+        order.append(f"{episode_id}:{stage}:start")
+        await asyncio.sleep(0.005)
+        order.append(f"{episode_id}:{stage}:end")
+        done_pairs.add((stage, episode_id))
+
+    monkeypatch.setattr(series_stages, "stage_is_complete", lambda stage, _c, eid: (stage, eid) in done_pairs)
+    monkeypatch.setattr(series_stages, "run_stage", fake_run_stage)
+    monkeypatch.setattr(merge, "merge_is_current", lambda *_a: False)
+    monkeypatch.setattr(merge, "build_series_film", lambda *_a: {})
+    progress = state.new_progress(entries)
+    recorder = WorkflowRecorder("run-task")
+
+    await orchestrator.run_task("p", "task-1", 1, 3, progress, recorder)
+
+    assert all(v == "done" for e in progress["episodes"] for v in e["stages"].values())
+    first_e2 = min(i for i, ev in enumerate(order) if ev.startswith("e2:"))
+    last_e1 = max(i for i, ev in enumerate(order) if ev.startswith("e1:"))
+    assert first_e2 < last_e1, "同一任务里第 1、2 集必须交错（并行）"
+    first_e3 = min(i for i, ev in enumerate(order) if ev.startswith("e3:"))
+    last_e2 = max(i for i, ev in enumerate(order) if ev.startswith("e2:"))
+    assert first_e3 > min(last_e1, last_e2), "第 3 集只能等某集整体结束后再开（并行集数 2）"
+    assert progress["running_episode_nos"] == [] and progress["current_episode_no"] is None
+    assert concurrency.episode_slots.running("p") == 0
+
+
+@pytest.mark.asyncio
+async def test_parallel_episode_failure_only_marks_that_episode(monkeypatch) -> None:
+    from app.domain.series_ops import concurrency
+
+    conn, entries = _conn([1, 2])
+    _patch_conn(monkeypatch, conn)
+    monkeypatch.setattr(concurrency, "queue_concurrency", lambda: 2)
+    done_pairs: set[tuple[str, str]] = set()
+
+    async def fake_run_stage(stage, episode_id, _run_id):
+        await asyncio.sleep(0.002)
+        if episode_id == "e1" and stage == "storyboard":
+            raise RuntimeError("分镜门禁没过")
+        done_pairs.add((stage, episode_id))
+
+    monkeypatch.setattr(series_stages, "stage_is_complete", lambda stage, _c, eid: (stage, eid) in done_pairs)
+    monkeypatch.setattr(series_stages, "run_stage", fake_run_stage)
+    monkeypatch.setattr(merge, "build_series_film", lambda *_a: pytest.fail("有集失败不得合并"))
+    progress = state.new_progress(entries)
+    recorder = WorkflowRecorder("run-task")
+
+    with pytest.raises(orchestrator.StageFailure):
+        await orchestrator.run_task("p", "task-1", 1, 2, progress, recorder)
+
+    assert progress["episodes"][0]["stages"]["storyboard"] == "failed"
+    assert all(v == "done" for v in progress["episodes"][1]["stages"].values())
+    assert concurrency.episode_slots.running("p") == 0
+
+
+@pytest.mark.asyncio
+async def test_running_episode_nos_and_current_are_derived_while_running(monkeypatch) -> None:
+    from app.domain.series_ops import concurrency
+
+    conn, entries = _conn([1, 2])
+    _patch_conn(monkeypatch, conn)
+    monkeypatch.setattr(concurrency, "queue_concurrency", lambda: 2)
+    release = asyncio.Event()
+    snapshots: list[tuple[list[int], int | None, str | None]] = []
+
+    async def fake_run_stage(stage, episode_id, _run_id):
+        if stage == "screenplay":
+            await asyncio.sleep(0.005)
+            snapshots.append((list(progress["running_episode_nos"]), progress["current_episode_no"], progress["current_stage"]))
+            await release.wait()
+
+    monkeypatch.setattr(series_stages, "stage_is_complete", lambda *_a: False)
+    monkeypatch.setattr(series_stages, "run_stage", fake_run_stage)
+    progress = state.new_progress(entries)
+    recorder = WorkflowRecorder("run-task")
+    task = asyncio.create_task(orchestrator.run_task("p", "task-1", 1, 2, progress, recorder))
+    for _ in range(50):
+        await asyncio.sleep(0.005)
+        if len(snapshots) >= 2:
+            break
+    release.set()
+    with pytest.raises(orchestrator.StageFailure):  # stage_is_complete 恒 False → 两集都判失败
+        await task
+    assert snapshots and snapshots[-1] == ([1, 2], 1, "screenplay")

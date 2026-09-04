@@ -1,12 +1,13 @@
 """项目级连播队列：runner 主循环、入队/出队/暂停/继续、连续失败自动停队。
 
 2026-09-04 起并发度不再恒为 1（用户拍板「连播改成并行任务」）：同一项目同时在跑的连播任务数由
-``settings.series_queue_concurrency`` 决定（缺省 3，夹在 1..8）。runner（登记为 ``series_queue``）
+``settings.series_queue_concurrency`` 决定（缺省 3，夹在 1..8；同一个数也限制项目内同时生成的集数，
+见 ``concurrency.py``——任务内部各集也并行，10 集一组的任务同样吃到并发）。runner（登记为 ``series_queue``）
 只做调度：按 queue_seq 依次把排队任务派成子任务（各自登记为 ``series_task_run``/task_id），子任务
 自己开连接、自己跑五步；runner 等任一子任务结束就补位。暂停/服务重启 = 取消 runner，runner 在
 ``CancelledError`` 里把全部子任务一起取消，子任务按「谁请求的取消」分类：明确点了取消这一个任务
 → ``idle``；其余（暂停/重启）→ 退回 ``queued`` 并保留进度。任务内部各集仍按顺序跑——要让多集
-并行，按 group_size=1 切任务即可。
+并行不再需要按 group_size=1 切任务。
 
 两个模块级可变单例（``_pause_requests``/``_cancel_requests``）只 add/discard，
 不做 global 重绑定，写法照 ``state.py`` 旧版 ``_PAUSE_REQUESTS`` 的先例。
@@ -19,17 +20,16 @@ import time
 from fastapi import HTTPException
 
 from app import task_registry
-from app.db import get_conn, get_setting, now
+from app.db import get_conn, now
 
 from . import orchestrator, state, tasks
+from .concurrency import queue_concurrency
 
 TASK_KIND = "series_queue"
 CHILD_KIND = "series_task_run"
 WORKFLOW_TYPE = "series_task"
 
 _CONSECUTIVE_FAILURE_LIMIT = 3
-DEFAULT_QUEUE_CONCURRENCY = 3
-MAX_QUEUE_CONCURRENCY = 8
 
 #: 任务开跑前要确认没被占用的三种单集任务，值是给用户看的工作台名。检查放在
 #: 「取到任务、真要开跑」这一刻而不是入队时：入队到执行之间可能隔几小时，那时
@@ -42,15 +42,6 @@ _EPISODE_BUSY_KINDS: dict[str, str] = {
 
 _pause_requests: set[str] = set()
 _cancel_requests: set[str] = set()
-
-
-def queue_concurrency() -> int:
-    """同一项目同时在跑的连播任务数：settings.series_queue_concurrency，缺省 3，夹在 1..8。"""
-    try:
-        value = int(float(str(get_setting("series_queue_concurrency") or "").strip() or DEFAULT_QUEUE_CONCURRENCY))
-    except ValueError:
-        value = DEFAULT_QUEUE_CONCURRENCY
-    return max(1, min(MAX_QUEUE_CONCURRENCY, value))
 
 
 class _PreflightFailed(RuntimeError):

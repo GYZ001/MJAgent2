@@ -50,10 +50,14 @@ export function seriesTaskProgressPercent(stepsDone: number, stepsTotal: number)
 
 /** 进度定位文案：正在跑第几集第几步 / 排第几位 / 终态归类，列表与详情共用。 */
 export function seriesTaskProgressLabel(
-  task: Pick<SeriesTaskSummary, 'status' | 'current_episode_no' | 'current_stage' | 'queue_position'>,
+  task: Pick<SeriesTaskSummary, 'status' | 'current_episode_no' | 'current_stage' | 'queue_position'>
+    & { running_episode_nos?: number[] },
 ): string {
   if (task.status === 'running' && task.current_episode_no != null) {
     const stage = task.current_stage ? SERIES_STAGE_LABEL[task.current_stage] : '处理中'
+    const running = task.running_episode_nos ?? []
+    // 多集并行时列出全部在跑的集；步骤只标最靠前那集的（进度树里 current_* 就是它）。
+    if (running.length > 1) return `第 ${running.join('、')} 集并行 · 第 ${task.current_episode_no} 集${stage}`
     return `第 ${task.current_episode_no} 集 · ${stage}`
   }
   if (task.status === 'queued') {

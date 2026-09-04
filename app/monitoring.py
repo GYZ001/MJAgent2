@@ -82,8 +82,8 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
         description="同一时间最多运行多少集剧本或分镜工作流。",
     ),
     "series_queue_concurrency": _number(
-        "连播台并行任务数", "3", 1, 8, unit="任务",
-        description="同一项目的连播队列同时跑多少个任务；任务内部各集仍按顺序跑。",
+        "连播台并行集数", "3", 1, 8, unit="集",
+        description="同一项目同时生成多少集（跨任务共享；一个 10 集的任务内部也按这个数并行），同时也是同时在跑的任务数上限。",
     ),
     "video_prev_frame_reference": _boolean("上一段画面作空间参考", "true"),
     "screenplay_scene_shards_enabled": _boolean("启用剧本场次分片", "true"),

@@ -230,6 +230,7 @@ def task_summary(
         "queue_position": queue_positions.get(row["id"]),
         "current_episode_no": progress.get("current_episode_no"),
         "current_stage": progress.get("current_stage"),
+        "running_episode_nos": list(progress.get("running_episode_nos") or []),
         "steps_done": state.steps_done(progress), "steps_total": episode_count * 5,
         "error": row.get("error") or progress.get("error"),
         "film": film,

@@ -167,6 +167,9 @@ describe('进度定位文案 seriesTaskProgressLabel', () => {
     expect(seriesTaskProgressLabel(task({ status: 'running', current_episode_no: 3, current_stage: 'storyboard' })))
       .toBe('第 3 集 · 分镜台')
     expect(seriesTaskProgressLabel(task({ status: 'queued', queue_position: 2 }))).toBe('排队中（第 2 位）')
+    expect(seriesTaskProgressLabel(task({
+      status: 'running', current_episode_no: 11, current_stage: 'screenplay', running_episode_nos: [11, 12, 13],
+    }))).toBe('第 11、12、13 集并行 · 第 11 集映射台')
     expect(seriesTaskProgressLabel(task({ status: 'succeeded' }))).toBe('已完成')
     expect(seriesTaskProgressLabel(task({ status: 'idle' }))).toBe('尚未开始')
   })

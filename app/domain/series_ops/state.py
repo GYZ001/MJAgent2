@@ -27,11 +27,27 @@ def new_progress(episodes: list[dict]) -> dict:
         "episodes": episodes,
         "current_episode_no": None,
         "current_stage": None,
+        "running_episode_nos": [],
         "error": None,
     }
 
 
+def refresh_current(progress: dict) -> None:
+    """多集并行后 ``current_*`` 从进度树推导：正在跑的集里取最小集号及其正在跑的步；
+    ``running_episode_nos`` 列出全部在跑的集。没有任何集在跑时不动 ``current_*``
+    （merge 阶段由编排器自己写）。"""
+    running: list[tuple[int, str]] = []
+    for entry in progress.get("episodes") or []:
+        for stage, value in (entry.get("stages") or {}).items():
+            if value == "running":
+                running.append((int(entry["episode_no"]), stage))
+    progress["running_episode_nos"] = sorted({no for no, _ in running})
+    if running:
+        progress["current_episode_no"], progress["current_stage"] = min(running)
+
+
 def persist_progress(task_id: str, progress: dict) -> None:
+    refresh_current(progress)
     conn = get_conn()
     conn.execute(
         "UPDATE series_tasks SET progress_json=?, updated_at=? WHERE id=?",
