@@ -157,3 +157,32 @@ def test_film_for_range_and_latest_film_projection(project_dir) -> None:
 
     assert merge.film_for_range(project_id, 9, 9) is None
     assert merge.latest_film("no-such-project") is None
+
+
+def test_merge_is_current_turns_false_when_an_episode_storyboard_artifact_changes(project_dir, monkeypatch) -> None:
+    """2026-09-03 实测：清空分镜后 final/episode.mp4 原封不动，只看文件指纹会把成片判成
+    未过期，重新入队被「已完成，成片未过期」跳过；分镜产物 id 必须是第二个输入指纹。"""
+    project_id = "proj-merge-storyboard"
+    _make_clip(_final_video_path(project_id, 1), duration_s=2.0, color="yellow")
+    monkeypatch.setattr(merge, "_storyboard_artifact_ids", lambda _p, _nos: {"1": "art_old"})
+    merge.build_series_film(project_id, 1, 1, [1])
+    assert merge.merge_is_current(project_id, 1, 1, [1]) is True
+
+    monkeypatch.setattr(merge, "_storyboard_artifact_ids", lambda _p, _nos: {"1": None})
+    assert merge.merge_is_current(project_id, 1, 1, [1]) is False
+
+
+def test_merge_is_current_keeps_judging_old_reports_by_file_fingerprints_only(project_dir, monkeypatch) -> None:
+    """旧报告没有 storyboard_artifact_ids 键：不把历史成片一律判成过期。"""
+    import json as _json
+    project_id = "proj-merge-legacy-report"
+    _make_clip(_final_video_path(project_id, 1), duration_s=2.0, color="yellow")
+    monkeypatch.setattr(merge, "_storyboard_artifact_ids", lambda _p, _nos: {"1": "art_x"})
+    merge.build_series_film(project_id, 1, 1, [1])
+    report_path = merge.series_film_dir(project_id, 1, 1) / "film.report.json"
+    report = _json.loads(report_path.read_text(encoding="utf-8"))
+    report.pop("storyboard_artifact_ids")
+    report_path.write_text(_json.dumps(report), encoding="utf-8")
+
+    monkeypatch.setattr(merge, "_storyboard_artifact_ids", lambda _p, _nos: {"1": None})
+    assert merge.merge_is_current(project_id, 1, 1, [1]) is True

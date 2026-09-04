@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from app import config
+from app.db import get_conn
 from app.final_edit import FINAL_AUDIO_RATE, FINAL_FPS, _run_ffmpeg
 from app.media_exec.concat import (
     _CONCAT_DURATION_TOLERANCE_MIN_S,
@@ -148,6 +149,7 @@ def build_series_film(
         "height": height,
         "created_at": time.time(),
         "input_fingerprints": _input_fingerprints(final_paths),
+        "storyboard_artifact_ids": _storyboard_artifact_ids(project_id, episode_nos),
         "ffmpeg_command_summary": (
             "filter_complex concat(scale/crop/fps/aresample 归一化，lanczos) -> "
             "DELIVERY_VIDEO_ARGS(h264 medium crf20) + aac + faststart"
@@ -157,6 +159,17 @@ def build_series_film(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8",
     )
     return report
+
+
+def _storyboard_artifact_ids(project_id: str, episode_nos: list[int]) -> dict[str, str | None]:
+    """各集当前的分镜产物 id（分镜清空/重做后会变），JSON 键用字符串以便与报告逐字比较。"""
+    marks = ",".join("?" for _ in episode_nos)
+    rows = get_conn().execute(
+        f"SELECT episode_no, storyboard_artifact_id FROM episodes WHERE project_id=? AND episode_no IN ({marks})",
+        (project_id, *episode_nos),
+    ).fetchall()
+    found = {str(row["episode_no"]): row["storyboard_artifact_id"] for row in rows}
+    return {str(no): found.get(str(no)) for no in episode_nos}
 
 
 def merge_is_current(
@@ -173,6 +186,12 @@ def merge_is_current(
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        return False
+    # 2026-09-03 实测：清空分镜后各集 final/episode.mp4 原封不动，只看文件指纹会把
+    # 一部分镜已经不存在的成片判成「未过期」，用户重新入队被跳过。分镜产物 id 是
+    # 第二个输入指纹；旧报告没有这个键时只按文件指纹判（不把历史成片全判成过期）。
+    recorded_ids = report.get("storyboard_artifact_ids")
+    if recorded_ids is not None and recorded_ids != _storyboard_artifact_ids(project_id, episode_nos):
         return False
     recorded = {item["path"]: item for item in report.get("input_fingerprints") or []}
     for no in episode_nos:
