@@ -39,7 +39,25 @@ class Scene(BaseModel):
     pending_state_ep_start: int | None = None
 
 
+class Prop(BaseModel):
+    """规范道具（物件库素材库的一条）：跨集道具一致性的视觉锚点（与 Scene 同构）。
+    name 是稳定短标签（如"旧猫包"），映射台抽出的 asset_manifest.props 标签收敛到它；
+    appearance_canonical 是三项以上可视觉验证特征（材质/颜色/结构/尺寸/标志物）拼成的
+    固定道具锚点串；ref_image_path 是纯色背景单件道具参考图，跨集复用防止形态漂移
+    （用户投诉根因：猫包一会儿网状一会儿透明——道具此前没有素材库，只有 label+
+    description 文字描述，见 app/production/prep_pack/contracts.py 的相关注释）。"""
+
+    name: str
+    appearance_canonical: str
+    aliases: list[str] = Field(default_factory=list)
+    ref_image_path: str | None = None
+    # 道具参考图生成词覆盖：人工编辑值；为空时用 appearance_canonical+画风 合成的默认描述。
+    prop_prompt_override: str | None = None
+    first_episode_no: int | None = None
+
+
 class Bible(BaseModel):
     characters: list[Character]
     world: World
     scenes: list[Scene] = Field(default_factory=list)
+    props: list[Prop] = Field(default_factory=list)

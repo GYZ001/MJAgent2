@@ -321,6 +321,9 @@ allowed_exceptions = []
 "app.narrative_outline_state" = 4
 "app.narrative_priority" = 4
 "app.narrative_repair" = 4
+"app.props" = 4  # 2026-09-03 新增：世界书物件库（道具跨集一致性，与 app.scenes 同层
+                  # 同构），只 import app.db/app.config/app.schemas/app.bible_store/
+                  # app.refs/app.hiagent/app.harness.model_gateway 等 <=4 的模块
 "app.refs" = 4
 "app.renderability" = 4
 "app.renderability_score" = 4

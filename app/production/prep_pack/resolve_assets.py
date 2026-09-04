@@ -31,7 +31,7 @@ from .asset_lookup import (
 from .chunk_extraction import _run_async_step
 from .discovery import (
     _character_discovery_dispositions,
-    _discover_new_characters,
+    _discover_new_characters, _discover_new_props,
     _discover_new_scenes,
     _discovery_errored_names,
     _load_project_bible,
@@ -987,7 +987,7 @@ async def _resolve_assets(
         }
         for label, data in functional_extras.items()
     ]
-    props_payload = _prep_pack_build_prop_manifest(prop_mentions, segments)
+    props_payload = await _discover_new_props(conn, project_id=project_id, episode_no=episode_no, props_payload=_prep_pack_build_prop_manifest(prop_mentions, segments), source_text=source_text)
     # appellation_map 真源出参（2.0.1 bug fix，见本函数 docstring
     # ``appellation_resolutions`` 一节与 _prep_pack_build_appellation_map
     # 上方大注释）：只在调用方真的传了列表时才写，默认 None 不记录，

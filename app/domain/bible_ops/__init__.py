@@ -224,3 +224,12 @@ from .view_redo import (
     regenerate_scene_view_route as regenerate_scene_view_route,
     rollback_scene_reference as rollback_scene_reference,
 )
+
+# 2026-09-03 新增（道具库，与场景库同构）：只追加在门面末尾，不插进上面按子
+# 模块名排序的区块——本文件历史上因为改动中间一行未使用的 re-export 就打断过
+# 整条 import 链（见文件顶部 docstring 案情），新增符号从真源子模块整段追加
+# 到最后，是变更面最小、最不可能误伤既有导出的写法。
+from .props_api import (
+    list_props as list_props,
+    regenerate_prop as regenerate_prop,
+)

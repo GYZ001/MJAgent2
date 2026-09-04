@@ -7,6 +7,7 @@ Split out of app/production/prep_pack.py.
 from __future__ import annotations
 
 import json
+import logging
 from app.schemas import Bible
 from typing import Any
 
@@ -14,6 +15,8 @@ from .contracts import (
     _FALLBACK_VISUAL_STYLE,
     _FUNCTIONAL_RESOLUTION_KINDS,
 )
+
+log = logging.getLogger(__name__)
 
 
 def _load_project_bible(conn, project_id: str) -> Bible:
@@ -169,6 +172,47 @@ async def _discover_new_scenes(
     from app.scenes import ensure_scenes_for_labels
 
     return await ensure_scenes_for_labels(project_id, episode_no, labels)
+
+
+async def _discover_new_props(
+    conn, *, project_id: str, episode_no: int, props_payload: list[dict[str, Any]], source_text: str,
+) -> list[dict[str, Any]]:
+    """道具库反应式登记（2026-09-03 新增）：抽取出的 props 项转交
+    ``app.props.ensure_props_for_labels`` 判定是否"关键道具"、补外观锚点与
+    参考图。跟角色/场景发现的关键区别——道具库是人物/场景库之外的**增量**
+    能力（用户投诉"道具形态漂移"后新加，不是资产解析的既有硬门槛）：失败
+    绝不能反过来挡住映射台本身发布，所以这里吞掉全部异常，只落 advisory 日志
+    （不是静默吞——CLAUDE.md 禁止"删核心功能掩盖问题"那一条针对的是隐藏真正
+    阻塞发布的错误；这里的错误对映射台产物结构没有任何影响，本来就不该阻塞）。
+    ``conn`` 参数与 ``_discover_new_scenes`` 保持同一调用形状，但
+    ``ensure_props_for_labels`` 内部自己开 ``get_conn()``（同 ``ensure_scenes_
+    for_labels``），不复用这个 conn——道具库落库不依赖调用方事务是否提交成功。
+    原样返回 ``props_payload``（本函数只登记道具库，不改变 asset_manifest.props
+    本身的形状）——调用方 ``_resolve_assets`` 借这个 pass-through 返回值把登记
+    动作内联进赋值表达式，省去多一条独立语句（该文件行数基线已顶格，见
+    ``app/FILE_CONVENTIONS.toml`` 的棘轮说明）。
+    """
+    # 延迟导入：避免给 app.production.prep_pack（映射台核心链路）加一条模块级
+    # 常驻依赖到 app.props 的模型/出图调用链，与相邻 _discover_new_characters/
+    # _discover_new_scenes 的既有写法保持一致（同一文件里两个函数都是函数内
+    # import）。
+    from app.props import ensure_props_for_labels
+
+    del conn
+    try:
+        result = await ensure_props_for_labels(project_id, episode_no, props_payload, source_text=source_text)
+    except Exception:  # noqa: BLE001 道具库登记失败不得阻断映射台发布，见上方 docstring
+        log.exception(
+            "道具库登记失败，映射台继续正常发布 project=%s episode_no=%s",
+            project_id, episode_no,
+        )
+        return props_payload
+    for message in result.get("errors") or []:
+        log.warning(
+            "道具库登记出现单条失败 project=%s episode_no=%s: %s",
+            project_id, episode_no, message,
+        )
+    return props_payload
 
 
 # ---------- 未解析角色标签候选判别（1.8.0，见 PREP_PACK_VERSION 上方大注释

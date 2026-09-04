@@ -114,6 +114,7 @@ from .storyboard import StoryboardOutline as StoryboardOutline
 from .storyboard import StoryboardOutlineShot as StoryboardOutlineShot
 from .storyboard import StoryboardSceneContext as StoryboardSceneContext
 from .world import Bible as Bible
+from .world import Prop as Prop
 from .world import Scene as Scene
 from .world import World as World
 
