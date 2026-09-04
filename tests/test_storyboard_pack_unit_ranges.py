@@ -315,3 +315,18 @@ def test_contract_marker_bumps_to_2_4_0_so_stale_packs_without_unit_ranges_regen
     assert STORYBOARD_PACK_CONTRACT_MARKER == "storyboard_pack/2.4.0"
     assert STORYBOARD_PACK_VERSION == "2.4.0"
 
+
+
+def test_dropping_a_full_speaker_line_is_rejected_but_interjections_may_be_dropped():
+    """EP1 第三次重跑实测：模型把 Q10（李麦麦的 21 字整句）塞进 dropped_lines 逃过校验。"""
+    from app.production.storyboard_beat_sheet import undroppable_quote_errors
+    from app.production.storyboard_dialogue_ledger import _AiDroppedLine
+
+    quotes = [
+        DialogueQuote(quote_id="Q10", source_segment_index=4, text="黄总，它真的只是一只普通的流浪猫，不能留在公司……", content_chars=21, speaker="李麦麦"),
+        DialogueQuote(quote_id="Q06", source_segment_index=4, text="这……", content_chars=1, speaker="黄总"),
+        DialogueQuote(quote_id="Q20", source_segment_index=5, text="牌匾上的四个字", content_chars=7),
+    ]
+    dropped = [_AiDroppedLine(quote_id="Q10", reason="未在当前剧情节拍中保留"), _AiDroppedLine(quote_id="Q06", reason="语气词"), _AiDroppedLine(quote_id="Q20", reason="屏上文字")]
+    errors = undroppable_quote_errors(dropped, quotes)
+    assert len(errors) == 1 and "Q10" in errors[0] and "李麦麦" in errors[0]

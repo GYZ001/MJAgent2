@@ -276,3 +276,20 @@ def test_seedance_requires_footing_and_display_name_mentions():
     errors = prompt_reference_prefix_errors("镜头1：@bible:黄总 拍桌，@张姐 缩着脖子，@entity:a029ddf7 围观")
     assert len(errors) == 1 and "@bible:黄总" in errors[0] and "@entity:a029ddf7" in errors[0]
     assert prompt_reference_prefix_errors("镜头1：@黄总 拍桌") == []
+
+
+def test_reference_mention_errors_require_at_name_for_characters_with_portraits():
+    from types import SimpleNamespace
+
+    from app.production.storyboard_dialects import reference_mention_errors
+
+    resources = SimpleNamespace(characters=[
+        SimpleNamespace(identity_id="bible:黄总", portrait_id="por_1"),
+        SimpleNamespace(identity_id="bible:李麦麦", portrait_id="por_2"),
+        SimpleNamespace(identity_id="bible:张姐", portrait_id=None),
+        SimpleNamespace(identity_id="entity:a029", portrait_id="por_3"),
+    ])
+    prompt = "镜头1：中年男性黄总站在地面上拍桌；画外音（李麦麦）：\"完了。\""
+    errors = reference_mention_errors(prompt, resources)
+    assert len(errors) == 1 and "@黄总" in errors[0] and "李麦麦" not in errors[0] and "张姐" not in errors[0]
+    assert reference_mention_errors("镜头1：@黄总 站在地面上拍桌，画外音（李麦麦）：\"完了。\"", resources) == []

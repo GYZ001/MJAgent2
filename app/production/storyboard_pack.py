@@ -60,6 +60,7 @@ from app.production.storyboard_dialects import (
     SEEDANCE_DIALECT_INSTRUCTIONS,  # noqa: F401 -- 重新导出，测试按旧路径 import
     _dialect_for_target_video_model,
     prompt_reference_prefix_errors,
+    reference_mention_errors,
 )
 from app.production.storyboard_beat_sheet import (
     _AiBeat as _AiBeat, _AiBeatSheetDraft as _AiBeatSheetDraft, _AiSegmentPlan as _AiSegmentPlan, _beat_sheet_rules as _beat_sheet_rules,
@@ -809,6 +810,7 @@ def _validate_segment_draft(
             f"prompt_text 长度 {len(draft.prompt_text)} 超过上限 {config.PROMPT_CHAR_LIMIT}"
         )
     errors.extend(prompt_reference_prefix_errors(draft.prompt_text))
+    errors.extend(reference_mention_errors(draft.prompt_text, draft.resources))
     if dialect_render_format == "minimax_h3_native_fields":
         for field in ("integrated_multimodal_description:", "overall_soundscape:", "non_diegetic_music:"):
             if field not in draft.prompt_text:

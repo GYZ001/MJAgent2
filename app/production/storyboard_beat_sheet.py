@@ -118,6 +118,7 @@ def _validate_beat_sheet_draft(
             errors.append(f"段 {seg.segment_no} 引用了不存在的 beat_id {unknown_beats}")
     segment_source_indexes = {s.segment_no: s.source_segment_indexes for s in draft.segments}
     # 2.1.2：容量检查不在这里跑，改由 storyboard_capacity_normalize 兜底。
+    errors.extend(undroppable_quote_errors(draft.dropped_lines, dialogue_quotes))
     errors.extend(dialogue_ledger_errors(
         quotes=dialogue_quotes,
         kept_lines=draft.kept_lines,
@@ -331,3 +332,29 @@ async def _generate_beat_sheet(
         },
         repair_context=f"原文共 {len(segments)} 段，段号范围 1..{len(segments)}",
     )
+
+
+#: 弃置只对语气词/寒暄这类短句成立；有说话人、正文超过这个字数的整句台词不是那三类。
+DROPPABLE_MAX_CHARS = 4
+
+
+def undroppable_quote_errors(dropped: list, quotes: list[DialogueQuote]) -> list[str]:
+    """剧本格式抽出的整句台词（有说话人、正文超过 4 字）不能进 dropped_lines。
+
+    EP1 第三次重跑实测：第一轮漏了 Q10 被打回后，模型把它塞进 dropped_lines、理由
+    写「未在当前剧情节拍中保留」——这不是三类可弃置内容中的任何一种，只是把校验
+    错误换了个地方。判据从数据推导：DialogueQuote.speaker 非空说明它是原文里的
+    说话人行，content_chars 超过语气词长度说明它不是「啊」「哦」。
+    """
+    by_id = {quote.quote_id: quote for quote in quotes}
+    errors: list[str] = []
+    for item in dropped:
+        quote = by_id.get(item.quote_id)
+        if quote is None or not getattr(quote, "speaker", "") or quote.content_chars <= DROPPABLE_MAX_CHARS:
+            continue
+        errors.append(
+            f"dropped_lines 里的 {quote.quote_id} 是 {quote.speaker} 的整句台词（{quote.content_chars} 字）"
+            f"「{quote.text[:30]}」，不是语气词、寒暄或屏上文字，不能弃置；请放回 kept_lines 并分到覆盖它"
+            "原文单元的段，容量装不下就新增段落"
+        )
+    return errors

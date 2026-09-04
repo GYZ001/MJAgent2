@@ -20,6 +20,7 @@ docs/prompt-skills/{novel-to-storyboard,minimax-h3-prompts}/。H3 的字段名�
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from app import config
 from app.schemas import MontageBeat
@@ -393,4 +394,30 @@ def prompt_reference_prefix_errors(prompt_text: str) -> list[str]:
         f"prompt_text 里的 @ 引用带了 identity_id 前缀：{shown}；@ 后面只能直接跟 "
         "relevant_assets.characters 的 display_name（例如 @黄总），bible:/entity: 前缀只用于 "
         "speaker_identity_id 与 resources，不进正文"
+    ]
+
+
+def reference_mention_errors(prompt_text: str, resources: Any) -> list[str]:
+    """本段 resources.characters 里有 portrait_id 的 bible 角色，正文必须以 @显示名
+    点名至少一次（只以画外音出场的可写成「画外音（显示名）」）。
+
+    EP1 第三次重跑实测：第 6 段整段没有一个 @，模型把「中年男性黄总」「幼橘猫」当
+    普通描述写，打包时 @名字→@图片N 没有可替换的目标，人物参考图对这一段完全不
+    起作用。display_name 从 identity_id 的 bible: 前缀后取（人物谱正名即 id 主体）。
+    """
+    missing: list[str] = []
+    for character in getattr(resources, "characters", []) or []:
+        identity_id = str(getattr(character, "identity_id", "") or "")
+        if not getattr(character, "portrait_id", None) or not identity_id.startswith("bible:"):
+            continue
+        name = identity_id.split(":", 1)[1].strip()
+        if name and f"@{name}" not in prompt_text and f"画外音（{name}）" not in prompt_text:
+            missing.append(name)
+    if not missing:
+        return []
+    shown = "、".join(f"@{name}" for name in missing)
+    return [
+        f"prompt_text 没有用 @ 点名有参考图的角色：{shown}；本段 resources.characters 里带 portrait_id "
+        "的角色，正文里至少要以 @显示名 出现一次（只以画外音出场的写「画外音（显示名）」），"
+        "否则打包时人物参考图绑不到画面"
     ]
