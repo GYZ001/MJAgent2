@@ -69,6 +69,9 @@ async def _generate_and_persist_prop_image(
         appearance=prop.appearance_canonical, image_path=image_path, prompt=prompt,
         status="ready" if image_path else "failed", qa={},
     )
+    # 连接归本模块所有（get_conn()），登记行必须在这里提交：EP1 回填实测图出来了、世界书
+    # 条目也进了，prop_references 却一行没有——store 不提交、调用方进程退出即丢。
+    conn.commit()
     return image_path
 
 
