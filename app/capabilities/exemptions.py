@@ -51,6 +51,7 @@ EXEMPT_ROUTE_REASONS: dict[str, str] = {
         "POST /api/projects/{project_id}/scenes/{scene_name}/refs/{scene_reference_id}/views/{view_role}/regenerate/cancel": "页面定向取消单场景视角任务，不创建新付费作业",
         "POST /api/projects/{project_id}/scenes/{scene_name}/refs/{scene_reference_id}/rollback": "场景库历史版本人工回滚；页面评审入口，不向 Agent/MCP 开放",
         "PUT /api/projects/{project_id}/scenes/{scene_name}": "场景库人工元数据修订；页面编辑入口，不自动触发付费出图",
+        "POST /api/projects/{project_id}/props/{name}/regenerate": "物件库人工重生成单件道具参考图；页面评审入口，不向 Agent/MCP 开放",
         "POST /api/shots/{shot_id}/edit-session": "分镜编辑租约签发；不改变分镜内容",
         "POST /api/shots/{shot_id}/impact-preview": "分镜修订前只读影响预览",
         "POST /api/shots/{shot_id}/spoken-conflict-preview": "分镜口播冲突处理前只读预览",
