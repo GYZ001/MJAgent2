@@ -3,7 +3,7 @@
 内存 sqlite + monkeypatch 各处 ``get_conn``（同 test_series_film_orchestrator.py
 的写法），绕开真实剧本/分镜/视频生成，只验证队列自身的调度语义：
 - 严格串行（一个任务跑完才跑下一个）；
-- 单任务失败标 failed 并继续，连续 3 个失败自动暂停整队且 stop_reason 非空；
+- 单任务失败标 failed 并继续，失败永不自动停队；
 - 暂停/取消单个任务时进度保留/清空的语义（queued vs idle）；
 - 开机恢复把 running 复位为 queued、遗留 series_film 运行标 CANCELLED。
 
@@ -125,7 +125,7 @@ async def test_queue_runs_two_tasks_strictly_serially(monkeypatch) -> None:
     assert last_e1 < first_e2
 
 
-# ----------------------------------------------------------- 失败继续/连续停队
+# ----------------------------------------------------------- 失败继续/不停队
 
 @pytest.mark.asyncio
 async def test_single_task_failure_marks_failed_and_continues_to_next(monkeypatch) -> None:
@@ -159,7 +159,9 @@ async def test_single_task_failure_marks_failed_and_continues_to_next(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_three_consecutive_failures_auto_pause_queue(monkeypatch) -> None:
+async def test_failures_never_auto_pause_the_queue(monkeypatch) -> None:
+    """2026-09-04 用户拍板：前面的任务失败不能挡住后面的——四个任务全失败，四个都要被跑到，
+    队列不暂停、stop_reason 为空（原来连续 3 次失败会自动停队，第 4 个永远排队）。"""
     conn = _conn()
     _patch_conn(monkeypatch, conn)
     for i in range(1, 5):
@@ -175,15 +177,10 @@ async def test_three_consecutive_failures_auto_pause_queue(monkeypatch) -> None:
     await queue.enqueue("p", ["st_1", "st_2", "st_3", "st_4"], False)
     await _await_runner("p")
 
-    for i in (1, 2, 3):
+    for i in (1, 2, 3, 4):
         assert _task_row(conn, f"st_{i}")["status"] == "failed"
-    # 第 4 个任务从没被跑到——连续 3 次失败后队列已经自动暂停。
-    assert _task_row(conn, "st_4")["status"] == "queued"
-
     snapshot = tasks.queue_snapshot(conn, "p")
-    assert snapshot["paused"] is True
-    assert snapshot["stop_reason"]
-    assert "连续" in snapshot["stop_reason"]
+    assert snapshot["paused"] is False and snapshot["stop_reason"] is None
 
 
 # ------------------------------------------------------- 已完成默认跳过/force

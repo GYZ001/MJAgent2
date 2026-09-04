@@ -325,7 +325,7 @@ async def test_episodes_inside_one_task_run_in_parallel_up_to_slots(monkeypatch)
 
     conn, entries = _conn([1, 2, 3])
     _patch_conn(monkeypatch, conn)
-    monkeypatch.setattr(concurrency, "queue_concurrency", lambda: 2)
+    monkeypatch.setattr(concurrency, "episode_concurrency", lambda: 2)
     order: list[str] = []
     done_pairs: set[tuple[str, str]] = set()
 
@@ -352,7 +352,7 @@ async def test_episodes_inside_one_task_run_in_parallel_up_to_slots(monkeypatch)
     last_e2 = max(i for i, ev in enumerate(order) if ev.startswith("e2:"))
     assert first_e3 > min(last_e1, last_e2), "第 3 集只能等某集整体结束后再开（并行集数 2）"
     assert progress["running_episode_nos"] == [] and progress["current_episode_no"] is None
-    assert concurrency.episode_slots.running("p") == 0
+    assert concurrency.episode_slots.running("task-1") == 0
 
 
 @pytest.mark.asyncio
@@ -361,7 +361,7 @@ async def test_parallel_episode_failure_only_marks_that_episode(monkeypatch) -> 
 
     conn, entries = _conn([1, 2])
     _patch_conn(monkeypatch, conn)
-    monkeypatch.setattr(concurrency, "queue_concurrency", lambda: 2)
+    monkeypatch.setattr(concurrency, "episode_concurrency", lambda: 2)
     done_pairs: set[tuple[str, str]] = set()
 
     async def fake_run_stage(stage, episode_id, _run_id):
@@ -381,7 +381,7 @@ async def test_parallel_episode_failure_only_marks_that_episode(monkeypatch) -> 
 
     assert progress["episodes"][0]["stages"]["storyboard"] == "failed"
     assert all(v == "done" for v in progress["episodes"][1]["stages"].values())
-    assert concurrency.episode_slots.running("p") == 0
+    assert concurrency.episode_slots.running("task-1") == 0
 
 
 @pytest.mark.asyncio
@@ -390,7 +390,7 @@ async def test_running_episode_nos_and_current_are_derived_while_running(monkeyp
 
     conn, entries = _conn([1, 2])
     _patch_conn(monkeypatch, conn)
-    monkeypatch.setattr(concurrency, "queue_concurrency", lambda: 2)
+    monkeypatch.setattr(concurrency, "episode_concurrency", lambda: 2)
     release = asyncio.Event()
     snapshots: list[tuple[list[int], int | None, str | None]] = []
 

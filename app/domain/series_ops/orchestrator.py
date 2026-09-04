@@ -120,12 +120,12 @@ async def _run_task_body(
 async def _run_episodes_in_parallel(
     project_id: str, task_id: str, progress: dict, recorder, failed: list[dict],
 ) -> None:
-    """按集序逐集拿项目级并行槽位（``concurrency.episode_slots``）再起子任务；一集失败
+    """按集序逐集拿本任务的并行槽位（``concurrency.episode_slots``，按 task_id 计）再起子任务；一集失败
     只记进该集条目、其余集照跑；本协程被取消（暂停/取消/重启）时连带取消所有在跑的集。"""
     children: set[asyncio.Task] = set()
     try:
         for entry in progress["episodes"]:
-            await episode_slots.acquire(project_id)
+            await episode_slots.acquire(task_id)
             child = asyncio.create_task(
                 _run_episode_holding_slot(project_id, task_id, entry, progress, recorder, failed),
             )
@@ -152,7 +152,7 @@ async def _run_episode_holding_slot(
         progress["error"] = f"{entry['error']}（已跳过，继续其余集；结束后汇总）"[:1000]
         state.persist_progress(task_id, progress)
     finally:
-        await episode_slots.release(project_id)
+        await episode_slots.release(task_id)
 
 
 async def _run_episode(task_id: str, entry: dict, progress: dict, recorder) -> None:

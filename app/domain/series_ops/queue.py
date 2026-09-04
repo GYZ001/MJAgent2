@@ -1,13 +1,15 @@
-"""项目级连播队列：runner 主循环、入队/出队/暂停/继续、连续失败自动停队。
+"""项目级连播队列：runner 主循环、入队/出队/暂停/继续。
 
 2026-09-04 起并发度不再恒为 1（用户拍板「连播改成并行任务」）：同一项目同时在跑的连播任务数由
-``settings.series_queue_concurrency`` 决定（缺省 3，夹在 1..8；同一个数也限制项目内同时生成的集数，
-见 ``concurrency.py``——任务内部各集也并行，10 集一组的任务同样吃到并发）。runner（登记为 ``series_queue``）
-只做调度：按 queue_seq 依次把排队任务派成子任务（各自登记为 ``series_task_run``/task_id），子任务
-自己开连接、自己跑五步；runner 等任一子任务结束就补位。暂停/服务重启 = 取消 runner，runner 在
-``CancelledError`` 里把全部子任务一起取消，子任务按「谁请求的取消」分类：明确点了取消这一个任务
-→ ``idle``；其余（暂停/重启）→ 退回 ``queued`` 并保留进度。任务内部各集仍按顺序跑——要让多集
-并行不再需要按 group_size=1 切任务。
+``settings.series_queue_concurrency`` 决定（缺省 3，夹在 1..8），每个任务内部各集再按
+``settings.series_episode_concurrency`` 并行（见 ``concurrency.py``，槽位按任务计，任务之间互不等待）。
+runner（登记为 ``series_queue``）只做调度：按 queue_seq 依次把排队任务派成子任务（各自登记为
+``series_task_run``/task_id），子任务自己开连接、自己跑五步；runner 等任一子任务结束就补位。
+暂停/服务重启 = 取消 runner，runner 在 ``CancelledError`` 里把全部子任务一起取消，子任务按「谁请求的
+取消」分类：明确点了取消这一个任务 → ``idle``；其余（暂停/重启）→ 退回 ``queued`` 并保留进度。
+
+失败不会让队列停下（2026-09-04 用户拍板取消「连续 3 个任务失败自动暂停」）：一个任务失败只落它
+自己的 failed，后面的任务照常派发；暂停只有用户手动点。
 
 两个模块级可变单例（``_pause_requests``/``_cancel_requests``）只 add/discard，
 不做 global 重绑定，写法照 ``state.py`` 旧版 ``_PAUSE_REQUESTS`` 的先例。
@@ -28,8 +30,6 @@ from .concurrency import queue_concurrency
 TASK_KIND = "series_queue"
 CHILD_KIND = "series_task_run"
 WORKFLOW_TYPE = "series_task"
-
-_CONSECUTIVE_FAILURE_LIMIT = 3
 
 #: 任务开跑前要确认没被占用的三种单集任务，值是给用户看的工作台名。检查放在
 #: 「取到任务、真要开跑」这一刻而不是入队时：入队到执行之间可能隔几小时，那时
@@ -127,7 +127,6 @@ async def _run_one_task(project_id: str, row: dict) -> None:
         recorder.start()
         recorder.fail_result(str(exc), failure_code=exc.code, conn=None)
         _handle_task_failed(conn, task_id, str(exc))
-        _maybe_auto_pause(conn, project_id, task_id)
         return
     try:
         await orchestrator.run_task(
@@ -138,7 +137,6 @@ async def _run_one_task(project_id: str, row: dict) -> None:
         raise
     except orchestrator.StageFailure as exc:
         _handle_task_failed(conn, task_id, str(exc))
-        _maybe_auto_pause(conn, project_id, task_id)
     else:
         tasks.mark_succeeded(conn, task_id)
 
@@ -195,14 +193,6 @@ def _create_recorder(project_id: str, row: dict):
 
 def _handle_task_failed(conn, task_id: str, message: str) -> None:
     tasks.mark_failed(conn, task_id, message or "任务执行失败")
-
-
-def _maybe_auto_pause(conn, project_id: str, task_id: str) -> None:
-    streak = tasks.consecutive_failures(conn, project_id)
-    if streak < _CONSECUTIVE_FAILURE_LIMIT:
-        return
-    reason = f"连续 {streak} 个任务失败，队列已自动暂停（最近失败：{task_id}）"
-    _set_paused(conn, project_id, True, reason)
 
 
 def _handle_task_cancelled(conn, project_id: str, task_id: str, recorder) -> None:

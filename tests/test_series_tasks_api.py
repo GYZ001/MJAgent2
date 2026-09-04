@@ -5,7 +5,7 @@
 路由自身的校验/响应契约，项目所有权鉴权由 test_rbac_project_isolation.py
 之类的专门测试覆盖。
 
-队列串行 runner 的深层行为（严格串行、失败继续、连续 3 次自动停队、暂停/
+队列 runner 的深层行为（并行、失败继续且不停队、暂停/
 取消的进度保留）在 tests/test_series_queue.py 直接测 queue.py，不在这里重复；
 本文件对 enqueue/cancel/queue 的覆盖只到「HTTP 契约接线对不对」为止。
 """

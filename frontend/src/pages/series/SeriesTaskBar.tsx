@@ -1,8 +1,8 @@
 import type { SeriesQueueState, SeriesTaskSummary } from '../../api'
 import { seriesBatchAvailability, seriesQueueStatusText } from './seriesTaskText'
 
-/** 队列状态条 + 批量操作条：暂停/继续队列、当前在跑哪个任务、队列剩余数、连续
- *  失败自动停队时展示 stop_reason 原文并给「继续队列」；批量按钮按勾选集合的
+/** 队列状态条 + 批量操作条：暂停/继续队列、当前在跑哪个任务、队列剩余数、队列
+ *  带 stop_reason 时展示原文并给「继续队列」（失败不再自动停队，2026-09-04）；批量按钮按勾选集合的
  *  可用性判据禁用，不额外弹二次确认（P0 拍板：只有删除单个任务才需要确认）。 */
 export default function SeriesTaskBar({
   queue,

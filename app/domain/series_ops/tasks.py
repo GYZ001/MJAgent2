@@ -448,21 +448,6 @@ def count_queued(conn, project_id: str) -> int:
     return int(row["n"])
 
 
-def consecutive_failures(conn, project_id: str) -> int:
-    """最近连续失败的任务数（按 finished_at 降序数连续 'failed'，遇到非
-    failed 即停）；成功/取消都会打断连续失败计数。"""
-    rows = conn.execute(
-        "SELECT status FROM series_tasks WHERE project_id=? AND finished_at IS NOT NULL "
-        "ORDER BY finished_at DESC LIMIT 20",
-        (project_id,),
-    ).fetchall()
-    count = 0
-    for row in rows:
-        if row["status"] != "failed":
-            break
-        count += 1
-    return count
-
 
 def projects_with_queued_tasks(conn) -> set[str]:
     """还有排队任务的项目——优雅停机会把在跑的任务退回 queued，开机恢复只看 running 行就会漏掉它们。"""
