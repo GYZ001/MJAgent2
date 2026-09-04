@@ -351,9 +351,12 @@ def _assert_review_dependency_fence(job, version_id: str, write_point: str) -> N
     target_shot_id = row["shot_id"] if row else None
 
     def asset_contract(items):
+        # 契约只看「哪个镜头用了哪个素材版本、门禁结果」：version_id/ref_id 是每次任务新生成的
+        # 行 id，同一素材再入队就换一个。EP1 串接实测：链上相邻镜头先后重建参考图行，彼此把
+        # 对方快照里的旧 ref_id 判成消失 → REVIEW_DEPENDENCY_STALE → 重入队 → 再互相打死。
         return {
             json.dumps(
-                {key: value for key, value in item.items() if key not in {"version_id"}},
+                {key: value for key, value in item.items() if key not in {"version_id", "ref_id"}},
                 ensure_ascii=False, sort_keys=True,
             )
             for item in items
