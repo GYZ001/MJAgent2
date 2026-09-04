@@ -6,11 +6,6 @@
 
    往这里加样式前先想清楚：它只在本页加载。跨页复用的东西属于 index.css。 */
 
-.scene-card-summary {
-  display: grid;
-  gap: 9px;
-  margin-top: auto;
-}
 .scene-detail-trigger span {
   font-size: 15px;
   transition: transform 0.16s ease;
@@ -168,14 +163,6 @@
   color: var(--ink-faint);
   font-size: 10.5px;
   line-height: 1.55;
-}
-.scene-image-error {
-  display: grid;
-  place-content: center;
-  gap: 10px;
-  padding: 16px;
-  text-align: center;
-  color: var(--ink-faint);
 }
 .scene-anchor-grid {
   display: grid;
