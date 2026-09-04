@@ -3366,31 +3366,6 @@ def update_provider_call_request(
         conn.rollback()
 
 
-def update_provider_call_progress(
-    call_id: int,
-    *,
-    received_chars: int,
-    chunk_at: float | None = None,
-) -> None:
-    """Persist bounded stream heartbeat data without affecting business flow."""
-    if not call_id:
-        return
-    stamp = float(chunk_at or now())
-    conn = get_conn()
-    try:
-        conn.execute(
-            """UPDATE provider_calls
-                  SET first_chunk_at=COALESCE(first_chunk_at,?),
-                      last_chunk_at=?,
-                      received_chars=MAX(received_chars,?)
-                WHERE id=? AND status='RUNNING'""",
-            (stamp, stamp, max(0, int(received_chars)), call_id),
-        )
-        conn.commit()
-    except sqlite3.OperationalError:
-        conn.rollback()
-
-
 def finish_provider_call(call_id: int, status: str, http_status: int | None,
                          latency_ms: int, *, error: str | None = None,
                          response_json: Any | None = None) -> None:

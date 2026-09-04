@@ -53,7 +53,8 @@ REQUIRED = {
         # equivalent of the old "镜头数量不设软上限或硬上限" invariant
         # (also guarded in English as "shot count has no product ceiling"
         # in app/harness/contracts.py's storyboard contract).
-        "段落数量由节拍的叙事单元数量决定，不是按原文段数或时长机械平分",
+        # 2.4.0（2339f34）起措辞改为「段数由本阶段从原文推导」，守的仍是同一条不变量。
+        "段数不再由上游给，必须由本阶段从原文推导",
     ],
     "docs/PROMPT_SPEC.md": [
         "确定性剧集映射（非 Agent 阶段）",

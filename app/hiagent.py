@@ -31,9 +31,9 @@ from app import config
 from app.chat_response_probe import (_content_delivery_absent, _empty_content_detail,
                                      _reasoning_present, _reasoning_used_all_output_budget)
 from app.atomic_io import atomic_write_bytes
-from app.db import (finish_provider_call, get_conn, get_setting, log_provider_call,
-                    provider_operation_id, start_provider_call,
-                    update_provider_call_progress, update_provider_call_request)
+from app.db import (finish_provider_call, get_conn, get_setting, log_provider_call, provider_operation_id,
+                    start_provider_call, update_provider_call_request)
+from app.observability.provider_heartbeat import update_provider_call_progress
 from app.harness.hiagent_input_image_privacy import (
     INPUT_IMAGE_PRIVACY_REJECTED_KIND, is_input_image_privacy_rejection,
 )

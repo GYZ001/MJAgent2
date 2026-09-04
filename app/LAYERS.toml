@@ -103,6 +103,8 @@ allowed_exceptions = []
 "app.config" = 1
 "app.atomic_io" = 1
 "app.observability.tracing" = 1
+"app.observability.write_lock_holders" = 2  # 2026-09-04：只依赖 app.db 的连接登记表，与 app.db 同层
+"app.observability.provider_heartbeat" = 2  # 2026-09-04：流式心跳写入，从 app.db 挪出，app.hiagent(3) 使用
 "app.auth" = 1  # 前缀：principal/passwords/deps 零 db 依赖，真 L1；
                 # sessions/api/admin_api 碰 db，2026-08-30 用更具体的 key
                 # 覆盖到 2（见下方新增 L2 持久化，及本文件末尾变更说明）

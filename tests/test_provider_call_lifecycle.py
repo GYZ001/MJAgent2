@@ -11,6 +11,7 @@ import pytest
 
 from app import config, db, hiagent, system_api, video_modes, worker
 from app.harness import hiagent_stream_evidence
+from app.observability import provider_heartbeat
 
 
 def test_provider_cache_request_identity_ignores_only_stream_transport_fields() -> None:
@@ -2707,7 +2708,7 @@ def test_provider_stream_progress_persists_heartbeat(
         request_json={"messages": []},
     )
 
-    db.update_provider_call_progress(
+    provider_heartbeat.update_provider_call_progress(
         call_id,
         received_chars=8192,
         chunk_at=1234.5,
