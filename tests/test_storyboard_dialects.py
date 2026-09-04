@@ -278,6 +278,47 @@ def test_seedance_requires_footing_and_display_name_mentions():
     assert prompt_reference_prefix_errors("镜头1：@黄总 拍桌") == []
 
 
+# ---------------------------------------------------------------------------
+# 规则 7：定场镜 + 道具外观锚点 + continuity_memo 起手（2026-09-03，用户
+# 投诉 EP1「橘座在上」猫在车底/后备箱之间跳变、猫包网状/透明材质矛盾驱动）。
+# 只落在 Seedance 中文块——H3 英文块本次不改，见模块拆分派单。
+# ---------------------------------------------------------------------------
+
+def test_seedance_scene_first_segment_requires_establishing_shot_with_prop_positions():
+    """一场戏的第一段（没有 previous_continuity_memo，或本段
+    source_segment_indexes 与上一段不同）必须先用一个定场镜别交代全部关键
+    家具与道具的摆位，后续同场戏各段只能从这份摆位里取物件。"""
+    assert "previous_continuity_memo为空" in SEEDANCE_FLAT
+    assert "source_segment_indexes与上一段的source_segment_indexes不同" in SEEDANCE_FLAT
+    assert "定场镜别" in SEEDANCE_FLAT
+    assert "网状猫包" in SEEDANCE_FLAT, "没有引用真实投诉案例"
+    assert "只从这份定场摆位或continuity_memo里取" in SEEDANCE_FLAT
+
+
+def test_seedance_segment_opening_must_start_from_continuity_memo_state():
+    """本段开头必须从上一段备忘记录的布局与道具状态起手，不能凭空另起一套。"""
+    assert "必须从continuity_memo起手" in SEEDANCE_FLAT
+    assert "凭空另起一套布局或道具外观" in SEEDANCE_FLAT
+
+
+def test_seedance_prop_appearance_anchor_covers_both_with_and_without_appearance_field():
+    """relevant_assets.props[].appearance 由另一位代理接入、暂时可能为空——
+    规则文案必须同时覆盖「有」和「没有」两种情况，写法与角色 appearance 那条
+    对称。"""
+    assert "relevant_assets.props里每件道具若带appearance字段" in SEEDANCE_FLAT
+    assert "第一次出现时必须逐字沿用这段描述本身" in SEEDANCE_FLAT
+    assert "appearance字段为空" in SEEDANCE_FLAT
+    assert "至少三项可视觉验证的特征" in SEEDANCE_FLAT
+    assert "网状包不会自己变成透明包" in SEEDANCE_FLAT
+
+
+def test_h3_dialect_untouched_by_seedance_only_establishing_shot_rule():
+    """定场镜/道具外观锚点/continuity_memo 起手三条规则本次只落 Seedance
+    块，H3 块本次不改（见模块拆分派单）——这条测试锁住这个范围边界，防止
+    将来有人误以为漏了 H3 半边而随手补上，造成两块规则再次不同步。"""
+    assert "previous_continuity_memo" not in MINIMAX_H3_DIALECT_INSTRUCTIONS
+
+
 def test_reference_mention_errors_require_at_name_for_characters_with_portraits():
     from types import SimpleNamespace
 

@@ -13,8 +13,10 @@ from app import db
 from app.production.storyboard_continuity_memo import (
     _AiCharacterState,
     _AiContinuityMemo,
+    _AiPropState,
     continuity_memo_character_advisories,
     continuity_memo_errors,
+    continuity_memo_output_contract_text,
     continuity_memo_payload,
     continuity_memo_rules,
 )
@@ -45,6 +47,10 @@ def _memo(**overrides) -> _AiContinuityMemo:
     base = dict(time_of_day="白天", time_of_day_basis="inferred")
     base.update(overrides)
     return _AiContinuityMemo(**base)
+
+
+def _prop(name: str, *, form: str = "", location: str = "", state: str = "") -> _AiPropState:
+    return _AiPropState(name=name, form=form, location=location, state=state)
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +125,82 @@ def test_source_text_basis_on_first_segment_with_empty_quote_is_rejected():
 
 
 # ---------------------------------------------------------------------------
+# continuity_memo_errors：道具外观（form）与空间布局（layout）阻断判据
+# （2026-09-03，用户投诉 EP1 猫在车底/后备箱之间跳变、猫包网状/透明材质
+# 互相矛盾驱动）
+# ---------------------------------------------------------------------------
+
+def test_prop_form_change_without_source_basis_is_rejected():
+    """道具外观（form）在同一集内不允许无原文依据地改变——猫包网状变透明
+    正是本次真实投诉的根因。"""
+    previous = _memo(props=[_prop("猫包", form="网状背包")])
+    memo = _memo(props=[_prop("猫包", form="透明背包")])
+    errors = continuity_memo_errors(memo, previous, "[段2] 少年背起猫包下山。")
+    assert any("猫包" in e and "网状背包" in e and "透明背包" in e for e in errors)
+
+
+def test_prop_form_carried_over_verbatim_is_accepted():
+    previous = _memo(props=[_prop("猫包", form="网状背包")])
+    memo = _memo(props=[_prop("猫包", form="网状背包")], time_of_day_basis="inherited")
+    assert continuity_memo_errors(memo, previous, "[段2] 少年背起猫包下山。") == []
+
+
+def test_prop_location_and_state_change_without_source_text_does_not_block():
+    """location/state 是剧情动作（拿起/放下/移动），不要求引用原文即可改变，
+    只有 form（外观形态）受阻断——判据只挂在 form 上。"""
+    previous = _memo(props=[_prop("猫包", form="网状背包", location="后备箱", state="拉链合上")])
+    memo = _memo(
+        props=[_prop("猫包", form="网状背包", location="副驾驶座", state="拉链拉开")],
+        time_of_day_basis="inherited",
+    )
+    assert continuity_memo_errors(memo, previous, "[段2] 少年下山。") == []
+
+
+def test_prop_disappearing_from_previous_segment_does_not_block():
+    """上一段有的道具本段消失不阻断——可能是真的离场了。"""
+    previous = _memo(props=[_prop("葫芦", form="深褐色葫芦")])
+    memo = _memo(props=[], time_of_day_basis="inherited")
+    assert continuity_memo_errors(memo, previous, "[段2] 少年下山。") == []
+
+
+def test_layout_change_without_quote_is_rejected():
+    previous = _memo(layout="猫窝在车底阴影里")
+    memo = _memo(layout="猫窝在后备箱里")
+    errors = continuity_memo_errors(memo, previous, "[段2] 少年发动了车子。")
+    assert any("layout_change_source_quote 为空" in e for e in errors)
+
+
+def test_layout_change_with_verbatim_source_quote_is_accepted():
+    previous = _memo(layout="猫窝在车底阴影里")
+    source_text = "[段2] 少年弯腰，把猫从车底抱进了后备箱。"
+    memo = _memo(
+        layout="猫窝在后备箱里",
+        layout_change_source_quote="把猫从车底抱进了后备箱",
+        time_of_day_basis="inherited",
+    )
+    assert continuity_memo_errors(memo, previous, source_text) == []
+
+
+def test_layout_change_with_fabricated_quote_is_rejected():
+    previous = _memo(layout="猫窝在车底阴影里")
+    memo = _memo(layout="猫窝在后备箱里", layout_change_source_quote="他把猫塞进了后备箱")
+    errors = continuity_memo_errors(memo, previous, "[段2] 少年发动了车子。")
+    assert any("找不到逐字匹配" in e for e in errors)
+
+
+def test_layout_carried_over_verbatim_is_accepted():
+    previous = _memo(layout="猫窝在车底阴影里")
+    memo = _memo(layout="猫窝在车底阴影里", time_of_day_basis="inherited")
+    assert continuity_memo_errors(memo, previous, "[段2] 少年发动了车子。") == []
+
+
+def test_props_and_layout_on_first_segment_are_accepted_without_previous_memo():
+    """第一段没有上一段可沿用，props/layout 由本段画面自己确定，不受阻断。"""
+    memo = _memo(props=[_prop("猫包", form="网状背包")], layout="猫包搁在副驾驶座")
+    assert continuity_memo_errors(memo, None, "[段1] 少年背着猫包上了车。") == []
+
+
+# ---------------------------------------------------------------------------
 # continuity_memo_rules：正面陈述文案（有/无上一段两种情况）
 # ---------------------------------------------------------------------------
 
@@ -130,6 +212,34 @@ def test_rules_with_previous_mentions_time_of_day_and_verbatim_copy():
 def test_rules_without_previous_describes_first_segment_case():
     rules = continuity_memo_rules(None)
     assert any("本集第一段" in r and "inferred" in r for r in rules)
+
+
+def test_rules_with_previous_mentions_prop_form_no_source_basis_change():
+    rules = continuity_memo_rules(_memo())
+    assert any(
+        "道具的外观形态（form）在同一集内不允许无原文依据" in r and "网状包不会自己变成透明包" in r
+        for r in rules
+    )
+
+
+def test_rules_with_previous_mentions_layout_verbatim_default_and_quote():
+    rules = continuity_memo_rules(_memo())
+    assert any(
+        "默认" in r and "逐字沿用上一段的 layout" in r and "layout_change_source_quote" in r
+        for r in rules
+    )
+
+
+def test_rules_without_previous_describes_props_layout_first_segment_case():
+    rules = continuity_memo_rules(None)
+    assert any("没有上一段 props/layout 可以沿用" in r for r in rules)
+
+
+def test_output_contract_text_mentions_props_and_layout_fields():
+    text = continuity_memo_output_contract_text()
+    assert "props[]" in text
+    assert "layout" in text
+    assert "layout_change_source_quote" in text
 
 
 # ---------------------------------------------------------------------------
