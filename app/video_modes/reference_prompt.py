@@ -128,6 +128,16 @@ def reference_gallery_matches_keyframe_contract(
     return True
 
 
+def _previous_segment_frame_allowed(ref: dict[str, Any]) -> bool:
+    """上一段画面参考只在试验开关打开时算合法输入（EP1 实测：不放行会让装配→打回→重建无限循环）。"""
+    if ref.get("type") != "previous_shot_frame" or ref.get("source") != "previous_shot":
+        return False
+    # 函数内导入：video_modes 包初始化期不能反向导入 video_plan 包（mode_selection 已模块级导入它）。
+    from app.video_plan.prev_frame_reference import prev_frame_reference_enabled
+
+    return prev_frame_reference_enabled()
+
+
 def reference_gallery_matches_library_policy(meta: dict[str, Any]) -> bool:
     """Only selected, readable character/scene/prop-library assets may reach video input.
 
@@ -149,7 +159,9 @@ def reference_gallery_matches_library_policy(meta: dict[str, Any]) -> bool:
         return False
     for ref in selected:
         entity_type = str(ref.get("entity_type") or ref.get("type") or "")
-        if ref.get("source") != "asset_library" or entity_type not in {"character", "scene", "prop"}:
+        if _previous_segment_frame_allowed(ref):
+            pass  # 上一段画面（试验开关）：来源是本集已采用的视频，不是素材库；下面仍查文件可用
+        elif ref.get("source") != "asset_library" or entity_type not in {"character", "scene", "prop"}:
             return False
         path = str(ref.get("path") or ref.get("image_path") or "").strip()
         url = str(ref.get("url") or "").strip()

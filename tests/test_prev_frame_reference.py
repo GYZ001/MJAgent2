@@ -99,3 +99,21 @@ def test_planned_previous_shot_id_reads_published_plan_only_when_flag_on(monkeyp
     assert pfr.planned_previous_shot_id(None, "s5") == "s4"
     monkeypatch.setattr(mode_attempt, "get_shot_plan", lambda shot_id, conn=None: None)
     assert pfr.planned_previous_shot_id(None, "s5") is None
+
+
+def test_library_policy_accepts_previous_segment_frames_only_when_flag_on(monkeypatch, tmp_path) -> None:
+    from app.video_modes import reference_prompt as rp
+
+    frame = tmp_path / "01_previous_frame_x.jpg"; frame.write_bytes(b"jpg")
+    portrait = tmp_path / "p.png"; portrait.write_bytes(b"png")
+    meta = {
+        "reference_input_policy_version": rp.REFERENCE_INPUT_POLICY_VERSION,
+        "reference_images": [
+            {"type": "character", "entity_type": "character", "source": "asset_library", "path": str(portrait), "selectedForSeedance": True},
+            {"type": "previous_shot_frame", "source": "previous_shot", "path": str(frame), "selectedForSeedance": True},
+        ],
+    }
+    monkeypatch.setattr(pfr, "get_setting", lambda key: "1")
+    assert rp.reference_gallery_matches_library_policy(meta) is True
+    monkeypatch.setattr(pfr, "get_setting", lambda key: "")
+    assert rp.reference_gallery_matches_library_policy(meta) is False
