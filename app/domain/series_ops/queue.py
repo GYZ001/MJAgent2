@@ -47,7 +47,7 @@ _cancel_requests: set[str] = set()
 def queue_concurrency() -> int:
     """同一项目同时在跑的连播任务数：settings.series_queue_concurrency，缺省 3，夹在 1..8。"""
     try:
-        value = int(str(get_setting("series_queue_concurrency") or "").strip() or DEFAULT_QUEUE_CONCURRENCY)
+        value = int(float(str(get_setting("series_queue_concurrency") or "").strip() or DEFAULT_QUEUE_CONCURRENCY))
     except ValueError:
         value = DEFAULT_QUEUE_CONCURRENCY
     return max(1, min(MAX_QUEUE_CONCURRENCY, value))

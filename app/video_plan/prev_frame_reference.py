@@ -45,13 +45,8 @@ _PTS_RE = re.compile(r"pts_time:\s*([0-9]+(?:\.[0-9]+)?)")
 def prev_frame_reference_enabled() -> bool:
     """默认启用（2026-09-04 用户看过串接成片后拍板进主线）；settings 表里
     ``video_prev_frame_reference`` 显式写 0 才关闭，空或非数字按默认开。"""
-    raw = str(get_setting(SETTING_KEY) or "").strip()
-    if not raw:
-        return True
-    try:
-        return int(raw) != 0
-    except ValueError:
-        return True
+    raw = str(get_setting(SETTING_KEY) or "").strip().lower()
+    return raw not in {"0", "false", "off", "no"}  # 设置台存 true/false，旧行存 0/1
 
 
 def video_duration_s(video_path: str) -> float | None:

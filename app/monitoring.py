@@ -81,6 +81,11 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
         "剧本/分镜工作流并发", "10", 1, 16, unit="集",
         description="同一时间最多运行多少集剧本或分镜工作流。",
     ),
+    "series_queue_concurrency": _number(
+        "连播台并行任务数", "3", 1, 8, unit="任务",
+        description="同一项目的连播队列同时跑多少个任务；任务内部各集仍按顺序跑。",
+    ),
+    "video_prev_frame_reference": _boolean("上一段画面作空间参考", "true"),
     "screenplay_scene_shards_enabled": _boolean("启用剧本场次分片", "true"),
     "screenplay_targeted_identity_enabled": _boolean("启用定向人物解析", "true"),
     "screenplay_targeted_blueprint_review_enabled": _boolean("启用蓝图风险审稿", "true"),

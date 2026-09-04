@@ -13,6 +13,8 @@ def test_flag_defaults_on_and_only_explicit_zero_turns_it_off(monkeypatch) -> No
     assert pfr.prev_frame_reference_enabled() is True
     monkeypatch.setattr(pfr, "get_setting", lambda key: "yes")
     assert pfr.prev_frame_reference_enabled() is True  # 非数字不当成关闭
+    monkeypatch.setattr(pfr, "get_setting", lambda key: "false")
+    assert pfr.prev_frame_reference_enabled() is False  # 设置台布尔项存的是 true/false
 
 
 def test_purpose_note_locks_layout_not_pose() -> None:
