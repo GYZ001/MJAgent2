@@ -34,6 +34,55 @@ async def _enforce_reference_consistency(*, selected: list[ReferenceImageAsset],
     return selected
 
 
+def select_library_references(
+    assets: list[ReferenceImageAsset], identity_names: list[str], max_images: int,
+) -> list[ReferenceImageAsset]:
+    """人物 > 场景 > 道具挑参考图，同类内部按 ``role_priority``/画质排序；
+    ``max_images`` 硬顶——超出时道具最先被舍弃（P2「道具外观一致性」拍板：
+    道具是新加的第三类，永远排在人物与场景之后选取；人物/场景的既有排序与
+    去重行为原样保留，只是从 ``_build_library_reference_assets`` 内联搬出来，
+    让那个函数腾出预算接住道具这第三类分支，见该函数调用处）。
+    """
+    role_priority = {
+        "front_full": 0, "three_quarter": 1, "profile": 2, "side_full": 2,
+        "action_zone": 0, "establishing": 1, "reverse_angle": 2,
+    }
+    kind_rank = {"character": 0, "scene": 1, "prop": 2}
+
+    def _rank(asset: ReferenceImageAsset) -> tuple[int, int, str]:
+        kind = str(asset.entity_type or asset.type)
+        return (kind_rank.get(kind, 9), role_priority.get(str(asset.view_role or ""), 9), asset.path or asset.id)
+
+    ordered = sorted(assets, key=_rank)
+    selected: list[ReferenceImageAsset] = []
+    selected_names: set[str] = set()
+    for asset in ordered:
+        if len(selected) >= max_images:
+            break
+        if (asset.entity_type or asset.type) != "character":
+            continue
+        name = str(asset.entity_name or "").strip()
+        if identity_names and name not in identity_names:
+            continue
+        key = name or "|".join(asset.relatedCharacterIds)
+        if key in selected_names:
+            continue
+        selected_names.add(key)
+        selected.append(asset)
+    scene_asset = next((a for a in ordered if (a.entity_type or a.type) == "scene"), None)
+    if scene_asset is not None and len(selected) < max_images:
+        selected.append(scene_asset)
+    prop_names: set[str] = set()
+    for asset in ordered:
+        if len(selected) >= max_images or (asset.entity_type or asset.type) != "prop":
+            continue
+        name = str(asset.entity_name or "").strip()
+        if name and name not in prop_names:
+            prop_names.add(name)
+            selected.append(asset)
+    return selected
+
+
 async def _build_library_reference_assets(
     *,
     conn: Any,
@@ -95,7 +144,12 @@ async def _build_library_reference_assets(
     assets: list[ReferenceImageAsset] = []
     for anchor in library_anchor_assets_from_manifest(manifest):
         entity_type = str(anchor.get("entity_type") or anchor.get("type") or "")
-        if entity_type not in {"character", "scene"}:
+        # "prop"（P2 新增）与既有 character/scene 同走 asset_library 血缘；
+        # related_character_ids 字段名沿用既有命名，但对 prop 同样承载
+        # entity_name——这是 seedance_reference_notes._related_names 识别
+        # "@道具名" 并替换成 "@图片N" 的唯一入口，缺了它道具的 @ 引用会
+        # 原样漏进正文。
+        if entity_type not in {"character", "scene", "prop"}:
             continue
         path = str(anchor.get("image_path") or "").strip()
         if not path or not Path(path).is_file():
@@ -107,7 +161,7 @@ async def _build_library_reference_assets(
                 source="asset_library",
                 related_character_ids=(
                     [str(anchor.get("entity_name"))]
-                    if entity_type == "character" and anchor.get("entity_name")
+                    if entity_type in {"character", "prop"} and anchor.get("entity_name")
                     else None
                 ),
                 qa={"status": "library", "overall": None, "issues": []},
@@ -138,54 +192,11 @@ async def _build_library_reference_assets(
         ))
     assets = [
         asset for asset in _dedupe_assets(assets)
-        if (asset.entity_type or asset.type) in {"character", "scene"}
+        if (asset.entity_type or asset.type) in {"character", "scene", "prop"}
         and asset.source == "asset_library"
     ]
 
-    role_priority = {
-        "front_full": 0,
-        "three_quarter": 1,
-        "profile": 2,
-        "side_full": 2,
-        "action_zone": 0,
-        "establishing": 1,
-        "reverse_angle": 2,
-    }
-
-    def _rank(asset: ReferenceImageAsset) -> tuple[int, int, str]:
-        kind = asset.entity_type or asset.type
-        kind_rank = 0 if kind == "character" else 1
-        return (
-            kind_rank,
-            role_priority.get(str(asset.view_role or ""), 9),
-            asset.path or asset.id,
-        )
-
-    selected: list[ReferenceImageAsset] = []
-    selected_names: set[str] = set()
-    for asset in sorted(assets, key=_rank):
-        if len(selected) >= max_reference_images():
-            break
-        if (asset.entity_type or asset.type) != "character":
-            continue
-        name = str(asset.entity_name or "").strip()
-        if identity_names and name not in identity_names:
-            continue
-        key = name or "|".join(asset.relatedCharacterIds)
-        if key in selected_names:
-            continue
-        selected_names.add(key)
-        selected.append(asset)
-    scene_asset = next(
-        (
-            asset for asset in sorted(assets, key=_rank)
-            if (asset.entity_type or asset.type) == "scene"
-        ),
-        None,
-    )
-    if scene_asset is not None and len(selected) < max_reference_images():
-        selected.append(scene_asset)
-
+    selected = select_library_references(assets, identity_names, max_reference_images())
     selected_ids = {id(asset) for asset in selected}
     for asset in assets:
         asset.shotId = shot_id

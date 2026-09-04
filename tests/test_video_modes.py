@@ -344,7 +344,7 @@ def test_reference_mode_keeps_one_winner_per_timeline_slot() -> None:
     ]
 
 
-def test_reference_pack_prioritizes_timeline_and_props_before_scene_and_character(monkeypatch) -> None:
+def test_reference_pack_prioritizes_timeline_before_scene_character_then_props(monkeypatch) -> None:
     patch_video_modes_everywhere(monkeypatch, "max_character_reference_images", lambda: 1)
     timeline = [
         {
@@ -403,7 +403,7 @@ def test_reference_pack_prioritizes_timeline_and_props_before_scene_and_characte
 
     assert len([ref for ref in packed if ref["type"] == "plot_key_frame"]) == 2
     assert [ref["id"] for ref in packed] == [
-        "beat-1", "beat-5", "prop-overflow", "scene-main", "character-a",
+        "beat-1", "beat-5", "scene-main", "character-a", "prop-overflow",
     ]
     assert {ref["id"] for ref in packed if ref["type"] == "plot_key_frame"} == {
         "beat-1", "beat-5",

@@ -432,20 +432,22 @@ def build_reference_manifest(
     shot_id: str,
     characters: list[dict[str, Any]],
     scene: dict[str, Any] | None,
-    additional_scenes: list[dict[str, Any]] | None = None,
-    keyframe_slot: str = NARRATIVE_KEYFRAME_SLOT,
+    additional_scenes: list[dict[str, Any]] | None = None, keyframe_slot: str = NARRATIVE_KEYFRAME_SLOT,
+    props: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """``scene`` 是主场景（沿用既有单场景形状，兼容全部现有调用方的读法）；
     ``additional_scenes`` 是同一段声明的第二个及以后的场景——多场景转场镜头
     （分镜台 2.0.0 一段 = 多镜，段内可以转场到另一地点）才会非空。旧调用方
-    忽略这个字段没有风险：它们本来就只关心「有没有一个可用场景」。"""
+    忽略这个字段没有风险：它们本来就只关心「有没有一个可用场景」。``props``
+    （P2 新增）是本段命中的道具条目，只服务于道具参考图装配，见
+    ``app.video_modes.prop_references.resolve_segment_prop_manifest_entries``。"""
     payload = {
         "episode_no": episode_no,
         "shot_id": shot_id,
         "characters": characters,
         "scene": scene,
-        "additional_scenes": list(additional_scenes or []),
-        "keyframe_slot": keyframe_slot,
+        "additional_scenes": list(additional_scenes or []), "keyframe_slot": keyframe_slot,
+        "props": list(props or []),
     }
     payload["input_fingerprint"] = fingerprint_payload(payload)
     return payload
@@ -551,12 +553,13 @@ def _storyboard_pack_asset_dependencies(
     scene_out = scene_outs[0] if scene_outs else None
     additional_scenes = scene_outs[1:]
 
+    from app.video_modes.prop_references import resolve_segment_prop_manifest_entries
+    props_out = resolve_segment_prop_manifest_entries(
+        resources.get("props") or [], conn=conn, project_id=project_id, episode_no=episode_no,
+    )
     return build_reference_manifest(
-        episode_no=episode_no,
-        shot_id=shot_id,
-        characters=characters_out,
-        scene=scene_out,
-        additional_scenes=additional_scenes,
+        episode_no=episode_no, shot_id=shot_id, characters=characters_out, scene=scene_out,
+        additional_scenes=additional_scenes, props=props_out,
     )
 
 
@@ -937,15 +940,11 @@ def library_anchor_assets_from_manifest(manifest: dict[str, Any]) -> list[dict[s
             if not path or not Path(path).exists():
                 continue
             anchors.append({
-                "entity_type": "character",
-                "entity_name": ch.get("name"),
-                "library_revision_id": ch.get("look_revision_id"),
-                "library_view_id": view.get("id"),
-                "view_role": view.get("view_role"),
-                "image_path": path,
+                "entity_type": "character", "entity_name": ch.get("name"),
+                "library_revision_id": ch.get("look_revision_id"), "library_view_id": view.get("id"),
+                "view_role": view.get("view_role"), "image_path": path,
                 "purposes": list(view.get("purposes") or [PURPOSE_QA_ANCHOR, PURPOSE_KEYFRAME_SEED]),
-                "type": "character",
-                "source": "asset_library",
+                "type": "character", "source": "asset_library",
             })
     scenes = [manifest.get("scene") or {}, *(manifest.get("additional_scenes") or [])]
     for scene in scenes:
@@ -954,16 +953,14 @@ def library_anchor_assets_from_manifest(manifest: dict[str, Any]) -> list[dict[s
             if not path or not Path(path).exists():
                 continue
             anchors.append({
-                "entity_type": "scene",
-                "entity_name": scene.get("name"),
-                "library_revision_id": scene.get("scene_revision_id"),
-                "library_view_id": view.get("id"),
-                "view_role": view.get("view_role"),
-                "image_path": path,
+                "entity_type": "scene", "entity_name": scene.get("name"),
+                "library_revision_id": scene.get("scene_revision_id"), "library_view_id": view.get("id"),
+                "view_role": view.get("view_role"), "image_path": path,
                 "purposes": list(view.get("purposes") or [PURPOSE_QA_ANCHOR, PURPOSE_KEYFRAME_SEED]),
-                "type": "scene",
-                "source": "asset_library",
+                "type": "scene", "source": "asset_library",
             })
+    from app.video_modes.prop_references import prop_library_anchors
+    anchors.extend(prop_library_anchors(manifest.get("props") or []))
     return anchors
 
 
@@ -1766,7 +1763,10 @@ def _keyframe_sequence_key(ref: dict[str, Any]) -> tuple[float, float, float, st
 
 
 def ref_pack_priority(ref: dict[str, Any]) -> tuple[Any, ...]:
-    """装箱稳定排序：连续帧、剧情帧、道具、场景、人物、风格。"""
+    """装箱稳定排序：连续帧、剧情帧、场景、人物、道具、风格。P2（道具外观一致性
+    任务）拍板：人物/场景是更高强度的身份/环境真值锚点，道具排在两者之后——
+    超出张数上限时道具最先被舍弃（此前把 prop 排第三是从未接过真实生产者的
+    超前占位，见 app.video_modes.prop_references 落地时一并纠正）。"""
     rtype = str(ref.get("type") or "")
     purposes = set(purpose_list(ref))
     slot = str(ref.get("slot_key") or "")
@@ -1774,11 +1774,11 @@ def ref_pack_priority(ref: dict[str, Any]) -> tuple[Any, ...]:
         tier = 0
     elif rtype == ASSET_TYPE_PLOT_KEY_FRAME or _is_narrative_keyframe_slot(slot) or "keyframe" in purposes:
         tier = 1
-    elif rtype == "prop":
-        tier = 2
     elif rtype == "scene":
-        tier = 3
+        tier = 2
     elif rtype == "character":
+        tier = 3
+    elif rtype == "prop":
         tier = 4
     elif rtype == "style":
         tier = 5

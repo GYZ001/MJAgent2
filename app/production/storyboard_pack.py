@@ -55,6 +55,7 @@ from app.harness.types import EvidenceArtifact
 from app.production.storyboard_capacity_normalize import normalize_and_assert_capacity
 from app.production.storyboard_pack_identity import resolve_persisted_character_ids
 from app.production.storyboard_pack_montage import fill_montage_beat_time_anchors
+from app.production.storyboard_prop_assets import enrich_prop_manifest_entries
 from app.production.storyboard_dialects import (
     MINIMAX_H3_DIALECT_INSTRUCTIONS,  # noqa: F401 -- 重新导出，测试按旧路径 import
     SEEDANCE_DIALECT_INSTRUCTIONS,  # noqa: F401 -- 重新导出，测试按旧路径 import
@@ -638,7 +639,7 @@ def _scene_canonical_description(
 
 
 def _enrich_asset_manifest_canonical_visuals(
-    conn, payload: dict[str, Any], *, bible: Bible | None = None,
+    conn, payload: dict[str, Any], *, bible: Bible | None = None, project_id: str | None = None,
 ) -> None:
     """原地把世界书标准外观/场景锚点补进 ``payload["asset_manifest"]``。
 
@@ -663,6 +664,7 @@ def _enrich_asset_manifest_canonical_visuals(
             conn, scene.get("scene_reference_id"),
             bible_scene_canonical=bible_scenes.get(str(scene.get("display_name") or "")),
         ) or _NO_CANONICAL_SCENE_NOTE
+    enrich_prop_manifest_entries(conn, manifest, bible=bible, project_id=project_id, episode_no=payload.get("episode_no"))
 
 
 # ---------------------------------------------------------------------------
@@ -1309,7 +1311,7 @@ async def generate_storyboard_pack(
         bible = bible_for_episode(
             ep["project_id"], Bible.model_validate(json.loads(project["bible_json"])), episode_no,
         )
-    _enrich_asset_manifest_canonical_visuals(conn, payload, bible=bible)
+    _enrich_asset_manifest_canonical_visuals(conn, payload, bible=bible, project_id=ep["project_id"])
 
     # 2.1.0：paratext 账提前算一次，抽取台词同时喂给阶段一（取值域）与阶段二（分配结果）。
     # 2.4.0：接 storyboard_dialogue_extract 的剧本格式抽取路径（真实 EP1《橘座

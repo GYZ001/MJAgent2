@@ -129,7 +129,14 @@ def reference_gallery_matches_keyframe_contract(
 
 
 def reference_gallery_matches_library_policy(meta: dict[str, Any]) -> bool:
-    """Only selected, readable character/scene-library assets may reach video input."""
+    """Only selected, readable character/scene/prop-library assets may reach video input.
+
+    "prop" 是 P2（道具外观一致性）新加的第三类库资产——道具参考图同样来自
+    app.props（世界书物件库），走 asset_library 同一条真实性血缘，理应与
+    character/scene 一样被这道闸门放行；此前只列 character/scene 会让任何
+    含道具参考图的画廊被判失败，整组候选被打回重来（不是"道具图被剔除"，
+    是"因为出现了道具图，人物/场景图也一起被拒"，故障面更大）。
+    """
     if meta.get("reference_input_policy_version") != REFERENCE_INPUT_POLICY_VERSION:
         return False
     selected = [
@@ -142,7 +149,7 @@ def reference_gallery_matches_library_policy(meta: dict[str, Any]) -> bool:
         return False
     for ref in selected:
         entity_type = str(ref.get("entity_type") or ref.get("type") or "")
-        if ref.get("source") != "asset_library" or entity_type not in {"character", "scene"}:
+        if ref.get("source") != "asset_library" or entity_type not in {"character", "scene", "prop"}:
             return False
         path = str(ref.get("path") or ref.get("image_path") or "").strip()
         url = str(ref.get("url") or "").strip()
