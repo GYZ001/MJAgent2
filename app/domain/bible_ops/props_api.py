@@ -9,7 +9,7 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 from app.db import get_conn
-from app.domain.common import _project_or_404, router
+from app.domain.common import _media_url, _project_or_404, router
 from app.props import props_for_project, regenerate_prop_reference
 
 
@@ -18,7 +18,11 @@ async def list_props(project_id: str):
     """道具库列表：name/appearance/aliases/image_path/status。"""
     _project_or_404(project_id)
     conn = get_conn()
-    return {"project_id": project_id, "items": props_for_project(conn, project_id)}
+    items = [
+        {**item, "image_url": _media_url(item.get("image_path"))}
+        for item in props_for_project(conn, project_id)
+    ]
+    return {"project_id": project_id, "items": items}
 
 
 @router.post("/projects/{project_id}/props/{name}/regenerate")
@@ -28,6 +32,7 @@ async def regenerate_prop(project_id: str, name: str):
     在这里必须显式转译，不走命令总线不会自动转 409）。"""
     _project_or_404(project_id)
     try:
-        return await regenerate_prop_reference(project_id, name)
+        result = await regenerate_prop_reference(project_id, name)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+    return {**result, "image_url": _media_url(result.get("image_path"))}

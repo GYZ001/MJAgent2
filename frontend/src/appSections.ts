@@ -10,6 +10,7 @@
 
 export const loadBiblePage = () => import("./pages/BiblePage");
 export const loadScenesPage = () => import("./pages/ScenesPage");
+export const loadPropsPage = () => import("./pages/PropsPage");
 export const loadEpisodesPage = () => import("./pages/EpisodesPage");
 export const loadScriptPage = () => import("./pages/ScriptPage");
 export const loadBoardPage = () => import("./pages/BoardPage");
@@ -25,6 +26,7 @@ export type View =
   | "studio"
   | "bible"
   | "scenes"
+  | "props"
   | "episodes"
   | "script"
   | "board"
@@ -38,6 +40,7 @@ export type View =
 export const PAGE_LOADERS: Partial<Record<View, () => Promise<unknown>>> = {
   bible: loadBiblePage,
   scenes: loadScenesPage,
+  props: loadPropsPage,
   episodes: loadEpisodesPage,
   script: loadScriptPage,
   board: loadBoardPage,
@@ -70,7 +73,7 @@ export const SECTIONS: Section[] = [
     icon: "书",
     group: "世界书",
     needProject: true,
-    matchViews: ["bible", "scenes", "episodes"],
+    matchViews: ["bible", "scenes", "props", "episodes"],
   },
   {
     key: "script",

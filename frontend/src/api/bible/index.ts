@@ -45,3 +45,4 @@ export const api_bible = {
   replaceSceneImage: manual.replaceSceneImage,
   rollbackManualSceneImage: manual.rollbackManualSceneImage,
 };
+export * from "./props";

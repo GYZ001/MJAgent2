@@ -97,6 +97,8 @@ export const api = {
   addManualCharacter: bibleApi.addManualCharacter,
   replaceCharacterPortraitImage: bibleApi.replaceCharacterPortraitImage,
   addManualScene: bibleApi.addManualScene,
+  listProps: bibleApi.listProps,
+  regenerateProp: bibleApi.regenerateProp,
   replaceSceneImage: bibleApi.replaceSceneImage,
   rollbackManualSceneImage: bibleApi.rollbackManualSceneImage,
 

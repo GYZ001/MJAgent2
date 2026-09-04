@@ -37,6 +37,7 @@ import {
   loadOperationAuditPage,
   loadReaderPage,
   loadScenesPage,
+  loadPropsPage,
   loadScriptPage,
   loadSeriesPage,
   loadWallPage,
@@ -50,6 +51,7 @@ export type { View } from "./appSections";
 
 const BiblePage = lazy(loadBiblePage);
 const ScenesPage = lazy(loadScenesPage);
+const PropsPage = lazy(loadPropsPage);
 const EpisodesPage = lazy(loadEpisodesPage);
 const ScriptPage = lazy(loadScriptPage);
 const BoardPage = lazy(loadBoardPage);
@@ -223,7 +225,7 @@ export function routeFromPath(pathname: string): Pick<
     };
   }
   const view: View =
-    parts[2] === "scenes" || parts[2] === "episodes" || parts[2] === "bible"
+    parts[2] === "scenes" || parts[2] === "props" || parts[2] === "episodes" || parts[2] === "bible"
       ? parts[2]
       : "bible";
   return { view, projectId, episodeId: null, chapterIdx: null, taskId: null };
@@ -996,6 +998,7 @@ function AppShell() {
         {view === "studio" && <Studio />}
         {view === "bible" && projectId && <BiblePage key={projectId} />}
         {view === "scenes" && projectId && <ScenesPage key={projectId} />}
+        {view === "props" && projectId && <PropsPage key={projectId} />}
         {view === "episodes" && projectId && <EpisodesPage key={projectId} />}
         {view === "reader" && projectId && <ReaderPage key={projectId} />}
         {view === "script" &&

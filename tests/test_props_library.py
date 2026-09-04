@@ -218,6 +218,7 @@ async def test_list_props_route(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert response["project_id"] == "p1"
     assert response["items"][0]["name"] == "旧猫包"
+    assert "image_url" in response["items"][0]  # 前端物件库页直接用它，不自己拼 /media 路径
 
 
 async def test_regenerate_prop_route_missing_prop_returns_409() -> None:
@@ -237,7 +238,9 @@ async def test_regenerate_prop_route_regenerates_image(monkeypatch: pytest.Monke
 
     response = await props_api.regenerate_prop("p1", "旧猫包")
 
-    assert response == {"name": "旧猫包", "status": "ready", "image_path": "/fake/p1/旧猫包.png"}
+    assert response == {
+        "name": "旧猫包", "status": "ready", "image_path": "/fake/p1/旧猫包.png", "image_url": None,
+    }  # 假路径不在盘上 → image_url 为 None；真实出图后由 _media_url 给出带票据的 /media URL
     row = store.prop_reference_for_episode(get_conn(), "p1", "旧猫包", 2)
     assert row["status"] == "ready"
 

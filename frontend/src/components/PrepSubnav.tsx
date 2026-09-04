@@ -4,12 +4,14 @@ import { prepStepLabel, type PrepStepStatus } from '../lib/statusLabels'
 const TABS: { key: View; label: string; description: string }[] = [
   { key: 'bible', label: '人物谱', description: '角色与定妆资产' },
   { key: 'scenes', label: '场景库', description: '场景设定与参考图' },
+  { key: 'props', label: '物件库', description: '关键道具与参考图' },
   { key: 'episodes', label: '分集规划', description: '章节拆分与制作进度' },
 ]
 
-export type PrepStepStatuses = Partial<Record<'bible' | 'scenes' | 'episodes', PrepStepStatus>>
+export type PrepStepKey = 'bible' | 'scenes' | 'props' | 'episodes'
+export type PrepStepStatuses = Partial<Record<PrepStepKey, PrepStepStatus>>
 
-/** 世界书三页共用的一级任务导航（含任务状态）。 */
+/** 世界书四页共用的一级任务导航（含任务状态）。 */
 export default function PrepSubnav({
   current,
   statuses,
@@ -18,7 +20,7 @@ export default function PrepSubnav({
 }: {
   current: View
   statuses?: PrepStepStatuses
-  onProblemClick?: (key: 'bible' | 'scenes' | 'episodes') => void
+  onProblemClick?: (key: PrepStepKey) => void
   onBeforeNavigate?: (target: View) => boolean
 }) {
   const { go, projectId } = useNav()
@@ -26,7 +28,7 @@ export default function PrepSubnav({
   return (
     <nav className="prep-subnav" aria-label="世界书">
       {TABS.map((tab, index) => {
-        const status = statuses?.[tab.key as 'bible' | 'scenes' | 'episodes']
+        const status = statuses?.[tab.key as PrepStepKey]
         const label = status ? prepStepLabel(status) : ''
         return (
           <button
@@ -37,7 +39,7 @@ export default function PrepSubnav({
             onClick={() => {
               if (tab.key !== current && onBeforeNavigate && !onBeforeNavigate(tab.key)) return
               if (status === 'problem' && onProblemClick) {
-                onProblemClick(tab.key as 'bible' | 'scenes' | 'episodes')
+                onProblemClick(tab.key as PrepStepKey)
               }
               go(tab.key, projectId)
             }}
