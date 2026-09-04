@@ -37,7 +37,9 @@ def _cancel_legacy_series_film_runs(conn) -> int:
 def recover_series_film_runs() -> int:
     conn = get_conn()
     _cancel_legacy_series_film_runs(conn)
-    project_ids = tasks.reset_running_to_queued(conn)
+    # 优雅停机（部署重启）会先把在跑的任务退回 queued，再到这里时 running 行已经没有了；
+    # 只看 running 行会让排队的任务停在 queued、没人重启 runner（2026-09-04 B 上连续两次重启实测）。
+    project_ids = tasks.reset_running_to_queued(conn) | tasks.projects_with_queued_tasks(conn)
     resumed = 0
     for project_id in project_ids:
         if queue.resume_after_recovery(project_id):

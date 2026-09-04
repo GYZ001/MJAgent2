@@ -8,7 +8,7 @@ import sqlite3
 import pytest
 
 from app import task_registry
-from app.domain.series_ops import merge, queue, tasks
+from app.domain.series_ops import merge, queue, recovery, tasks
 from app.domain.series_ops import stages as series_stages
 from tests.test_series_queue import _await_runner, _conn, _patch_conn, _seed_task, _task_row
 
@@ -147,3 +147,19 @@ def test_init_progress_resets_stale_running_markers_from_previous_process() -> N
     assert progress["episodes"][0]["stages"]["screenplay"] == "done"  # 已完成的不动
     assert progress["episodes"][1]["stages"]["screenplay"] == "pending"
     assert all(e["waiting"] is None for e in progress["episodes"])
+
+
+# ------------------------------------------------------------- 开机恢复：只剩 queued 也要重启 runner
+@pytest.mark.asyncio
+async def test_recovery_restarts_project_whose_tasks_were_left_queued_by_graceful_shutdown(monkeypatch) -> None:
+    """部署重启是优雅停机：在跑的任务先被退回 queued，开机时已经没有 running 行。
+    恢复只看 running 行就会让这些任务永远停在 queued（B 上连续两次重启实测）。"""
+    conn = _conn()
+    _patch_conn(monkeypatch, conn)
+    _seed_task(conn, "st_a", [1])
+    conn.execute("UPDATE series_tasks SET status='queued', queue_seq=1 WHERE id='st_a'")
+    conn.commit()
+    restarted: list[str] = []
+    monkeypatch.setattr(queue, "_ensure_runner", lambda project_id: restarted.append(project_id))
+    resumed = recovery.recover_series_film_runs()
+    assert restarted == ["p"] and resumed == 1

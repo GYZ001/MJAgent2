@@ -464,6 +464,12 @@ def consecutive_failures(conn, project_id: str) -> int:
     return count
 
 
+def projects_with_queued_tasks(conn) -> set[str]:
+    """还有排队任务的项目——优雅停机会把在跑的任务退回 queued，开机恢复只看 running 行就会漏掉它们。"""
+    rows = conn.execute("SELECT DISTINCT project_id FROM series_tasks WHERE status='queued'").fetchall()
+    return {row["project_id"] for row in rows}
+
+
 def reset_running_to_queued(conn) -> set[str]:
     """开机恢复：把因进程重启而卡在 running 的任务复位为 queued（进度保留）。"""
     rows = conn.execute("SELECT id, project_id FROM series_tasks WHERE status='running'").fetchall()
