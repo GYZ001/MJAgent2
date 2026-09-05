@@ -13,11 +13,20 @@
 复用。``rejection_details`` 非空（VLM 一致性质检已下线，当前恒为空，见
 ``app.video_modes.reference_assemble._enforce_reference_consistency``）时同样视为
 真实故障，为未来可能复活的质检机制预留判据，不假设它永远是空的。
+
+WS3a（docs/failure_triage_and_self_heal_plan_2026-09-05.md）：候选池「本该有
+资产却没有」不再直接拦成待人工——按 blockers 指向的人物/场景各自动触发一次
+补生成（复用 ``app.refs.generate_refs``/``app.scenes.generate_scene_refs`` 既
+有入口，不复制生成逻辑），成功后重新解析依赖再装配；仍缺才落回原有的
+``waiting_human`` 拦截。每个镜头只自愈一次，标记写在 job/version 的
+``meta["reference_self_heal_attempted"]``，日志前缀 ``[REFERENCE_SELF_HEAL]``。
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import re
 from typing import Any
 
 from app import config, video_modes
@@ -26,6 +35,8 @@ from app.db import log_provider_call, now
 from .authority import _assert_job_lease
 from .fences import VideoInputRepairRequired
 from .job_state import _set_version
+
+_LOGGER = logging.getLogger(__name__)
 
 TEXT_ONLY_FALLBACK_NOTE_MARKER = "[TEXT_ONLY_NO_REFERENCE_IMAGES]"
 
@@ -150,6 +161,14 @@ def _append_text_only_reference_notes(
     return prompt_body + " " + note + prompt_args
 
 
+def _episode_no_for_job(conn: Any, job: Any) -> int | None:
+    """job 只带 episode_id；按 episode_no 查询的几处调用统一走这一份。"""
+    row = conn.execute(
+        "SELECT episode_no FROM episodes WHERE id=?", (job["episode_id"],),
+    ).fetchone()
+    return row["episode_no"] if row else None
+
+
 def _time_anchor_advisories_for_job(conn: Any, job: Any, shot_model: Any) -> list[str]:
     """WS9：本镜命中的时间线锚点若与当前实际选用造型不符，取一份 ``[未拦截]``
     告警，记进 image_inputs meta——不影响候选池是否为空的既有判定，只是把
@@ -157,12 +176,9 @@ def _time_anchor_advisories_for_job(conn: Any, job: Any, shot_model: Any) -> lis
     结论顺带落一份到本次纯文本回退的产物里，供分镜台/生成台展示。"""
     from app.validators.resource_forecast import character_time_anchor_advisories
 
-    episode_row = conn.execute(
-        "SELECT episode_no FROM episodes WHERE id=?", (job["episode_id"],),
-    ).fetchone()
     return character_time_anchor_advisories(
         shot=shot_model, project_id=job["project_id"],
-        episode_no=episode_row["episode_no"] if episode_row else None, conn=conn,
+        episode_no=_episode_no_for_job(conn, job), conn=conn,
     )
 
 
@@ -252,6 +268,126 @@ def _raise_reference_mode_repair_required(
     raise VideoInputRepairRequired(ref_failure_reason)
 
 
+_SELF_HEAL_ENTITY_RE = re.compile(r"^(人物|场景)「(.+?)」")
+
+
+def _blocked_entity_names(blockers: list[str]) -> tuple[list[str], list[str]]:
+    """从 blockers 文案摘出人物名/场景名，供自愈定位重生成目标；文案格式来自
+    ``app.multiview.manifest_production_blockers`` 的既有产物（"人物「name」…"/
+    "场景「name」…"），只解析既有产物，不重新实现它判断"谁该有资产"的条件。"""
+    characters: list[str] = []
+    scenes: list[str] = []
+    for blocker in blockers:
+        match = _SELF_HEAL_ENTITY_RE.match(blocker)
+        if not match:
+            continue
+        (characters if match.group(1) == "人物" else scenes).append(match.group(2))
+    return characters, scenes
+
+
+async def _self_heal_reference_pool(*, project_id: str, blockers: list[str]) -> bool:
+    """按 blockers 指向的人物/场景各自动触发一次补生成；用既有入口
+    （``app.refs.generate_refs``/``app.scenes.generate_scene_refs``），不复制
+    生成逻辑。单个目标失败不阻断其它目标；返回是否至少补成功一项。"""
+    character_names, scene_names = _blocked_entity_names(blockers)
+    healed = False
+    if character_names:
+        from app.refs import generate_refs
+
+        for name in character_names:
+            try:
+                await generate_refs(project_id, only_character=name)
+            except Exception as exc:  # noqa: BLE001 单项失败不阻断其它自愈目标
+                _LOGGER.warning("[REFERENCE_SELF_HEAL] 人物「%s」补生成失败：%s", name, exc)
+                continue
+            _LOGGER.info("[REFERENCE_SELF_HEAL] 人物「%s」定妆照补生成完成", name)
+            healed = True
+    if scene_names:
+        from app.scenes import generate_scene_refs
+
+        for name in scene_names:
+            try:
+                await generate_scene_refs(project_id, only_scene=name)
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("[REFERENCE_SELF_HEAL] 场景「%s」补生成失败：%s", name, exc)
+                continue
+            _LOGGER.info("[REFERENCE_SELF_HEAL] 场景「%s」场景图补生成完成", name)
+            healed = True
+    return healed
+
+
+async def _complete_reference_mode_with_healed_assets(
+    *, conn: Any, job: Any, meta: dict[str, Any], prompt_text: str, version: Any,
+    shot_model: Any, decision: Any, assets: list[Any],
+) -> tuple[dict, str] | None:
+    """自愈补生成后重新装配拿到真实资产：落一份完整可用状态，与参考图模式
+    正常成功同规格，不是纯文本回退。资产未过关键帧库策略门禁时返回 None，
+    交调用方落回原有判定，不在这里悄悄放宽策略。"""
+    gate_meta = {**meta, "reference_images": [a.public_dict() for a in assets]}
+    if not video_modes.reference_gallery_matches_library_policy(gate_meta):
+        return None
+    from app.media_pipeline import stages as media_stages
+    from app.media_pipeline.stage_state import set_pipeline_stage
+
+    meta["mode_decision"] = video_modes.decision_to_dict(decision)
+    meta["reference_images"] = video_modes.dedupe_reference_dicts(
+        [a.public_dict() for a in assets]
+    )
+    meta["reference_generation_complete"] = True
+    meta["reference_static_ready"] = True
+    meta["continuity_anchor_ready"] = True
+    meta["reference_group_gate_passed"] = True
+    meta["video_input_manifest_frozen"] = True
+    meta.pop("first_frame_path", None)
+    meta.pop("last_frame_path", None)
+    prompt_text = video_modes.append_reference_prompt_notes(
+        prompt_text, assets, duration_s=shot_model.duration_s,
+        required_identity_names=list(meta.get("required_reference_characters") or []),
+    )
+    try:
+        from app.media_pipeline.reference_store import upsert_reference_set_from_meta
+        upsert_reference_set_from_meta(
+            shot_id=job["shot_id"], version_id=version["id"], meta=meta, conn=conn,
+            static_ready=True, continuity_ready=True, group_gate_passed=True,
+        )
+    except Exception:  # noqa: BLE001 参考图集落库失败不阻断视频
+        pass
+    set_pipeline_stage(
+        job["id"], media_stages.STAGE_VIDEO_READY,
+        scheduler_lane=media_stages.LANE_VIDEO_READY, ready_at=now(), conn=conn,
+    )
+    _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False), prompt_text=prompt_text)
+    conn.commit()
+    _LOGGER.info(
+        "[REFERENCE_SELF_HEAL] 镜头 %s 自愈后重新装配成功，共 %d 项资产",
+        job["shot_id"], len(assets),
+    )
+    return meta, prompt_text
+
+
+async def _attempt_reference_self_heal(
+    *, conn: Any, job: Any, meta: dict[str, Any], prompt_text: str, version: Any,
+    shot_model: Any, bible: Any, screenplay: Any, decision: Any, blockers: list[str],
+) -> tuple[dict, str] | None:
+    """WS3a 编排：补生成 → 重新解析依赖装配 → 尝试完整落地；任何一步没有
+    产出真实可用资产都返回 None，交调用方走原有判定——自愈只多给一次机会，
+    不改变最终失败语义。"""
+    healed = await _self_heal_reference_pool(project_id=job["project_id"], blockers=blockers)
+    if not healed:
+        return None
+    assets = await video_modes.build_reference_assets(
+        conn=conn, project_id=job["project_id"], episode_no=_episode_no_for_job(conn, job),
+        episode_id=job["episode_id"], shot_id=job["shot_id"], shot=shot_model,
+        bible=bible, decision=decision, existing_meta=meta, screenplay=screenplay,
+    )
+    if not assets:
+        return None
+    return await _complete_reference_mode_with_healed_assets(
+        conn=conn, job=job, meta=meta, prompt_text=prompt_text, version=version,
+        shot_model=shot_model, decision=decision, assets=assets,
+    )
+
+
 async def finish_reference_mode_without_assets(
     *, conn: Any, job: Any, meta: dict[str, Any], prompt_text: str, version: Any,
     shot_model: Any, bible: Any, screenplay: Any, decision: Any,
@@ -261,13 +397,27 @@ async def finish_reference_mode_without_assets(
     """两次参考图生成尝试后仍无可用资产时的唯一落点。
 
     先按 ``_reference_pool_blockers`` 判断候选池是否本来就是空的；是则纯文本
-    出片，否则维持原有的人工修复拦截，两条路径都不放行真实故障。
+    出片，否则维持原有的人工修复拦截，两条路径都不放行真实故障。候选池「本该
+    有却没有」时，先自动补生成一次（WS3a）再重新解析依赖装配，成功即正常出片；
+    每个镜头只自愈一次（``meta["reference_self_heal_attempted"]``），仍缺才走
+    原有的待人工路径。
     """
     _release_rejected_reference_assets(
         job=job, lease_owner=lease_owner, rejected_assets=rejected_assets,
     )
     manifest = meta.get("reference_manifest")
     blockers = _reference_pool_blockers(manifest if isinstance(manifest, dict) else None)
+    if blockers and not meta.get("reference_self_heal_attempted"):
+        meta["reference_self_heal_attempted"] = True
+        healed_result = await _attempt_reference_self_heal(
+            conn=conn, job=job, meta=meta, prompt_text=prompt_text, version=version,
+            shot_model=shot_model, bible=bible, screenplay=screenplay, decision=decision,
+            blockers=blockers,
+        )
+        if healed_result is not None:
+            return healed_result
+        manifest = meta.get("reference_manifest")
+        blockers = _reference_pool_blockers(manifest if isinstance(manifest, dict) else None)
     if not blockers and not rejection_details:
         return await _complete_reference_mode_as_text_only(
             conn=conn, job=job, meta=meta, prompt_text=prompt_text, version=version,
