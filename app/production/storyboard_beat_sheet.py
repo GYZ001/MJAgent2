@@ -129,7 +129,7 @@ def _validate_beat_sheet_draft(
         _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
     for note in restore_undroppable_lines(draft, dialogue_quotes, source_segments):
         _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
-    for note in append_segments_for_uncovered_sources(draft, dialogue_quotes, source_segments, paratext_indexes):
+    for note in append_segments_for_uncovered_sources(draft, dialogue_quotes, source_segments, set(paratext_indexes), set(context_indexes)):
         _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
     errors.extend(undroppable_quote_errors(draft.dropped_lines, dialogue_quotes))
     # 先按单元位置/原文段号把分错段的台词挪到覆盖它的段（确定性，不打回模型），再查台账分区——

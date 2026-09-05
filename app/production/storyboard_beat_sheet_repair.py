@@ -196,6 +196,7 @@ def complete_missing_quote_decisions(draft: Any, quotes: list[Any]) -> list[str]
 
 def append_segments_for_uncovered_sources(
     draft: Any, quotes: list[Any], source_segments: list[Any], paratext_indexes: set[int],
+    context_indexes: set[int] = frozenset(),
 ) -> list[str]:
     """模型把整个原文段漏排（segments 只覆盖 [1, 2]，原文段 3、4 的必保台词没有任何段覆盖）时，
     按原文顺序补一段：source_segment_indexes=[N]、单元范围覆盖整段（容量归一化会再按 15 秒拆），
@@ -205,22 +206,23 @@ def append_segments_for_uncovered_sources(
     2026-09-05 第 2 集：三次重试模型都没补段，整集失败。"""
     from app.production.storyboard_beat_sheet import _AiSegmentPlan
     from app.production.storyboard_segment_ranges import _AiSourceUnitRange, split_source_units
-    by_id = {q.quote_id: q for q in quotes}
+    _ = quotes  # 判据不再依赖必保台词：任何非副文本原文段没有段覆盖，交付门禁都会拦（2026-09-05 第 4 集尾段无台词被漏排）
     covered = {i for p in draft.segments for i in p.source_segment_indexes}
-    needed = sorted({
-        by_id[k.quote_id].source_segment_index for k in draft.kept_lines
-        if k.quote_id in by_id and by_id[k.quote_id].source_segment_index not in covered
-        and by_id[k.quote_id].source_segment_index not in paratext_indexes
-    })
+    needed = [i for i in range(1, len(source_segments) + 1) if i not in covered and i not in paratext_indexes]
     notes: list[str] = []
     for index in needed:
-        if not (1 <= index <= len(source_segments)):
-            continue
         units = len(split_source_units(source_segments[index - 1].text))
         if units < 1:
             continue
         after = max([i for i, p in enumerate(draft.segments) if any(x < index for x in p.source_segment_indexes)], default=-1)
         prev = draft.segments[after] if after >= 0 else None
+        if index in context_indexes and draft.segments:
+            # 背景交代段没有可视化来源，规则只允许并入相邻事件段：挂到前一段（没有就挂到第一段）
+            host = prev if prev is not None else draft.segments[0]
+            host.source_segment_indexes = sorted(set(host.source_segment_indexes) | {index})
+            host.source_unit_ranges.append(_AiSourceUnitRange(source_segment_index=index, from_unit=1, to_unit=units))
+            notes.append(f"背景段 {index} 没有任何段覆盖，已并入第 {host.segment_no} 段")
+            continue
         new_plan = _AiSegmentPlan(
             segment_no=0, synopsis=f"原文段 {index}（模型未排入，按原文补齐）",
             source_segment_indexes=[index],

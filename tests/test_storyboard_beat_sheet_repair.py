@@ -141,12 +141,29 @@ def test_uncovered_source_segment_with_required_lines_gets_a_synthesized_segment
     draft.kept_lines = [_AiKeptLine(quote_id="Q14", segment_no=1)]
     quotes = [DialogueQuote(quote_id="Q14", source_segment_index=4, text="猫忽然跳上了桌子", content_chars=17, speaker="小胖子")]
     notes = append_segments_for_uncovered_sources(draft, quotes, _scene_4_segments(), set())
-    assert len(notes) == 1
-    assert [s.segment_no for s in draft.segments] == [1, 2]
-    added = draft.segments[1]
-    assert added.source_segment_indexes == [4] and added.beat_ids == ["b1"] and added.palette == "暖黄"
+    assert len(notes) == 3, notes  # 原文段 1、2、4 都没被引用（2026-09-05 起不限有台词的段）
+    assert [s.segment_no for s in draft.segments] == [1, 2, 3, 4]
+    assert [s.source_segment_indexes for s in draft.segments] == [[1], [2], [3], [4]]
+    added = draft.segments[3]
+    assert added.beat_ids == ["b1"] and added.palette == "暖黄"
     assert (added.source_unit_ranges[0].from_unit, added.source_unit_ranges[0].to_unit) == (1, 12)
     assert segment_unit_range_errors(draft.segments, _scene_4_segments(), set()) == []
     reassign_kept_lines_to_covering_segments(draft.kept_lines, quotes, draft.segments, _scene_4_segments())
-    assert draft.kept_lines[0].segment_no == 2, "补段后台词按单元归位到新段"
+    assert draft.kept_lines[0].segment_no == 4, "补段后台词按单元归位到新段"
     assert append_segments_for_uncovered_sources(draft, quotes, _scene_4_segments(), set()) == [], "已覆盖不再补"
+
+
+def test_uncovered_tail_source_segment_without_dialogue_gets_a_segment_too():
+    """第 4 集真实形态：末段「平台上此刻彩霞略散…」没有台词，模型整段漏排；交付门禁按整集原文覆盖零容忍，
+    所以没有台词的原文段同样要补段。背景交代段则并入相邻事件段。"""
+    from app.production.storyboard_beat_sheet_repair import append_segments_for_uncovered_sources
+
+    draft = _draft([_plan(1, [(1, 1)], index=3)])
+    notes = append_segments_for_uncovered_sources(draft, [], _scene_4_segments(), set(), set())
+    assert len(notes) == 3, notes  # 原文段 1、2、4 都没被引用
+    assert [s.source_segment_indexes for s in draft.segments] == [[1], [2], [3], [4]]
+    assert segment_unit_range_errors(draft.segments, _scene_4_segments(), set()) == []
+    context = _draft([_plan(1, [(1, 1)], index=3)])
+    notes = append_segments_for_uncovered_sources(context, [], _scene_4_segments(), {1}, {2})
+    assert [s.source_segment_indexes for s in context.segments] == [[2, 3], [4]], notes
+    assert any("并入" in n for n in notes)
