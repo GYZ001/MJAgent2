@@ -37,6 +37,7 @@ from app.schemas import is_narrator_label
 from pydantic import BaseModel, ConfigDict
 from typing import Any
 
+from .appellation_response_repair import repair_appellation_payload
 from .asset_lookup import _resolve_portrait_id
 from .chunking import _chunk_segments
 from .provenance import _prep_pack_provenance
@@ -121,6 +122,7 @@ async def _appellation_resolution_call(
         format_retry_limit=1,
         semantic_retry_limit=1,
         output_schema=schema,
+        normalize_payload=repair_appellation_payload,
         call_meta={
             "stage": "叙述向称谓归属",
             "stage_key": "episode_prep_pack_appellation_resolution",
