@@ -136,6 +136,11 @@ def test_rejection_needs_identical_failure_on_distinct_tasks():
 def test_first_unstructured_terminal_failure_resubmits_instead_of_repolling(monkeypatch):
     conn = get_conn()
     _seed_job(conn)
+    conn.execute(
+        """INSERT INTO provider_calls(ts, kind, model, status, http_status, latency_ms, operation_id, response_json)
+           VALUES(1, 'video_create', 'seedance', 'OK', 200, 10, 'video-create-v1', '{"id": "task-3"}')"""
+    )
+    conn.commit()
     _wire(monkeypatch, _failed_poll("task-3", ts=3.0))
     asyncio.run(worker._run_job("j1", lease_owner="worker-1"))
     job = conn.execute(
@@ -144,6 +149,9 @@ def test_first_unstructured_terminal_failure_resubmits_instead_of_repolling(monk
              FROM jobs WHERE id='j1'"""
     ).fetchone()
     assert job["provider_poll_required"] == 0, "供应商已报终态，不得再轮询这个任务"
+    assert conn.execute(
+        "SELECT recovery_disposition FROM provider_calls WHERE operation_id='video-create-v1' AND kind='video_create'"
+    ).fetchone()[0] == "TASK_FAILED", "成功的 create 结果必须作废，否则重试会复用同一个已死的 task id"
     assert job["status"] == "queued" and job["retry_count"] == 1, "应换新任务重试而不是复轮"
     assert job["provider_create_state"] == "not_started"
     assert conn.execute("SELECT provider_task_id FROM shot_versions WHERE id='v1'").fetchone()[0] is None, \

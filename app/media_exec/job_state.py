@@ -279,6 +279,15 @@ def release_provider_poll(conn, job_id: str, owner: str, *, version_id: str) -> 
     conn.execute(
         "UPDATE shot_versions SET provider_task_id=NULL WHERE id=?", (version_id,),
     )
+    # 同一 job 的 create 调用有幂等 operation_id，账本里那条成功的 create 会被 start_provider_call
+    # 直接复用——于是"新建任务"又拿回同一个已死的 task id（2026-09-05 第 11 集同一 task 被轮了 4 次，
+    # 版权拒绝永远凑不齐 3 个独立任务）。把这条 create 结果标成 TASK_FAILED，复用查询会跳过它。
+    conn.execute(
+        """UPDATE provider_calls SET recovery_disposition='TASK_FAILED'
+            WHERE kind='video_create' AND status IN ('OK','SUCCESS','SUCCEEDED')
+              AND operation_id=(SELECT provider_operation_id FROM jobs WHERE id=?)""",
+        (job_id,),
+    )
     conn.commit()
 
 
