@@ -204,16 +204,20 @@ def rebuild_coverage_ledger(
         (episode_id,),
     ).fetchone()
     if plan_row:
+        from app.video_plan.rejected_rebase import DROPPED_DEPENDENCY_KIND  # 包级导入成环
+
+        # 依赖行是运行时解析（可能已改挂到被拒镜头的上游、或已放弃），计划行只是回退。
         for dep in conn.execute(
-            """SELECT p.shot_id,p.depends_on_shot_id,
-                      d.upstream_adopted_version_id
+            """SELECT p.shot_id,p.depends_on_shot_id,d.depends_on_shot_id AS effective,
+                      d.dependency_kind,d.upstream_adopted_version_id
                  FROM shot_video_generation_plans p
                  LEFT JOIN video_plan_dependencies d
                    ON d.shot_plan_id=p.id
                 WHERE p.episode_video_plan_id=?""",
             (plan_row["id"],),
         ).fetchall():
-            depends_on = str(dep["depends_on_shot_id"] or "") or None
+            dropped = str(dep["dependency_kind"] or "") == DROPPED_DEPENDENCY_KIND
+            depends_on = None if dropped else (str(dep["effective"] or dep["depends_on_shot_id"] or "") or None)
             dependency_map[str(dep["shot_id"])] = (
                 depends_on,
                 not depends_on or bool(dep["upstream_adopted_version_id"]),

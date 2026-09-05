@@ -2,15 +2,19 @@
 
 第 16 镜 model_rejected（按约定视为跳过），第 17 镜的计划依赖指向它，
 ``upstream_adopted_version_id`` 永远等不到 → 覆盖账本判 dependency_ready=False →
-第 17–21 镜整条链一镜没派发就收口 PARTIAL。修法是状态转移：依赖被拒镜头的计划改挂到
-被拒镜头自己的上游（连续被拒就沿链跳过），没有上游就删掉依赖行；派发锚点同样跳过被拒的上一镜。
+第 17–21 镜整条链一镜没派发就收口 PARTIAL。修法是运行时依赖行的状态转移：依赖被拒镜头的
+依赖行改挂到被拒镜头自己的上游（连续被拒沿链跳过），没有上游就标成已放弃；派发锚点同样
+跳过被拒的上一镜。已发布的计划行不动——它的 depends_on 在执行契约指纹里，改了整集就
+RELEASE_QUALIFICATION_CHANGED（第 15 集实测）。
 """
 from __future__ import annotations
 
 import sqlite3
 
 from app.db import get_conn
-from app.video_plan.rejected_rebase import rebase_dependencies_past_rejected_shots
+from app.video_plan.rejected_rebase import (
+    DROPPED_DEPENDENCY_KIND, effective_dependency, rebase_dependencies_past_rejected_shots,
+)
 from app.video_supervisor import rebuild_coverage_ledger
 from app.video_supervisor.dispatch import _after_shot_id
 from tests.conftest import patch_video_plan_everywhere
@@ -50,7 +54,7 @@ def _seed(conn: sqlite3.Connection, *, shots: int = 4) -> None:
             conn.execute(
                 """INSERT INTO video_plan_dependencies(
                        id,episode_video_plan_id,shot_plan_id,shot_id,depends_on_shot_id,dependency_kind,created_at
-                   ) VALUES(?,'evp',?,?,?,'previous_tail',1)""",
+                   ) VALUES(?,'evp',?,?,?,'adopted_tail_frame',1)""",
                 (f"vdep{no}", f"svp{no}", f"s{no}", dep),
             )
     conn.commit()
@@ -86,42 +90,56 @@ def _reject(conn: sqlite3.Connection, shot: str) -> None:
     conn.commit()
 
 
-def _dependency(conn: sqlite3.Connection, shot: str):
-    plan = conn.execute(
-        "SELECT depends_on_shot_id, status FROM shot_video_generation_plans WHERE shot_id=?", (shot,)
-    ).fetchone()
-    dep = conn.execute(
-        "SELECT depends_on_shot_id, upstream_adopted_version_id FROM video_plan_dependencies WHERE shot_id=?",
+def _planned(conn: sqlite3.Connection) -> dict[str, str | None]:
+    return {
+        r["shot_id"]: r["depends_on_shot_id"]
+        for r in conn.execute("SELECT shot_id, depends_on_shot_id FROM shot_video_generation_plans")
+    }
+
+
+def _dependency_row(conn: sqlite3.Connection, shot: str) -> dict | None:
+    row = conn.execute(
+        """SELECT depends_on_shot_id, dependency_kind, upstream_adopted_version_id
+             FROM video_plan_dependencies WHERE shot_id=?""",
         (shot,),
     ).fetchone()
-    return plan["depends_on_shot_id"], plan["status"], (dict(dep) if dep else None)
+    return dict(row) if row else None
 
 
-def test_dependents_of_rejected_shot_rebase_onto_its_adopted_upstream() -> None:
+def test_dependents_of_rejected_shot_rebase_onto_its_adopted_upstream_without_touching_plan() -> None:
     conn = get_conn()
     _seed(conn)
+    planned_before = _planned(conn)
     _adopt(conn, "s1", "v1")
     _reject(conn, "s2")
     changes = rebase_dependencies_past_rejected_shots(conn, "e1")
     conn.commit()
     assert [(c["shot_id"], c["from"], c["to"]) for c in changes] == [("s3", "s2", "s1")]
-    assert _dependency(conn, "s3") == ("s1", "ready", {"depends_on_shot_id": "s1", "upstream_adopted_version_id": "v1"})
-    # 第 4 镜仍依赖第 3 镜，不受影响；被拒镜头自己的计划行不动。
-    assert _dependency(conn, "s4")[0] == "s3"
-    assert _dependency(conn, "s2")[0] == "s1"
+    assert _dependency_row(conn, "s3") == {
+        "depends_on_shot_id": "s1", "dependency_kind": "adopted_tail_frame", "upstream_adopted_version_id": "v1",
+    }
+    assert _dependency_row(conn, "s4")["depends_on_shot_id"] == "s3"
+    # 已发布计划行一个字段都不动：它的 depends_on 在执行契约指纹里，动了整集就 RELEASE_QUALIFICATION_CHANGED。
+    assert _planned(conn) == planned_before
+    assert conn.execute("SELECT status FROM shot_video_generation_plans WHERE shot_id='s3'").fetchone()[0] == "ready"
+    assert effective_dependency(conn, episode_video_plan_id="evp", shot_id="s3", planned_dependency="s2") == "s1"
     assert rebase_dependencies_past_rejected_shots(conn, "e1") == []
 
 
-def test_consecutive_rejections_are_skipped_along_the_chain_and_first_shot_drops_anchor() -> None:
+def test_consecutive_rejections_are_skipped_and_dependency_without_upstream_is_dropped() -> None:
     conn = get_conn()
     _seed(conn)
+    planned_before = _planned(conn)
     _reject(conn, "s1")
     _reject(conn, "s2")
     changes = rebase_dependencies_past_rejected_shots(conn, "e1")
     conn.commit()
     assert {(c["shot_id"], c["to"]) for c in changes} == {("s2", None), ("s3", None)}
-    assert _dependency(conn, "s3") == (None, "ready", None)
-    assert _dependency(conn, "s4")[0] == "s3"
+    row = _dependency_row(conn, "s3")
+    assert row["dependency_kind"] == DROPPED_DEPENDENCY_KIND and row["upstream_adopted_version_id"] is None
+    assert effective_dependency(conn, episode_video_plan_id="evp", shot_id="s3", planned_dependency="s2") is None
+    assert _dependency_row(conn, "s4")["depends_on_shot_id"] == "s3"
+    assert _planned(conn) == planned_before
 
 
 def test_coverage_ledger_marks_rebased_shot_dispatchable() -> None:
@@ -134,8 +152,6 @@ def test_coverage_ledger_marks_rebased_shot_dispatchable() -> None:
     assert by_no[2].provider_rejected
     assert by_no[3].dependency_ready and by_no[3].blocked_by_shot_no is None
     assert by_no[3].depends_on_shot_id == "s1"
-    # 第 1 镜的采纳版本没有真实视频文件，账本按可用性会把它重新算成待办；这里只看链上的判定：
-    # 被拒的第 2 镜不再是待办，改挂后的第 3 镜可派发。
     actionable = {e.shot_no for e in ledger.actionable()}
     assert 3 in actionable and 2 not in actionable
     assert not conn.in_transaction
@@ -151,7 +167,7 @@ def test_after_shot_anchor_skips_rejected_previous_shot(monkeypatch) -> None:
     # 锚点取自已发布计划；这里的计划没有绑定分镜发布权威，把"计划仍是当前"的校验钉真。
     patch_video_plan_everywhere(monkeypatch, "verify_episode_plan_is_current", lambda plan, conn=None: True)
     assert _after_shot_id("e1", 3) == "s1"
-    # 被拒的上一镜不再作锚点：没有可用上游时干脆不挂锚，而不是等一个永远不会来的采纳版本。
+    # 没有可用上游时干脆不挂锚，而不是等一个永远不会来的采纳版本。
     conn.execute("UPDATE shots SET adopted_version_id=NULL WHERE id='s1'")
     _reject(conn, "s1")
     rebase_dependencies_past_rejected_shots(conn, "e1")
