@@ -1,7 +1,7 @@
 """规划器输出的宽容解析：裸镜头数组、依赖枚举同义写法——契约两侧对齐，不整集打回。"""
 from __future__ import annotations
 
-from app.video_plan.generate import window_shots_from_planner_response
+from app.video_plan.planner_contract import window_shots_from_planner_response
 from app.video_plan.normalize import normalize_ai_shot_plan_candidate
 
 

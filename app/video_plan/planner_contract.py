@@ -108,3 +108,14 @@ def cached_window_is_valid(response_text: str) -> bool:
         except (TypeError, ValueError, ValidationError):
             return False
     return True
+
+def window_shots_from_planner_response(parsed: Any) -> list[Any] | None:
+    """规划器一个窗口的镜头数组。契约要求 ``{"shots": [...]}``，但模型偶尔直接返回镜头
+    数组（2026-09-04 我欲封天 12/13/19 集三次），内容完全合法只是外层形状不同——
+    按同一份数组处理，不整集打回。其它形状返回 None 由调用方判 AI_PLAN_SCHEMA_INVALID。"""
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        shots = parsed.get("shots")
+        return shots if isinstance(shots, list) else None
+    return None

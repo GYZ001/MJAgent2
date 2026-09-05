@@ -29,6 +29,7 @@ from .concurrency import queue_concurrency
 
 TASK_KIND = "series_queue"
 CHILD_KIND = "series_task_run"
+_RUNNER_WAKE_INTERVAL_S = 10.0
 WORKFLOW_TYPE = "series_task"
 
 #: 任务开跑前要确认没被占用的三种单集任务，值是给用户看的工作台名。检查放在
@@ -61,7 +62,12 @@ async def _run_queue(project_id: str) -> None:
                 _spawn_children(conn, project_id, children)
                 if not children:
                     return
-                await asyncio.wait(list(children.values()), return_when=asyncio.FIRST_COMPLETED)
+                # 带超时：新任务入队、设置台上调并行数时，不必等某个子任务结束才补位
+                # （2026-09-05 B 上实测：并行数从 1 改回 3 后第二个任务仍排队）。
+                await asyncio.wait(
+                    list(children.values()), timeout=_RUNNER_WAKE_INTERVAL_S,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 -- 启动期 database is locked 之类的瞬时错误

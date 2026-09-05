@@ -8,10 +8,11 @@ from __future__ import annotations
 import json
 
 from app import (
-    errors,
+    errors as errors,  # 再导出：app.domain.video_ops 包与测试从这里取 errors，不是本文件在用
     task_registry,
     worker,
 )
+from app.video_issues import public_enqueue_error_message
 from app.db import get_conn
 from app.domain.common import (
     _episode_or_404,
@@ -380,13 +381,7 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
                 )
             results.append({"shot_id": s["row"]["id"], **r})
         except Exception as exc:  # noqa: BLE001
-            from app.video_issues import _is_concurrency_quota_wait
-            if _is_concurrency_quota_wait(exc):
-                # 并发触顶是等待，不是故障：不进错误日志（观测台曾被一小时 38 条刷屏）
-                public = str(getattr(exc, "detail", {}).get("message") or "视频并发已达上限，等待后自动重试")
-            else:
-                public = errors.record_and_format(exc, action="enqueue_shot",
-                                                  context={"shot_id": s["row"]["id"], "episode_id": episode_id})
+            public = public_enqueue_error_message(exc, shot_id=s["row"]["id"], episode_id=episode_id)
             issue_codes: list[str] = []
             try:
                 from app.video_issues import issues_from_enqueue_error, persist_shot_issue

@@ -163,3 +163,39 @@ async def test_recovery_restarts_project_whose_tasks_were_left_queued_by_gracefu
     monkeypatch.setattr(queue, "_ensure_runner", lambda project_id: restarted.append(project_id))
     resumed = recovery.recover_series_film_runs()
     assert restarted == ["p"] and resumed == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_picks_up_new_task_without_waiting_for_running_child(monkeypatch) -> None:
+    """runner 在等子任务时也要定时醒来补位：并行度 2、一个任务在跑，再入队一个，
+    第二个不能等第一个跑完才开始（B 上实测并行数上调后第二个任务一直排队）。"""
+    conn = _conn()
+    _patch_conn(monkeypatch, conn)
+    monkeypatch.setattr(queue, "queue_concurrency", lambda: 2)
+    monkeypatch.setattr(queue, "_RUNNER_WAKE_INTERVAL_S", 0.02)
+    _seed_task(conn, "st_a", [1])
+    _seed_task(conn, "st_b", [2])
+    release = asyncio.Event()
+    started: set[str] = set()
+
+    async def fake_run_stage(stage, episode_id, _run_id):
+        started.add(episode_id)
+        await release.wait()
+    monkeypatch.setattr(series_stages, "stage_is_complete", lambda *_a: False)
+    monkeypatch.setattr(series_stages, "run_stage", fake_run_stage)
+    monkeypatch.setattr(merge, "merge_is_current", lambda *_a: False)
+    monkeypatch.setattr(merge, "build_series_film", lambda *_a: {})
+
+    await queue.enqueue("p", ["st_a"], False)
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if "e1" in started:
+            break
+    await queue.enqueue("p", ["st_b"], False)  # runner 已在跑：_ensure_runner 是空操作
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if "e2" in started:
+            break
+    assert started >= {"e1", "e2"}, "第二个任务必须在第一个仍在跑时就开始"
+    release.set()
+    await _await_runner("p", timeout=10.0)

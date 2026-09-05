@@ -312,6 +312,16 @@ def _is_concurrency_quota_wait(exc: Exception) -> bool:
     return isinstance(exc, QuotaExceeded) and _quota_detail(exc).get("gate") == "concurrency"
 
 
+def public_enqueue_error_message(exc: Exception, *, shot_id: str, episode_id: str) -> str:
+    """入队异常给用户看的文案：并发触顶是等待不是故障，不进错误日志
+    （2026-09-04 集级并行后观测台一小时被 38 条触顶记录刷屏）；其余照常记错误。"""
+    if _is_concurrency_quota_wait(exc):
+        return str(_quota_detail(exc).get("message") or "视频并发已达上限，等待后自动重试")
+    from app import errors  # 延迟导入：app.errors 反向依赖 db/quota 链
+
+    return errors.record_and_format(exc, action="enqueue_shot", context={"shot_id": shot_id, "episode_id": episode_id})
+
+
 def issues_from_enqueue_error(
     exc: Exception,
     *,

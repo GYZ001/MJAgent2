@@ -49,10 +49,8 @@ _RELATION_ALIASES: dict[str, dict[str, str]] = {
 }
 
 
-def normalize_ai_shot_plan_candidate(
-    value: dict[str, Any],
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Canonicalize redundant planner fields without changing its selected mode."""
+def _prepare_candidate(value: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """复制输入并先把依赖枚举的同义写法归一（记录进 changes）。"""
     normalized = dict(value)
     changes: list[dict[str, Any]] = []
     for field in ("state_dependency", "motion_dependency"):
@@ -61,6 +59,14 @@ def normalize_ai_shot_plan_candidate(
         if replacement is not None:
             normalized[field] = replacement
             changes.append({"field": field, "from": current, "to": replacement})
+    return normalized, changes
+
+
+def normalize_ai_shot_plan_candidate(
+    value: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Canonicalize redundant planner fields without changing its selected mode."""
+    normalized, changes = _prepare_candidate(value)
     relations = normalized.get("relations")
     if isinstance(relations, dict):
         relations = dict(relations)
