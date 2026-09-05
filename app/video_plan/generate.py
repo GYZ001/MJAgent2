@@ -83,7 +83,6 @@ async def generate_episode_plan(
     """
     from app import hiagent
     from app.harness import model_gateway
-    from app.schemas import extract_json
 
     db = conn or get_conn()
     episode = db.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
@@ -554,7 +553,7 @@ async def generate_episode_plan(
                     "source_provider_call_id": cached_call_id,
                 },
             )
-        window_raw_shots = window_shots_from_planner_response(extract_json(response))
+        window_raw_shots = window_shots_from_planner_response(response)
         if not isinstance(window_raw_shots, list):
             raise VideoPlanValidationError([{
                 "code": "AI_PLAN_SCHEMA_INVALID",

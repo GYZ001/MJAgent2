@@ -109,10 +109,31 @@ def cached_window_is_valid(response_text: str) -> bool:
             return False
     return True
 
-def window_shots_from_planner_response(parsed: Any) -> list[Any] | None:
+def window_shots_from_planner_response(payload: Any) -> list[Any] | None:
     """规划器一个窗口的镜头数组。契约要求 ``{"shots": [...]}``，但模型偶尔直接返回镜头
-    数组（2026-09-04 我欲封天 12/13/19 集三次），内容完全合法只是外层形状不同——
-    按同一份数组处理，不整集打回。其它形状返回 None 由调用方判 AI_PLAN_SCHEMA_INVALID。"""
+    数组（2026-09-04 我欲封天 12/13/19 集，09-05 第 17 集再次）——内容完全合法只是外层形状
+    不同，按同一份数组处理，不整集打回。
+
+    ``payload`` 可以是原始文本或已解析对象：``extract_json`` 只认第一个 JSON **对象**，
+    遇到裸数组会把第一个镜头当成整份输出（这就是第一版修复没生效的原因），所以文本先
+    整体按 JSON 解析一次，再退回 ``extract_json``。其它形状返回 None 由调用方判
+    AI_PLAN_SCHEMA_INVALID。"""
+    import json
+    import re
+
+    parsed: Any = payload
+    if isinstance(payload, str):
+        cleaned = re.sub(r"```(?:json)?\s*", "", payload, flags=re.IGNORECASE).replace("```", "").strip()
+        cleaned = re.split(r"</think[^>]*>", cleaned, flags=re.IGNORECASE)[-1].strip()
+        try:
+            parsed = json.loads(cleaned)
+        except ValueError:
+            from app.schemas.json_extract import extract_json
+
+            try:
+                parsed = extract_json(cleaned)
+            except ValueError:
+                return None
     if isinstance(parsed, list):
         return parsed
     if isinstance(parsed, dict):
