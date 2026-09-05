@@ -34,6 +34,14 @@ def _after_shot_id(episode_id: str, shot_no: int, *, degrade: bool = False) -> s
     if len(rows) < 2:
         return None
     prev_row, cur_row = rows[0], rows[1]
+    if prev_row["adopted_version_id"] is None and conn.execute(
+        "SELECT 1 FROM jobs WHERE shot_id=? AND kind='video' AND provider_create_state='model_rejected' LIMIT 1",
+        (prev_row["id"],),
+    ).fetchone():
+        # 上一镜被供应商确定性拒绝（按跳过处理）：锚点取计划里改挂后的上游，没有就不挂锚。
+        from app.video_plan.prev_frame_reference import planned_previous_shot_id  # 包级导入成环
+
+        return planned_previous_shot_id(conn, cur_row["id"])
 
     def to_model(r):
         return Shot(

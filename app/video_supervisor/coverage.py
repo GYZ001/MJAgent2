@@ -184,6 +184,13 @@ def rebuild_coverage_ledger(
     fallback_quota: int | None = None,
 ) -> CoverageLedger:
     conn = get_conn()
+    # 被拒镜头的下游依赖先改挂到它的上游（幂等状态转移），账本才不会把整条链判成永久阻塞。
+    # 只在自己开启事务时提交：本函数常在调用方的事务里被调用，不在它上面隐式提交。
+    from app.video_plan.rejected_rebase import rebase_dependencies_past_rejected_shots  # 包级导入成环
+
+    caller_in_transaction = conn.in_transaction
+    if rebase_dependencies_past_rejected_shots(conn, episode_id) and not caller_in_transaction:
+        conn.commit()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     shot_rows = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)

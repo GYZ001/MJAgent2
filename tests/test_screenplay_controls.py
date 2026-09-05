@@ -683,9 +683,7 @@ def test_stale_v14_document_is_not_new_baseline_step_authority(
             db.now(),
         ),
     )
-    # 显式提交：建表助手不再替调用方隐式提交，未提交的写入会让下面的 BEGIN IMMEDIATE 报
-    # "cannot start a transaction within a transaction"。
-    conn.commit()
+    conn.commit()  # 建表助手不再替调用方隐式提交，未提交写入会让 BEGIN IMMEDIATE 报事务嵌套
     revision = ensure_production_revision(
         episode_id="e1",
         kind="screenplay",
@@ -1135,10 +1133,9 @@ def test_resume_route_has_a_distinct_capability() -> None:
     ] == "screenplay.resume"
     assert registry.commands["screenplay.resume"].title == "继续剧本流程"
     assert registry.commands["screenplay.resume"].risk == RiskLevel.R2_MATERIAL
-    # 不是删除资源（side_effect="resumes_working_revision_finalization"），
-    # 2026-08-30 产品拍板「除了删除资源，否则不需要弹窗」后已从 ALWAYS 降到
-    # NEVER——ALWAYS 对浏览器调用方本来就只是空头承诺（client.ts 自动消费
-    # approval_token）。
+    # 不是删除资源（side_effect="resumes_working_revision_finalization"），2026-08-30 产品拍板
+    # 「除了删除资源，否则不需要弹窗」后已从 ALWAYS 降到 NEVER——ALWAYS 对浏览器调用方本来就
+    # 只是空头承诺（client.ts 自动消费 approval_token）。
     assert (
         registry.commands["screenplay.resume"].confirmation
         == ConfirmationPolicy.NEVER

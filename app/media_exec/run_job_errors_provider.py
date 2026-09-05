@@ -153,6 +153,16 @@ def _defer_or_retry_provider_error(
     return False
 
 
+def _rebase_dependencies_after_rejection(conn: Any, job_id: str) -> None:
+    """被拒镜头的下游依赖改挂到它的上游，整条链不再等一个永远不会来的采纳版本（第 15 集）。
+    写在调用方连接上，提交归调用方。"""
+    from app.video_plan.rejected_rebase import rebase_dependencies_past_rejected_shots  # 包级导入成环
+
+    row = conn.execute("SELECT episode_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if row:
+        rebase_dependencies_past_rejected_shots(conn, str(row["episode_id"]))
+
+
 async def _finalize_provider_terminal_failure(
     conn: Any,
     job: Any,
@@ -184,6 +194,7 @@ async def _finalize_provider_terminal_failure(
                 WHERE id=? AND status='failed'""",
             (job_id,),
         )
+        _rebase_dependencies_after_rejection(conn, job_id)
         conn.commit()
     mark_media_job_state(
         _row_value(job, "run_id"),
@@ -295,3 +306,4 @@ def _persist_provider_failure_details(
                 WHERE id=? AND status='failed'""",
             (job_id,),
         )
+        _rebase_dependencies_after_rejection(conn, job_id)
