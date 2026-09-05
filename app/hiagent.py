@@ -120,7 +120,7 @@ def _reusable_operation_candidate_rows(
             "SELECT id,response_json,meta,request_json,request_hash,"
             "contract_version FROM provider_calls "
             f"WHERE operation_id IN ({marks}) AND kind=? AND model=? "
-            "AND status IN ('OK','SUCCESS','SUCCEEDED') "
+            "AND status IN ('OK','SUCCESS','SUCCEEDED') AND COALESCE(recovery_disposition,'') NOT IN ('RESET_PURGED','OUTPUT_UNREACHABLE') "
             "AND response_json IS NOT NULL ORDER BY id DESC LIMIT 20",
             (*operation_ids, kind, model),
         ).fetchall()

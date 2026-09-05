@@ -376,6 +376,7 @@ async def _generate_one_character_portrait(
     """
     conn = get_conn()
     from app import portraits as _portraits
+    from app.portraits.reuse_invalidation import download_or_invalidate_reuse  # portraits 反向依赖本模块，只能延迟导入
     from app.portraits.appearance_style_guard import strip_visual_style_leak
 
     c.ref_image_path = None
@@ -419,7 +420,7 @@ async def _generate_one_character_portrait(
                 call_meta=call_meta,
             )
             if item.get("url"):
-                await hiagent.download(item["url"], path)
+                await download_or_invalidate_reuse(conn, item["url"], path, call_meta)  # 5xx→作废复用结果再抛
             elif item.get("b64_json"):
                 import base64
                 atomic_write_bytes(path, base64.b64decode(item["b64_json"]))

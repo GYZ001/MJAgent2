@@ -306,9 +306,20 @@ def purge_project_media(project_id: str) -> None:
 # 画风是用户选的运维配置，重跑不该把它清掉（清了会跑在默认画风上）；
 # 其余状态字段回 idle，让人物谱/场景库回到"未生成"。
 PROJECT_STATUS_RESET = {
-    "bible_status": "idle", "bible_error": None, "refs_status": "idle",
-    "portraits_status": "idle", "scene_refs_status": "idle",
+    "bible_status": "idle", "bible_error": None, "refs_status": "idle", "refs_error": None,
+    "portraits_status": "idle", "portraits_error": None, "scene_refs_status": "idle", "scene_refs_error": None,
+    # 2026-09-05 实测漏网：定妆/场景图的幂等 operation_id 由「项目 id + 本批开始时间 + 名字」哈希而成，
+    # 批次时间戳不清，新一轮算出同样的 id 就会从账本复用上一轮的图片 URL（其中 3 张已 500）。
+    "refs_batch_started_at": None, "refs_target": None, "refs_resume": None,
+    "scene_refs_batch_started_at": None, "scene_refs_target": None,
 }
+# 账本 provider_calls 只保留审计，不能再当缓存命中：把该项目的成功结果标成不可复用
+# （hiagent 复用查询按 recovery_disposition 排除），行本身与费用记录不动。
+PROVIDER_CALLS_UNREUSABLE_SQL = (
+    "UPDATE provider_calls SET recovery_disposition='RESET_PURGED' "
+    "WHERE project_id=? AND status IN ('OK','SUCCESS','SUCCEEDED') "
+    "AND COALESCE(recovery_disposition,'') NOT IN ('RESET_PURGED','OUTPUT_UNREACHABLE')"
+)
 
 
 EPISODE_RESET_SQL = """UPDATE episodes SET
@@ -444,6 +455,8 @@ def purge_project_assets(conn: sqlite3.Connection, project_id: str) -> None:
     sets = ", ".join(f"{k}=?" for k in PROJECT_STATUS_RESET)
     conn.execute(f"UPDATE projects SET {sets} WHERE id=?",
                  (*PROJECT_STATUS_RESET.values(), project_id))
+    purged = conn.execute(PROVIDER_CALLS_UNREUSABLE_SQL, (project_id,))
+    log(f"  账本 provider_calls 标记不可复用：{purged.rowcount} 行（行本身保留审计）")
     conn.commit()
 
 
@@ -453,7 +466,7 @@ def report_scope(scope: dict[str, list[str]], project_id: str, name: str,
     for key, ids in scope.items():
         log(f"  {key}: {len(ids)} 条")
     log("保留：chapters、episodes 行本身、projects 行（含已选画风）、"
-        "provider_calls、账号与配额。")
+        "provider_calls（仅审计，成功结果已标为不可复用）、账号与配额。")
 
 
 def main() -> int:

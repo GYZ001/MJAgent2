@@ -2733,7 +2733,7 @@ def test_cached_replay_skips_truncated_length_responses(monkeypatch) -> None:
         """CREATE TABLE provider_calls(
                id INTEGER PRIMARY KEY, response_json TEXT, meta TEXT,
                request_json TEXT, request_hash TEXT, contract_version TEXT,
-               kind TEXT, model TEXT, operation_id TEXT, status TEXT)"""
+               kind TEXT, model TEXT, operation_id TEXT, status TEXT, recovery_disposition TEXT)"""
     )
     payload = {
         "model": "text-model",
@@ -2787,7 +2787,7 @@ def test_cached_replay_returns_none_when_only_truncated_rows_exist(monkeypatch) 
         """CREATE TABLE provider_calls(
                id INTEGER PRIMARY KEY, response_json TEXT, meta TEXT,
                request_json TEXT, request_hash TEXT, contract_version TEXT,
-               kind TEXT, model TEXT, operation_id TEXT, status TEXT)"""
+               kind TEXT, model TEXT, operation_id TEXT, status TEXT, recovery_disposition TEXT)"""
     )
     payload = {
         "model": "text-model",
@@ -2834,7 +2834,7 @@ def test_cached_replay_skips_undelivered_empty_responses(monkeypatch) -> None:
         """CREATE TABLE provider_calls(
                id INTEGER PRIMARY KEY, response_json TEXT, meta TEXT,
                request_json TEXT, request_hash TEXT, contract_version TEXT,
-               kind TEXT, model TEXT, operation_id TEXT, status TEXT)"""
+               kind TEXT, model TEXT, operation_id TEXT, status TEXT, recovery_disposition TEXT)"""
     )
     payload = {
         "model": "text-model",
@@ -2890,7 +2890,7 @@ def test_cached_replay_returns_none_when_only_undelivered_rows_exist(monkeypatch
         """CREATE TABLE provider_calls(
                id INTEGER PRIMARY KEY, response_json TEXT, meta TEXT,
                request_json TEXT, request_hash TEXT, contract_version TEXT,
-               kind TEXT, model TEXT, operation_id TEXT, status TEXT)"""
+               kind TEXT, model TEXT, operation_id TEXT, status TEXT, recovery_disposition TEXT)"""
     )
     payload = {
         "model": "text-model",
