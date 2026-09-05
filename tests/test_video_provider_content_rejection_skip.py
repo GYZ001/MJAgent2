@@ -286,3 +286,31 @@ def test_vendor_request_id_does_not_break_cross_task_comparison():
     assert rejection_repeated_across_tasks([("t1", a), ("t2", b), ("t3", c)]) is True
     other = "S3 upload failed with 500. Request id: 02178860011223300000000000000"
     assert rejection_repeated_across_tasks([("t1", a), ("t2", other), ("t3", c)]) is False
+
+
+# ------------------------------------------------ 产出连续取不到：换新任务而不是复轮
+def test_unreachable_output_after_download_retries_resubmits_instead_of_repolling(monkeypatch):
+    """供应商任务已成功但视频 URL 持续 HTTP 500：hiagent.download 内部 3 次重试后仍失败，
+    不能再每 10 秒复轮同一任务重下（第 2/23 集 3 镜各刷 6 条/分钟报错近 1 小时）。"""
+    from app import hiagent
+
+    conn = get_conn()
+    _seed_job(conn)
+
+    async def poll_succeeded(task_id, *, call_meta=None):
+        return {
+            "status": "succeeded", "video_url": "https://cdn.example.com/v.mp4",
+            "last_frame_url": "", "error": "", "failure": None,
+        }
+
+    async def download_500(url, dest):
+        raise hiagent.ProviderError("视频下载失败 HTTP 500（URL 可能已过期，有效期 7 天）", retryable=True)
+
+    _wire(monkeypatch, poll_succeeded)
+    monkeypatch.setattr(worker.hiagent, "download", download_500)
+    asyncio.run(worker._run_job("j1", lease_owner="worker-1"))
+    job = conn.execute(
+        "SELECT status, retry_count, provider_poll_required FROM jobs WHERE id='j1'"
+    ).fetchone()
+    assert job["provider_poll_required"] == 0, "产出取不到的任务不得再轮询"
+    assert job["status"] == "queued" and job["retry_count"] == 1, "应换新任务重试"

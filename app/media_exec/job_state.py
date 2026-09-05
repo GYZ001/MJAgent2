@@ -259,14 +259,20 @@ def settle_terminal_poll_failure(
         if rejection_repeated_across_tasks(history):
             failure = hiagent.ProviderFailure.model_rejection(PROVIDER_CONTENT_REJECTED_KIND)
         elif failure.retryable:
-            conn.execute(
-                """UPDATE jobs SET provider_poll_required=0, provider_result_adoptable=0,
-                          updated_at=?
-                    WHERE id=? AND lease_owner=?""",
-                (now(), job_id, owner),
-            )
-            conn.commit()
+            release_provider_poll(conn, job_id, owner)
     return failure
+
+
+def release_provider_poll(conn, job_id: str, owner: str) -> None:
+    """这条供应商任务不会再变（已报终态失败，或产出连续取不到）：清掉轮询标记，
+    让错误处理器走 ``_schedule_job_retry`` 换新任务，而不是 ``_defer_provider_poll``
+    每 10 秒再轮一次。"""
+    conn.execute(
+        """UPDATE jobs SET provider_poll_required=0, provider_result_adoptable=0, updated_at=?
+            WHERE id=? AND lease_owner=?""",
+        (now(), job_id, owner),
+    )
+    conn.commit()
 
 
 def _prior_task_poll_failure_messages(conn, task_id: str) -> list[str]:

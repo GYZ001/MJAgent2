@@ -59,14 +59,23 @@ async def defer_job_with_wait(
 async def download_provider_result(conn, meta: dict, job, ep, shot, version, result, provider_recovery_only: bool) -> str:
     """下载供应商产出视频到本地路径；叙事计划已失效则围栏拒绝。返回本地路径。"""
     from app import hiagent
-    from .enqueue import _video_path
+    from .enqueue import _row_value, _video_path
 
     meta["provider_video_source_url"] = result["video_url"]
     # Current provider contract advertises a seven-day URL. Keep a
     # conservative six-day reuse window so downstream jobs never race expiry.
     meta["provider_video_source_url_expires_at"] = now() + 6 * 24 * 3600
     dest = _video_path(job["project_id"], ep["episode_no"], shot["shot_no"], version["version_no"])
-    await hiagent.download(result["video_url"], str(dest))
+    try:
+        await hiagent.download(result["video_url"], str(dest))
+    except hiagent.ProviderError as exc:
+        if exc.retryable:
+            # 任务已完成但产出连续取不到（对象存储 5xx，hiagent.download 内部已重试 3 次）：
+            # 这条任务不会再变，不能每 10 秒复轮再重下（2026-09-05 第 2/23 集 3 镜各刷
+            # 6 条/分钟报错近 1 小时）；清掉轮询标记让错误处理器换新任务，受 max_retries 封顶。
+            from .job_state import release_provider_poll  # job_state 依赖 enqueue，避免模块级环
+            release_provider_poll(conn, job["id"], _row_value(job, "lease_owner"))
+        raise
     if not provider_recovery_only and meta.get("shot_plan_id"):
         from app.video_plan import active_plan_is_current
         from .fences import VideoPlanStaleFence
