@@ -391,3 +391,37 @@ def test_kept_line_in_segment_not_referencing_its_source_is_moved_by_source_inde
     moves = reassign_kept_lines_to_covering_segments(kept, quotes, plans, _scene_4_segments())
     assert kept[0].segment_no == 13
     assert moves and moves[0]["to_segment_no"] == 13
+
+
+def test_cross_source_fallback_prefers_the_segment_with_least_kept_chars():
+    """归位到引用该原文段的段时按当前必保台词字数最少的选，不按最早——否则会把多句堆进一段撞容量。"""
+    from types import SimpleNamespace
+    from app.production.storyboard_beat_sheet import _AiSegmentPlan
+    from app.production.storyboard_segment_ranges import reassign_kept_lines_to_covering_segments
+
+    plans = [
+        _AiSegmentPlan(segment_no=1, synopsis="a", source_segment_indexes=[1], source_unit_ranges=[]),
+        _AiSegmentPlan(segment_no=2, synopsis="b", source_segment_indexes=[4], source_unit_ranges=[]),
+        _AiSegmentPlan(segment_no=3, synopsis="c", source_segment_indexes=[4], source_unit_ranges=[]),
+    ]
+    quotes = [
+        DialogueQuote(quote_id="Q01", source_segment_index=4, text="猫忽然跳上了桌子", content_chars=50),
+        DialogueQuote(quote_id="Q02", source_segment_index=4, text="黄总一把抓住猫", content_chars=10),
+    ]
+    kept = [SimpleNamespace(quote_id="Q01", segment_no=2), SimpleNamespace(quote_id="Q02", segment_no=1)]
+    reassign_kept_lines_to_covering_segments(kept, quotes, plans, _scene_4_segments(), unit_moves=False)
+    assert kept[1].segment_no == 3, "第 2 段已有 50 字，Q02 应归到空的第 3 段"
+
+
+def test_recheck_mode_never_moves_lines_whose_segment_references_their_source():
+    """unit_moves=False（容量归一化复核）：所在段引用了原文段号就不动，哪怕单元范围没覆盖。"""
+    from types import SimpleNamespace
+    from app.production.storyboard_segment_ranges import reassign_kept_lines_to_covering_segments
+
+    plans = [_plan(1, 1, 2), _plan(2, 3, 12)]
+    quotes = [DialogueQuote(quote_id="Q01", source_segment_index=4, text="猫忽然跳上了桌子", content_chars=8)]  # S03
+    kept = [SimpleNamespace(quote_id="Q01", segment_no=1)]
+    assert reassign_kept_lines_to_covering_segments(kept, quotes, plans, _scene_4_segments(), unit_moves=False) == []
+    assert kept[0].segment_no == 1
+    reassign_kept_lines_to_covering_segments(kept, quotes, plans, _scene_4_segments())
+    assert kept[0].segment_no == 2  # 校验路径仍按单元范围归位

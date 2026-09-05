@@ -353,6 +353,7 @@ def segment_source_payload(
 
 def reassign_kept_lines_to_covering_segments(
     kept_lines: list[Any], quotes: list[Any], plans: list[Any], source_segments: list[SourceSegment],
+    *, unit_moves: bool = True,
 ) -> list[dict[str, Any]]:
     """确定性归一化：kept 台词落在别的段声明的单元范围里时，直接把它挪到覆盖它的那一段。
 
@@ -364,6 +365,11 @@ def reassign_kept_lines_to_covering_segments(
     """
     quotes_by_id = {q.quote_id: q for q in quotes}
     plans_by_no = {p.segment_no: p for p in plans}
+    chars_by_segment: dict[int, int] = {}
+    for item in kept_lines:
+        q = quotes_by_id.get(item.quote_id)
+        if q is not None:
+            chars_by_segment[item.segment_no] = chars_by_segment.get(item.segment_no, 0) + int(q.content_chars or 0)
     moves: list[dict[str, Any]] = []
     for item in kept_lines:
         quote = quotes_by_id.get(item.quote_id)
@@ -371,30 +377,35 @@ def reassign_kept_lines_to_covering_segments(
         if quote is None or plan is None or not (1 <= quote.source_segment_index <= len(source_segments)):
             continue
         source_index = quote.source_segment_index
+        refs = getattr(plan, "source_segment_indexes", None)
+        references_source = True if refs is None else source_index in list(refs)  # 没声明就当引用，只按单元归位
         unit_no = quote_unit_index(quote, source_segments[source_index - 1].text)
-        if unit_no >= 1 and any(
-            r.source_segment_index == source_index and r.from_unit <= unit_no <= r.to_unit
-            for r in plan.source_unit_ranges
-        ):
-            continue
-        covering: list[int] = []
-        if unit_no >= 1:
+        target: int | None = None
+        if unit_moves and unit_no >= 1 and references_source:
+            if any(r.source_segment_index == source_index and r.from_unit <= unit_no <= r.to_unit
+                   for r in plan.source_unit_ranges):
+                continue
             covering = sorted(
                 p.segment_no for p in plans
                 for r in p.source_unit_ranges
                 if r.source_segment_index == source_index and r.from_unit <= unit_no <= r.to_unit
             )
-        if not covering:
+            target = covering[0] if covering else None
+        if target is None and not references_source:
             # 2026-09-05 我欲封天第 23 集：台词的原文段号根本不在它所在段的 source_segment_indexes 里
-            # （容量归一化拆段后尤其常见），而没有任何段的单元范围覆盖它——退一步按原文段号归到
-            # 最早引用该原文段的段；连这都没有才留给 dialogue_ledger_errors 报「新增段落」。
-            covering = sorted(
+            # （容量归一化拆段后尤其常见）。归到引用该原文段、且当前必保台词字数最少的段——
+            # 只按「最早」归会把多句堆进同一段撞上 15 秒口播容量（16:04-16:10 八次复核失败）。
+            candidates = [
                 p.segment_no for p in plans
                 if source_index in list(getattr(p, "source_segment_indexes", None) or [])
-            )
-            if not covering or item.segment_no in covering:
-                continue
+            ]
+            if candidates:
+                target = min(candidates, key=lambda no: (chars_by_segment.get(no, 0), no))
+        if target is None or target == item.segment_no:
+            continue
+        chars_by_segment[item.segment_no] = chars_by_segment.get(item.segment_no, 0) - int(quote.content_chars or 0)
+        chars_by_segment[target] = chars_by_segment.get(target, 0) + int(quote.content_chars or 0)
         moves.append({"quote_id": item.quote_id, "from_segment_no": item.segment_no,
-                      "to_segment_no": covering[0], "unit": unit_no})
-        item.segment_no = covering[0]
+                      "to_segment_no": target, "unit": unit_no})
+        item.segment_no = target
     return moves

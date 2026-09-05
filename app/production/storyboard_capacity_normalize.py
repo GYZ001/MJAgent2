@@ -245,7 +245,9 @@ def normalize_and_assert_capacity(
     _ = paratext_indexes
     # 拆段后台词的段号可能落到不再引用它原文段的段上（2026-09-05 第 23 集 Q31 → 第 28 段只覆盖 [4]）：
     # 复核前先按单元位置/原文段号确定性归位，归位不了的才是真正的算法 bug。
-    reassign_kept_lines_to_covering_segments(draft.kept_lines, quotes, draft.segments, source_segments)
+    # 只修「所在段不引用其原文段」的漂移（unit_moves=False）：拆段后再按单元范围搬动会把台词搬回
+    # 已装满的段，重新撞上容量（2026-09-05 16:04-16:10 八次复核失败就是这么来的）。
+    reassign_kept_lines_to_covering_segments(draft.kept_lines, quotes, draft.segments, source_segments, unit_moves=False)
     segment_source_indexes = {s.segment_no: s.source_segment_indexes for s in draft.segments}
     errors = dialogue_ledger_errors(
         quotes=quotes,
