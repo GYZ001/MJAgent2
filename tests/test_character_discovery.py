@@ -913,25 +913,23 @@ def test_future_identity_new_name_rejects_list_separator_not_length(
         }, ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
-    with pytest.raises(
-        model_gateway.StructuredSemanticError,
-        match="真名不得包含身份列表分隔符",
-    ):
-        asyncio.run(portraits.resolve_future_identity_candidates(
-            [{
-                "name": "三哥",
-                "source_label": "三哥",
-                "identity_kind": "functional",
-                "identity_group": "current:third-brother",
-                "kind": "onscreen",
-            }],
-            source_text="三哥推门进来。",
-            future_text=f"后来才知道，三哥其实是{bad_name}两人假扮的。",
-            bible=bible,
-            episode_no=7,
-            future_label="后续章节",
-        ))
+    # 2026-09-05 起：并列名不是一个人的真名，确定性降级为该 group 的 functional 决议，不再整集打回。
+    candidates = asyncio.run(portraits.resolve_future_identity_candidates(
+        [{
+            "name": "三哥",
+            "source_label": "三哥",
+            "identity_kind": "functional",
+            "identity_group": "current:third-brother",
+            "kind": "onscreen",
+        }],
+        source_text="三哥推门进来。",
+        future_text=f"后来才知道，三哥其实是{bad_name}两人假扮的。",
+        bible=bible,
+        episode_no=7,
+        future_label="后续章节",
+    ))
     assert calls == 1
+    assert [(item["source_label"], item["identity_kind"]) for item in candidates] == [("三哥", "functional")]
 
 
 def _coverage_audit_kwargs() -> dict:

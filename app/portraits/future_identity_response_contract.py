@@ -40,6 +40,15 @@ class _FutureIdentityResolutionContext:
     future_text: str
 
 
+def _new_name_is_one_personal_name(name_kinds: dict, revealed_names: dict, group_key: str) -> bool:
+    """NEW 只能签发**一个人的真名**：形态不是 personal_name，或名字里含身份列表分隔符
+    （「尹天隆、周凯」——模型把两个人的并列名当成一个新身份，2026-09-05 第 21 集三次重试
+    都如此，整集映射台失败）都不是，按同一条路径降级为该 group 的 functional 决议。"""
+    if str(name_kinds.get(group_key) or "") != IDENTITY_NAME_FORM_PERSONAL:
+        return False
+    return not _identity_source_label_has_list_separator(str(revealed_names.get(group_key) or ""))
+
+
 def _normalize_future_identity_payload(
     payload: dict,
     context: _FutureIdentityResolutionContext,
@@ -90,9 +99,7 @@ def _normalize_future_identity_payload(
             or str(selected.get("resolution_kind") or "") != "new_named"
         ):
             continue
-        if str(
-            name_kinds.get(group_key) or ""
-        ) != IDENTITY_NAME_FORM_PERSONAL:
+        if not _new_name_is_one_personal_name(name_kinds, revealed_names, group_key):
             # 真名 > 尊称 > 代称：只有真名可以签发新的人物权威。尊称与代称
             # （以及没有明确声明形态的情况）确定性降级为功能身份，本组仍然是
             # 一个独立身份，等真名出现在证据里再由 K 决议认领同一个人。
