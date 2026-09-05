@@ -31,6 +31,7 @@ from .evidence_merge import (
     _resolved_evidence_ref,
 )
 from .identity_literal_evidence import literal_rebind_target, named_literal_miss_verdict
+from .identity_promotions import promote_titled_known
 from .identity_schemas import CurrentIdentityCandidateResponse, promote_functional_matching_known
 
 def _project_current_identity_response(
@@ -56,7 +57,7 @@ def _project_current_identity_response(
     errors: list[str] = []
     projected: list[dict] = []
     expected_refs = set(evidence_by_ref)
-    value = promote_functional_matching_known(value, known_decisions)  # f 冒用已登记称谓 → 采用同 (label, ref) 的 K
+    value = promote_titled_known(promote_functional_matching_known(value, known_decisions), known_decisions)  # 冒用登记称谓/登记名＋师兄 → 采用 K
     if set(value.model_fields_set) != {"k", "n", "f"}:
         errors.append("current identity root keys 非闭合")
     # 第22轮总审计 ERR-20260824-aeee2d：帽子随本批 evidence ref 数量缩放，

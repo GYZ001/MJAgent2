@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from app.schemas import Bible
 from app.validators import match_scene_name
+from app.portraits.card_owner import resolve_card_owner
 
 
 def _resolve_portrait_id(conn, project_id: str, character_name: str, episode_no: int) -> str | None:
@@ -125,3 +126,9 @@ def _prep_pack_group_scene_quotes_by_canonical(
     return grouped
 
 
+def _rebind_titled_owner(conn, project_id: str, episode_no: int, bible, resolved_name: str, portrait_id):
+    """「登记名＋关系称谓」的称呼归到登记名那张卡（card_owner 的派生精确匹配），并补查它的定妆照。"""
+    owner_status, owner_name = resolve_card_owner(bible, resolved_name)
+    if owner_status != "owner" or owner_name == resolved_name:
+        return resolved_name, portrait_id
+    return owner_name, portrait_id or _resolve_portrait_id(conn, project_id, owner_name, episode_no)

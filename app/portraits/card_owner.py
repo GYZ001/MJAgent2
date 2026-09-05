@@ -74,6 +74,23 @@ def resolve_card_owner(
     label = str(label or "").strip()
     if not label:
         return ("none", "")
+    owners = _exact_owners(bible, label)
+    if not owners:
+        # 「登记名＋关系称谓」是同一个人的派生写法（原文里「韩宗师兄」就是人物谱里的
+        # 「韩宗」，2026-09-05 第 5 集实测：按独立群演建了第二张卡、分镜台显示无定妆照）。
+        # 判据仍是精确相等：去掉一个闭集里的称谓后缀后，剩下的字符串必须逐字等于某个
+        # 登记名/别名；不是子串匹配，也不猜姓氏（「上官师叔」剩「上官」查无此人就仍是 none）。
+        stem = strip_relational_title(label)
+        if stem:
+            owners = _exact_owners(bible, stem)
+    if not owners:
+        return ("none", "")
+    if len(owners) == 1:
+        return ("owner", owners[0])
+    return ("conflict", owners)
+
+
+def _exact_owners(bible: Bible, label: str) -> list[str]:
     owners: list[str] = []
     for character in getattr(bible, "characters", None) or []:
         name = str(getattr(character, "name", "") or "").strip()
@@ -83,11 +100,26 @@ def resolve_card_owner(
             character, label, include_name=True, include_aliases=True,
         ):
             owners.append(name)
-    if not owners:
-        return ("none", "")
-    if len(owners) == 1:
-        return ("owner", owners[0])
-    return ("conflict", owners)
+    return owners
+
+
+# 汉语里挂在人名后面的关系/尊称后缀：闭集、语法性质，不是任何人物的黑名单。长的在前，
+# 保证「师兄」先于「兄」匹配。单字后缀只在剩余部分 ≥2 字时才考虑（「王兄」剩「王」不算）。
+RELATIONAL_TITLE_SUFFIXES: tuple[str, ...] = (
+    "师兄", "师姐", "师弟", "师妹", "师叔", "师伯", "师祖", "师父", "师傅", "师尊",
+    "长老", "前辈", "道友", "道长", "公子", "姑娘", "小姐", "大人", "仙子", "真人",
+    "上人", "老祖", "老爷", "掌门", "宗主", "先生", "夫人",
+    "兄", "姐", "弟", "妹", "叔", "伯", "爷", "哥",
+)
+
+
+def strip_relational_title(label: str) -> str | None:
+    """``label`` 以一个关系称谓后缀结尾且去掉后剩 ≥2 字时返回剩余部分，否则 None。"""
+    text = str(label or "").strip()
+    for suffix in RELATIONAL_TITLE_SUFFIXES:
+        if text.endswith(suffix) and len(text) - len(suffix) >= 2:
+            return text[: -len(suffix)]
+    return None
 
 
 def bible_known_labels(bible: Bible) -> set[str]:

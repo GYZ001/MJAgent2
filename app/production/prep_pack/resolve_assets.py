@@ -27,6 +27,7 @@ from .asset_lookup import (
     _prep_pack_resolve_scene_reference_with_alias,
     _resolve_portrait_id,
     _resolve_scene_reference_id,
+    _rebind_titled_owner,
 )
 from .chunk_extraction import _run_async_step
 from .discovery import (
@@ -412,9 +413,9 @@ async def _resolve_assets(
                         portrait_id = _resolve_portrait_id(
                             conn, project_id, resolved_name, episode_no,
                         )
-            # 出图已解耦到后台：没行只说明没出图，不说明人物谱没卡。
-            # resolve_card_owner（建卡去重判据唯一落地点）核验命中即按已解析
-            # 处理，出图闸门是生成台 confirmation_gate 的事，这里不重复把关。
+            # 出图已解耦到后台：没行只说明没出图，不说明人物谱没卡。resolve_card_owner（建卡去重
+            # 判据唯一落地点）核验命中即按已解析处理；「登记名＋师兄/长老…」归到那张卡（第 5 集「韩宗师兄」）。
+            resolved_name, portrait_id = _rebind_titled_owner(conn, project_id, episode_no, bible, resolved_name, portrait_id)
             if not portrait_id and resolve_card_owner(bible, resolved_name) != ("owner", resolved_name):
                 errors.append(
                     f"角色「{name}」（段 {mention_segment_indexes}）未解析到已有 "
@@ -1038,5 +1039,3 @@ def _prep_pack_build_prop_manifest(
             set(entry["segment_indexes"]) | set(segment_indexes)
         )
     return list(props.values())
-
-
