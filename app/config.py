@@ -459,7 +459,6 @@ DEFAULT_SETTINGS = {
     "reference_shot_cohort_limit": "15",
     "video_reference_batch_prompt": "true",   # P1：一镜一次提示词合同
     "video_reference_role_adaptive": "false", # P2：质量角色自适应（实验，默认关）
-    "video_plan_confidence_floor": "0.55",
     # 本地项目媒体映射到自有对象存储/CDN 的公开基址；为空时视频输入明确阻断。
     "provider_media_public_base_url": "",
     "provider_media_max_download_bytes": str(512 * 1024 * 1024),

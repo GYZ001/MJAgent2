@@ -12,8 +12,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app.db import get_setting
-
 from .models import (
     AssetSource,
     EpisodeVideoGenerationPlan,
@@ -188,19 +186,6 @@ def validate_episode_plan(
                 "mode": item.mode.value,
                 "intent": item.video_input_intent.value if item.video_input_intent else None,
                 "required_owner": "provider_capability",
-            })
-        try:
-            confidence_floor = float(
-                get_setting("video_plan_confidence_floor") or 0.55
-            )
-        except (TypeError, ValueError):
-            confidence_floor = 0.55
-        if item.confidence < max(0.0, min(1.0, confidence_floor)):
-            issues.append({
-                "code": "MODE_PLAN_CONFIDENCE_TOO_LOW",
-                "shot_id": item.shot_id,
-                "confidence": item.confidence,
-                "threshold": confidence_floor,
             })
         if item.depends_on_shot_id:
             dep_row = by_id.get(item.depends_on_shot_id)
