@@ -244,8 +244,51 @@ def rejection_repeated_across_tasks(
     return len(tasks) >= max(2, min_tasks)
 
 
+def _release_rejected_continuity_anchor(
+    conn, job_id: str, owner: str, *, version_id: str, error_text: str,
+) -> bool:
+    """供应商拒收的是上一段取出的锚点帧（不是本镜内容）：去掉上一段参考、解绑死任务，
+    让重试不带锚点重新生成。返回是否命中。第 15 集实测：第 16/17 镜被拒的 content[N]
+    都是第 15 镜成片的同一张取帧，按内容拒绝计数会把整条链一镜一镜全判掉。"""
+    from app.harness.hiagent_input_image_rejection import rejected_input_image_index
+
+    index = rejected_input_image_index(error_text)
+    if index is None:
+        return False
+    row = conn.execute("SELECT image_inputs FROM shot_versions WHERE id=?", (version_id,)).fetchone()
+    try:
+        meta = json.loads((row["image_inputs"] if row else None) or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    labels = list(meta.get("_seedance_image_input_labels") or [])
+    position = index - 1  # content[0] 是提示词，图片从 content[1] 起按标签顺序排列
+    if not (0 <= position < len(labels)) or str(labels[position].get("type") or "") != "previous_shot_frame":
+        return False
+    meta["reference_images"] = [
+        ref for ref in (meta.get("reference_images") or [])
+        if not (isinstance(ref, dict) and str(ref.get("type") or "") == "previous_shot_frame")
+    ]
+    meta["_seedance_image_input_labels"] = [
+        label for label in labels if str(label.get("type") or "") != "previous_shot_frame"
+    ]
+    meta["continuity_degraded"] = True
+    meta["continuity_degraded_reason"] = f"供应商拒收上一段取帧（content[{index}]），本镜改为不带锚点重新生成"
+    meta["after_shot_id"] = None
+    meta["after_version_id"] = None
+    conn.execute(
+        "UPDATE shot_versions SET image_inputs=? WHERE id=?",
+        (json.dumps(meta, ensure_ascii=False), version_id),
+    )
+    conn.execute(
+        "UPDATE jobs SET after_shot_id=NULL, after_version_id=NULL, updated_at=? WHERE id=? AND lease_owner=?",
+        (now(), job_id, owner),
+    )
+    release_provider_poll(conn, job_id, owner, version_id=version_id)
+    return True
+
+
 def settle_terminal_poll_failure(
-    conn, job_id: str, owner: str, *, shot_id: str, version_id: str, failure: Any,
+    conn, job_id: str, owner: str, *, shot_id: str, version_id: str, failure: Any, error_text: str = "",
 ) -> Any:
     """供应商已报告任务终态失败：这个任务不会再变，绝不能再轮询它。
     - 跨独立任务重复出现相同失败 → 真实的模型拒绝（外部终态，本镜跳过，成片不含本镜）；
@@ -255,6 +298,10 @@ def settle_terminal_poll_failure(
       109 次、刷出 82 条报错，而换新任务的第 2 次一次就过）。
     """
     if failure.category is hiagent.ProviderFailureCategory.TECHNICAL:
+        if _release_rejected_continuity_anchor(
+            conn, job_id, owner, version_id=version_id, error_text=error_text,
+        ):
+            return failure
         history = _prior_shot_terminal_failure_records(conn, shot_id)
         if rejection_repeated_across_tasks(history):
             failure = hiagent.ProviderFailure.model_rejection(PROVIDER_CONTENT_REJECTED_KIND)

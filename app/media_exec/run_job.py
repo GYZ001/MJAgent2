@@ -693,6 +693,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 # （判据与副作用见 job_state.settle_terminal_poll_failure）。
                 failure = settle_terminal_poll_failure(
                     conn, job_id, owner, shot_id=job["shot_id"], version_id=version["id"], failure=failure,
+                    error_text=str(result.get("error") or ""),
                 )
                 raise ProviderError(
                     f"{provider_label} 任务失败：{error_text}",
