@@ -149,11 +149,10 @@ async def recover_all() -> dict[str, Any]:
         return result
 
     from app import db
-    run_step(
-        "startup_business_status_repair",
-        lambda: _repair_startup_business_status(db.get_conn()),
-    )
+    run_step("startup_business_status_repair", lambda: _repair_startup_business_status(db.get_conn()))
     run_step("media", worker.recover_media_jobs)
+    from app.media_exec.candidate_recovery import recover_unvalidated_video_candidates
+    run_step("video_candidates_unvalidated", recover_unvalidated_video_candidates, record_empty=False)
     from app.artifacts import flush_pending_media_cleanup
     run_step("media_cleanup_outbox", flush_pending_media_cleanup)
     run_step("abandoned_partial_files_removed", lambda: cleanup_abandoned_parts(PROJECTS_DIR))
