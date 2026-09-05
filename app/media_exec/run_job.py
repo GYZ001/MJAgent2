@@ -692,7 +692,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 # 任务已终态：不再复轮死任务；跨独立任务相同失败才算真实拒绝
                 # （判据与副作用见 job_state.settle_terminal_poll_failure）。
                 failure = settle_terminal_poll_failure(
-                    conn, job_id, owner, shot_id=job["shot_id"], failure=failure,
+                    conn, job_id, owner, shot_id=job["shot_id"], version_id=version["id"], failure=failure,
                 )
                 raise ProviderError(
                     f"{provider_label} 任务失败：{error_text}",

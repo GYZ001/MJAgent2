@@ -145,6 +145,9 @@ def test_first_unstructured_terminal_failure_resubmits_instead_of_repolling(monk
     ).fetchone()
     assert job["provider_poll_required"] == 0, "供应商已报终态，不得再轮询这个任务"
     assert job["status"] == "queued" and job["retry_count"] == 1, "应换新任务重试而不是复轮"
+    assert job["provider_create_state"] == "not_started"
+    assert conn.execute("SELECT provider_task_id FROM shot_versions WHERE id='v1'").fetchone()[0] is None, \
+        "旧任务 id 留在版本上，重跑会继续轮询它而不是新建任务"
     assert job["provider_create_state"] != "model_rejected"
     assert job["provider_failure_category"] == "technical"
     version = conn.execute("SELECT status FROM shot_versions WHERE id='v1'").fetchone()
@@ -314,3 +317,4 @@ def test_unreachable_output_after_download_retries_resubmits_instead_of_repollin
     ).fetchone()
     assert job["provider_poll_required"] == 0, "产出取不到的任务不得再轮询"
     assert job["status"] == "queued" and job["retry_count"] == 1, "应换新任务重试"
+    assert conn.execute("SELECT provider_task_id FROM shot_versions WHERE id='v1'").fetchone()[0] is None

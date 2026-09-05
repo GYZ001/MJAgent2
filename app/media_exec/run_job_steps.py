@@ -74,7 +74,7 @@ async def download_provider_result(conn, meta: dict, job, ep, shot, version, res
             # 这条任务不会再变，不能每 10 秒复轮再重下（2026-09-05 第 2/23 集 3 镜各刷
             # 6 条/分钟报错近 1 小时）；清掉轮询标记让错误处理器换新任务，受 max_retries 封顶。
             from .job_state import release_provider_poll  # job_state 依赖 enqueue，避免模块级环
-            release_provider_poll(conn, job["id"], _row_value(job, "lease_owner"))
+            release_provider_poll(conn, job["id"], _row_value(job, "lease_owner"), version_id=version["id"])
         raise
     if not provider_recovery_only and meta.get("shot_plan_id"):
         from app.video_plan import active_plan_is_current

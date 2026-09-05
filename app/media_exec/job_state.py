@@ -245,7 +245,7 @@ def rejection_repeated_across_tasks(
 
 
 def settle_terminal_poll_failure(
-    conn, job_id: str, owner: str, *, shot_id: str, failure: Any,
+    conn, job_id: str, owner: str, *, shot_id: str, version_id: str, failure: Any,
 ) -> Any:
     """供应商已报告任务终态失败：这个任务不会再变，绝不能再轮询它。
     - 跨独立任务重复出现相同失败 → 真实的模型拒绝（外部终态，本镜跳过，成片不含本镜）；
@@ -259,18 +259,25 @@ def settle_terminal_poll_failure(
         if rejection_repeated_across_tasks(history):
             failure = hiagent.ProviderFailure.model_rejection(PROVIDER_CONTENT_REJECTED_KIND)
         elif failure.retryable:
-            release_provider_poll(conn, job_id, owner)
+            release_provider_poll(conn, job_id, owner, version_id=version_id)
     return failure
 
 
-def release_provider_poll(conn, job_id: str, owner: str) -> None:
-    """这条供应商任务不会再变（已报终态失败，或产出连续取不到）：清掉轮询标记，
-    让错误处理器走 ``_schedule_job_retry`` 换新任务，而不是 ``_defer_provider_poll``
-    每 10 秒再轮一次。"""
+def release_provider_poll(conn, job_id: str, owner: str, *, version_id: str) -> None:
+    """这条供应商任务不会再变（已报终态失败，或产出连续取不到）：解除 job/版本与它的
+    绑定，让错误处理器走 ``_schedule_job_retry`` 后真正**新建任务**。
+    只清 ``provider_poll_required`` 不够：重跑时 ``run_job_claim`` 以
+    ``shot_versions.provider_task_id`` 为准，非空就继续轮询旧任务而不是创建——
+    2026-09-05 实测 3 个换新任务重试全部又轮回同一个取不到产出的旧任务。旧任务 id
+    仍留在 provider_calls / video_generation_attempts 账本里，不丢审计。"""
     conn.execute(
-        """UPDATE jobs SET provider_poll_required=0, provider_result_adoptable=0, updated_at=?
+        """UPDATE jobs SET provider_poll_required=0, provider_result_adoptable=0,
+                  provider_create_state='not_started', updated_at=?
             WHERE id=? AND lease_owner=?""",
         (now(), job_id, owner),
+    )
+    conn.execute(
+        "UPDATE shot_versions SET provider_task_id=NULL WHERE id=?", (version_id,),
     )
     conn.commit()
 
