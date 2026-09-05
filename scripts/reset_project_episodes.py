@@ -310,7 +310,7 @@ PROJECT_STATUS_RESET = {
     "portraits_status": "idle", "portraits_error": None, "scene_refs_status": "idle", "scene_refs_error": None,
     # 2026-09-05 实测漏网：定妆/场景图的幂等 operation_id 由「项目 id + 本批开始时间 + 名字」哈希而成，
     # 批次时间戳不清，新一轮算出同样的 id 就会从账本复用上一轮的图片 URL（其中 3 张已 500）。
-    "refs_batch_started_at": None, "refs_target": None, "refs_resume": None,
+    "refs_batch_started_at": None, "refs_target": None, "refs_resume": 1,  # refs_resume NOT NULL DEFAULT 1
     "scene_refs_batch_started_at": None, "scene_refs_target": None,
 }
 # 账本 provider_calls 只保留审计，不能再当缓存命中：把该项目的成功结果标成不可复用
