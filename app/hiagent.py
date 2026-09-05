@@ -3034,8 +3034,8 @@ async def _download_public_url(url: str, dest_path: str) -> None:
         resp = await client.get(url)
         # 最终落地 URL 再校验一次（防 DNS 重绑定后的内网跳转）。
         _assert_public_download_url(str(resp.url))
-        if resp.status_code != 200:
-            raise ProviderError(f"视频下载失败 HTTP {resp.status_code}（URL 可能已过期，有效期 7 天）")
+        if resp.status_code != 200:  # 5xx 是对象存储瞬时故障，可重试（重新轮询同一任务再下载）；4xx 才是 URL 失效
+            raise ProviderError(f"视频下载失败 HTTP {resp.status_code}（URL 可能已过期，有效期 7 天）", retryable=resp.status_code >= 500)
         atomic_write_bytes(dest_path, resp.content)
 
 

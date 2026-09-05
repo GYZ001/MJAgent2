@@ -248,6 +248,14 @@ async def _resume_paused_video(episode_id: str, run_id: str, cp) -> str | None:
         )
 
 
+def _cancel_orphan_video_run(run_id: str) -> None:
+    from app.orchestration.engine import WorkflowRecorder
+    WorkflowRecorder(run_id).cancel(
+        "服务重启时该运行尚未写下检查点，无法续跑；连播台已按当前分镜重新发起全片补齐",
+        conn=None,
+    )
+
+
 async def _kick_video_completion(episode_id: str, run_id: str) -> None:
     from app.domain.video_ops import _complete_episode_core
     from app.video_supervisor import load_latest_checkpoint
@@ -255,6 +263,13 @@ async def _kick_video_completion(episode_id: str, run_id: str) -> None:
     run = _active_video_run(get_conn(), episode_id)
     cp = load_latest_checkpoint(episode_id) if run else None
     matched_cp = cp if (cp and run and cp.run_id == run["id"]) else None
+    if run and run["status"] == "PAUSED_EXTERNAL" and matched_cp is None:
+        # 服务重启把运行标成了 PAUSED_EXTERNAL，但它还没来得及写下任何检查点
+        # （2026-09-05 我欲封天第 13/14 集）：开机恢复找不到检查点不会接管，续跑
+        # 也无从续起，fresh 又被它挡成 ALREADY_ACTIVE——连播台把这种孤儿运行收尾
+        # 掉，按当前分镜重新发起，而不是判本集失败让人去生成台点。
+        _cancel_orphan_video_run(run["id"])
+        run = None
 
     if matched_cp and run["status"] == "PAUSED_EXTERNAL":
         wait_message = await _resume_paused_video(episode_id, run_id, matched_cp)

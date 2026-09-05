@@ -245,3 +245,22 @@ def test_latest_video_jobs_marks_rejection_only_when_it_is_the_last_word():
     conn.commit()
     active, rejected = _latest_video_jobs(conn, ["s1"], None)
     assert rejected == set() and active == {"s1": "j2"}
+
+
+# ------------------------------------------------- 占槽唯一索引与跨轮在途 job
+def test_active_slot_integrity_error_is_retryable_in_preflight():
+    import sqlite3
+    from app.media_exec.enqueue import _preflight_failure_is_retryable
+    err = sqlite3.IntegrityError("UNIQUE constraint failed: shot_versions.shot_id")
+    assert _preflight_failure_is_retryable(err) is True, "旧版本仍占槽是时序问题，等一轮再入队"
+    assert _preflight_failure_is_retryable(sqlite3.IntegrityError("UNIQUE constraint failed: jobs.id")) is False
+
+
+def test_latest_video_jobs_sees_in_flight_job_from_another_supervisor_run():
+    conn = get_conn()
+    _seed_job(conn)
+    conn.execute("UPDATE jobs SET status='waiting_provider', owner_run_id='run-previous' WHERE id='j1'")
+    conn.commit()
+    active, rejected = _latest_video_jobs(conn, ["s1"], "run-current")
+    assert active == {"s1": "j1"}, "上一轮遗留的在途 job 一样占着镜头槽位，本轮不得再派"
+    assert rejected == set()

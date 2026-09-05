@@ -253,3 +253,63 @@ def test_screenplay_complete_requires_projection_not_just_status_column(monkeypa
     assert series_stages.screenplay_complete(conn, "e") is False
     monkeypatch.setattr("app.domain.common._screenplay_ready", lambda ep: True)
     assert series_stages.screenplay_complete(conn, "e") is True
+
+
+@pytest.mark.asyncio
+async def test_paused_run_without_checkpoint_is_cancelled_and_restarted_fresh(monkeypatch) -> None:
+    """2026-09-05 我欲封天第 13/14 集：服务重启把运行标成 PAUSED_EXTERNAL，但它还没写下
+    检查点——开机恢复不接管、续跑无从续起、fresh 又被它挡成 ALREADY_ACTIVE，连播台只能
+    判「未能补齐全部镜头」。现在连播台把这种孤儿运行取消掉，按当前分镜重新发起。"""
+    conn = _conn("run-orphan")
+    _insert_run(conn, "run-orphan", "PAUSED_EXTERNAL")
+    monkeypatch.setattr(series_stages, "get_conn", lambda: conn)
+    patch_video_supervisor_everywhere(monkeypatch, "load_latest_checkpoint", lambda _eid: None)
+    cancelled: list[tuple[str, str]] = []
+
+    class FakeRecorder:
+        def __init__(self, run_id: str) -> None:
+            self.run_id = run_id
+
+        def cancel(self, message: str = "", *, conn=None) -> None:
+            cancelled.append((self.run_id, message))
+
+    from app.orchestration import engine as engine_mod
+    monkeypatch.setattr(engine_mod, "WorkflowRecorder", FakeRecorder)
+    captured: dict = {}
+
+    async def fake_complete(episode_id, body, **_kwargs):
+        captured.update({"episode_id": episode_id, "body": body})
+        return {"run_id": "run-new"}
+
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", fake_complete)
+    await series_stages._kick_video_completion("e", "series-run-1")
+    assert cancelled and cancelled[0][0] == "run-orphan"
+    assert "检查点" in cancelled[0][1]
+    assert captured["body"]["mode"] == "fresh", "孤儿运行收尾后必须按当前分镜重新发起"
+
+
+@pytest.mark.asyncio
+async def test_paused_run_with_matching_checkpoint_is_not_treated_as_orphan(monkeypatch) -> None:
+    conn = _conn("run-old")
+    _insert_run(conn, "run-old", "PAUSED_EXTERNAL")
+    monkeypatch.setattr(series_stages, "get_conn", lambda: conn)
+    patch_video_supervisor_everywhere(
+        monkeypatch, "load_latest_checkpoint",
+        lambda _eid: SimpleNamespace(run_id="run-old", grant_id="grant-1", phase="DISPATCHING", outcome=None),
+    )
+    from app.orchestration import engine as engine_mod
+
+    class Boom:
+        def __init__(self, run_id: str) -> None:
+            raise AssertionError("有检查点的暂停运行不得被当成孤儿取消")
+
+    monkeypatch.setattr(engine_mod, "WorkflowRecorder", Boom)
+    captured: dict = {}
+
+    async def fake_complete(episode_id, body, **_kwargs):
+        captured.update(body)
+        return {}
+
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", fake_complete)
+    await series_stages._kick_video_completion("e", "series-run-1")
+    assert captured["mode"] == "resume"

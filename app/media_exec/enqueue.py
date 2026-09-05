@@ -866,6 +866,10 @@ def _preflight_failure_is_retryable(exc: Exception) -> bool:
         return True
     if isinstance(exc, sqlite3.OperationalError):
         return True
+    if isinstance(exc, sqlite3.IntegrityError) and "shot_versions" in str(exc):
+        # uq_versions_active_video_shot：同一镜头已有占槽版本（旧 job 仍在跑/排队）。
+        # 槽位会随旧版本终态释放，这是时序问题不是内容问题，等一轮再入队。
+        return True
     return bool(getattr(exc, "retryable", False))
 
 

@@ -133,9 +133,13 @@ def _latest_video_jobs(
     conn: Any, shot_ids: list[str], supervisor_run_id: str | None,
 ) -> tuple[dict[str, str], set[str]]:
     """每镜的在途 job，以及「最新一个 job 以供应商真实拒绝告终」的镜头。
-    拒绝不按 supervisor 轮次过滤：拒绝的是这段内容本身，换一轮不会变；
-    但只要镜头后来又派了新 job（任何状态），它就是最新的，拒绝不再成立。
+    两者都不按 supervisor 轮次过滤：占槽（uq_versions_active_video_shot）是镜头级
+    排他的，上一轮/服务重启前遗留的在途 job 一样占着槽，这一轮再派只会撞唯一索引
+    （2026-09-05 我欲封天第 2 集：「视频输入校验未通过：UNIQUE constraint failed:
+    shot_versions.shot_id」转人工）；拒绝的是这段内容本身，换一轮也不会变。
+    只要镜头后来又派了新 job（任何状态），它就是最新的，旧拒绝不再成立。
     """
+    _ = supervisor_run_id
     active_jobs: dict[str, str] = {}
     rejected: set[str] = set()
     if not shot_ids:
@@ -147,9 +151,8 @@ def _latest_video_jobs(
         f"""SELECT id, shot_id FROM jobs
             WHERE shot_id IN ({placeholders}) AND kind='video'
               AND status IN ({status_ph})
-              AND (? IS NULL OR owner_run_id=?)
             ORDER BY created_at DESC""",
-        (*shot_ids, *status_list, supervisor_run_id, supervisor_run_id),
+        (*shot_ids, *status_list),
     ).fetchall():
         if row["shot_id"] not in active_jobs:
             active_jobs[row["shot_id"]] = row["id"]
