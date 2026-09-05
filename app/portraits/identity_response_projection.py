@@ -367,20 +367,18 @@ def _project_current_identity_response(
         selected = known_decisions.get(decision_id)
         evidence_ref = str((selected or {}).get("evidence_ref") or "")
         record = evidence_by_ref.get(evidence_ref)
+        if decision_id == "K:NONE" and not known_decisions:
+            continue  # K 目录为空时 schema 只能放这个占位 enum；模型选了它等于「没有已登记身份」，不是越界
         if selected is None or record is None:
             # decision_id is enum-declared in _current_identity_schema()
             # (known_item["properties"]["decision_id"]["enum"] = decision_ids)
             # and that enum keyword survives _identity_strict_provider_schema's
             # whitelist, so it really is sent to the provider -- a decision_id
             # outside it is a wire-schema violation (selected is None).
-            # `record is None` can only fire when `selected` is not None, but
-            # both _current_identity_known_decision_catalog and
-            # _current_identity_prior_decision_catalog only ever mint a
-            # known_decisions entry by iterating evidence_by_ref.items()
-            # itself, so every entry's evidence_ref is structurally guaranteed
-            # to already be a key of evidence_by_ref -- that branch is dead
-            # defensive code, not a second reachable failure mode, so the
-            # whole check is schema-declared in practice.
+            # `record is None` can only fire when `selected` is not None, but both
+            # known/prior decision catalogs only mint entries by iterating evidence_by_ref
+            # itself, so that branch is dead defensive code, not a second failure mode;
+            # the whole check is schema-declared in practice.
             errors.append(
                 _CurrentIdentitySchemaViolation(
                     f"current K decision 越界：{decision_id}"

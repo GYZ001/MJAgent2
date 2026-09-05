@@ -87,7 +87,7 @@ def _current_identity_prompt(
 规则：
 1. root 只输出一次 k/n/f 三个全局数组，不得输出 decisions，也无需覆盖没有人物的 E。
    每个身份/称谓只输出一次，从它的 owned 证据中选最清晰的 E；同一 E 可支持多人。
-2. 已登记身份只可选 k：decision_id 精确复制 K 目录，该 token 已绑定 E；
+2. 已登记身份只可选 k：decision_id 精确复制 K 目录，该 token 已绑定 E；K 目录为空时 k 必须是空数组 []；
    kind 必须属于该 K 的 allowed_kinds；
    不得把 K 目录中的 source_label 写进 n/f。只允许 mentioned 的 K 没有可安全物化的最终人物卡
    authority；若人物实际出镜则必须停止而不能谎报 mentioned 或另造身份。
