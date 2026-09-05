@@ -47,6 +47,9 @@ class ShotCoverageEntry(BaseModel):
     fatal_repeat_count: int = 0
     fallback_reason: str | None = None
     video_stale: bool = False
+    # 供应商对本镜的真实内容拒绝（结构化拒绝或跨独立任务相同失败）：
+    # 本镜按「跳过」收口，成片不含本镜，不再占用修复循环。
+    provider_rejected: bool = False
 
 
 class CoverageLedger(BaseModel):
@@ -59,14 +62,25 @@ class CoverageLedger(BaseModel):
     cost_spent: float = 0.0
 
     def count_uncovered(self) -> int:
-        return sum(1 for entry in self.entries if not entry.adopted_version_id)
+        return sum(1 for entry in self.entries if self._uncovered(entry))
+
+    @staticmethod
+    def _uncovered(entry: "ShotCoverageEntry") -> bool:
+        return not entry.adopted_version_id and not entry.provider_rejected
+
+    def rejected_shot_nos(self) -> list[int]:
+        return [e.shot_no for e in self.entries if e.provider_rejected and not e.adopted_version_id]
 
     def covered_within_quota(self) -> bool:
         if self.shots_total <= 0:
             return False
         # “补齐”只填空位。adopted 是用户/Supervisor 已作出的最终选择；
         # QA、stale 与 fallback 配额只能形成风险提示，不能撤销采用并重烧。
-        return all(entry.adopted_version_id for entry in self.entries)
+        # 被供应商真实拒绝的镜头按「跳过」算已收口（用户拍板：真实的模型拒绝当成功），
+        # 但整集至少要有一镜可用，否则没有东西可合。
+        if not any(entry.adopted_version_id for entry in self.entries):
+            return False
+        return not any(self._uncovered(entry) for entry in self.entries)
 
     def has_active_jobs(self) -> bool:
         # 补齐 Supervisor 只观察未采用镜头；已有采用版的手工重抽不属于本次补齐。
@@ -75,7 +89,7 @@ class CoverageLedger(BaseModel):
     def actionable(self) -> list[ShotCoverageEntry]:
         out = []
         for e in self.entries:
-            if e.adopted_version_id:
+            if e.adopted_version_id or e.provider_rejected:
                 continue
             if e.active_job_id:
                 continue
@@ -92,7 +106,7 @@ class CoverageLedger(BaseModel):
         """attempt 配额用尽但有技术合格候选，必须 best-effort 收口。"""
         out = []
         for e in self.entries:
-            if e.adopted_version_id or e.active_job_id:
+            if e.adopted_version_id or e.active_job_id or e.provider_rejected:
                 continue
             if e.grade == "A" and not e.chain_stale and not e.video_stale:
                 continue

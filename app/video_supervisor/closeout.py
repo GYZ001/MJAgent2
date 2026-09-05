@@ -110,9 +110,10 @@ def _deadline_closeout(
         cp.missing_shots or any(e.grade != "A" for e in ledger.entries)
     )
     cp.finished_at = now()
+    # 缺镜里只剩供应商真实拒绝的镜头时，按跳过收口而不是「无可用候选」。
     cp.outcome = (
         "PARTIAL_NO_USABLE_CANDIDATE"
-        if cp.missing_shots
+        if ledger.count_uncovered()
         else "COMPLETED_DEADLINE_FALLBACK"
     )
     cp.phase = cp.outcome  # type: ignore[assignment]
@@ -174,8 +175,9 @@ def _finalize_covered(
     cp.outcome = "SUCCEEDED_COVERED"
     cp.terminal_reason = "COVERAGE_TARGET_MET"
     cp.finished_at = now()
-    cp.missing_shots = []
-    cp.quality_target_missed = any(
+    # 供应商真实拒绝的镜头按跳过收口：成片不含它们，但必须如实记在缺镜清单里。
+    cp.missing_shots = ledger.rejected_shot_nos()
+    cp.quality_target_missed = bool(cp.missing_shots) or any(
         entry.grade != "A" or entry.video_stale or entry.chain_stale
         for entry in ledger.entries
     )

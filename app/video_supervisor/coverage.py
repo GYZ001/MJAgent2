@@ -128,6 +128,47 @@ def _video_stale_for_shot(conn, shot_row, episode_storyboard_id: str | None) -> 
     return not any(parent in valid_storyboard_parents for parent in parents)
 
 
+
+def _latest_video_jobs(
+    conn: Any, shot_ids: list[str], supervisor_run_id: str | None,
+) -> tuple[dict[str, str], set[str]]:
+    """每镜的在途 job，以及「最新一个 job 以供应商真实拒绝告终」的镜头。
+    拒绝不按 supervisor 轮次过滤：拒绝的是这段内容本身，换一轮不会变；
+    但只要镜头后来又派了新 job（任何状态），它就是最新的，拒绝不再成立。
+    """
+    active_jobs: dict[str, str] = {}
+    rejected: set[str] = set()
+    if not shot_ids:
+        return active_jobs, rejected
+    placeholders = ",".join("?" * len(shot_ids))
+    status_list = tuple(ACTIVE_JOB_STATUSES)
+    status_ph = ",".join("?" * len(status_list))
+    for row in conn.execute(
+        f"""SELECT id, shot_id FROM jobs
+            WHERE shot_id IN ({placeholders}) AND kind='video'
+              AND status IN ({status_ph})
+              AND (? IS NULL OR owner_run_id=?)
+            ORDER BY created_at DESC""",
+        (*shot_ids, *status_list, supervisor_run_id, supervisor_run_id),
+    ).fetchall():
+        if row["shot_id"] not in active_jobs:
+            active_jobs[row["shot_id"]] = row["id"]
+    seen: set[str] = set()
+    for row in conn.execute(
+        f"""SELECT shot_id, status, provider_create_state FROM jobs
+            WHERE shot_id IN ({placeholders}) AND kind='video'
+            ORDER BY created_at DESC, rowid DESC""",
+        tuple(shot_ids),
+    ).fetchall():
+        sid = row["shot_id"]
+        if sid in seen:
+            continue
+        seen.add(sid)
+        if row["status"] == "failed" and row["provider_create_state"] == "model_rejected":
+            rejected.add(sid)
+    return active_jobs, rejected
+
+
 def rebuild_coverage_ledger(
     episode_id: str,
     *,
@@ -168,21 +209,7 @@ def rebuild_coverage_ledger(
 
     # 批量读 jobs / versions / costs
     shot_ids = [r["id"] for r in shot_rows]
-    active_jobs: dict[str, str] = {}
-    if shot_ids:
-        placeholders = ",".join("?" * len(shot_ids))
-        status_list = tuple(ACTIVE_JOB_STATUSES)
-        status_ph = ",".join("?" * len(status_list))
-        for row in conn.execute(
-            f"""SELECT id, shot_id FROM jobs
-                WHERE shot_id IN ({placeholders}) AND kind='video'
-                  AND status IN ({status_ph})
-                  AND (? IS NULL OR owner_run_id=?)
-                ORDER BY created_at DESC""",
-            (*shot_ids, *status_list, supervisor_run_id, supervisor_run_id),
-        ).fetchall():
-            if row["shot_id"] not in active_jobs:
-                active_jobs[row["shot_id"]] = row["id"]
+    active_jobs, rejected_shots = _latest_video_jobs(conn, shot_ids, supervisor_run_id)
 
     cost_map: dict[str, float] = {}
     attempts_map: dict[str, int] = {}
@@ -377,6 +404,7 @@ def rebuild_coverage_ledger(
             dependency_ready=dependency_ready,
             chain_stale=bool(saved.get("chain_stale")),
             active_job_id=active_jobs.get(sid),
+            provider_rejected=sid in rejected_shots,
             human_adopted=_human_adopted(conn, sid),
             continuity_degraded=bool(saved.get("continuity_degraded") or graded.get("continuity_degraded")),
             never_attempted=dispatch_map.get(sid, 0) == 0 and not saved.get("attempts_dispatched"),

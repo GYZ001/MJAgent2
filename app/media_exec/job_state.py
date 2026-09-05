@@ -132,6 +132,14 @@ def _video_model_rejection_guidance(
             )
         mode = str(meta.get("mode") or meta.get("planned_mode") or "")
         quote = f"供应商原文：{provider_text}。" if provider_text else ""
+        if exc.failure.kind == PROVIDER_CONTENT_REJECTED_KIND:
+            return (
+                "VIDEO_PROVIDER_CONTENT_REJECTED",
+                f"视频供应商对本镜连续 {CONTENT_REJECTION_MIN_TASKS} 次独立任务给出了完全相同的"
+                f"拒绝结果，判定为真实的模型拒绝。{quote}"
+                "系统已停止对本镜的自动重试，并把本镜按「跳过」处理：本集成片照常合成、"
+                "不含本镜。需要补上时请编辑本镜提示词后手工重抽。",
+            )
         return (
             "VIDEO_PROVIDER_MODEL_REJECTED",
             f"当前视频模型明确拒绝了本次输入，系统已保持 {mode or '原计划模式'} "
@@ -151,6 +159,75 @@ def _video_model_rejection_guidance(
             "请在页面核对供应商任务状态，或编辑本镜提示词后重抽、或切换视频供应商。",
         )
     return None
+
+
+PROVIDER_CONTENT_REJECTED_KIND = "provider_content_rejected"
+# 同一镜头、不同供应商任务、字节级相同的终态失败达到这个数才判定为真实拒绝。
+# 与 config.VIDEO_JOB_MAX_RETRIES=3 配合：第 1、2 次换新任务重试，第 3 次相同即停。
+CONTENT_REJECTION_MIN_TASKS = 3
+
+
+def _prior_shot_terminal_failure_records(conn, shot_id: str) -> list[tuple[str, str]]:
+    """按时间顺序返回同一镜头此前全部 TASK_FAILED 轮询的 (task_id, error 原文)。
+    ``poll_video_task`` 落库的 meta 带 ``shot_id``/``task_id``（见 app/seedance.py
+    call_meta），本次失败那条在这里被调用前已经提交，所以结果天然含"本次"。
+    """
+    rows = conn.execute(
+        """SELECT error, meta FROM provider_calls
+           WHERE kind='video_poll' AND status='TASK_FAILED' AND meta LIKE ?
+           ORDER BY ts""",
+        (f'%"shot_id": "{shot_id}"%',),
+    ).fetchall()
+    out: list[tuple[str, str]] = []
+    for row in rows:
+        try:
+            meta = json.loads(row["meta"] or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+        out.append((str(meta.get("task_id") or ""), str(row["error"] or "")))
+    return out
+
+
+def rejection_repeated_across_tasks(
+    records: list[tuple[str, str]], *, min_tasks: int = CONTENT_REJECTION_MIN_TASKS,
+) -> bool:
+    """纯结构判据：最近一次终态失败的原文，在同一镜头至少 ``min_tasks`` 个**不同**
+    供应商任务上逐字出现，判定为供应商对这段内容的确定性拒绝。
+    只看"独立任务 × 相同结果"这个结构，不看 message 里写了什么词——同一任务被
+    反复轮询出的相同文本只算一个任务（``task_id`` 去重），说明不了任何事。
+    """
+    if not records:
+        return False
+    latest_task, latest_msg = records[-1]
+    if not latest_msg or not latest_task:
+        return False
+    tasks = {task for task, msg in records if task and msg == latest_msg}
+    return len(tasks) >= max(2, min_tasks)
+
+
+def settle_terminal_poll_failure(
+    conn, job_id: str, owner: str, *, shot_id: str, failure: Any,
+) -> Any:
+    """供应商已报告任务终态失败：这个任务不会再变，绝不能再轮询它。
+    - 跨独立任务重复出现相同失败 → 真实的模型拒绝（外部终态，本镜跳过，成片不含本镜）；
+    - 否则保持技术故障、可换**新任务**重试：把 ``provider_poll_required`` 清零，
+      错误处理器才会走 ``_schedule_job_retry`` 而不是 ``_defer_provider_poll``
+      去复轮一个死任务（2026-09-05 我欲封天第 21 集第 3 镜：一个任务 2 小时被轮询
+      109 次、刷出 82 条报错，而换新任务的第 2 次一次就过）。
+    """
+    if failure.category is hiagent.ProviderFailureCategory.TECHNICAL:
+        history = _prior_shot_terminal_failure_records(conn, shot_id)
+        if rejection_repeated_across_tasks(history):
+            failure = hiagent.ProviderFailure.model_rejection(PROVIDER_CONTENT_REJECTED_KIND)
+        elif failure.retryable:
+            conn.execute(
+                """UPDATE jobs SET provider_poll_required=0, provider_result_adoptable=0,
+                          updated_at=?
+                    WHERE id=? AND lease_owner=?""",
+                (now(), job_id, owner),
+            )
+            conn.commit()
+    return failure
 
 
 def _prior_task_poll_failure_messages(conn, task_id: str) -> list[str]:

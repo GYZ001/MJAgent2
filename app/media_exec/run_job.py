@@ -132,6 +132,7 @@ from .job_recovery import (
 from .job_state import (
     _paid_video_attempt_count,
     _prior_task_poll_failure_messages,
+    settle_terminal_poll_failure,
     _provider_submitted_at,
     _provider_wait_policy,
     _recover_paid_video_task,
@@ -688,16 +689,11 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 failure = hiagent.ProviderFailure.from_provider_payload(
                     result.get("failure")
                 )
-                if failure.category is hiagent.ProviderFailureCategory.TECHNICAL:
-                    # 供应商没有给出任何结构化分类信号时，同一 task_id 连续轮询给出字节级
-                    # 相同的终态失败只能说明「这个任务已经终结」，说明不了「内容被拒」——
-                    # 2026-09-03 我欲封天第 10 集 14 个镜头是供应商自己的 S3 上传 500，也被
-                    # 升级成「模型明确拒绝、禁止重试」转人工。现在保持技术故障、标记可换新任务
-                    # 重试（模型调用不计费，重试由修复路由分级封顶）；真正的内容拒绝要靠
-                    # 供应商的结构化 failure 字段，不再从「重复」推断。
-                    history = _prior_task_poll_failure_messages(conn, task_id)
-                    if hiagent.has_repeated_terminal_poll_failure(history):
-                        failure = hiagent.ProviderFailure.technical(failure.kind, retryable=True)
+                # 任务已终态：不再复轮死任务；跨独立任务相同失败才算真实拒绝
+                # （判据与副作用见 job_state.settle_terminal_poll_failure）。
+                failure = settle_terminal_poll_failure(
+                    conn, job_id, owner, shot_id=job["shot_id"], failure=failure,
+                )
                 raise ProviderError(
                     f"{provider_label} 任务失败：{error_text}",
                     raw=error_text,
