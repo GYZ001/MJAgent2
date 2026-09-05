@@ -66,3 +66,29 @@ def test_holders_older_than_counts_only_transactions_seen_across_ticks() -> None
     assert "B" not in seen
     aged = holders_older_than(109.0, seen, [a, b], threshold=8)                 # A 已 9 秒；B 重新开始计时
     assert [(h["task"], round(age)) for h, age in aged] == [("A", 9)]
+
+
+def test_await_chain_frames_reach_the_suspended_await_point():
+    """Task.get_stack() 对挂起协程只给最外层一帧，定位不到握着事务的具体 await；
+    沿 cr_await 展开才能看到内层。"""
+    import asyncio
+
+    async def inner():
+        await asyncio.sleep(10)
+
+    async def outer():
+        await inner()
+
+    async def main():
+        task = asyncio.create_task(outer())
+        await asyncio.sleep(0.01)
+        frames = write_lock_holders._await_chain_frames(task)
+        task.cancel()
+        return frames
+
+    frames = asyncio.run(main())
+    assert any(f.endswith(" outer") for f in frames)
+    assert any(f.endswith(" inner") for f in frames)
+    assert frames.index(next(f for f in frames if f.endswith(" outer"))) < frames.index(
+        next(f for f in frames if f.endswith(" inner"))
+    )

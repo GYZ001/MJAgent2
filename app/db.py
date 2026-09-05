@@ -3066,17 +3066,11 @@ def log_provider_call(kind: str, model: str, status: str, http_status: int | Non
 
     trace = current_trace()
     conn = get_conn()
-    try:
-        _log_provider_call_inner(
-            conn, trace, kind, model, status, http_status, latency_ms,
-            error=error, meta=meta, request_json=request_json,
-            response_json=response_json, operation_id=operation_id,
-        )
-    except sqlite3.OperationalError:
-        # 观测写入为 best-effort：滚动升级或隔离单测库缺表时不应阻断业务。
-        if conn.in_transaction:
-            conn.rollback()  # 锁错误后不留开着的事务壳：后续写会在它里面悄悄开写锁
-        pass
+    _bookkeeping(conn, lambda: _log_provider_call_inner(
+        conn, trace, kind, model, status, http_status, latency_ms,
+        error=error, meta=meta, request_json=request_json,
+        response_json=response_json, operation_id=operation_id,
+    ), default=None)
 
 
 def _provider_call_project_id(
@@ -3200,6 +3194,23 @@ def _log_provider_call_inner(
     conn.commit()
 
 
+def _bookkeeping(conn: sqlite3.Connection, op: Callable[[], _T], *, default: _T) -> _T:
+    """provider_calls 账本写入的统一护栏：任何异常都先回滚，绝不把开着的事务壳留给业务
+    代码——后续写会在它里面悄悄开写锁直到下次 commit（2026-09-05 B 上定妆照/分镜素材任务
+    各握着 provider_calls 事务 3–5 分钟，事件循环等锁）。锁错误按 best-effort 吞掉（滚动
+    升级或隔离单测库缺表时不应阻断业务），其它异常回滚后照常抛出，不掩盖。"""
+    try:
+        return op()
+    except sqlite3.OperationalError:
+        if conn.in_transaction:
+            conn.rollback()
+        return default
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+
+
 def start_provider_call(kind: str, model: str, *, meta: dict | None = None,
                         request_json: Any | None = None) -> int:
     """请求发出前先写入账本，让长请求立即在监制房显示。"""
@@ -3207,14 +3218,9 @@ def start_provider_call(kind: str, model: str, *, meta: dict | None = None,
 
     trace = current_trace()
     conn = get_conn()
-    try:
-        return _start_provider_call_inner(
-            conn, trace, kind, model, meta=meta, request_json=request_json,
-        )
-    except sqlite3.OperationalError:
-        if conn.in_transaction:
-            conn.rollback()  # 锁错误后不留开着的事务壳：后续写会在它里面悄悄开写锁
-        return 0
+    return _bookkeeping(conn, lambda: _start_provider_call_inner(
+        conn, trace, kind, model, meta=meta, request_json=request_json,
+    ), default=0)
 
 
 def _start_provider_call_inner(
@@ -3395,15 +3401,10 @@ def finish_provider_call(call_id: int, status: str, http_status: int | None,
     if not call_id:
         return
     conn = get_conn()
-    try:
-        _finish_provider_call_inner(
-            conn, call_id, status, http_status, latency_ms,
-            error=error, response_json=response_json,
-        )
-    except sqlite3.OperationalError:
-        if conn.in_transaction:
-            conn.rollback()  # 锁错误后不留开着的事务壳：后续写会在它里面悄悄开写锁
-        pass
+    _bookkeeping(conn, lambda: _finish_provider_call_inner(
+        conn, call_id, status, http_status, latency_ms,
+        error=error, response_json=response_json,
+    ), default=None)
 
 
 def _finish_provider_call_inner(

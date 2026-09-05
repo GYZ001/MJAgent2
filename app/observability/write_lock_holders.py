@@ -19,8 +19,32 @@ _LAST_DUMP_AT = 0.0
 DUMP_INTERVAL_S = 30.0
 
 
+def _await_chain_frames(task: Any, limit: int = 12) -> list[str]:
+    """沿 ``cr_await`` 一路走到任务此刻真正挂起的那个 await。
+    ``Task.get_stack()`` 对挂起的协程只给最外层一帧（Python 文档如此约定），
+    实测只能看到 ``task_body.py:42 _prepare_storyboard_assets_background`` 这种
+    入口，定位不到握着事务的具体 await 点；逐层展开 ``cr_await``/``gi_yieldfrom``
+    才能拿到整条链，最后一帧就是持锁时正在等的地方。
+    """
+    frames: list[str] = []
+    try:
+        node = task.get_coro()
+        while node is not None and len(frames) < limit:
+            frame = getattr(node, "cr_frame", None) or getattr(node, "gi_frame", None) \
+                or getattr(node, "ag_frame", None)
+            if frame is None:
+                frames.append(repr(node)[:120])
+                break
+            frames.append(f"{frame.f_code.co_filename}:{frame.f_lineno} {frame.f_code.co_name}")
+            node = getattr(node, "cr_await", None) or getattr(node, "gi_yieldfrom", None) \
+                or getattr(node, "ag_await", None)
+    except Exception:  # noqa: BLE001 -- 诊断路径，任务状态随时会变
+        pass
+    return frames
+
+
 def open_write_holders() -> list[dict[str, Any]]:
-    """哪些 asyncio 任务的连接正处于未提交事务，附最近 8 帧协程栈。"""
+    """哪些 asyncio 任务的连接正处于未提交事务，附整条 await 链（最后一帧即挂起点）。"""
     holders: list[dict[str, Any]] = []
     with _task_connections_lock:
         items = list(_task_connections.items())
@@ -30,14 +54,9 @@ def open_write_holders() -> list[dict[str, Any]]:
                 continue
         except sqlite3.ProgrammingError:  # 连接已关闭
             continue
-        frames: list[str] = []
-        try:
-            for frame in task.get_stack(limit=8):
-                frames.append(f"{frame.f_code.co_filename}:{frame.f_lineno} {frame.f_code.co_name}")
-        except Exception:  # noqa: BLE001 -- 诊断路径，任务状态随时会变
-            pass
         holders.append({
-            "task": task.get_name(), "coro": repr(task.get_coro())[:160], "frames": frames,
+            "task": task.get_name(), "coro": repr(task.get_coro())[:160],
+            "frames": _await_chain_frames(task),
             "last_sql": _last_write_sql.get(id(conn)),
         })
     with _task_connections_lock:
