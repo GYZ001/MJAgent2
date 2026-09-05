@@ -1,6 +1,9 @@
 from app.compiler import sanitize_seedance_prompt
 from app.harness.hiagent_input_image_privacy import INPUT_IMAGE_PRIVACY_REJECTED_KIND
-from app.hiagent import ProviderError, ProviderFailure
+from app.hiagent import (
+    ProviderError, ProviderFailure, ProviderFailureCategory,
+    ProviderFailureDisposition,
+)
 from app.worker import _video_model_rejection_guidance
 
 
@@ -101,3 +104,43 @@ def test_input_image_privacy_rejection_is_externally_terminal_and_not_retryable(
     assert failure.retryable is False
     assert failure.disposition.value == "external_terminal"
     assert failure.category.value == "model_rejection"
+
+
+def test_missing_failure_payload_defaults_to_automatic_retry() -> None:
+    """WS1a 契约反转（2026-09-05）：真实供应商几乎从不返回我们内部的
+    ``failure`` 子对象词汇（``category``/``kind``/``retryable``），
+    ``data.get("failure")`` 拿到的是 ``None``——这是 app/seedance.py、
+    app/minimax_h3.py 轮询失败时的常态，不是边界情况。无结构化信号不等于
+    「内容被拒」，此前默认 retryable=False 会让第一次失败就转
+    manual_review/waiting_human（真实案例：我欲封天第 10 集 14 个镜头，
+    根因是供应商自己的 S3 上传 500）。默认必须是可重试，外部终态只留给
+    供应商明确给出 category=model_rejection 的情形。"""
+    for missing_payload in (None, "", [], "not-a-dict", 42):
+        failure = ProviderFailure.from_provider_payload(missing_payload)
+        assert failure.category is ProviderFailureCategory.TECHNICAL
+        assert failure.retryable is True
+        assert failure.disposition is ProviderFailureDisposition.AUTOMATIC_RETRY
+
+
+def test_structured_model_rejection_payload_stays_external_terminal() -> None:
+    """回归：无结构化载荷改默认可重试后，供应商确有结构化
+    category=model_rejection 时仍必须落终态，不能被上面那条放宽误伤。"""
+    failure = ProviderFailure.from_provider_payload(
+        {"category": "model_rejection", "kind": "provider_rejected"}
+    )
+    assert failure.category is ProviderFailureCategory.MODEL_REJECTION
+    assert failure.retryable is False
+    assert failure.disposition is ProviderFailureDisposition.EXTERNAL_TERMINAL
+
+
+def test_structured_technical_payload_without_retryable_flag_stays_manual_review() -> None:
+    """回归：供应商确实给了结构化 failure 字典、但没显式声明
+    retryable=True 时，不得被「无载荷默认重试」误伤——这条路径仍走
+    app/hiagent.py 的 has_repeated_terminal_poll_failure 重复判据升级，
+    不是本次改动范围。"""
+    failure = ProviderFailure.from_provider_payload(
+        {"category": "technical", "kind": "provider_execution_failed"}
+    )
+    assert failure.category is ProviderFailureCategory.TECHNICAL
+    assert failure.retryable is False
+    assert failure.disposition is ProviderFailureDisposition.MANUAL_REVIEW

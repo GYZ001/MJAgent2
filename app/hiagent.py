@@ -409,7 +409,7 @@ class ProviderFailure:
             else str(default_kind)
         )
         if not isinstance(payload, dict):
-            return cls.technical(default)
+            return cls.technical(default, retryable=True)  # 无载荷≠内容拒绝，默认可重试
         kind = str(payload.get("kind") or default)
         if payload.get("category") == ProviderFailureCategory.MODEL_REJECTION.value:
             return cls.model_rejection(kind)
