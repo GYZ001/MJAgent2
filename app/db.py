@@ -21,6 +21,8 @@ _task_connections: weakref.WeakKeyDictionary[
     asyncio.Task[Any], sqlite3.Connection
 ] = weakref.WeakKeyDictionary()
 _task_connections_lock = threading.Lock()
+#: 线程局部连接登记（线程 id → 连接），只为写锁争用诊断能点名「锁在哪条线程连接上」。
+_thread_connections: dict[int, sqlite3.Connection] = {}
 #: 任务连接最近一条写语句（诊断：写锁争用时点名「谁的哪条语句没提交」），键是 id(conn)。
 _last_write_sql: dict[int, str] = {}
 _WRITE_PREFIXES = ("INSERT", "UPDATE", "DELETE", "REPLACE", "BEGIN")
@@ -1261,6 +1263,9 @@ def get_conn() -> sqlite3.Connection:
     conn = getattr(_local, "conn", None)
     if conn is None:
         conn = _open_connection()
+        conn.set_trace_callback(_remember_write_statement(id(conn)))
+        with _task_connections_lock:
+            _thread_connections[threading.get_ident()] = conn  # 供写锁争用诊断点名线程局部连接
         _local.conn = conn
     return conn
 

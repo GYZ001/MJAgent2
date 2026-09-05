@@ -12,7 +12,7 @@ import sqlite3
 import time
 from typing import Any
 
-from app.db import _last_write_sql, _task_connections, _task_connections_lock
+from app.db import _last_write_sql, _task_connections, _task_connections_lock, _thread_connections
 
 _LOGGER = logging.getLogger(__name__)
 _LAST_DUMP_AT = 0.0
@@ -38,6 +38,18 @@ def open_write_holders() -> list[dict[str, Any]]:
             pass
         holders.append({
             "task": task.get_name(), "coro": repr(task.get_coro())[:160], "frames": frames,
+            "last_sql": _last_write_sql.get(id(conn)),
+        })
+    with _task_connections_lock:
+        thread_items = list(_thread_connections.items())
+    for thread_id, conn in thread_items:
+        try:
+            if not conn.in_transaction:
+                continue
+        except sqlite3.ProgrammingError:
+            continue
+        holders.append({
+            "task": f"thread-{thread_id}", "coro": "（线程局部连接，无协程栈）", "frames": [],
             "last_sql": _last_write_sql.get(id(conn)),
         })
     return holders
