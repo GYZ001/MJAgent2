@@ -107,11 +107,16 @@ def test_required_line_speaker_mismatch_is_a_precise_error():
     assert dialogue_speaker_errors(_draft([_Line("bible:孟浩", "早晚有一日，我定要手刃此人！")]), required, n2i, "") == []
 
 
-def test_untraceable_offscreen_line_is_rejected():
+def test_untraceable_offscreen_line_is_dropped_from_dialogue_and_prompt():
+    """2026-09-05 第 2 集：模型把原文转述成画外音，打回三次仍如此。追溯不到就删，不再拦整段。"""
     src = "[段1·S01]孟浩面色阴沉，他不时取出妖丹吞下。[段1·S02]“早晚有一日，我定要手刃此人！”孟浩想起对方的贪婪。"
-    draft = _draft([_Line("bible:孟浩", "昔日屈辱，今日必讨。", "offscreen_voice")])
+    prompt = "镜头1：孟浩盘膝而坐。画外音（孟浩）：“昔日屈辱，今日必讨。”；夕阳暖金色光影\n全片贯穿：环境音。"
+    draft = _draft([_Line("bible:孟浩", "昔日屈辱，今日必讨。", "offscreen_voice")], prompt)
     errors = dialogue_speaker_errors(draft, [], manifest_name_to_identity(PAYLOAD), src)
-    assert len(errors) == 1 and "找不到对应句子" in errors[0]
+    assert errors == []
+    assert draft.dialogue == []
+    assert "昔日屈辱" not in draft.prompt_text and "画外音（孟浩）" not in draft.prompt_text
+    assert "镜头1：孟浩盘膝而坐。" in draft.prompt_text and "夕阳暖金色光影" in draft.prompt_text
 
 
 def test_narration_derived_offscreen_line_is_reassigned_to_narrator_and_label_rewritten():

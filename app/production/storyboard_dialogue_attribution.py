@@ -169,6 +169,15 @@ def _rewrite_offscreen_label(prompt_text: str, old_name: str, line: str) -> str:
     return pattern.sub("画外音（" + NARRATOR + "）\\1" + line[:6], prompt_text, count=1)
 
 
+def _scrub_offscreen_line(prompt_text: str, line: str) -> str:
+    """把被删掉的画外音从提示词里一并抹掉：带标签的整条（画外音（X）：「…」）、只剩引号的、裸文本。"""
+    quoted = r"[「“『\"]" + re.escape(line) + r"[」”』\"]"
+    text = re.sub(r"(?:画外音（[^）]*）|旁白)\s*[：:]?\s*" + quoted + r"[。；;，,]?", "", prompt_text)
+    text = re.sub(quoted + r"[。；;，,]?", "", text)
+    text = text.replace(line, "")
+    return re.sub(r"(?:[；;]\s*){2,}", "；", text)
+
+
 def dialogue_speaker_errors(
     draft: Any, required_dialogue: list[dict[str, Any]], name_to_identity: dict[str, str], segment_source_text: str,
 ) -> list[str]:
@@ -191,21 +200,26 @@ def dialogue_speaker_errors(
                 )
     if not segment_source_text:
         return errors
+    dropped: list[int] = []
     for index, line in enumerate(draft.dialogue):
         if line.delivery != "offscreen_voice":
             continue
         traceable, in_quotes = _trace_to_source(line.line, segment_source_text)
         if not traceable:
-            errors.append(
-                f"dialogue[{index}] 画外音『{line.line[:24]}』在本段原文里找不到对应句子：只能用原文里的句子"
-                "作画外音，删除这一条或改成原文句"
-            )
+            # 模型把原文转述成画外音（「小胖子有家财万贯，我却一穷二白欠着债」）时，打回让它改成原文句
+            # 三次仍如此、整集失败（2026-09-05 第 2 集）。画外音是可选的旁白性交代，追溯不到就删掉
+            # 这一条（对白与提示词里都删），画面照常——空着诚实，转述是编造。
+            dropped.append(index)
+            draft.prompt_text = _scrub_offscreen_line(draft.prompt_text, line.line)
+            _LOGGER.info("[STORYBOARD_OFFSCREEN_DROPPED] dialogue[%s]『%s』追溯不到原文，已删除", index, line.line[:24])
             continue
         if not in_quotes and line.speaker_identity_id != NARRATOR:
             old = identity_to_name.get(line.speaker_identity_id, line.speaker_identity_id)
             draft.prompt_text = _rewrite_offscreen_label(draft.prompt_text, old, line.line)
             _LOGGER.info("[STORYBOARD_SPEAKER_REPAIR] 画外音『%s』来自叙述句，说话人「%s」改为旁白", line.line[:20], old)
             line.speaker_identity_id = NARRATOR
+    if dropped:
+        draft.dialogue = [line for i, line in enumerate(draft.dialogue) if i not in dropped]
     return errors
 
 
