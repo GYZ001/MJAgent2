@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -116,14 +117,42 @@ def prop_reference_for_episode(
         return None
     ensure_schema()
     try:
-        return conn.execute(
-            "SELECT * FROM prop_references "
-            "WHERE project_id=? AND prop_name=? AND ep_start<=? AND (ep_end IS NULL OR ep_end>=?) "
+        names = _prop_name_and_aliases(conn, project_id, name)
+        marks = ",".join("?" for _ in names)
+        row = conn.execute(
+            f"SELECT * FROM prop_references "
+            f"WHERE project_id=? AND prop_name IN ({marks}) AND ep_start<=? AND (ep_end IS NULL OR ep_end>=?) "
             "ORDER BY ep_start DESC LIMIT 1",
-            (project_id, name, episode_no, episode_no),
+            (project_id, *names, episode_no, episode_no),
+        ).fetchone()
+        if row is not None:
+            return row
+        # 道具的样子不取决于它在第几集被登记：并行跑集时第 14 集先登记了「凝灵丹」，
+        # 第 5 集按区间查不到就显示占位（2026-09-05 实测）。没有区间覆盖时回退到最早那张。
+        return conn.execute(
+            f"SELECT * FROM prop_references WHERE project_id=? AND prop_name IN ({marks}) "
+            "ORDER BY ep_start ASC LIMIT 1",
+            (project_id, *names),
         ).fetchone()
     except Exception:  # noqa: BLE001 与 scene_row_for_episode 同一容错口径
         return None
+
+
+def _prop_name_and_aliases(conn: sqlite3.Connection, project_id: str, name: str) -> list[str]:
+    """把段落里的道具称呼归到世界书里的正名：正名或别名逐字命中就用那条的正名＋全部别名查图。"""
+    label = str(name or "").strip()
+    names = [label] if label else []
+    try:
+        raw = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+        props = (json.loads(raw[0]) if raw and raw[0] else {}).get("props") or []
+    except Exception:  # noqa: BLE001 世界书不可读就只按字面查
+        return names
+    for prop in props:
+        canonical = str(prop.get("name") or "").strip()
+        aliases = [str(a).strip() for a in (prop.get("aliases") or []) if str(a).strip()]
+        if label and (label == canonical or label in aliases):
+            return list(dict.fromkeys([canonical, *aliases, label]))
+    return names
 
 
 def latest_prop_reference_status(conn: sqlite3.Connection, project_id: str, name: str):

@@ -66,7 +66,8 @@ def test_prop_reference_for_episode_interval() -> None:
         prompt="p", status="ready", qa={},
     )
     conn.commit()
-    assert store.prop_reference_for_episode(conn, "p1", "旧猫包", 2) is None
+    # 登记集之前的集回退到最早那张（2026-09-05：并行跑集时后面的集先登记，前面的集不该显示占位）。
+    assert store.prop_reference_for_episode(conn, "p1", "旧猫包", 2)["image_path"] == "a.png"
     row = store.prop_reference_for_episode(conn, "p1", "旧猫包", 3)
     assert row["image_path"] == "a.png"
     # ep_end=NULL 是开区间，覆盖到当前最新版——与 scene_row_for_episode 同一语义。
