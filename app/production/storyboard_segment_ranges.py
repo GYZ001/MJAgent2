@@ -370,21 +370,30 @@ def reassign_kept_lines_to_covering_segments(
         plan = plans_by_no.get(item.segment_no)
         if quote is None or plan is None or not (1 <= quote.source_segment_index <= len(source_segments)):
             continue
-        unit_no = quote_unit_index(quote, source_segments[quote.source_segment_index - 1].text)
-        if unit_no < 1:
-            continue
-        if any(
-            r.source_segment_index == quote.source_segment_index and r.from_unit <= unit_no <= r.to_unit
+        source_index = quote.source_segment_index
+        unit_no = quote_unit_index(quote, source_segments[source_index - 1].text)
+        if unit_no >= 1 and any(
+            r.source_segment_index == source_index and r.from_unit <= unit_no <= r.to_unit
             for r in plan.source_unit_ranges
         ):
             continue
-        covering = sorted(
-            p.segment_no for p in plans
-            for r in p.source_unit_ranges
-            if r.source_segment_index == quote.source_segment_index and r.from_unit <= unit_no <= r.to_unit
-        )
+        covering: list[int] = []
+        if unit_no >= 1:
+            covering = sorted(
+                p.segment_no for p in plans
+                for r in p.source_unit_ranges
+                if r.source_segment_index == source_index and r.from_unit <= unit_no <= r.to_unit
+            )
         if not covering:
-            continue  # 留给 kept_line_unit_binding_errors / 洞检查去报
+            # 2026-09-05 我欲封天第 23 集：台词的原文段号根本不在它所在段的 source_segment_indexes 里
+            # （容量归一化拆段后尤其常见），而没有任何段的单元范围覆盖它——退一步按原文段号归到
+            # 最早引用该原文段的段；连这都没有才留给 dialogue_ledger_errors 报「新增段落」。
+            covering = sorted(
+                p.segment_no for p in plans
+                if source_index in list(getattr(p, "source_segment_indexes", None) or [])
+            )
+            if not covering or item.segment_no in covering:
+                continue
         moves.append({"quote_id": item.quote_id, "from_segment_no": item.segment_no,
                       "to_segment_no": covering[0], "unit": unit_no})
         item.segment_no = covering[0]

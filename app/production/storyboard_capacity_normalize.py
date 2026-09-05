@@ -36,7 +36,8 @@ from typing import Any
 
 from app import config
 from app.production.storyboard_dialogue_ledger import DialogueQuote, dialogue_ledger_errors
-from app.production.storyboard_segment_ranges import _AiSourceUnitRange, quote_unit_index
+from app.production.storyboard_segment_ranges import (_AiSourceUnitRange, quote_unit_index,
+                                                      reassign_kept_lines_to_covering_segments)
 from app.source_excerpt import SourceSegment
 
 
@@ -242,6 +243,9 @@ def normalize_and_assert_capacity(
     """
     telemetry = normalize_beat_sheet_capacity(draft, quotes, source_segments=source_segments)
     _ = paratext_indexes
+    # 拆段后台词的段号可能落到不再引用它原文段的段上（2026-09-05 第 23 集 Q31 → 第 28 段只覆盖 [4]）：
+    # 复核前先按单元位置/原文段号确定性归位，归位不了的才是真正的算法 bug。
+    reassign_kept_lines_to_covering_segments(draft.kept_lines, quotes, draft.segments, source_segments)
     segment_source_indexes = {s.segment_no: s.source_segment_indexes for s in draft.segments}
     errors = dialogue_ledger_errors(
         quotes=quotes,

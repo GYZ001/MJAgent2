@@ -106,6 +106,10 @@ _SCENE_4_TEXT = (
 )
 
 
+def _seg(text: str, no: int = 1) -> SourceSegment:
+    return SourceSegment(segment_id=f"seg{no}", text=text, start_offset=0, end_offset=len(text))
+
+
 def _scene_4_segments() -> list[SourceSegment]:
     return [
         SourceSegment(segment_id="s1", text="第一章标题", start_offset=0, end_offset=0),
@@ -368,3 +372,22 @@ def test_segment_declaring_two_ranges_on_one_source_segment_does_not_crash_the_s
     text5 = _SCENE_4_TEXT[start:end].strip()
     quotes5 = [DialogueQuote(quote_id="Q05", source_segment_index=4, text=text5, content_chars=len(text5))]
     assert kept_line_unit_binding_errors([_kept("Q05", 1)], quotes5, plans, _scene_4_segments()) == []
+
+
+def test_kept_line_in_segment_not_referencing_its_source_is_moved_by_source_index():
+    """2026-09-05 第 23 集：Q09 原文段号 2，被分到只覆盖 [1] 的第 12 段；覆盖原文段 2 的是第 13、14 段。
+    没有任何段的单元范围覆盖到这句时，按原文段号归到最早引用它的段，不再打回模型。"""
+    from types import SimpleNamespace
+    from app.production.storyboard_beat_sheet import _AiSegmentPlan
+    from app.production.storyboard_segment_ranges import reassign_kept_lines_to_covering_segments
+
+    plans = [
+        _AiSegmentPlan(segment_no=12, synopsis="a", source_segment_indexes=[1], source_unit_ranges=[]),
+        _AiSegmentPlan(segment_no=13, synopsis="b", source_segment_indexes=[4], source_unit_ranges=[]),
+        _AiSegmentPlan(segment_no=14, synopsis="c", source_segment_indexes=[4], source_unit_ranges=[]),
+    ]
+    quotes = [DialogueQuote(quote_id="Q09", source_segment_index=4, text="猫忽然跳上了桌子", content_chars=8)]
+    kept = [SimpleNamespace(quote_id="Q09", segment_no=12)]
+    moves = reassign_kept_lines_to_covering_segments(kept, quotes, plans, _scene_4_segments())
+    assert kept[0].segment_no == 13
+    assert moves and moves[0]["to_segment_no"] == 13
