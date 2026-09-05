@@ -4048,9 +4048,7 @@ def test_attempt14_call_63221_old_functional_bible_name_fails_once(
     except model_gateway.StructuredSemanticError as exc:
         assert "functional 不得冒用已登记身份称谓：耳根" in str(exc)
     else:
-        assert not any(
-            item.get("identity_kind") == "functional" and item.get("source_label") == "耳根" for item in items
-        ), items
+        assert not any(i.get("identity_kind") == "functional" and i.get("source_label") == "耳根" for i in items), items
 
     assert calls == 1
 
@@ -5843,9 +5841,7 @@ def test_current_functional_cannot_claim_reserved_authority_label_once(
     except model_gateway.StructuredSemanticError as exc:
         assert "functional 不得冒用已登记身份称谓" in str(exc)
     else:
-        assert not any(
-            item.get("identity_kind") == "functional" and item.get("source_label") == source_label for item in items
-        ), items
+        assert not any(i.get("identity_kind") == "functional" and i.get("source_label") == source_label for i in items), items
 
     assert calls == 1
 
