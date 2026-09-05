@@ -83,13 +83,13 @@ async def run_task(
     # 不清的话 task_summary 取「列 or 进度树」会让界面在"进行中"时还挂着上一轮的失败横幅。
     progress["error"] = None
     recorder.start()
-    state.persist_progress(task_id, progress)
+    await state.persist_progress_async(task_id, progress)
     try:
         await _run_task_body(project_id, task_id, episode_from, episode_to, progress, recorder)
     except StageFailure:
         raise
     except Exception as exc:  # noqa: BLE001 -- 未预期的编排异常，如实落盘后转成 StageFailure
-        state.persist_progress(task_id, progress)
+        await state.persist_progress_async(task_id, progress)
         recorder.fail(exc, conn=None)
         raise StageFailure(str(exc)) from exc
 
@@ -106,14 +106,14 @@ async def _run_task_body(
         progress["current_stage"] = None
         message = _episodes_failed_message(failed, len(progress["episodes"]))
         progress["error"] = message
-        state.persist_progress(task_id, progress)
+        await state.persist_progress_async(task_id, progress)
         recorder.fail_result(message, failure_code="SERIES_TASK_STAGE_FAILED", conn=None)
         raise StageFailure(message)
     progress["current_stage"] = "merge"
-    state.persist_progress(task_id, progress)
+    await state.persist_progress_async(task_id, progress)
     await _run_merge(task_id, project_id, episode_from, episode_to, progress, recorder)
     progress["current_stage"] = None
-    state.persist_progress(task_id, progress)
+    await state.persist_progress_async(task_id, progress)
     recorder.succeed("连播任务已完成，成片已生成", conn=None)
 
 
@@ -150,7 +150,7 @@ async def _run_episode_holding_slot(
         # 记下、跳过、继续：一集被卡住（供应商拒了某一镜、门禁没过）不该把别的集全部拖住。
         failed.append(entry)
         progress["error"] = f"{entry['error']}（已跳过，继续其余集；结束后汇总）"[:1000]
-        state.persist_progress(task_id, progress)
+        await state.persist_progress_async(task_id, progress)
     finally:
         await episode_slots.release(task_id)
 
@@ -169,13 +169,13 @@ async def _wait_until_episode_free(episode_id: str, task_id: str, entry: dict, p
     if label is None:
         return
     entry["waiting"] = f"第{entry['episode_no']}集正被{label}的任务占用，等它跑完后自动继续"
-    state.persist_progress(task_id, progress)
+    await state.persist_progress_async(task_id, progress)
     try:
         while stages.busy_label(episode_id) is not None:
             await asyncio.sleep(5)
     finally:
         entry["waiting"] = None
-        state.persist_progress(task_id, progress)
+        await state.persist_progress_async(task_id, progress)
 
 
 async def _run_single_stage(
@@ -184,24 +184,24 @@ async def _run_single_stage(
     await _wait_until_episode_free(episode_id, task_id, entry, progress)
     if stages.stage_is_complete(stage, get_conn(), episode_id):
         entry["stages"][stage] = "skipped"
-        state.persist_progress(task_id, progress)
+        await state.persist_progress_async(task_id, progress)
         return
     entry["stages"][stage] = "running"
-    state.persist_progress(task_id, progress)
+    await state.persist_progress_async(task_id, progress)
     try:
         await stages.run_stage(stage, episode_id, recorder.run_id)
         ok = stages.stage_is_complete(stage, get_conn(), episode_id)
     except Exception as exc:
-        _fail_stage(entry, progress, task_id, recorder, stage, _exception_message(exc))
+        await _fail_stage(entry, progress, task_id, recorder, stage, _exception_message(exc))
         raise StageFailure from exc
     if not ok:
-        _fail_stage(entry, progress, task_id, recorder, stage, "步骤已运行但未达到完成判据")
+        await _fail_stage(entry, progress, task_id, recorder, stage, "步骤已运行但未达到完成判据")
         raise StageFailure
     entry["stages"][stage] = "done"
-    state.persist_progress(task_id, progress)
+    await state.persist_progress_async(task_id, progress)
 
 
-def _fail_stage(entry: dict, progress: dict, task_id: str, recorder, stage: str, detail: str) -> None:
+async def _fail_stage(entry: dict, progress: dict, task_id: str, recorder, stage: str, detail: str) -> None:
     """只把失败记进该集条目；运行级终态由 _run_task_body 在全部集跑完后统一落一次
     （WorkflowRecorder 的 RUNNING→FAILED 只能转一次，不能每集失败都调）。"""
     _ = recorder
@@ -209,7 +209,7 @@ def _fail_stage(entry: dict, progress: dict, task_id: str, recorder, stage: str,
     message = f"第{entry['episode_no']}集 {stages.STAGE_LABELS[stage]} 失败：{detail}"[:1000]
     entry["error"] = message
     progress["error"] = message
-    state.persist_progress(task_id, progress)
+    await state.persist_progress_async(task_id, progress)
 
 
 def _episodes_failed_message(failed: list[dict], total: int) -> str:
@@ -237,6 +237,6 @@ async def _run_merge(
     except Exception as exc:
         message = f"连播成片合并失败：{_exception_message(exc)}"[:1000]
         progress["error"] = message
-        state.persist_progress(task_id, progress)
+        await state.persist_progress_async(task_id, progress)
         recorder.fail_result(message, failure_code="SERIES_TASK_MERGE_FAILED", conn=None)
         raise StageFailure from exc

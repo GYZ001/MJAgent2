@@ -12,7 +12,7 @@ import sqlite3
 import time
 from typing import Any
 
-from app.db import _task_connections, _task_connections_lock
+from app.db import _last_write_sql, _task_connections, _task_connections_lock
 
 _LOGGER = logging.getLogger(__name__)
 _LAST_DUMP_AT = 0.0
@@ -36,7 +36,10 @@ def open_write_holders() -> list[dict[str, Any]]:
                 frames.append(f"{frame.f_code.co_filename}:{frame.f_lineno} {frame.f_code.co_name}")
         except Exception:  # noqa: BLE001 -- 诊断路径，任务状态随时会变
             pass
-        holders.append({"task": task.get_name(), "coro": repr(task.get_coro())[:160], "frames": frames})
+        holders.append({
+            "task": task.get_name(), "coro": repr(task.get_coro())[:160], "frames": frames,
+            "last_sql": _last_write_sql.get(id(conn)),
+        })
     return holders
 
 
@@ -53,6 +56,7 @@ def log_open_write_holders(reason: str) -> None:
         return
     for holder in holders:
         _LOGGER.warning(
-            "写锁争用（%s）：任务 %s 握着未提交事务 %s\n    %s",
-            reason, holder["task"], holder["coro"], "\n    ".join(holder["frames"]) or "（无栈）",
+            "写锁争用（%s）：任务 %s 握着未提交事务 %s\n    最后一条写语句：%s\n    %s",
+            reason, holder["task"], holder["coro"], holder.get("last_sql") or "（未记录）",
+            "\n    ".join(holder["frames"]) or "（无栈）",
         )

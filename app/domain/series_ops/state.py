@@ -6,9 +6,11 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import sqlite3
 
-from app.db import get_conn, now
+from app.db import _is_transient_sqlite_lock, get_conn, now
 
 STAGE_SEQUENCE: tuple[str, ...] = ("screenplay", "storyboard", "confirm", "video", "final")
 
@@ -58,6 +60,40 @@ def persist_progress(task_id: str, progress: dict) -> None:
         (json.dumps(progress, ensure_ascii=False), now(), task_id),
     )
     conn.commit()
+
+
+#: 写锁被别人握着时的等待节奏（累计约 12 秒），等的是 asyncio.sleep，不冻结事件循环。
+PERSIST_RETRY_DELAYS_S: tuple[float, ...] = (0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 3.0, 5.0)
+
+
+async def persist_progress_async(task_id: str, progress: dict) -> bool:
+    """编排器用的进度落盘：跑在事件循环线程上，绝不能按 30 秒 busy_timeout 忙等写锁
+    （2026-09-04 B 实测多集并行时循环整体冻结）。锁住就 asyncio.sleep 后重试；重试用尽
+    则放弃这一拍并记错误——进度树是整棵覆盖写，下一次落盘会把这一拍一起写上。"""
+    refresh_current(progress)
+    payload = (json.dumps(progress, ensure_ascii=False), now(), task_id)
+    last_exc: sqlite3.OperationalError | None = None
+    for delay in (*PERSIST_RETRY_DELAYS_S, None):
+        conn = get_conn()
+        conn.execute("PRAGMA busy_timeout=0")
+        try:
+            conn.execute("UPDATE series_tasks SET progress_json=?, updated_at=? WHERE id=?", payload)
+            conn.commit()
+            return True
+        except sqlite3.OperationalError as exc:
+            conn.rollback()
+            if not _is_transient_sqlite_lock(exc):
+                raise
+            last_exc = exc
+        finally:
+            conn.execute("PRAGMA busy_timeout=30000")
+        if delay is None:
+            break
+        await asyncio.sleep(delay)
+    from app.errors import log_error  # 延迟导入：app.errors 反向依赖 db/quota 链，模块级会成环
+    log_error(last_exc or RuntimeError("persist_progress 放弃"), action="series_task.persist_progress",
+              context={"task_id": task_id})
+    return False
 
 
 def load_progress(row: dict) -> dict:

@@ -21,6 +21,17 @@ _task_connections: weakref.WeakKeyDictionary[
     asyncio.Task[Any], sqlite3.Connection
 ] = weakref.WeakKeyDictionary()
 _task_connections_lock = threading.Lock()
+#: 任务连接最近一条写语句（诊断：写锁争用时点名「谁的哪条语句没提交」），键是 id(conn)。
+_last_write_sql: dict[int, str] = {}
+_WRITE_PREFIXES = ("INSERT", "UPDATE", "DELETE", "REPLACE", "BEGIN")
+
+
+def _remember_write_statement(conn_id: int):
+    def _trace(sql: str) -> None:
+        head = sql.lstrip()[:7].upper()
+        if head.startswith(_WRITE_PREFIXES):
+            _last_write_sql[conn_id] = sql.strip()[:200]
+    return _trace
 _T = TypeVar("_T")
 
 ASYNC_WRITE_RETRY_DELAYS_S = (0.05, 0.1, 0.2, 0.4)
@@ -1224,6 +1235,7 @@ def _release_task_connection(task: asyncio.Task[Any]) -> None:
         conn = _task_connections.pop(task, None)
     if conn is None:
         return
+    _last_write_sql.pop(id(conn), None)
     try:
         if conn.in_transaction:
             conn.rollback()
@@ -1241,6 +1253,7 @@ def get_conn() -> sqlite3.Connection:
             conn = _task_connections.get(task)
             if conn is None:
                 conn = _open_connection()
+                conn.set_trace_callback(_remember_write_statement(id(conn)))
                 _task_connections[task] = conn
                 task.add_done_callback(_release_task_connection)
         return conn
