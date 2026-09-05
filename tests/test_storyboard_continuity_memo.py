@@ -73,10 +73,12 @@ def test_first_segment_inherited_is_rejected():
     assert any("inherited" in e and "第一段" in e for e in errors)
 
 
-def test_non_first_segment_inferred_is_rejected():
+def test_non_first_segment_inferred_is_inherited():
+    """2026-09-05 起：不再打回模型，确定性沿用上一段（逐字）。"""
     previous = _memo(time_of_day="黄昏")
-    errors = continuity_memo_errors(_memo(time_of_day="正午"), previous, "[段2] 少年下山。")
-    assert any("inferred" in e and "已有上一段时段" in e for e in errors)
+    memo = _memo(time_of_day="正午")
+    assert continuity_memo_errors(memo, previous, "[段2] 少年下山。") == []
+    assert (memo.time_of_day, memo.time_of_day_basis) == ("黄昏", "inherited")
 
 
 def test_inherited_verbatim_copy_is_accepted():
@@ -85,19 +87,19 @@ def test_inherited_verbatim_copy_is_accepted():
     assert continuity_memo_errors(memo, previous, "[段2] 少年继续赶路。") == []
 
 
-def test_inherited_with_different_wording_is_rejected():
-    """沿用必须逐字相同，「夜晚」与「深夜」视为不同——不做同义归并。"""
+def test_inherited_with_different_wording_is_copied_verbatim():
+    """沿用必须逐字相同，「夜晚」与「深夜」视为不同——不做同义归并，直接改回上一段原词。"""
     previous = _memo(time_of_day="夜晚")
     memo = _memo(time_of_day="深夜", time_of_day_basis="inherited")
-    errors = continuity_memo_errors(memo, previous, "[段2] 少年继续赶路。")
-    assert any("逐字复制" in e and "夜晚" in e for e in errors)
+    assert continuity_memo_errors(memo, previous, "[段2] 少年继续赶路。") == []
+    assert memo.time_of_day == "夜晚"
 
 
-def test_source_text_change_without_quote_is_rejected():
+def test_source_text_change_without_quote_inherits_previous():
     previous = _memo(time_of_day="黄昏")
     memo = _memo(time_of_day="深夜", time_of_day_basis="source_text", time_of_day_source_quote="")
-    errors = continuity_memo_errors(memo, previous, "[段2] 少年继续赶路，夜幕渐渐降临。")
-    assert any("time_of_day_source_quote 为空" in e for e in errors)
+    assert continuity_memo_errors(memo, previous, "[段2] 少年继续赶路，夜幕渐渐降临。") == []
+    assert (memo.time_of_day, memo.time_of_day_basis, memo.time_of_day_source_quote) == ("黄昏", "inherited", "")
 
 
 def test_source_text_change_with_verbatim_quote_is_accepted():
@@ -109,19 +111,20 @@ def test_source_text_change_with_verbatim_quote_is_accepted():
     assert continuity_memo_errors(memo, _memo(time_of_day="黄昏"), source_text) == []
 
 
-def test_source_text_change_with_fabricated_quote_is_rejected():
+def test_source_text_change_with_fabricated_quote_inherits_previous():
+    """第 13 集真实形态：引文『光线从暖调白日缓慢渐变到正午暖金』是编造的——没有逐字证据就沿用。"""
     memo = _memo(
         time_of_day="深夜", time_of_day_basis="source_text",
         time_of_day_source_quote="乌云蔽月，狂风大作",
     )
-    errors = continuity_memo_errors(memo, _memo(time_of_day="黄昏"), "[段2] 少年继续赶路。")
-    assert any("找不到逐字匹配" in e for e in errors)
+    assert continuity_memo_errors(memo, _memo(time_of_day="黄昏"), "[段2] 少年继续赶路。") == []
+    assert (memo.time_of_day, memo.time_of_day_basis, memo.time_of_day_source_quote) == ("黄昏", "inherited", "")
 
 
-def test_source_text_basis_on_first_segment_with_empty_quote_is_rejected():
+def test_source_text_basis_on_first_segment_with_empty_quote_falls_back_to_inferred():
     memo = _memo(time_of_day="清晨", time_of_day_basis="source_text", time_of_day_source_quote="")
-    errors = continuity_memo_errors(memo, None, "[段1] 少年站在山顶。")
-    assert any("time_of_day_source_quote 为空" in e for e in errors)
+    assert continuity_memo_errors(memo, None, "[段1] 少年站在山顶。") == []
+    assert (memo.time_of_day, memo.time_of_day_basis) == ("清晨", "inferred")
 
 
 # ---------------------------------------------------------------------------
@@ -325,11 +328,10 @@ async def test_generate_passes_previous_continuity_memo_into_next_segment_payloa
 
 
 @pytest.mark.asyncio
-async def test_generate_retries_when_segment_changes_time_of_day_without_quote(monkeypatch):
-    """第 2 段第一次擅自把时段从「白天」改成「黑夜」且不给引用：validate 必须
-    拦下并把错误喂回去；模拟 chat_structured 自己的语义重试后改正才通过——
-    fake 内部自己调用 kwargs["validate"]，照抄 test_storyboard_pack.py 里
-    端到端用例学到的 fake 写法，只是这里额外验证重试判据本身。"""
+async def test_generate_repairs_segment_that_changes_time_of_day_without_quote(monkeypatch):
+    """第 2 段擅自把时段从「白天」改成「黑夜」且不给引用：2026-09-05 起 validate 不再打回，
+    而是确定性沿用上一段（逐字、basis=inherited）——第 13 集三次重试都在编造引文，整集失败。
+    fake 内部自己调用 kwargs["validate"]，照抄 test_storyboard_pack.py 的写法。"""
     import app.production.storyboard_pack as storyboard_pack_module
 
     seen_errors: list[list[str]] = []
@@ -370,9 +372,10 @@ async def test_generate_retries_when_segment_changes_time_of_day_without_quote(m
         required_dialogue_by_segment_no={},
     )
 
-    assert attempts[2] == 2, "第 2 段第一次因擅自改时段被拦，重试后才通过"
-    assert any("time_of_day" in e for e in seen_errors[1]), "错误文本必须进入重试"
+    assert attempts[2] == 1, "第 2 段擅自改时段被就地沿用，不再消耗语义重试"
+    assert seen_errors[1] == []
     assert result[2].continuity_memo.time_of_day == "白天"
+    assert result[2].continuity_memo.time_of_day_basis == "inherited"
 
 
 # ---------------------------------------------------------------------------

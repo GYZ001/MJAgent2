@@ -290,36 +290,30 @@ def continuity_memo_errors(
                 "沿用：第一段只能是 inferred（自行判断）或 source_text（原文写明）。"
             )
         elif memo.time_of_day != previous_memo.time_of_day:
-            errors.append(
-                f"continuity_memo.time_of_day_basis=inherited 要求逐字复制上一段的 "
-                f"time_of_day『{previous_memo.time_of_day}』，但本段写的是『{memo.time_of_day}』"
-                "——沿用必须逐字相同，不允许改写成近义表述；如果本段确有时间推移，请改成 "
-                "basis=source_text 并引用本段原文里写明时间变化的那句。"
-            )
+            _inherit_time_of_day(memo, previous_memo, f"basis=inherited 却写成近义表述『{memo.time_of_day}』")
     elif memo.time_of_day_basis == "inferred" and previous_memo is not None:
-        errors.append(
-            f"continuity_memo.time_of_day_basis=inferred，但已有上一段时段"
-            f"『{previous_memo.time_of_day}』：本段只能沿用（basis=inherited，逐字复制）或"
-            "引用本段原文中写明时间变化的句子（basis=source_text），不能凭空重新判断。"
-        )
+        _inherit_time_of_day(memo, previous_memo, "已有上一段时段却 basis=inferred 重新判断")
     elif memo.time_of_day_basis == "source_text":
         quote = memo.time_of_day_source_quote.strip()
-        if not quote:
-            errors.append(
-                "continuity_memo.time_of_day_basis=source_text，但 time_of_day_source_quote "
-                "为空：必须逐字引用本段原文里写明时间的那句。"
-            )
-        elif not _quote_found_in_source(quote, segment_source_text):
-            fallback = (
-                f"沿用上一段『{previous_memo.time_of_day}』（basis=inherited）"
-                if previous_memo is not None else "自行判断一个时段（basis=inferred）"
-            )
-            errors.append(
-                f"continuity_memo.time_of_day_source_quote『{quote}』在本段原文里找不到逐字"
-                f"匹配：只能是本段原文中真实存在的一句，不得改写或编造；如果本段其实没有时间"
-                f"变化，请改成{fallback}。"
-            )
+        if not quote or not _quote_found_in_source(quote, segment_source_text):
+            # 2026-09-05 第 13 集：引文『光线从暖调白日缓慢渐变到正午暖金』是编造的，打回三次仍如此，
+            # 整集失败。没有逐字原文证据就等于「本段没写明时间变化」——按错误提示自己给出的出路
+            # 确定性处理：有上一段就沿用（inherited），第一段就退回自行判断（inferred）。
+            if previous_memo is not None:
+                _inherit_time_of_day(memo, previous_memo, f"time_of_day_source_quote『{quote}』在本段原文里找不到逐字匹配")
+            else:
+                log.info("[STORYBOARD_CONTINUITY_MEMO_REPAIR] 第一段引文『%s』找不到逐字匹配，退回 inferred", quote)
+                memo.time_of_day_basis = "inferred"
+                memo.time_of_day_source_quote = ""
     return errors
+
+
+def _inherit_time_of_day(memo: _AiContinuityMemo, previous_memo: _AiContinuityMemo, why: str) -> None:
+    """时段沿用上一段（逐字）、basis=inherited、清空引文，并记一条修补日志。"""
+    log.info("[STORYBOARD_CONTINUITY_MEMO_REPAIR] %s → 沿用上一段『%s』", why, previous_memo.time_of_day)
+    memo.time_of_day = previous_memo.time_of_day
+    memo.time_of_day_basis = "inherited"
+    memo.time_of_day_source_quote = ""
 
 
 def continuity_memo_character_advisories(
