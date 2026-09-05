@@ -176,3 +176,19 @@ def restore_undroppable_lines(draft: Any, quotes: list[Any], source_segments: li
         notes.append(f"{quote.quote_id}「{quote.text[:16]}」不可弃置，从 dropped_lines 放回第 {target} 段")
     draft.dropped_lines = remaining
     return notes
+
+
+def complete_missing_quote_decisions(draft: Any, quotes: list[Any]) -> list[str]:
+    """dialogue_targets 里既不在 kept_lines 也不在 dropped_lines 的台词，先一律补进 dropped_lines
+    （reason 注明由后端补齐），紧接着的 restore_undroppable_lines 会把其中不可弃置的整句放回覆盖它
+    的段；真正的语气词/短句就留在弃置区。模型一次长调用漏掉一两句是常态（2026-09-05 第 3 集 Q41），
+    按「必须显式决定去留」整份打回、三次重试后判整集失败，代价远大于确定性补齐。"""
+    from app.production.storyboard_dialogue_ledger import _AiDroppedLine
+    referenced = {k.quote_id for k in draft.kept_lines} | {d.quote_id for d in draft.dropped_lines}
+    notes: list[str] = []
+    for quote in quotes:
+        if quote.quote_id in referenced:
+            continue
+        draft.dropped_lines.append(_AiDroppedLine(quote_id=quote.quote_id, reason="模型未决定去留，由后端按可弃置规则补齐"))
+        notes.append(f"{quote.quote_id}「{quote.text[:16]}」模型未决定去留，先补进 dropped_lines 再按规则复核")
+    return notes

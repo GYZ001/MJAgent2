@@ -51,7 +51,9 @@ from app.production.storyboard_narrative_arc import (
     beat_sheet_narrative_arc_rules, palette_scene_consistency_errors,
 )
 _LOGGER = logging.getLogger(__name__)
-from app.production.storyboard_beat_sheet_repair import repair_beat_sheet_draft, restore_undroppable_lines
+from app.production.storyboard_beat_sheet_repair import (
+    complete_missing_quote_decisions, repair_beat_sheet_draft, restore_undroppable_lines,
+)
 from app.production.storyboard_segment_ranges import (
     _AiSourceUnitRange,
     _PARATEXT_PLACEHOLDER_TEXT,
@@ -122,6 +124,8 @@ def _validate_beat_sheet_draft(
             errors.append(f"段 {seg.segment_no} 引用了不存在的 beat_id {unknown_beats}")
     segment_source_indexes = {s.segment_no: s.source_segment_indexes for s in draft.segments}
     # 2.1.2：容量检查不在这里跑，改由 storyboard_capacity_normalize 兜底。
+    for note in complete_missing_quote_decisions(draft, dialogue_quotes):
+        _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
     for note in restore_undroppable_lines(draft, dialogue_quotes, source_segments):
         _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
     errors.extend(undroppable_quote_errors(draft.dropped_lines, dialogue_quotes))

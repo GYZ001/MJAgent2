@@ -86,3 +86,24 @@ def test_droppable_filler_stays_dropped():
     quotes = [DialogueQuote(quote_id="Q01", source_segment_index=4, text="喵", content_chars=1, speaker="橘座")]
     assert restore_undroppable_lines(draft, quotes, _scene_4_segments()) == []
     assert len(draft.dropped_lines) == 1
+
+
+def test_missing_quote_decisions_are_completed_then_restored_by_rule():
+    """2026-09-05 第 3 集 Q41：模型既没 kept 也没 dropped。整句先补进 dropped，再由不可弃置规则放回；
+    语气词留在弃置区。"""
+    from app.production.storyboard_beat_sheet_repair import complete_missing_quote_decisions, restore_undroppable_lines
+    from app.production.storyboard_dialogue_ledger import DialogueQuote
+
+    draft = _draft([_plan(1, [(1, 3)]), _plan(2, [(4, 12)])])
+    draft.kept_lines = []
+    draft.dropped_lines = []
+    quotes = [
+        DialogueQuote(quote_id="Q41", source_segment_index=4, text="猫忽然跳上了桌子", content_chars=17, speaker="小胖子"),
+        DialogueQuote(quote_id="Q42", source_segment_index=4, text="喵", content_chars=1, speaker="橘座"),
+    ]
+    notes = complete_missing_quote_decisions(draft, quotes)
+    assert len(notes) == 2 and {d.quote_id for d in draft.dropped_lines} == {"Q41", "Q42"}
+    restore_undroppable_lines(draft, quotes, _scene_4_segments())
+    assert [k.quote_id for k in draft.kept_lines] == ["Q41"]
+    assert [d.quote_id for d in draft.dropped_lines] == ["Q42"]
+    assert complete_missing_quote_decisions(draft, quotes) == [], "已决定去留的不再重复补"
