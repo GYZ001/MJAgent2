@@ -197,8 +197,13 @@ ACTIVE_RUN_STATUSES = ("CREATED", "RUNNING", "WAITING_RETRY", "WAITING_HUMAN",
                        "WAITING_AUTHORIZATION", "PAUSED_BUDGET", "PAUSED_EXTERNAL")
 
 
+#: 服务重启后没有任何进程持有的运行状态：暂停/等待重试/等待人工/等待授权。它们不是在途，
+#: 是上一轮进程留下的壳；``--inert-paused`` 把它们排除在「在途」判定之外（清扫时会一并删掉）。
+INERT_AFTER_RESTART = ("PAUSED_EXTERNAL", "WAITING_RETRY", "WAITING_HUMAN", "WAITING_AUTHORIZATION")
+
+
 def assert_idle(conn: sqlite3.Connection, scope: dict[str, list[str]],
-                *, dry_run: bool) -> None:
+                *, dry_run: bool, inert_paused: bool = False) -> None:
     """目标范围里还有在途运行就拒绝执行——清到一半被写回来的残留最难查。
 
     ``--dry-run`` 只警告不退出：预览的价值就在于先看清要动什么，被在途任务挡住
@@ -208,11 +213,12 @@ def assert_idle(conn: sqlite3.Connection, scope: dict[str, list[str]],
     if not scopes:
         return
     ph = ",".join("?" * len(scopes))
-    st = ",".join("?" * len(ACTIVE_RUN_STATUSES))
+    statuses = [x for x in ACTIVE_RUN_STATUSES if not (inert_paused and x in INERT_AFTER_RESTART)]
+    st = ",".join("?" * len(statuses))
     rows = conn.execute(
         f"SELECT id, workflow_type, status FROM workflow_runs"
         f" WHERE scope_id IN ({ph}) AND status IN ({st})",
-        (*scopes, *ACTIVE_RUN_STATUSES),
+        (*scopes, *statuses),
     ).fetchall()
     if rows:
         detail = "、".join(f"{r['id']}({r['workflow_type']}/{r['status']})" for r in rows)
@@ -397,13 +403,15 @@ def main() -> int:
     parser.add_argument("--from", dest="ep_from", type=int, default=1)
     parser.add_argument("--to", dest="ep_to", type=int, default=10)
     parser.add_argument("--dry-run", action="store_true", help="只预览，不修改")
+    parser.add_argument("--inert-paused", action="store_true",
+                        help="服务刚重启、无进程持有运行时，把暂停/等待态的运行行视为壳而不是在途")
     args = parser.parse_args()
 
     project_id, name = resolve_project(args.project)
     ro = readonly_conn()
     try:
         scope = collect_scope(ro, project_id, args.ep_from, args.ep_to)
-        assert_idle(ro, scope, dry_run=args.dry_run)
+        assert_idle(ro, scope, dry_run=args.dry_run, inert_paused=args.inert_paused)
     finally:
         ro.close()
     report_scope(scope, project_id, name, args.ep_from, args.ep_to)
