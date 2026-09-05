@@ -195,11 +195,14 @@ _VIDEO_WAIT_PHASES = {
 # 人话，专门补这一条。不新造一整套阶段文案——阶段名复用
 # app.video_supervisor.constants.phase_label，不重复 _PHASE_LABELS。
 #: 等待补充授权里能由连播台自己续上的原因：旧授权绑定的分镜/资格已过时或已用尽。
-_REAUTHORIZABLE_OUTCOMES = {"UPSTREAM_VERSION_CHANGED", "GRANT_EXPIRED", "GRANT_CONSUMED"}
 
 
 def _can_reauthorize(cp) -> bool:
-    return cp.phase == "WAITING_AUTHORIZATION" and (cp.outcome or "") in _REAUTHORIZABLE_OUTCOMES
+    """连播台重新入队这个动作本身就是「人已处理」：生成台停在等人工/等授权的检查点时，连播台按当前
+    分镜重新发起一次 fresh 补齐，而不是把人晾在「请到生成台处理后再回来点继续」——2026-09-05 第三轮 k
+    第 11 集：版权拒绝转人工后补跑任务永远起不来；重新发起后拒绝会按「3 个独立任务相同失败」跳过。
+    WAITING_RETRY / PAUSED_EXTERNAL 仍按服务重启续跑处理，不在这里。"""
+    return cp.phase in {"WAITING_AUTHORIZATION", "WAITING_HUMAN"}
 
 
 _VIDEO_WAIT_OUTCOME_DETAILS: dict[str, str] = {

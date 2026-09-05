@@ -90,7 +90,7 @@ async def test_paused_external_service_restart_resumes_with_original_grant(
 
 
 @pytest.mark.asyncio
-async def test_waiting_authorization_stops_with_actionable_message(monkeypatch) -> None:
+async def test_waiting_authorization_restarts_fresh_on_reenqueue(monkeypatch) -> None:
     """真实字面值：checkpoint phase 才是 WAITING_AUTHORIZATION 的唯一来源，
     workflow_runs.status 落的是 PARTIAL（见 completion_core.py 的
     recorder.partial()），不是字面量 WAITING_AUTHORIZATION——两者都要覆盖到。
@@ -109,18 +109,16 @@ async def test_waiting_authorization_stops_with_actionable_message(monkeypatch) 
         ),
     )
 
-    async def fail_if_called(*_a, **_k):
-        raise AssertionError("等待人工处理时不应该发起新的补齐尝试")
+    captured: dict = {}
 
-    patch_api_everywhere(monkeypatch, "_complete_episode_core", fail_if_called)
+    async def fake_complete(episode_id, body, **_kwargs):
+        captured.update(body)
+        return {"run_id": "run-new"}
 
-    with pytest.raises(RuntimeError) as exc:
-        await series_stages._kick_video_completion("e", "series-run-1")
-
-    message = str(exc.value)
-    assert "生成台" in message
-    assert "继续" in message
-    assert "AI 提议修改分镜以补齐镜头" in message
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", fake_complete)
+    # 2026-09-05 起：连播台重新入队即视为人已处理，等授权/等人工的检查点按当前分镜重新发起 fresh。
+    await series_stages._kick_video_completion("e", "series-run-1")
+    assert captured["mode"] == "fresh"
 
 
 @pytest.mark.asyncio
