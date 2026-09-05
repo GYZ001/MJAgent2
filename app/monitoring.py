@@ -195,6 +195,18 @@ SETTINGS_SCHEMA["provider_media_public_base_url"] = {
     "experimental": False,
 }
 
+# WS1b：文本模型审核拒答换路目的地，格式 "provider:model"；空串=不换路，
+# 原样抛错——换路目的地必须显式声明，不得兜底猜一个供应商。
+SETTINGS_SCHEMA["text_moderation_fallback_route"] = {
+    "label": "文本审核拒答换路目的地",
+    "type": "string",
+    "default": config.DEFAULT_SETTINGS["text_moderation_fallback_route"],
+    "max_length": 500,
+    "allow_empty": True,
+    "immediate": True,
+    "experimental": False,
+}
+
 
 def public_settings_schema() -> dict[str, dict[str, Any]]:
     return deepcopy(SETTINGS_SCHEMA)

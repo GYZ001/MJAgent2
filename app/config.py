@@ -511,11 +511,12 @@ DEFAULT_SETTINGS = {
     "character_multiview_enabled": "true",
     "scene_multiview_enabled": "true",
     "narrative_keyframe_required": "true",
+    # WS1b：文本模型审核拒答换路，格式 "provider:model"；空串=不换路，原样抛错。
+    "text_moderation_fallback_route": "",
 }
 
 PROJECTS_DIR.mkdir(exist_ok=True)
 DATA_DIR.mkdir(exist_ok=True)
-
 
 # ---------- API Key 管理：前端填写 → 持久化 .env → 运行时热更新 ----------
 
@@ -568,7 +569,6 @@ def save_keys_to_env(keys: dict[str, str]) -> list[str]:
     # 热更新模块级变量
     _reload_keys()
     return updated
-
 
 def _reload_keys() -> None:
     """从 os.environ 重新加载 API Key 相关的模块级变量。"""

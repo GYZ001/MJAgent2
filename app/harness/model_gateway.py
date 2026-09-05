@@ -11,6 +11,7 @@ from pydantic import BaseModel, ValidationError
 from app import config, hiagent
 from app.db import get_conn, now
 from app.evidence import repository
+from app.harness.model_gateway_moderation import attempt_moderation_fallback
 from app.observability.tracing import current_trace
 from app.orchestration.state_machine import transition_run
 
@@ -170,7 +171,6 @@ def _is_nested_json_candidate(text: str, start: int, end: int) -> bool:
 
     return bool(containers or damaged_root)
 
-
 def _json_candidates(value: str) -> list[dict[str, Any]]:
     """Return complete root JSON objects, preferring a trailing response.
 
@@ -197,7 +197,6 @@ def _json_candidates(value: str) -> list[dict[str, Any]]:
         ):
             candidates.append((end, payload))
     return [payload for _end, payload in sorted(candidates, key=lambda item: item[0], reverse=True)]
-
 
 def _json_authority_candidates(text: str) -> list[tuple[int, str, str]]:
     """Enumerate every object/array root proven not to be a child, in order.
@@ -227,7 +226,6 @@ def _json_authority_candidates(text: str) -> list[tuple[int, str, str]]:
             candidates.append((index, root_type, root_text))
     return candidates
 
-
 # A candidate is a "dangling container child" when the text immediately
 # before it (skipping whitespace) is either a bare comma, or a JSON string
 # literal directly followed by a colon (a dict "key": prefix). Both are
@@ -244,10 +242,8 @@ def _json_authority_candidates(text: str) -> list[tuple[int, str, str]]:
 # restart is never misclassified as a dangling fragment.
 _DANGLING_CONTAINER_CHILD_RE = re.compile(r'(,|"(?:[^"\\]|\\.)*"\s*:)\s*\Z')
 
-
 def _is_dangling_container_child(text: str, index: int) -> bool:
     return bool(_DANGLING_CONTAINER_CHILD_RE.search(text[:index]))
-
 
 def _latest_json_authority_root(value: str) -> tuple[str, str, int] | None:
     """Return the latest object/array root proven not to be a child, plus how
@@ -290,11 +286,9 @@ def _latest_json_authority_root(value: str) -> tuple[str, str, int] | None:
     _, root_type, root_text = max(pool, key=lambda c: c[0])
     return root_type, root_text, len(candidates)
 
-
 def _model_schema(model_type: Any) -> dict[str, Any]:
     schema = getattr(model_type, "model_json_schema", None)
     return schema() if callable(schema) else {"type": "object"}
-
 
 def _coerce_structured(model_type: Any, payload: dict[str, Any]) -> Any:
     validator = getattr(model_type, "model_validate", None)
@@ -548,6 +542,12 @@ async def chat(
         except hiagent.ProviderError as exc:
             if exc.requires_explicit_retry:
                 _append_interrupted_event(exc, meta)
+            if exc.failure_category == "model_rejection":  # WS1b 换路，见 model_gateway_moderation
+                fallback_result = await attempt_moderation_fallback(
+                    provider_messages, provider_kwargs, meta,
+                )
+                if fallback_result is not None:
+                    return fallback_result
             if (
                 not exc.retryable
                 or not exc.replay_safe
