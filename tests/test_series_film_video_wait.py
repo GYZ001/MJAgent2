@@ -243,3 +243,13 @@ async def test_waiting_authorization_after_storyboard_change_restarts_fresh_comp
     patch_api_everywhere(monkeypatch, "_complete_episode_core", fake_complete)
     await series_stages._kick_video_completion("e", "series-run-1")
     assert captured["body"]["mode"] == "fresh"
+
+
+def test_screenplay_complete_requires_projection_not_just_status_column(monkeypatch) -> None:
+    """重置后状态列残留 ready 而 screenplay_json 已清：连播台不得把映射台判成已完成。"""
+    conn = _conn("run-x")
+    conn.execute("UPDATE episodes SET screenplay_status='ready', screenplay_json=NULL WHERE id='e'")
+    conn.commit()
+    assert series_stages.screenplay_complete(conn, "e") is False
+    monkeypatch.setattr("app.domain.common._screenplay_ready", lambda ep: True)
+    assert series_stages.screenplay_complete(conn, "e") is True

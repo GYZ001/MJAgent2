@@ -68,10 +68,12 @@ def _http_error_message(exc: HTTPException) -> str:
 # ---------------------------------------------------------------- screenplay
 
 def screenplay_complete(conn, episode_id: str) -> bool:
-    row = conn.execute(
-        "SELECT screenplay_status FROM episodes WHERE id=?", (episode_id,)
-    ).fetchone()
-    return bool(row) and row["screenplay_status"] == "ready"
+    """与分镜台开跑用的是同一份判据（``_screenplay_ready``：ready 且带正式投影），不再只看状态列——
+    2026-09-05 实测重置后状态列残留 ready 而产物已删，连播台跳过映射台、分镜台报「请先生成可拍剧本」。"""
+    from app.domain.common import _screenplay_ready  # 延迟导入：app.domain.common 会拉起整条 domain 依赖链
+
+    row = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    return bool(row) and _screenplay_ready(row)
 
 
 async def _run_screenplay(episode_id: str) -> None:

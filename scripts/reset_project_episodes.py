@@ -148,6 +148,13 @@ def _in_query(conn: sqlite3.Connection, prefix: str, values: list[str]) -> list[
 RESIDUE_PROBES: list[tuple[str, str, str]] = [
     ("prop_references", "id", "props"),
     ("series_tasks", "id", "series_tasks"),
+    # 2026-09-05 实测漏网：清除端点被 PROVIDER_TASKS_NOT_TERMINAL 挡住的集，这些表整批残留。
+    ("jobs", "episode_id", "episodes"),
+    ("completion_grants", "episode_id", "episodes"),
+    ("production_revisions", "episode_id", "episodes"),
+    ("episode_video_publish_leases", "episode_id", "episodes"),
+    ("episode_video_budget_authorities", "episode_id", "episodes"),
+    ("video_budget_authority_ledger", "episode_id", "episodes"),
     ("shots", "episode_id", "episodes"),
     ("screenplay_drafts", "episode_id", "episodes"),
     ("storyboard_source_bindings", "shot_id", "shots"),
@@ -304,6 +311,58 @@ PROJECT_STATUS_RESET = {
 }
 
 
+EPISODE_RESET_SQL = """UPDATE episodes SET
+    screenplay_json=NULL, screenplay_character_resolutions='[]', screenplay_required_dialogues='[]',
+    screenplay_required_dialogue_occurrences='[]', screenplay_status='pending', screenplay_error=NULL,
+    screenplay_started_at=NULL, screenplay_artifact_id=NULL, active_screenplay_run_id=NULL,
+    working_screenplay_artifact_id=NULL, published_screenplay_artifact_id=NULL,
+    screenplay_production_revision_id=NULL, screenplay_completion_certificate_id=NULL,
+    storyboard_outline_json=NULL, storyboard_artifact_id=NULL, storyboard_warning=NULL,
+    active_storyboard_run_id=NULL, working_storyboard_artifact_id=NULL, published_storyboard_artifact_id=NULL,
+    storyboard_production_revision_id=NULL, storyboard_completion_certificate_id=NULL,
+    active_video_run_id=NULL, video_control_json=NULL, delivery_artifact_id=NULL,
+    delivery_status='not_ready', status='planned', script_error=NULL
+WHERE id IN ({ph})"""
+NON_TERMINAL_CLAIM_STATUSES = ("reserved", "accepted", "running")
+
+
+def reset_episode_columns(conn: sqlite3.Connection, scope: dict[str, list[str]]) -> None:
+    """与 app/domain/screenplay_ops/delete.py 的删剧本语句同一份列清单（去掉运行归属守卫）。
+    清除端点被 409 挡住时，产物行被 SQL 扫掉而这些列还留着旧值，会造出「状态说剧本就绪、
+    产物却不在」的半状态（2026-09-05 实测：连播台按 screenplay_status 判剧本已完成，分镜台报
+    「请先生成可拍剧本」，21 集直接失败）。所以无论端点成败，范围内分集一律复位。
+    视频秒数的预扣认领：所属任务已删，非终态认领只会让清空闸门永远判「供应商任务未终态」，
+    按释放处理（把预扣秒数还回去）；settled/released 是历史账，保留。"""
+    eps = scope["episodes"]
+    released = 0
+    ph_st = ",".join("?" * len(NON_TERMINAL_CLAIM_STATUSES))
+    for i in range(0, len(eps), 500):
+        chunk = eps[i:i + 500]
+        ph = ",".join("?" * len(chunk))
+        conn.execute(EPISODE_RESET_SQL.format(ph=ph), chunk)
+        released += conn.execute(
+            f"UPDATE provider_video_budget_claims SET status='released'"
+            f" WHERE episode_id IN ({ph}) AND status IN ({ph_st})",
+            (*chunk, *NON_TERMINAL_CLAIM_STATUSES),
+        ).rowcount
+    conn.commit()
+    log(f"  分集状态列复位 {len(eps)} 集；释放非终态视频秒数认领 {released} 条")
+
+
+def episode_column_residue(conn: sqlite3.Connection, scope: dict[str, list[str]]) -> list[str]:
+    eps = scope["episodes"]
+    bad = 0
+    for i in range(0, len(eps), 500):
+        chunk = eps[i:i + 500]
+        ph = ",".join("?" * len(chunk))
+        bad += conn.execute(
+            f"SELECT COUNT(*) FROM episodes WHERE id IN ({ph}) AND (status!='planned'"
+            " OR screenplay_status!='pending' OR screenplay_artifact_id IS NOT NULL"
+            " OR storyboard_artifact_id IS NOT NULL OR active_video_run_id IS NOT NULL)", chunk,
+        ).fetchone()[0]
+    return [f"episodes 状态列未复位 {bad} 集"] if bad else []
+
+
 def sweep_orchestration_residue(conn: sqlite3.Connection,
                                 scope: dict[str, list[str]]) -> None:
     """产品的清除端点只管流水线产出，不动编排与产物记录；这里做兜底清扫。
@@ -437,12 +496,13 @@ def main() -> int:
             log("  跳过项目级视觉资产：本次范围之外还有已产出的分集，"
                 "清掉定妆照/场景图会越界（要清就把范围扩到全部分集）")
         sweep_orchestration_residue(conn, scope)
+        reset_episode_columns(conn, scope)
     finally:
         conn.close()
 
     ro = readonly_conn()
     try:
-        residue = verify_clean(ro, scope)
+        residue = verify_clean(ro, scope) + episode_column_residue(ro, scope)
     finally:
         ro.close()
     # 退出码只挂产物信号——逐表验证有没有残留。单步的非 2xx 不参与判定：
