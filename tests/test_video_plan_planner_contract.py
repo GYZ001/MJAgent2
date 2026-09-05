@@ -46,9 +46,14 @@ def _response(shots: list[dict]) -> str:
 def test_cached_window_with_invented_enum_is_not_reused():
     bad = _response([
         {"shot_id": "s1", "state_dependency": "start_only", "motion_dependency": "none"},
-        {"shot_id": "s2", "state_dependency": "end_only", "motion_dependency": "none"},
+        {"shot_id": "s2", "state_dependency": "sideways", "motion_dependency": "none"},
     ])
     assert pc.cached_window_is_valid(bad) is False
+    # 2026-09-05 起 end_only 是登记在册的同义写法（归一为 none），不再算自造枚举。
+    aliased = _response([
+        {"shot_id": "s2", "state_dependency": "end_only", "motion_dependency": "none"},
+    ])
+    assert pc.cached_window_is_valid(aliased) is True
 
 
 def test_cached_window_that_passes_the_same_validation_is_reused():

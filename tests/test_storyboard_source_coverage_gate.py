@@ -164,3 +164,29 @@ def test_real_prose_gap_names_the_missing_text() -> None:
     assert gap is not None
     assert f" {len(missing)} 字" in gap
     assert "那是他人生中听到的第一句评价" in gap
+
+
+def test_book_name_subtitle_line_does_not_count_as_uncovered() -> None:
+    """跑不快的孩子第 1 集真实形态：章首「那个跑不快的小孩——梅西成长史·四集中篇」是作品副标题，
+    不等于 chapters.title、没进副文本，却被算成 9% 未覆盖。逐字含本书书名的无标点短行不算剧情
+    （判据是 projects.name 这份数据，不按位置猜）。"""
+    heading = "那个跑不快的小孩 ——梅西成长史 · 四集中篇"
+    body = "那是他人生中听到的第一句评价。他踢的是纽维尔老男孩的青训。"
+    text = f"{heading}\n\n{body}"
+    conn = _conn(text, title="第1集")
+    conn.execute("UPDATE projects SET name='《那个跑不快的小孩》' WHERE id='p'")
+    conn.commit()
+    start = text.index(body)
+    _add_shot(conn, "s1", 1, (start, len(text)))
+    assert storyboard_source_coverage_gap(conn, "e") is None
+
+
+def test_short_line_with_sentence_punctuation_still_counts() -> None:
+    """有句末标点的短句是剧情（例如「他笑了。」），不能被当成标题吞掉。"""
+    line = "他笑了。"
+    body = "那是他人生中听到的第一句评价。他踢的是纽维尔老男孩的青训。"
+    text = f"{line}\n\n{body}"
+    conn = _conn(text, title="第1集")
+    start = text.index(body)
+    _add_shot(conn, "s1", 1, (start, len(text)))
+    assert storyboard_source_coverage_gap(conn, "e") is not None

@@ -689,15 +689,15 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     result.get("failure")
                 )
                 if failure.category is hiagent.ProviderFailureCategory.TECHNICAL:
-                    # 供应商没有给出任何结构化分类信号时（真实案例：Seedance
-                    # 版权拒绝，error.code 为空、无 failure 子对象），唯一可用
-                    # 的是行为判据——同一 task_id 连续轮询给出字节级相同的
-                    # 终态失败，判定为确定性拒绝而不是瞬时故障，升级分类。
-                    # 判断的是结构（同一任务、同一结果、重复出现），不是内容
-                    # （不看 message 里写了什么词），因此不构成关键词黑名单。
+                    # 供应商没有给出任何结构化分类信号时，同一 task_id 连续轮询给出字节级
+                    # 相同的终态失败只能说明「这个任务已经终结」，说明不了「内容被拒」——
+                    # 2026-09-03 我欲封天第 10 集 14 个镜头是供应商自己的 S3 上传 500，也被
+                    # 升级成「模型明确拒绝、禁止重试」转人工。现在保持技术故障、标记可换新任务
+                    # 重试（模型调用不计费，重试由修复路由分级封顶）；真正的内容拒绝要靠
+                    # 供应商的结构化 failure 字段，不再从「重复」推断。
                     history = _prior_task_poll_failure_messages(conn, task_id)
                     if hiagent.has_repeated_terminal_poll_failure(history):
-                        failure = hiagent.ProviderFailure.model_rejection(failure.kind)
+                        failure = hiagent.ProviderFailure.technical(failure.kind, retryable=True)
                 raise ProviderError(
                     f"{provider_label} 任务失败：{error_text}",
                     raw=error_text,

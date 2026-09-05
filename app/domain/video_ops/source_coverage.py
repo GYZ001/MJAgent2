@@ -84,17 +84,44 @@ def _subtract(intervals: list[Interval], regions: list[Interval]) -> list[Interv
     return result
 
 
-def _structural_regions(content: str, title: str | None, chapter_row) -> list[Interval]:
-    """不算剧情的区间：与本章 ``chapters.title`` 逐字相同的标题段 + 已落库的副文本。"""
+_HEADING_MAX_CHARS = 40
+_SENTENCE_PUNCT = "。！？!?；;…"
+
+
+def _heading_like_regions(segments, project_name: str | None) -> list[Interval]:
+    """写着本书书名的标题行：不超过 40 字、没有句末标点、逐字包含 projects.name。
+    2026-09-05 跑不快的孩子第 1 集被拦的 9% 里第一条是「那个跑不快的小孩——梅西成长史·四集中篇」
+    这种作品副标题——它不等于 chapters.title，也没进副文本，却不是剧情。判据只用本项目自己的
+    数据（书名、标点），不按段落位置或长度猜（那是被 test_title_exemption_needs_the_db_title
+    明确禁止的结构猜测）；书名对不上的副标题走映射台副文本判定（PARATEXT_RULE 已把
+    作品副标题/卷名列为框外文字）。"""
+    name = re.sub(r"[《》\s]", "", project_name or "")
+    if not name:
+        return []
     regions: list[Interval] = []
+    for segment in segments:
+        compact = re.sub(r"\s+", "", segment.text)
+        if not compact or len(compact) > _HEADING_MAX_CHARS or any(ch in compact for ch in _SENTENCE_PUNCT):
+            continue
+        if name in compact:
+            regions.append((segment.start_offset, segment.end_offset))
+    return regions
+
+
+def _structural_regions(
+    content: str, title: str | None, chapter_row, project_name: str | None = None,
+) -> list[Interval]:
+    """不算剧情的区间：与本章 ``chapters.title`` 逐字相同的标题段、标题样式的短段 + 已落库的副文本。"""
+    regions: list[Interval] = []
+    segments = index_source_segments(content)
     if title and title.strip():
-        segments = index_source_segments(content)
         title_ids = chapter_title_segment_ids(segments, [title])
         regions.extend(
             (segment.start_offset, segment.end_offset)
             for segment in segments
             if segment.segment_id in title_ids
         )
+    regions.extend(_heading_like_regions(segments, project_name))
     regions.extend(cached_chapter_paratext_offsets(chapter_row))
     return _merged(regions)
 
@@ -128,7 +155,8 @@ def _chapter_gap(conn, project_id: str, chapter_idx: int, bindings) -> tuple[int
         if int(b["chapter_idx"] or 0) == chapter_idx
     ]
     gaps = _complement(len(content), _merged(spans))
-    gaps = _subtract(gaps, _structural_regions(content, row["title"], row))
+    project = conn.execute("SELECT name FROM projects WHERE id=?", (project_id,)).fetchone()
+    gaps = _subtract(gaps, _structural_regions(content, row["title"], row, project["name"] if project else None))
     uncovered, samples = _content_gaps(content, gaps)
     return len(content), uncovered, samples
 

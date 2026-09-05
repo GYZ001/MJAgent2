@@ -380,8 +380,13 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
                 )
             results.append({"shot_id": s["row"]["id"], **r})
         except Exception as exc:  # noqa: BLE001
-            public = errors.record_and_format(exc, action="enqueue_shot",
-                                              context={"shot_id": s["row"]["id"], "episode_id": episode_id})
+            from app.video_issues import _is_concurrency_quota_wait
+            if _is_concurrency_quota_wait(exc):
+                # 并发触顶是等待，不是故障：不进错误日志（观测台曾被一小时 38 条刷屏）
+                public = str(getattr(exc, "detail", {}).get("message") or "视频并发已达上限，等待后自动重试")
+            else:
+                public = errors.record_and_format(exc, action="enqueue_shot",
+                                                  context={"shot_id": s["row"]["id"], "episode_id": episode_id})
             issue_codes: list[str] = []
             try:
                 from app.video_issues import issues_from_enqueue_error, persist_shot_issue

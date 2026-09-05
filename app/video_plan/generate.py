@@ -47,6 +47,18 @@ from .shot_row import _shot_model_from_row, _shot_planner_payload
 from .validate import validate_episode_plan
 
 
+def window_shots_from_planner_response(parsed: Any) -> list[Any] | None:
+    """规划器一个窗口的镜头数组。契约要求 ``{"shots": [...]}``，但模型偶尔直接返回镜头
+    数组（2026-09-04 我欲封天 12/13/19 集三次），内容完全合法只是外层形状不同——
+    按同一份数组处理，不整集打回。其它形状返回 None 由调用方判 AI_PLAN_SCHEMA_INVALID。"""
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        shots = parsed.get("shots")
+        return shots if isinstance(shots, list) else None
+    return None
+
+
 async def generate_episode_plan(
     episode_id: str,
     *,
@@ -553,8 +565,7 @@ async def generate_episode_plan(
                     "source_provider_call_id": cached_call_id,
                 },
             )
-        parsed = extract_json(response)
-        window_raw_shots = parsed.get("shots") if isinstance(parsed, dict) else None
+        window_raw_shots = window_shots_from_planner_response(extract_json(response))
         if not isinstance(window_raw_shots, list):
             raise VideoPlanValidationError([{
                 "code": "AI_PLAN_SCHEMA_INVALID",

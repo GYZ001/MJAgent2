@@ -213,9 +213,18 @@ async def _fail_stage(entry: dict, progress: dict, task_id: str, recorder, stage
 
 
 def _episodes_failed_message(failed: list[dict], total: int) -> str:
+    """按失败的台分组汇总（2026-09-05 产品复盘：只列失败集看不出该去哪个台处理）。"""
+    groups: dict[str, list[int]] = {}
+    for entry in failed:
+        stage = next((s for s, v in (entry.get("stages") or {}).items() if v == "failed"), None)
+        label = stages.STAGE_LABELS.get(stage or "", "未知步骤")
+        groups.setdefault(label, []).append(int(entry["episode_no"]))
+    summary = "；".join(
+        f"{label} {len(nos)} 集（第 {'、'.join(str(n) for n in sorted(nos))} 集）" for label, nos in groups.items()
+    )
     head = (
         f"{len(failed)} 集失败（已跳过），其余 {total - len(failed)} 集已完成；成片未合并。"
-        "修好失败的集后重新加入队列，会只补齐失败的集并合并成片。"
+        f"按步骤：{summary}。修好失败的集后重新加入队列，会只补齐失败的集并合并成片。"
     )
     lines = [head] + [
         str(entry.get("error") or f"第{entry['episode_no']}集 失败")[:220] for entry in failed

@@ -192,6 +192,14 @@ _VIDEO_WAIT_PHASES = {
 # STORYBOARD_REPAIR_PROPOSAL_NOT_AUTHORIZED（见 run_loop.py 第 404 行）没有配套
 # 人话，专门补这一条。不新造一整套阶段文案——阶段名复用
 # app.video_supervisor.constants.phase_label，不重复 _PHASE_LABELS。
+#: 等待补充授权里能由连播台自己续上的原因：旧授权绑定的分镜/资格已过时或已用尽。
+_REAUTHORIZABLE_OUTCOMES = {"UPSTREAM_VERSION_CHANGED", "GRANT_EXPIRED", "GRANT_CONSUMED"}
+
+
+def _can_reauthorize(cp) -> bool:
+    return cp.phase == "WAITING_AUTHORIZATION" and (cp.outcome or "") in _REAUTHORIZABLE_OUTCOMES
+
+
 _VIDEO_WAIT_OUTCOME_DETAILS: dict[str, str] = {
     "STORYBOARD_REPAIR_PROPOSAL_NOT_AUTHORIZED": (
         "AI 提议修改分镜以补齐镜头，需要你在生成台批准或自行修分镜"
@@ -252,9 +260,12 @@ async def _kick_video_completion(episode_id: str, run_id: str) -> None:
             return
         raise RuntimeError(wait_message)
 
-    if matched_cp and matched_cp.phase in _VIDEO_WAIT_PHASES:
+    if matched_cp and matched_cp.phase in _VIDEO_WAIT_PHASES and not _can_reauthorize(matched_cp):
         raise RuntimeError(_checkpoint_wait_message(matched_cp))
 
+    # 走到这里要么没有在等的运行，要么是「旧授权因分镜重做/过期/用尽而失效」——那是流程
+    # 自己造成的状态变化，连播台自己重新发起一次 fresh 补齐（按当前发布版分镜签新授权），
+    # 不把人晾到生成台点确认（2026-09-05 产品复盘：我欲封天第 10 集卡在 UPSTREAM_VERSION_CHANGED）。
     try:
         await _complete_episode_core(episode_id, {
             "mode": "fresh",

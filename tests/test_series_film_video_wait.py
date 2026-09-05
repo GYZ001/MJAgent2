@@ -217,3 +217,29 @@ def test_stalled_reason_names_the_blocked_shot_with_provider_words(monkeypatch) 
     assert "需人工处理" in reason
     assert "第1镜" in reason and "不符合安全合规要求" in reason
 
+
+
+@pytest.mark.asyncio
+async def test_waiting_authorization_after_storyboard_change_restarts_fresh_completion(monkeypatch) -> None:
+    """旧授权因分镜重做失效（UPSTREAM_VERSION_CHANGED）是流程自己造成的：连播台自己重新发起
+    fresh 补齐，不把人晾到生成台（2026-09-05 产品复盘，我欲封天第 10 集）。"""
+    conn = _conn("run-old")
+    _insert_run(conn, "run-old", "RUNNING")
+    monkeypatch.setattr(series_stages, "get_conn", lambda: conn)
+    patch_video_supervisor_everywhere(
+        monkeypatch,
+        "load_latest_checkpoint",
+        lambda _eid: SimpleNamespace(
+            run_id="run-old", grant_id="grant-1", phase="WAITING_AUTHORIZATION",
+            outcome="UPSTREAM_VERSION_CHANGED",
+        ),
+    )
+    captured: dict = {}
+
+    async def fake_complete(episode_id, body, **_kwargs):
+        captured.update({"episode_id": episode_id, "body": body})
+        return {"run_id": "run-new"}
+
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", fake_complete)
+    await series_stages._kick_video_completion("e", "series-run-1")
+    assert captured["body"]["mode"] == "fresh"

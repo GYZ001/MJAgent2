@@ -288,10 +288,11 @@ def _wire_run_job_common_mocks_real_db(monkeypatch, poll_fn) -> None:
     )
 
 
-def test_repeated_identical_poll_failure_escalates_to_model_rejected(monkeypatch):
-    """P1 端到端：同一 task_id 连续两次轮询给出字节级相同的终态失败，第二次
-    必须把 provider_create_state 升级为 'model_rejected'（外部终态），
-    即使供应商本身从没给过任何结构化 category=model_rejection 信号。
+def test_repeated_identical_poll_failure_stays_technical_and_retryable(monkeypatch):
+    """2026-09-05 契约反转：同一 task_id 连续两次轮询给出字节级相同的终态失败，只说明
+    这个任务已终结，不等于内容被拒——我欲封天第 10 集 14 个镜头是供应商自己的 S3 上传 500，
+    却被升级成「模型明确拒绝、禁止重试」转人工。现在第二次保持技术故障、可换新任务重试，
+    绝不写成 model_rejected；真正的内容拒绝要靠供应商的结构化 failure 字段。
 
     刻意不用手工 :memory: 连接：``_commit_provider_acceptance`` 等写路径会
     按 ``_authority_checks_can_use_worker_thread`` 探测到"可重开"的落盘库
@@ -378,12 +379,9 @@ def test_repeated_identical_poll_failure_escalates_to_model_rejected(monkeypatch
                   provider_failure_disposition
              FROM jobs WHERE id='j1'"""
     ).fetchone()
-    assert dict(second) == {
-        "status": "failed",
-        "provider_create_state": "model_rejected",
-        "provider_failure_category": "model_rejection",
-        "provider_failure_disposition": "external_terminal",
-    }
+    assert second["provider_create_state"] != "model_rejected"
+    assert second["provider_failure_category"] != "model_rejection"
+    assert second["status"] != "failed", "可重试的技术故障不得落终态失败"
     assert poll_calls["n"] == 2
 
     # 独立只读连接，证明写入真的提交到了磁盘上的文件，不是同一连接读自己写。
@@ -395,8 +393,8 @@ def test_repeated_identical_poll_failure_escalates_to_model_rejected(monkeypatch
         ).fetchone()
     finally:
         verify_conn.close()
-    assert persisted["provider_create_state"] == "model_rejected"
-    assert persisted["status"] == "failed"
+    assert persisted["provider_create_state"] != "model_rejected"
+    assert persisted["status"] != "failed"
 
 
 def test_single_poll_failure_does_not_escalate(monkeypatch):

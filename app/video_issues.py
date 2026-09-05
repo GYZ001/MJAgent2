@@ -301,6 +301,17 @@ def issues_from_job_failure(
     )]
 
 
+def _quota_detail(exc: Exception) -> dict:
+    detail = getattr(exc, "detail", None)
+    return detail if isinstance(detail, dict) else {}
+
+
+def _is_concurrency_quota_wait(exc: Exception) -> bool:
+    from app.quota import QuotaExceeded  # 延迟导入：app.quota 与 db 链有环，模块级会拉起
+
+    return isinstance(exc, QuotaExceeded) and _quota_detail(exc).get("gate") == "concurrency"
+
+
 def issues_from_enqueue_error(
     exc: Exception,
     *,
@@ -313,6 +324,21 @@ def issues_from_enqueue_error(
     message = str(exc) or exc.__class__.__name__
     retryable = bool(getattr(exc, "retryable", False))
     failure_kind = str(getattr(exc, "failure_kind", "") or "")
+    if _is_concurrency_quota_wait(exc):
+        # 账号视频并发触顶不是这一镜的错：等现有任务结束就能入队，按可等待的
+        # 告警（L0，不付费）处理，不能升级成阻断或人工介入（2026-09-04 连播集级并行后
+        # 一小时 38 次触顶全被记成错误）。
+        return [_mk(
+            "VIDEO_ENQUEUE_WAIT_CONCURRENCY",
+            IssueSeverity.WARNING,
+            shot_id=shot_id,
+            message=str(_quota_detail(exc).get("message") or message),
+            shot_no=shot_no,
+            rule_id="quota_concurrency",
+            repair_hint="等待账号内其它视频任务结束后自动重新入队",
+            category="operational",
+            extra={"recommended_level": "L0", "wait": True},
+        )]
     if isinstance(exc, CompileError):
         return [_mk(
             "VIDEO_PREFLIGHT_BLOCKED",

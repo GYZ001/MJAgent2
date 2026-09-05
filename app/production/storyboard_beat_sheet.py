@@ -28,6 +28,7 @@ STORYBOARD_PACK_VERSION`` 模块常量。
 from __future__ import annotations
 
 import hashlib
+import logging
 import json
 from typing import Any
 
@@ -49,6 +50,8 @@ from app.production.storyboard_dialogue_ledger import (
 from app.production.storyboard_narrative_arc import (
     beat_sheet_narrative_arc_rules, palette_scene_consistency_errors,
 )
+_LOGGER = logging.getLogger(__name__)
+from app.production.storyboard_beat_sheet_repair import repair_beat_sheet_draft
 from app.production.storyboard_segment_ranges import (
     _AiSourceUnitRange,
     _PARATEXT_PLACEHOLDER_TEXT,
@@ -128,6 +131,10 @@ def _validate_beat_sheet_draft(
         max_chars_per_segment=config.MAX_SPOKEN_CHARS_PER_SHOT,
         include_capacity=False,
     ))
+    # 2026-09-05：机械规则先确定性修补（色温统一、范围裁剪/合并、补洞、不回退），
+    # 修了什么写日志；只把修不了的留给校验打回模型。
+    for note in repair_beat_sheet_draft(draft, source_segments, set(paratext_indexes)):
+        _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
     errors.extend(segment_unit_range_errors(draft.segments, source_segments, set(paratext_indexes)))
     # 先按单元位置把分错段的台词挪到覆盖它的段（确定性，不打回模型），再查残余的越界。
     reassign_kept_lines_to_covering_segments(draft.kept_lines, dialogue_quotes, draft.segments, source_segments)

@@ -13,6 +13,11 @@ from .prev_frame_reference import prev_frame_reference_enabled
 from .primitives import _json, _row_value
 
 
+#: 依赖枚举的同义写法（2026-09-03 我欲封天第 6 集：模型写了 end_only，契约里没有这个值，
+#: 整集被打回）。end_only 说的是「本镜的结尾要被下一镜接上」，那是下一镜的 start_only，
+#: 对本镜而言没有对前一镜的依赖，归一为 none。
+_DEPENDENCY_ALIASES: dict[str, str] = {"end_only": "none", "start": "start_only", "both": "start_and_end"}
+
 _RELATION_ALIASES: dict[str, dict[str, str]] = {
     "temporal": {
         "episode_start": "new_domain",
@@ -50,6 +55,12 @@ def normalize_ai_shot_plan_candidate(
     """Canonicalize redundant planner fields without changing its selected mode."""
     normalized = dict(value)
     changes: list[dict[str, Any]] = []
+    for field in ("state_dependency", "motion_dependency"):
+        current = str(normalized.get(field) or "")
+        replacement = _DEPENDENCY_ALIASES.get(current)
+        if replacement is not None:
+            normalized[field] = replacement
+            changes.append({"field": field, "from": current, "to": replacement})
     relations = normalized.get("relations")
     if isinstance(relations, dict):
         relations = dict(relations)
