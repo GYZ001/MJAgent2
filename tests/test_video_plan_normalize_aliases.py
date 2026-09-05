@@ -25,3 +25,22 @@ def test_end_only_dependency_normalises_to_none_with_a_record():
     normalized, changes = normalize_ai_shot_plan_candidate(raw)
     assert normalized["state_dependency"] == "none"
     assert {"field": "state_dependency", "from": "end_only", "to": "none"} in changes
+
+
+def test_unknown_dependency_values_are_moved_or_defaulted_instead_of_failing_the_plan():
+    """第 6 集真实形态：规划器把 motion 的 'audio' 写进 state_dependency，整集计划因 AI_PLAN_SCHEMA_INVALID 失败。"""
+    from app.video_plan.models import PlannerShotAnalysis
+
+    normalized, changes = normalize_ai_shot_plan_candidate({
+        "shot_id": "s1", "mode": "REFERENCE_IMAGE_MODE", "state_dependency": "audio", "motion_dependency": "none",
+    })
+    assert normalized["state_dependency"] == "none" and normalized["motion_dependency"] == "audio"
+    assert any(c.get("reason") == "moved_from_state_dependency" for c in changes)
+    PlannerShotAnalysis.model_validate({k: v for k, v in normalized.items() if k in PlannerShotAnalysis.model_fields})
+    normalized, changes = normalize_ai_shot_plan_candidate({
+        "shot_id": "s1", "mode": "REFERENCE_IMAGE_MODE", "motion_dependency": "gesture",
+        "relations": {"temporal": "flashback", "spatial": "same_space"},
+    })
+    assert normalized["motion_dependency"] == "none"
+    assert normalized["relations"]["temporal"] == "unknown" and normalized["relations"]["spatial"] == "same_space"
+    assert {c["field"] for c in changes if c.get("reason") == "unknown_value"} == {"motion_dependency", "relations.temporal"}

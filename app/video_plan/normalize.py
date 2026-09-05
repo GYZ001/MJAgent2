@@ -49,6 +49,44 @@ _RELATION_ALIASES: dict[str, dict[str, str]] = {
 }
 
 
+def _literal_values(model: type, field: str) -> tuple[set[str], Any]:
+    """从 pydantic 模型的 Literal 注解取合法值集合与声明默认值（取值域来自模型本身，不另抄一份）。"""
+    from typing import get_args
+    info = model.model_fields[field]
+    return set(get_args(info.annotation)), info.default
+
+
+def _coerce_dependency_literals(normalized: dict[str, Any], changes: list[dict[str, Any]]) -> None:
+    """规划器把 motion 的取值写进 state（2026-09-05 第 6 集 state_dependency='audio'）或写了枚举外的词时，
+    先按「值合法于兄弟字段且兄弟字段为空」挪过去，否则回落到模型声明的默认值；整份计划不再因一个
+    字段串枚举而 AI_PLAN_SCHEMA_INVALID。取值域从 PlannerShotAnalysis 的 Literal 注解读，不手抄名单。"""
+    from .models import PlannerShotAnalysis
+    pair = ("state_dependency", "motion_dependency")
+    allowed = {f: _literal_values(PlannerShotAnalysis, f) for f in pair}
+    for field, sibling in (pair, pair[::-1]):
+        current = str(normalized.get(field) or "")
+        values, default = allowed[field]
+        if not current or current in values:
+            continue
+        sib_values, sib_default = allowed[sibling]
+        if current in sib_values and str(normalized.get(sibling) or sib_default) == sib_default:
+            normalized[sibling] = current
+            changes.append({"field": sibling, "from": normalized.get(sibling, ""), "to": current, "reason": f"moved_from_{field}"})
+        normalized[field] = default
+        changes.append({"field": field, "from": current, "to": default, "reason": "unknown_value"})
+
+
+def _coerce_relation_literals(relations: dict[str, Any], changes: list[dict[str, Any]]) -> None:
+    """relations 四个维度里既不是合法值也不是已知同义词的，回落到 ShotRelations 声明的默认值。"""
+    from .models import ShotRelations
+    for field, aliases in _RELATION_ALIASES.items():
+        current = str(relations.get(field) or "")
+        values, default = _literal_values(ShotRelations, field)
+        if current and current not in values and aliases.get(current) is None:
+            relations[field] = default
+            changes.append({"field": f"relations.{field}", "from": current, "to": default, "reason": "unknown_value"})
+
+
 def _prepare_candidate(value: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """复制输入并先把依赖枚举的同义写法归一（记录进 changes）。"""
     normalized = dict(value)
@@ -59,6 +97,7 @@ def _prepare_candidate(value: dict[str, Any]) -> tuple[dict[str, Any], list[dict
         if replacement is not None:
             normalized[field] = replacement
             changes.append({"field": field, "from": current, "to": replacement})
+    _coerce_dependency_literals(normalized, changes)
     return normalized, changes
 
 
@@ -71,6 +110,7 @@ def normalize_ai_shot_plan_candidate(
     if isinstance(relations, dict):
         relations = dict(relations)
         normalized["relations"] = relations
+        _coerce_relation_literals(relations, changes)
         for field, aliases in _RELATION_ALIASES.items():
             current = str(relations.get(field) or "")
             replacement = aliases.get(current)

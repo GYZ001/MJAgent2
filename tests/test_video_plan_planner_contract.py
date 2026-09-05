@@ -43,11 +43,15 @@ def _response(shots: list[dict]) -> str:
     return json.dumps({"shots": shots}, ensure_ascii=False)
 
 
-def test_cached_window_with_invented_enum_is_not_reused():
-    bad = _response([
+def test_cached_window_with_invented_enum_is_normalized_like_fresh_output():
+    """2026-09-05 起枚举外取值由 normalize 回落模型默认（新鲜输出与缓存走同一条路径），
+    所以自造枚举不再是「不复用」的理由；结构缺字段的才不复用。"""
+    invented = _response([
         {"shot_id": "s1", "state_dependency": "start_only", "motion_dependency": "none"},
         {"shot_id": "s2", "state_dependency": "sideways", "motion_dependency": "none"},
     ])
+    assert pc.cached_window_is_valid(invented) is True
+    bad = _response([{"state_dependency": "start_only", "motion_dependency": "none"}])
     assert pc.cached_window_is_valid(bad) is False
     # 2026-09-05 起 end_only 是登记在册的同义写法（归一为 none），不再算自造枚举。
     aliased = _response([
