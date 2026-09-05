@@ -40,31 +40,65 @@ def _unvalidated_succeeded_versions(conn) -> list:
     ).fetchall()
 
 
+def heal_unvalidated_version(conn, row) -> bool:
+    """给一条「已落盘未校验」的版本补做技术校验、QA 记未复核、释放槽位；文件不在盘上或
+    校验抛错返回 False（只记日志）。逐版本独立提交：一个坏文件不影响其它版本收尾。"""
+    path = str(row["video_path"] or "")
+    if not os.path.isfile(path):
+        return False
+    try:
+        record_video_candidate(row["id"])
+    except Exception as exc:  # noqa: BLE001 单个版本校验失败只记日志，不阻断恢复
+        _LOGGER.warning("补做技术校验失败 version=%s: %s", row["id"], exc)
+        return False
+    qa_json = str(row["qa_json"] or "").strip()
+    conn.execute(
+        """UPDATE shot_versions
+              SET video_slot_active=0,
+                  qa_json=CASE WHEN ? THEN qa_json ELSE ? END
+            WHERE id=?""",
+        (bool(qa_json and qa_json != "{}"), json.dumps(UNVERIFIED_QA, ensure_ascii=False), row["id"]),
+    )
+    conn.execute(
+        "UPDATE jobs SET video_slot_active=0, updated_at=? WHERE version_id=? AND status='succeeded'",
+        (now(), row["id"]),
+    )
+    conn.commit()
+    return True
+
+
 def recover_unvalidated_video_candidates() -> int:
-    """返回补齐的版本数。逐版本独立提交：一个坏文件不影响其它版本收尾。"""
+    """开机入口：返回补齐的版本数。"""
     conn = get_conn()
-    healed = 0
-    for row in _unvalidated_succeeded_versions(conn):
-        path = str(row["video_path"] or "")
-        if not os.path.isfile(path):
-            continue
-        try:
-            record_video_candidate(row["id"])
-        except Exception as exc:  # noqa: BLE001 单个版本校验失败只记日志，不阻断开机恢复
-            _LOGGER.warning("补做技术校验失败 version=%s: %s", row["id"], exc)
-            continue
-        qa_json = str(row["qa_json"] or "").strip()
-        conn.execute(
-            """UPDATE shot_versions
-                  SET video_slot_active=0,
-                      qa_json=CASE WHEN ? THEN qa_json ELSE ? END
-                WHERE id=?""",
-            (bool(qa_json and qa_json != "{}"), json.dumps(UNVERIFIED_QA, ensure_ascii=False), row["id"]),
-        )
-        conn.execute(
-            "UPDATE jobs SET video_slot_active=0, updated_at=? WHERE version_id=? AND status='succeeded'",
-            (now(), row["id"]),
-        )
-        conn.commit()
-        healed += 1
-    return healed
+    return sum(1 for row in _unvalidated_succeeded_versions(conn) if heal_unvalidated_version(conn, row))
+
+
+def reconcile_unvalidated_candidates(conn, shot_ids: list[str], active_job_statuses) -> set[str]:
+    """运行期入口（覆盖账本重建时调用）：这些镜头里「已落盘未校验」的版本，其 job 仍在
+    ACTIVE 状态的（QA/校验正在进行）返回镜头 id 让账本按在途处理、不得派重拍；job 已终态
+    的当场补齐成候选。2026-09-05 实测重启后「历史任务已完成→隔离」路径留下 job=succeeded、
+    版本 succeeded+占槽+未校验，新一轮 supervisor 8 秒后就派重拍撞占槽索引；只靠开机自愈
+    赶不上这种运行期产生的半成品。"""
+    if not shot_ids:
+        return set()
+    placeholders = ",".join("?" * len(shot_ids))
+    rows = conn.execute(
+        f"""SELECT v.id, v.shot_id, v.video_path, v.qa_json
+              FROM shot_versions v
+             WHERE v.shot_id IN ({placeholders}) AND v.status='succeeded'
+               AND v.video_path IS NOT NULL AND v.video_path!=''
+               AND (v.technical_validation_json IS NULL OR v.technical_validation_json IN ('', '{{}}'))""",
+        tuple(shot_ids),
+    ).fetchall()
+    blocked: set[str] = set()
+    for row in rows:
+        active = conn.execute(
+            "SELECT 1 FROM jobs WHERE version_id=? AND status IN (%s) LIMIT 1"
+            % ",".join("?" * len(active_job_statuses)),
+            (row["id"], *active_job_statuses),
+        ).fetchone()
+        if active:
+            blocked.add(str(row["shot_id"]))
+        elif not heal_unvalidated_version(conn, row):
+            blocked.add(str(row["shot_id"]))  # 文件缺失/校验失败：不当候选也不派重拍，留给人看
+    return blocked

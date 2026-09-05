@@ -9,6 +9,7 @@ from typing import Any
 from app.continuity import classify_video_hard_failures
 from app.db import get_conn
 from app.evidence.media import grade_shot_video, video_candidate_selection_score
+from app.media_exec.candidate_recovery import reconcile_unvalidated_candidates
 from app.media_pipeline.stages import ACTIVE_JOB_STATUSES
 from app.schemas import Shot
 from app.video_issues import issues_from_job_failure, load_persisted_shot_issues
@@ -156,6 +157,10 @@ def _latest_video_jobs(
     ).fetchall():
         if row["shot_id"] not in active_jobs:
             active_jobs[row["shot_id"]] = row["id"]
+    # 「已落盘未校验」的版本：job 仍在跑的按在途处理，job 已终态的当场补齐成候选——
+    # 两种都不能派重拍去撞 uq_versions_active_video_shot（见 candidate_recovery）。
+    for sid in reconcile_unvalidated_candidates(conn, shot_ids, status_list):
+        active_jobs.setdefault(sid, f"postprocess:{sid}")
     seen: set[str] = set()
     for row in conn.execute(
         f"""SELECT shot_id, status, provider_create_state FROM jobs

@@ -75,3 +75,40 @@ def test_validation_failure_does_not_abort_recovery(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cr, "record_video_candidate", boom)
     assert cr.recover_unvalidated_video_candidates() == 0
+
+
+def test_runtime_reconcile_blocks_when_job_active_and_heals_when_terminal(monkeypatch, tmp_path):
+    conn = get_conn()
+    _seed(conn, tmp_path)
+    healed: list[str] = []
+
+    def fake_record(version_id, *, step_run_id=None):
+        healed.append(version_id)
+        conn.execute("UPDATE shot_versions SET technical_validation_json='{\"passed\": true}' WHERE id=?", (version_id,))
+        return {"id": "art_1"}
+
+    monkeypatch.setattr(cr, "record_video_candidate", fake_record)
+    conn.execute("UPDATE jobs SET status='running' WHERE id='j1'"); conn.commit()
+    assert cr.reconcile_unvalidated_candidates(conn, ["s1"], ("queued", "running")) == {"s1"}, "QA 进行中：按在途，不派重拍"
+    assert healed == []
+    conn.execute("UPDATE jobs SET status='succeeded' WHERE id='j1'"); conn.commit()
+    assert cr.reconcile_unvalidated_candidates(conn, ["s1"], ("queued", "running")) == set()
+    assert healed == ["v1"]
+    assert conn.execute("SELECT video_slot_active FROM shot_versions WHERE id='v1'").fetchone()[0] == 0
+    assert cr.reconcile_unvalidated_candidates(conn, ["s1"], ("queued", "running")) == set(), "已补齐不再处理"
+
+
+def test_ledger_treats_postprocessing_version_as_active(monkeypatch, tmp_path):
+    from app.video_supervisor.coverage import _latest_video_jobs
+
+    conn = get_conn()
+    _seed(conn, tmp_path)
+    conn.execute("UPDATE jobs SET status='running' WHERE id='j1'"); conn.commit()
+    monkeypatch.setattr(cr, "record_video_candidate", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("在途不该校验")))
+    active, rejected = _latest_video_jobs(conn, ["s1"], None)
+    assert active.get("s1") == "j1" and rejected == set()
+    conn.execute("UPDATE jobs SET status='succeeded' WHERE id='j1'"); conn.commit()
+    monkeypatch.setattr(cr, "record_video_candidate", lambda version_id, **_k: conn.execute(
+        "UPDATE shot_versions SET technical_validation_json='{\"passed\": true}' WHERE id=?", (version_id,)) and {"id": "a"})
+    active, rejected = _latest_video_jobs(conn, ["s1"], None)
+    assert active == {} and conn.execute("SELECT video_slot_active FROM shot_versions WHERE id='v1'").fetchone()[0] == 0
