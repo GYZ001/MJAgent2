@@ -251,7 +251,7 @@ def test_screenplay_complete_requires_projection_not_just_status_column(monkeypa
     conn.execute("UPDATE episodes SET screenplay_status='ready', screenplay_json=NULL WHERE id='e'")
     conn.commit()
     assert series_stages.screenplay_complete(conn, "e") is False
-    monkeypatch.setattr("app.domain.common._screenplay_ready", lambda ep: True)
+    patch_api_everywhere(monkeypatch, "_screenplay_ready", lambda ep: True)
     assert series_stages.screenplay_complete(conn, "e") is True
 
 
