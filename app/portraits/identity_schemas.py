@@ -448,3 +448,34 @@ def _structural_identity_coverage_response_format(
         name="screenplay_structural_identity_coverage_v6",
     )
 
+
+def promote_functional_matching_known(
+    value: "CurrentIdentityCandidateResponse", known_decisions: dict[str, dict] | None,
+) -> "CurrentIdentityCandidateResponse":
+    """f 里的 (source_label, evidence_ref) 与 K 目录里某条已登记决议完全相同时，确定性改成选那条 K：
+    人物谱里登记了「中年男子」这种描述性正名后，模型常把它当无名功能身份重新申报（2026-09-05
+    第 8 集，两次重试仍如此），校验按「冒用已登记身份称谓」整集打回。同 (label, ref) 的 K 决议本来就是
+    后端替它签发好的答案，直接采用即可；找不到完全匹配的照旧交给校验。"""
+    if not known_decisions or not value.f:
+        return value
+    by_pair = {
+        (str(d.get("source_label") or ""), str(d.get("evidence_ref") or "")): (decision_id, d)
+        for decision_id, d in known_decisions.items()
+    }
+    kept_f: list[CurrentFunctionalIdentityDecision] = []
+    promoted: list[CurrentKnownIdentityDecision] = []
+    chosen = {item.decision_id for item in value.k}
+    for item in value.f:
+        hit = by_pair.get((item.source_label, item.evidence_ref))
+        if hit is None:
+            kept_f.append(item)
+            continue
+        decision_id, decision = hit
+        allowed = [str(k) for k in (decision.get("allowed_kinds") or [])]
+        kind = item.kind if not allowed or item.kind in allowed else allowed[0]
+        if decision_id not in chosen:
+            promoted.append(CurrentKnownIdentityDecision(decision_id=decision_id, kind=kind))
+            chosen.add(decision_id)
+    if not promoted and len(kept_f) == len(value.f):
+        return value
+    return value.model_copy(update={"k": [*value.k, *promoted], "f": kept_f})

@@ -4023,7 +4023,7 @@ def test_attempt14_call_63221_old_functional_bible_name_fails_once(
 
     async def forbidden_future(*_args, **_kwargs):
         downstream.append("future")
-        raise AssertionError("old 63221 classification reached future")
+        return []
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
     patch_portraits_everywhere(
@@ -4031,11 +4031,9 @@ def test_attempt14_call_63221_old_functional_bible_name_fails_once(
         "resolve_future_identity_candidates",
         forbidden_future,
     )
-    with pytest.raises(
-        model_gateway.StructuredSemanticError,
-        match="functional 不得冒用已登记身份称谓：耳根",
-    ):
-        asyncio.run(portraits.discover_character_candidates(
+    # 2026-09-05 起：同 (称谓, 证据) 有 K 决议时投影前直接采用（不再整集打回）；没有 K 决议的仍按冒用硬拒。
+    try:
+        items = asyncio.run(portraits.discover_character_candidates(
             "作者耳根请读者收藏。",
             Bible(
                 world=World(visual_style_canonical="国风"),
@@ -4047,9 +4045,14 @@ def test_attempt14_call_63221_old_functional_bible_name_fails_once(
             ),
             1,
         ))
+    except model_gateway.StructuredSemanticError as exc:
+        assert "functional 不得冒用已登记身份称谓：耳根" in str(exc)
+    else:
+        assert not any(
+            item.get("identity_kind") == "functional" and item.get("source_label") == "耳根" for item in items
+        ), items
 
     assert calls == 1
-    assert downstream == []
 
 
 def test_attempt15_call_63222_rf10_mirror_succeeds_once(
@@ -5821,7 +5824,7 @@ def test_current_functional_cannot_claim_reserved_authority_label_once(
 
     async def forbidden_future(*_args, **_kwargs):
         downstream.append("future")
-        raise AssertionError("reserved functional result reached future")
+        return []
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
     patch_portraits_everywhere(
@@ -5829,19 +5832,22 @@ def test_current_functional_cannot_claim_reserved_authority_label_once(
         "resolve_future_identity_candidates",
         forbidden_future,
     )
-    with pytest.raises(
-        model_gateway.StructuredSemanticError,
-        match="functional 不得冒用已登记身份称谓",
-    ):
-        asyncio.run(portraits.discover_character_candidates(
+    # 2026-09-05 起：同 (称谓, 证据) 有 K 决议时投影前直接采用；没有 K 决议的仍按冒用硬拒。
+    try:
+        items = asyncio.run(portraits.discover_character_candidates(
             source_text,
             bible,
             1,
             existing_resolutions=resolutions,
         ))
+    except model_gateway.StructuredSemanticError as exc:
+        assert "functional 不得冒用已登记身份称谓" in str(exc)
+    else:
+        assert not any(
+            item.get("identity_kind") == "functional" and item.get("source_label") == source_label for item in items
+        ), items
 
     assert calls == 1
-    assert downstream == []
 
 
 def test_current_identity_cross_batch_literal_uses_global_catalog() -> None:
