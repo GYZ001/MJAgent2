@@ -82,7 +82,8 @@ from app.production.storyboard_dialogue_ledger import (
     required_dialogue_rule,
 )
 from app.production.storyboard_dialogue_repeat import (already_delivered_dialogue_rule, already_delivered_payload,
-                                                        repeated_delivery_errors, reserved_dialogue_payload, reserved_lines_for)
+                                                        reserved_dialogue_payload, reserved_lines_for)
+from app.production.storyboard_dialogue_repeat_repair import repaired_repeated_delivery_errors
 from app.production.storyboard_narrative_arc import (
     _segment_continuity_rules,
     _segment_shared_rules,
@@ -821,11 +822,8 @@ def _validate_segment_draft(
         required_dialogue, [line.line for line in draft.dialogue],
     ))
     errors.extend(continuity_memo_errors(draft.continuity_memo, previous_memo, segment_source_text))
-    errors.extend(repeated_delivery_errors(
-        delivered_lines,
-        [(line.speaker_identity_id, line.line) for line in draft.dialogue],
-        current_segment_no=current_segment_no,
-        reserved=reserved_lines,
+    errors.extend(repaired_repeated_delivery_errors(
+        draft, delivered_lines, current_segment_no=current_segment_no, reserved=reserved_lines,
     ))
     return errors
 
