@@ -25,6 +25,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from app import config, generation_concurrency, hiagent, quota
+from app.observability.write_lock_holders import rollback_before_long_wait
 from app.atomic_io import atomic_write_bytes
 from app.bible_store import mutate_bible_json
 from app.errors import ContentGenerationError, code_ref
@@ -656,6 +657,7 @@ async def _generate_one_scene_reference(
                     ).hexdigest()[:32],
                     "reuse_successful_operation": True,
                 })
+            rollback_before_long_wait(conn, "scene_reference:generate_image")
             item = await _generate_scene_image(
                 prompt,
                 retry_seed,
@@ -746,6 +748,7 @@ async def _generate_one_scene_reference(
                 ensure_scene_multiview_pack, scene_multiview_enabled, pack_result_ok,
             )
             if scene_multiview_enabled():
+                rollback_before_long_wait(conn, "scene_reference:multiview_pack")
                 pack = await ensure_scene_multiview_pack(
                     project_id=project_id,
                     scene_reference_id=scene_id,
@@ -757,12 +760,8 @@ async def _generate_one_scene_reference(
                     optional_views=[role for role in (sc.required_views or []) if role == "action_zone"],
                 )
                 if not pack_result_ok(pack):
-                    # 有图就是可用（用户拍板 2026-09-01）：侧视角没补齐不得把已经
-                    # 落盘的主图作废重来——那正是"同一个场景反复烧图"的来源。
-                    log.warning(
-                        "场景「%s」侧视角未补齐（status=%s），仍采用已落盘主图",
-                        sc.name, (pack or {}).get("status"),
-                    )
+                    # 有图就是可用（用户拍板 2026-09-01）：侧视角没补齐不得把已落盘主图作废重来——那正是"同一个场景反复烧图"的来源。
+                    log.warning("场景「%s」侧视角未补齐（status=%s），仍采用已落盘主图", sc.name, (pack or {}).get("status"))
             if is_atomic_replacement and old_current:
                 # 完整包已通过：先把旧当前版本移入新的历史槽，再把候选切为当前。
                 minimum = conn.execute(

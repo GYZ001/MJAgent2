@@ -92,3 +92,19 @@ def test_await_chain_frames_reach_the_suspended_await_point():
     assert frames.index(next(f for f in frames if f.endswith(" outer"))) < frames.index(
         next(f for f in frames if f.endswith(" inner"))
     )
+
+
+def test_rollback_before_long_wait_closes_open_transaction_and_is_noop_otherwise(caplog):
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE t(x)")
+    conn.commit()
+    write_lock_holders.rollback_before_long_wait(conn, "noop")
+    conn.execute("INSERT INTO t VALUES(1)")
+    assert conn.in_transaction
+    with caplog.at_level("WARNING"):
+        write_lock_holders.rollback_before_long_wait(conn, "scene_reference:generate_image")
+    assert not conn.in_transaction
+    assert conn.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 0, "半截写入必须回滚，不能带进长等待"
+    assert any("OPEN_TXN_BEFORE_WAIT" in r.message and "scene_reference:generate_image" in r.message for r in caplog.records)

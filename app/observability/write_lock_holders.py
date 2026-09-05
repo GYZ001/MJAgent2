@@ -137,3 +137,18 @@ async def long_transaction_watchdog(interval_s: float = 5.0, threshold_s: float 
         except Exception:  # noqa: BLE001 -- 诊断循环不得因自身异常退出
             _LOGGER.exception("write lock watchdog tick failed")
         await asyncio.sleep(interval_s)
+
+
+def rollback_before_long_wait(conn: sqlite3.Connection, where: str) -> None:
+    """长等待（出图信号量、供应商调用）之前把任务连接上还开着的事务回滚掉，并记一条告警。
+    2026-09-05 B 实测：场景库出图任务在某次异常后带着未提交的 scene_reference_views 插入
+    去等图片生成信号量，一等 5 分钟，写锁把 9 个并行映射台全部拖成 database is locked。
+    这里的回滚是 fail-closed：半截状态不提交、锁不带进长等待；告警里的 ``where`` 用来定位
+    是哪条路径把事务留开了。"""
+    try:
+        if conn.in_transaction:
+            conn.rollback()
+            _LOGGER.warning("[OPEN_TXN_BEFORE_WAIT] %s：长等待前发现未提交事务，已回滚（最后写语句：%s）",
+                            where, str(_last_write_sql.get(id(conn)) or "")[:160])
+    except sqlite3.ProgrammingError:
+        pass

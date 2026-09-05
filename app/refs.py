@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 
 from app import config, generation_concurrency, hiagent, quota
+from app.observability.write_lock_holders import rollback_before_long_wait
 from app.atomic_io import atomic_write_bytes
 from app.bible_store import mutate_bible_json
 from app.db import get_conn, new_id
@@ -367,14 +368,11 @@ async def _generate_one_character_portrait(
 ) -> None:
     """Run one character's full definitive-portrait pipeline; raises on failure.
 
-    Spawned as its own ``asyncio.Task`` by ``asyncio.gather`` in
-    ``generate_refs``.  ``get_conn()`` keys connections by
-    ``asyncio.current_task()`` (see ``app.db``), so calling it fresh here --
-    never inheriting the caller's ``conn`` via closure -- gives this
-    character its own isolated SQLite connection.  Concurrent siblings
-    therefore never share a connection or its implicit transaction state,
-    which matters because most writes below commit immediately but a few
-    (staged portrait -> multiview pack -> promote) span several statements.
+    Spawned as its own ``asyncio.Task`` by ``asyncio.gather`` in ``generate_refs``.
+    ``get_conn()`` keys connections by ``asyncio.current_task()`` (see ``app.db``), so calling
+    it fresh here -- never inheriting the caller's ``conn`` -- gives this character its own
+    isolated SQLite connection; siblings never share implicit transaction state, which matters
+    because a few writes (staged portrait -> multiview pack -> promote) span several statements.
     """
     conn = get_conn()
     from app import portraits as _portraits
@@ -414,6 +412,7 @@ async def _generate_one_character_portrait(
                     ).hexdigest()[:32],
                     "reuse_successful_operation": True,
                 })
+            rollback_before_long_wait(conn, "character_portrait:generate_image")
             item = await hiagent.generate_image(
                 prompt,
                 size=config.REF_IMAGE_SIZE,
@@ -451,10 +450,9 @@ async def _generate_one_character_portrait(
                 conn, project_id, c.name, path, effective_appearance, prompt,
                 bible_version, artifact_id=artifact["id"])
             # 初始多视角资产包会有界补齐；耗尽后仍发布已落盘的正面主图。
-            from app.multiview import (
-                ensure_character_multiview_pack, character_multiview_enabled, pack_result_ok,
-            )
+            from app.multiview import character_multiview_enabled, ensure_character_multiview_pack, pack_result_ok
             if character_multiview_enabled():
+                rollback_before_long_wait(conn, "character_portrait:multiview_pack")
                 pack = await ensure_character_multiview_pack(
                     project_id=project_id,
                     portrait_id=portrait_id,
