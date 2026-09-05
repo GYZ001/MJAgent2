@@ -866,9 +866,8 @@ def _preflight_failure_is_retryable(exc: Exception) -> bool:
         return True
     if isinstance(exc, sqlite3.OperationalError):
         return True
-    if isinstance(exc, sqlite3.IntegrityError) and "shot_versions" in str(exc):
-        # uq_versions_active_video_shot：同一镜头已有占槽版本（旧 job 仍在跑/排队）。
-        # 槽位会随旧版本终态释放，这是时序问题不是内容问题，等一轮再入队。
+    from .job_state import is_active_slot_collision  # job_state 反向 import 本模块的 _row_value，不能模块级导入
+    if is_active_slot_collision(exc):  # 旧版本仍占槽是时序问题，等它释放
         return True
     return bool(getattr(exc, "retryable", False))
 
@@ -896,12 +895,11 @@ def _mark_video_preflight_failure(
     message = (str(exc) or exc.__class__.__name__)[:2000]
     failure_kind = getattr(exc, "failure_kind", None)
     retryable = _preflight_failure_is_retryable(exc)
+    from .job_state import preflight_retry_budget  # 同上：job_state 依赖本模块，只能延迟导入
     retry_count = int(row["retry_count"] or 0)
-    configured_limit = int(config.VIDEO_PREFLIGHT_MAX_RETRIES)
-    max_retries = min(int(row["max_retries"] or configured_limit), configured_limit)
+    max_retries, delay = preflight_retry_budget(exc, row["max_retries"], retry_count)
     if retryable and retry_count < max_retries:
         attempt = retry_count + 1
-        delay = float(config.VIDEO_PREFLIGHT_RETRY_BASE_DELAY) * (2 ** retry_count)
         reason = (
             f"视频输入校验遇到可重试的结构化故障，系统将在约 {int(delay)} 秒后"
             f"自动重试（{attempt}/{max_retries}）"

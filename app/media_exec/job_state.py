@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import json
+import re
+import sqlite3
 import time
 from typing import Any
 
@@ -161,6 +163,32 @@ def _video_model_rejection_guidance(
     return None
 
 
+# 预检撞 uq_versions_active_video_shot（旧版本仍占槽）时的等待预算：槽位随旧版本终态
+# 释放，通常几秒到几分钟（服务重启后"历史任务完成→隔离"的提交可能晚几分钟），
+# 默认 2 次×15 秒等不到（2026-09-05 我欲封天 4 镜因此转人工）。
+ACTIVE_SLOT_WAIT_MAX_RETRIES = 12
+ACTIVE_SLOT_WAIT_STEP_S = 30.0
+ACTIVE_SLOT_WAIT_CAP_S = 60.0
+
+
+def is_active_slot_collision(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.IntegrityError) and "shot_versions" in str(exc)
+
+
+def preflight_retry_budget(
+    exc: BaseException, job_max_retries: Any, retry_count: int,
+) -> tuple[int, float]:
+    """(本次故障的重试上限, 下一次的延迟秒数)。槽位冲突走独立的等待预算，不占
+    结构化故障那 2 次的名额；其它故障维持 VIDEO_PREFLIGHT_* 的指数退避。"""
+    if is_active_slot_collision(exc):
+        return ACTIVE_SLOT_WAIT_MAX_RETRIES, min(
+            ACTIVE_SLOT_WAIT_STEP_S * (retry_count + 1), ACTIVE_SLOT_WAIT_CAP_S,
+        )
+    configured = int(config.VIDEO_PREFLIGHT_MAX_RETRIES)
+    limit = min(int(job_max_retries or configured), configured)
+    return limit, float(config.VIDEO_PREFLIGHT_RETRY_BASE_DELAY) * (2 ** retry_count)
+
+
 PROVIDER_CONTENT_REJECTED_KIND = "provider_content_rejected"
 # 同一镜头、不同供应商任务、字节级相同的终态失败达到这个数才判定为真实拒绝。
 # 与 config.VIDEO_JOB_MAX_RETRIES=3 配合：第 1、2 次换新任务重试，第 3 次相同即停。
@@ -188,20 +216,31 @@ def _prior_shot_terminal_failure_records(conn, shot_id: str) -> list[tuple[str, 
     return out
 
 
+_REQUEST_ID_RE = re.compile(r"(request[ _-]?id|requestid|trace[ _-]?id|logid)\s*[:=：]?\s*[0-9a-zA-Z\-]+", re.I)
+
+
+def normalize_vendor_failure_text(message: str) -> str:
+    """去掉供应商失败原文里每次请求都不同的追踪标识（``Request id: 0217…``），只留
+    对内容的判语。这是结构归一化，不是按关键词猜分类：不去掉它，跨任务的同一句
+    拒绝永远比不相等（实测火山每条失败都带唯一 Request id）。"""
+    return " ".join(_REQUEST_ID_RE.sub("", message or "").split()).strip(" .。;；,，")
+
+
 def rejection_repeated_across_tasks(
     records: list[tuple[str, str]], *, min_tasks: int = CONTENT_REJECTION_MIN_TASKS,
 ) -> bool:
-    """纯结构判据：最近一次终态失败的原文，在同一镜头至少 ``min_tasks`` 个**不同**
-    供应商任务上逐字出现，判定为供应商对这段内容的确定性拒绝。
+    """纯结构判据：最近一次终态失败的原文（归一化后），在同一镜头至少 ``min_tasks``
+    个**不同**供应商任务上逐字出现，判定为供应商对这段内容的确定性拒绝。
     只看"独立任务 × 相同结果"这个结构，不看 message 里写了什么词——同一任务被
     反复轮询出的相同文本只算一个任务（``task_id`` 去重），说明不了任何事。
     """
     if not records:
         return False
     latest_task, latest_msg = records[-1]
-    if not latest_msg or not latest_task:
+    latest = normalize_vendor_failure_text(latest_msg)
+    if not latest or not latest_task:
         return False
-    tasks = {task for task, msg in records if task and msg == latest_msg}
+    tasks = {task for task, msg in records if task and normalize_vendor_failure_text(msg) == latest}
     return len(tasks) >= max(2, min_tasks)
 
 

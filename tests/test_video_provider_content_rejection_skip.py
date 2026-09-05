@@ -254,6 +254,15 @@ def test_active_slot_integrity_error_is_retryable_in_preflight():
     err = sqlite3.IntegrityError("UNIQUE constraint failed: shot_versions.shot_id")
     assert _preflight_failure_is_retryable(err) is True, "旧版本仍占槽是时序问题，等一轮再入队"
     assert _preflight_failure_is_retryable(sqlite3.IntegrityError("UNIQUE constraint failed: jobs.id")) is False
+    from app import config
+    from app.media_exec.job_state import ACTIVE_SLOT_WAIT_MAX_RETRIES, preflight_retry_budget
+    assert ACTIVE_SLOT_WAIT_MAX_RETRIES >= 10, "槽位可能被'历史任务完成→隔离'的提交占几分钟，2 次×15 秒等不到"
+    assert preflight_retry_budget(err, 3, 0) == (ACTIVE_SLOT_WAIT_MAX_RETRIES, 30.0)
+    assert preflight_retry_budget(err, 3, 5) == (ACTIVE_SLOT_WAIT_MAX_RETRIES, 60.0)
+    plain = ConnectionError("upstream")
+    limit, delay = preflight_retry_budget(plain, 3, 1)
+    assert limit == min(3, config.VIDEO_PREFLIGHT_MAX_RETRIES)
+    assert delay == config.VIDEO_PREFLIGHT_RETRY_BASE_DELAY * 2
 
 
 def test_latest_video_jobs_sees_in_flight_job_from_another_supervisor_run():
@@ -264,3 +273,16 @@ def test_latest_video_jobs_sees_in_flight_job_from_another_supervisor_run():
     active, rejected = _latest_video_jobs(conn, ["s1"], "run-current")
     assert active == {"s1": "j1"}, "上一轮遗留的在途 job 一样占着镜头槽位，本轮不得再派"
     assert rejected == set()
+
+
+def test_vendor_request_id_does_not_break_cross_task_comparison():
+    """火山每条失败原文都带唯一 Request id：不归一化，跨任务的同一句拒绝永远比不相等，
+    真实拒绝永远升不成终态（2026-09-05 第二轮：3 次换新任务后转人工而不是跳过）。"""
+    from app.media_exec.job_state import normalize_vendor_failure_text
+    a = "The request failed because the output video may contain sensitive information. Request id: 02178859995537500000000000000"
+    b = "The request failed because the output video may contain sensitive information. Request id: 02178860011223300000000000000"
+    c = "The request failed because the output video may contain sensitive information. Request id: 02178860099999900000000000000"
+    assert normalize_vendor_failure_text(a) == normalize_vendor_failure_text(b)
+    assert rejection_repeated_across_tasks([("t1", a), ("t2", b), ("t3", c)]) is True
+    other = "S3 upload failed with 500. Request id: 02178860011223300000000000000"
+    assert rejection_repeated_across_tasks([("t1", a), ("t2", other), ("t3", c)]) is False
