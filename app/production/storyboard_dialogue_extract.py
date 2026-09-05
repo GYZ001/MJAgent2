@@ -30,6 +30,7 @@ from __future__ import annotations
 import re
 
 from app import config, spoken_contract
+from app.production.storyboard_dialogue_attribution import attribute_prose_speaker
 from app.production.storyboard_dialogue_ledger import (
     _QUOTE_PATTERNS,
     DialogueQuote,
@@ -123,7 +124,7 @@ def _extract_script_segment(segment_text: str, speaker_names: set[str], *, max_c
     return results
 
 
-def _extract_prose_segment(segment_text: str, *, max_chars: int) -> list[_LineHit]:
+def _extract_prose_segment(segment_text: str, *, max_chars: int, names: set[str] = frozenset()) -> list[_LineHit]:
     """普通小说体段：逐字复用旧的引号正则 + _quote_parts，只是多算一份偏移。
 
     排序键沿用旧函数的 ``match.start()``（整个匹配含引号符号的起点），保证
@@ -139,8 +140,11 @@ def _extract_prose_segment(segment_text: str, *, max_chars: int) -> list[_LineHi
     matches.sort(key=lambda item: item[0])
     results: list[_LineHit] = []
     for _sort_key, begin, stripped in matches:
+        # 2026-09-05：说话人按引号前后的人物谱名字确定性归属（attribute_prose_speaker），
+        # 不再留空让第二阶段模型猜——内心独白绑错人的根因之一。
+        speaker = attribute_prose_speaker(segment_text, begin, begin + len(stripped), names) if names else ""
         for part, part_start, part_end in _quote_parts_with_offsets(stripped, begin, max_chars=max_chars):
-            results.append(("", "", part, part_start, part_end))
+            results.append((speaker, "", part, part_start, part_end))
     return results
 
 
@@ -169,7 +173,7 @@ def extract_dialogue_targets(
         if names and _segment_has_speaker_line(segment.text, names):
             hits = _extract_script_segment(segment.text, names, max_chars=max_chars)
         else:
-            hits = _extract_prose_segment(segment.text, max_chars=max_chars)
+            hits = _extract_prose_segment(segment.text, max_chars=max_chars, names=names)
         for speaker, note, text, start, end in hits:
             counter += 1
             quotes.append(DialogueQuote(

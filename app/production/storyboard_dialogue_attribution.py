@@ -1,0 +1,184 @@
+"""台词说话人的确定性归属 + 画外音的可追溯性 + 结尾段台词剥除（2026-09-05 两条成片根因）。
+
+根因复盘（B 库 7 天）：① 15 秒段里同句台词说两遍——提示词把台词写进「镜头N」又在结尾
+「全片贯穿」段里重抄一遍（「台词：…」「对话清晰可闻：…」「音频为 X 说出的…」「画外音（X）：…」），
+09-03 晚方言规则后归零，但代码里没有守卫；② 内心独白绑错说话人——小说体引号台词的台账
+``speaker`` 留空、必保台词不传说话人，第二阶段模型只能猜；方言又鼓励把叙述句改成某个角色的
+画外音（132 条画外音 35 条原文找不到，可定位的 97 条里 14 条说话人与引号旁的人名矛盾）。
+
+三条修法都是机械规则：
+- ``attribute_prose_speaker``：引号后 30 字内第一个人物谱正名/别名，其次引号前 40 字内最后一个；
+  只用人物谱名字与位置，不做动词名单。
+- ``strip_tail_dialogue``：结尾「全片贯穿」段里的引号台词（含其标签）直接剥掉并留痕。
+- ``dialogue_speaker_errors``：必保台词带说话人时第二阶段必须一致（改提示词要模型重写，报精确错误）；
+  画外音必须能追溯到本段原文句（逐字或二元组 ≥0.8），追溯不到报错；来自叙述句（原文不在引号里）的
+  画外音说话人一律「旁白」，不是就确定性改成旁白并改写提示词里对应的「画外音（X）」标签。
+"""
+from __future__ import annotations
+
+import logging
+import re
+from typing import Any
+
+from app import textmatch
+
+_LOGGER = logging.getLogger(__name__)
+NARRATOR = "旁白"
+_QUOTE_RE = re.compile(r"[「“『\"]([^」”』\"]{2,})[」”』\"]")
+_TAIL_MARKER = "全片贯穿"
+_TAG_RE = re.compile(r"\[段\d+·S\d+\]")
+_SENTENCE_SPLIT_RE = re.compile(r"[。！？!?…]+")
+POST_WINDOW = 30
+PRE_WINDOW = 40
+
+
+def _sorted_names(names: list[str] | set[str]) -> list[str]:
+    return sorted({n.strip() for n in names if n and n.strip()}, key=len, reverse=True)
+
+
+def attribute_prose_speaker(segment_text: str, quote_start: int, quote_end: int, names: list[str] | set[str]) -> str:
+    """小说体引号台词的说话人：引号后窗口里最先出现的人物谱名字，否则引号前窗口里最后出现的。
+    窗口在下一个/上一个引号处截断，避免把对手的归属抄过来；找不到返回空串（不猜）。"""
+    ordered = _sorted_names(names)
+    if not ordered:
+        return ""
+    after = segment_text[quote_end:quote_end + POST_WINDOW]
+    cut = _QUOTE_RE.search(after)
+    if cut:
+        after = after[:cut.start()]
+    best: tuple[int, str] | None = None
+    for name in ordered:
+        pos = after.find(name)
+        if pos >= 0 and (best is None or pos < best[0]):
+            best = (pos, name)
+    if best:
+        return best[1]
+    before = segment_text[max(0, quote_start - PRE_WINDOW):quote_start]
+    last_quote = max((m.end() for m in _QUOTE_RE.finditer(before)), default=0)
+    before = before[last_quote:]
+    latest: tuple[int, str] | None = None
+    for name in ordered:
+        pos = before.rfind(name)
+        if pos >= 0 and (latest is None or pos > latest[0]):
+            latest = (pos, name)
+    return latest[1] if latest else ""
+
+
+_TAIL_LINE_RE = re.compile(
+    r"(?:(?:台词|对白|对话[^：:；。\n]{0,12}|画外音（[^）]*）|旁白|音频为[^「“『\"\n]{0,20}说出的)\s*[：:]?\s*)?"
+    r"[「“『\"][^」”』\"]{2,}[」”』\"]"
+)
+
+
+def strip_tail_dialogue(prompt_text: str) -> tuple[str, list[str]]:
+    """把「全片贯穿」段里的引号台词（含「台词：」「画外音（X）：」等标签）剥掉；返回新文本与被剥的句子。"""
+    idx = prompt_text.rfind(_TAIL_MARKER)
+    if idx < 0:
+        return prompt_text, []
+    head, tail = prompt_text[:idx], prompt_text[idx:]
+    removed = [m.group(0) for m in _TAIL_LINE_RE.finditer(tail)]
+    if not removed:
+        return prompt_text, []
+    cleaned = _TAIL_LINE_RE.sub("", tail)
+    cleaned = re.sub(r"[；;、，]\s*(?=[；;。])", "", cleaned)
+    cleaned = re.sub(r"[：:]\s*(?=[；;。\n]|$)", "", cleaned)
+    cleaned = re.sub(r"(?:[；;]\s*){2,}", "；", cleaned)
+    return head + cleaned, removed
+
+
+def manifest_name_to_identity(payload: dict[str, Any]) -> dict[str, str]:
+    """人物谱正名/别名 → identity_id（阶段二 dialogue[].speaker_identity_id 的取值域）。"""
+    mapping: dict[str, str] = {}
+    for character in (payload.get("asset_manifest") or {}).get("characters") or []:
+        identity = str(character.get("identity_id") or "")
+        if not identity:
+            continue
+        for name in [character.get("display_name"), *(character.get("aliases") or [])]:
+            if name:
+                mapping.setdefault(str(name).strip(), identity)
+    return mapping
+
+
+def _source_sentences(source_text: str) -> list[str]:
+    plain = _TAG_RE.sub("", source_text or "")
+    return [s for s in (p.strip() for p in _SENTENCE_SPLIT_RE.split(plain)) if s]
+
+
+def _bigrams(text: str) -> set[str]:
+    return {text[i:i + 2] for i in range(len(text) - 1)}
+
+
+def _trace_to_source(line: str, source_text: str) -> tuple[bool, bool]:
+    """(能否追溯, 原文里是否在引号内)。逐字包含优先；否则与某个原文句二元组覆盖 ≥ KEY_LINE_PRESENT_RATIO。"""
+    needle = textmatch.condense(line)
+    if not needle:
+        return False, False
+    plain = _TAG_RE.sub("", source_text or "")
+    quoted = {textmatch.condense(m.group(1)) for m in _QUOTE_RE.finditer(plain)}
+    if any(needle in q or q in needle for q in quoted if q):
+        return True, True
+    if needle in textmatch.condense(plain):
+        return True, False
+    nb = _bigrams(needle)
+    for sentence in _source_sentences(plain):
+        sb = _bigrams(textmatch.condense(sentence))
+        if nb and sb and len(nb & sb) / len(nb) >= textmatch.KEY_LINE_PRESENT_RATIO:
+            return True, False
+    return False, False
+
+
+def _rewrite_offscreen_label(prompt_text: str, old_name: str, line: str) -> str:
+    """把「画外音（旧名）：『台词』」这一条标签改成旁白；找不到精确形态就不动提示词。"""
+    if not old_name:
+        return prompt_text
+    pattern = re.compile(
+        r"画外音（" + re.escape(old_name) + r"）(\s*[：:]\s*[「“『\"])" + re.escape(line[:6])
+    )
+    return pattern.sub("画外音（" + NARRATOR + "）\\1" + line[:6], prompt_text, count=1)
+
+
+def dialogue_speaker_errors(
+    draft: Any, required_dialogue: list[dict[str, Any]], name_to_identity: dict[str, str], segment_source_text: str,
+) -> list[str]:
+    """必保台词说话人一致性（报错）、画外音可追溯性（报错）、叙述句画外音改旁白（就地修补）。"""
+    errors: list[str] = []
+    identity_to_name = {v: k for k, v in name_to_identity.items()}
+    for item in required_dialogue:
+        expected = name_to_identity.get(str(item.get("speaker") or "").strip())
+        needle = textmatch.condense(str(item.get("text") or ""))
+        if not expected or not needle:
+            continue
+        for index, line in enumerate(draft.dialogue):
+            if needle not in textmatch.condense(line.line) and textmatch.condense(line.line) not in needle:
+                continue
+            if line.speaker_identity_id != expected and line.speaker_identity_id != NARRATOR:
+                errors.append(
+                    f"dialogue[{index}]『{line.line[:20]}』的说话人按原文归属应为「{item.get('speaker')}」"
+                    f"（identity_id={expected}），当前写成「{line.speaker_identity_id}」；请把 dialogue[] 与 "
+                    "prompt_text 里这句的说话人都改成原文归属的人"
+                )
+    if not segment_source_text:
+        return errors
+    for index, line in enumerate(draft.dialogue):
+        if line.delivery != "offscreen_voice":
+            continue
+        traceable, in_quotes = _trace_to_source(line.line, segment_source_text)
+        if not traceable:
+            errors.append(
+                f"dialogue[{index}] 画外音『{line.line[:24]}』在本段原文里找不到对应句子：只能用原文里的句子"
+                "作画外音，删除这一条或改成原文句"
+            )
+            continue
+        if not in_quotes and line.speaker_identity_id != NARRATOR:
+            old = identity_to_name.get(line.speaker_identity_id, line.speaker_identity_id)
+            draft.prompt_text = _rewrite_offscreen_label(draft.prompt_text, old, line.line)
+            _LOGGER.info("[STORYBOARD_SPEAKER_REPAIR] 画外音『%s』来自叙述句，说话人「%s」改为旁白", line.line[:20], old)
+            line.speaker_identity_id = NARRATOR
+    return errors
+
+
+def repair_draft_tail(draft: Any) -> None:
+    """就地剥掉 draft.prompt_text 结尾段里重抄的台词并留痕（第二阶段校验前调用）。"""
+    draft.prompt_text, removed = strip_tail_dialogue(draft.prompt_text)
+    if removed:
+        _LOGGER.info("[STORYBOARD_PROMPT_TAIL_REPAIR] 剥掉结尾段台词 %s", removed)

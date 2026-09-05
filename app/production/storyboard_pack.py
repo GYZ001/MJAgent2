@@ -75,6 +75,8 @@ from app.production.storyboard_continuity_memo import (
     continuity_memo_payload,
 )
 from app.production.storyboard_dialogue_extract import extract_dialogue_targets
+from app.production.storyboard_dialogue_attribution import (dialogue_speaker_errors, manifest_name_to_identity,
+                                                             repair_draft_tail)
 from app.production.storyboard_dialogue_ledger import (
     dialogue_ledger_summary,
     required_dialogue_for_segments,
@@ -777,6 +779,7 @@ def _validate_segment_draft(
     current_segment_no: int,
     previous_memo: _AiContinuityMemo | None = None,
     segment_source_text: str = "",
+    name_to_identity: dict[str, str] | None = None,
 ) -> list[str]:
     """Blocking checks -- the only things that can make
     ``model_gateway.chat_structured`` retry or fail this segment.
@@ -806,6 +809,7 @@ def _validate_segment_draft(
     了"。
     """
     errors: list[str] = []
+    repair_draft_tail(draft)  # 结尾「全片贯穿」段重抄的台词会让模型说两遍，先剥掉
     if not draft.prompt_text.strip():
         errors.append("prompt_text 为空")
     elif len(draft.prompt_text) > config.PROMPT_CHAR_LIMIT:
@@ -822,6 +826,7 @@ def _validate_segment_draft(
         required_dialogue, [line.line for line in draft.dialogue],
     ))
     errors.extend(continuity_memo_errors(draft.continuity_memo, previous_memo, segment_source_text))
+    errors.extend(dialogue_speaker_errors(draft, required_dialogue, name_to_identity or {}, segment_source_text))
     errors.extend(repaired_repeated_delivery_errors(
         draft, delivered_lines, current_segment_no=current_segment_no, reserved=reserved_lines,
     ))
@@ -834,17 +839,10 @@ def _speaker_absent_advisory(
     """delivery 感知的说话人在场提示文案：画外音不要求在场，改说「未列入」。"""
     if line.speaker_identity_id in segment_character_ids:
         return None
+    head = f"[STORYBOARD_PACK_DIALOGUE_SPEAKER_ABSENT][未拦截] dialogue[{index}] "
     if line.delivery == "offscreen_voice":
-        return (
-            f"[STORYBOARD_PACK_DIALOGUE_SPEAKER_ABSENT][未拦截] dialogue[{index}] "
-            f"是画外音，说话人「{line.speaker_identity_id}」未列入本段 "
-            "resources.characters（画外发声也需要注明归属角色）"
-        )
-    return (
-        f"[STORYBOARD_PACK_DIALOGUE_SPEAKER_ABSENT][未拦截] dialogue[{index}] "
-        f"的说话人「{line.speaker_identity_id}」不在本段 resources.characters 内，"
-        "没有在场证据"
-    )
+        return head + f"是画外音，说话人「{line.speaker_identity_id}」未列入本段 resources.characters（画外发声也需要注明归属角色）"
+    return head + f"的说话人「{line.speaker_identity_id}」不在本段 resources.characters 内，没有在场证据"
 
 
 def _segment_content_advisories(
@@ -984,7 +982,6 @@ def _camera_digest_window_payload(
 # 2.2.0/2.3.0 起搬到 app.production.storyboard_narrative_arc（纯函数、不依赖
 # 本文件任何私有对象，为新增的结构层改造腾行数——见该模块 docstring）；本文件
 # 通过上方 import 继续用同一个名字调用它们，行为不变。
-
 
 
 async def _generate_all_segment_prompts(
@@ -1139,8 +1136,8 @@ async def _generate_all_segment_prompts(
             model_type=_AiStoryboardSegmentDraft,
             validate=lambda value, _req=required_dialogue, _pm=previous_memo,
             _st=source_payload["source_text_by_segment"], _dl=list(delivered_lines), _rv=reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no),
-            _no=plan.segment_no: _validate_segment_draft(
-                value, dialect_render_format=profile.render_format, required_dialogue=_req,
+            _no=plan.segment_no, _n2i=manifest_name_to_identity(payload): _validate_segment_draft(
+                value, dialect_render_format=profile.render_format, required_dialogue=_req, name_to_identity=_n2i,
                 previous_memo=_pm, segment_source_text=_st, delivered_lines=_dl, reserved_lines=_rv, current_segment_no=_no,
             ),
             operation_id=f"storyboard_pack_segment_{episode_id}_{plan.segment_no}_{fingerprint}",

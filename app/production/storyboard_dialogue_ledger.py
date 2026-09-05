@@ -359,6 +359,7 @@ def required_dialogue_for_segments(
             "quote_id": quote.quote_id,
             "text": quote.text,
             "source_segment_index": quote.source_segment_index,
+            **({"speaker": quote.speaker} if quote.speaker else {}),
         })
     return result
 
