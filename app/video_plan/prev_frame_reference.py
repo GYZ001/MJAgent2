@@ -147,10 +147,12 @@ def planned_previous_shot_id(conn: Any, shot_id: str) -> str | None:
     plan = get_shot_plan(shot_id, conn=conn)
     if plan is None or not plan.depends_on_shot_id:
         return None
+    plan_id = str(getattr(plan, "episode_video_plan_id", "") or "")
+    if conn is None or not plan_id:
+        return str(plan.depends_on_shot_id)
     from app.video_plan.rejected_rebase import effective_dependency
 
     # 依赖行可能已改挂到被拒镜头的上游或已放弃（rejected_rebase）；计划行不可变，只作回退。
     return effective_dependency(
-        conn, episode_video_plan_id=str(plan.episode_video_plan_id), shot_id=shot_id,
-        planned_dependency=str(plan.depends_on_shot_id),
+        conn, episode_video_plan_id=plan_id, shot_id=shot_id, planned_dependency=str(plan.depends_on_shot_id),
     )

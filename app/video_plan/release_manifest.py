@@ -223,6 +223,33 @@ def current_storyboard_release_manifest(
     }
 
 
+def shot_id_aliases(shot_rows: list[Any]) -> tuple[dict[str, str], dict[int, str]]:
+    """合法 shot_id 的来源：库 id、shot_uid、已发布契约里的 shot_id；另按 shot_no 建一份索引。
+
+    模型抄写 id 会走样（第 20 集：``shot_38e5d84cf03c`` 被写成 ``shot_38e5d84cf0307``，整集
+    UNKNOWN_SHOT_ID + SHOT_COVERAGE_INCOMPLETE 直接收口）。shot_no 是分镜台发布的、本集内唯一的
+    权威序号，与 id 同源；id 对不上时按 shot_no 落到唯一那一镜，不是猜测——两者都对不上才拒。
+    """
+    aliases: dict[str, str] = {}
+    by_shot_no: dict[int, str] = {}
+    for row in shot_rows:
+        db_id = str(row["id"])
+        aliases[db_id] = db_id
+        by_shot_no[int(row["shot_no"])] = db_id
+        for key in ("shot_uid",):
+            value = str(_row_value(row, key, "") or "").strip()
+            if value:
+                aliases[value] = db_id
+        try:
+            contract = json.loads(_row_value(row, "shot_contract_json", "") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            contract = {}
+        published_id = str(contract.get("shot_id") or "").strip()
+        if published_id:
+            aliases[published_id] = db_id
+    return aliases, by_shot_no
+
+
 def bind_plan_release_identity(
     plan: EpisodeVideoGenerationPlan,
     shot_rows: list[Any],
@@ -238,22 +265,10 @@ def bind_plan_release_identity(
     ]
     plan.release_qualification_hash = manifest["release_qualification_hash"]
     by_id = {str(row["id"]): row for row in shot_rows}
-    aliases: dict[str, str] = {}
-    for row in shot_rows:
-        database_id = str(row["id"])
-        aliases[database_id] = database_id
-        shot_uid = str(_row_value(row, "shot_uid", "") or "").strip()
-        if shot_uid:
-            aliases[shot_uid] = database_id
-        try:
-            contract = json.loads(_row_value(row, "shot_contract_json", "") or "{}")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            contract = {}
-        published_id = str(contract.get("shot_id") or "").strip()
-        if published_id:
-            aliases[published_id] = database_id
+    aliases, by_shot_no = shot_id_aliases(shot_rows)
     for item in plan.shots:
-        row = by_id.get(aliases.get(str(item.shot_id), str(item.shot_id)))
+        resolved = aliases.get(str(item.shot_id)) or by_shot_no.get(int(item.shot_no or 0))
+        row = by_id.get(resolved or "")
         if row is not None:
             item.input_revision_fingerprints["shot_contract"] = (
                 canonical_shot_contract_fingerprint(row)

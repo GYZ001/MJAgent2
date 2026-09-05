@@ -9,7 +9,6 @@ baseline entry for this file in ``app/FILE_CONVENTIONS.toml``).
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from .models import (
@@ -21,7 +20,7 @@ from .models import (
 )
 from .prev_frame_reference import prev_frame_reference_enabled
 from .primitives import VideoPlanValidationError, _row_value
-from .release_manifest import canonical_shot_contract_fingerprint
+from .release_manifest import canonical_shot_contract_fingerprint, shot_id_aliases
 from .capability_snapshot import capability_allows
 
 
@@ -73,26 +72,15 @@ def validate_episode_plan(
                 "stored": projected_duration_s,
                 "current": authoritative_duration_s,
             })
-    aliases: dict[str, str] = {}
-    for row in shot_rows:
-        db_id = str(row["id"])
-        aliases[db_id] = db_id
-        for key in ("shot_uid",):
-            value = str(_row_value(row, key, "") or "").strip()
-            if value:
-                aliases[value] = db_id
-        try:
-            contract = json.loads(_row_value(row, "shot_contract_json", "") or "{}")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            contract = {}
-        published_id = str(contract.get("shot_id") or "").strip()
-        if published_id:
-            aliases[published_id] = db_id
+    aliases, by_shot_no = shot_id_aliases(shot_rows)
 
     normalized: list[ShotVideoGenerationPlan] = []
     seen: set[str] = set()
     for item in plan.shots:
-        resolved = aliases.get(item.shot_id) or aliases.get(item.published_shot_id)
+        resolved = (
+            aliases.get(item.shot_id) or aliases.get(item.published_shot_id)
+            or by_shot_no.get(int(item.shot_no or 0))
+        )
         if not resolved or resolved not in by_id:
             issues.append({
                 "code": "UNKNOWN_SHOT_ID",
