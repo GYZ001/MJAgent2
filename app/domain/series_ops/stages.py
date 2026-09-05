@@ -298,13 +298,39 @@ async def _kick_video_completion(episode_id: str, run_id: str) -> None:
             raise
 
 
+# 补齐运行因「流程自己造成的授权失效」收口：分镜重做/重规划让旧授权失效、或重启后旧计划在
+# 新开关下不再合法（2026-09-05 第 18 集：上一段取帧关闭后旧计划失效→重规划→新授权撞上旧计划
+# 变更，两秒内连收 RELEASE_QUALIFICATION_INVALID 与 UPSTREAM_VERSION_CHANGED）。这类不是本集
+# 内容的问题，连播台按当前发布版分镜再发起一次即可，最多再试两次；其它失败原样报出。
+_AUTHORIZATION_LOST_CODES = frozenset({
+    "UPSTREAM_VERSION_CHANGED", "RELEASE_QUALIFICATION_CHANGED", "RELEASE_QUALIFICATION_INVALID",
+})
+_AUTHORIZATION_LOST_RETRIES = 2
+
+
+def _last_video_run_failure(conn, episode_id: str) -> str:
+    row = conn.execute(
+        """SELECT failure_message FROM workflow_runs
+            WHERE scope_id=? AND workflow_type='episode_video_completion'
+            ORDER BY started_at DESC, updated_at DESC LIMIT 1""",
+        (episode_id,),
+    ).fetchone()
+    return str((row["failure_message"] if row else "") or "").split("：", 1)[0].split(":", 1)[0].strip()
+
+
 async def _run_video(episode_id: str, run_id: str) -> None:
-    if not task_registry.active("video_completion", episode_id):
-        await _kick_video_completion(episode_id, run_id)
-    while task_registry.active("video_completion", episode_id):
-        await asyncio.sleep(8)
-    if not video_complete(get_conn(), episode_id):
-        raise RuntimeError(f"生成台未能补齐全部镜头{_stalled_video_reason(episode_id)}")
+    for attempt in range(_AUTHORIZATION_LOST_RETRIES + 1):
+        if not task_registry.active("video_completion", episode_id):
+            await _kick_video_completion(episode_id, run_id)
+        while task_registry.active("video_completion", episode_id):
+            await asyncio.sleep(8)
+        if video_complete(get_conn(), episode_id):
+            return
+        if _last_video_run_failure(get_conn(), episode_id) not in _AUTHORIZATION_LOST_CODES:
+            break
+        if attempt < _AUTHORIZATION_LOST_RETRIES:
+            await asyncio.sleep(5)  # 让上一次运行的收口写完，再按当前分镜重新发起
+    raise RuntimeError(f"生成台未能补齐全部镜头{_stalled_video_reason(episode_id)}")
 
 
 # ----------------------------------------------------------------------- final
