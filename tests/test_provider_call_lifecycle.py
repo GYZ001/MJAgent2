@@ -2455,8 +2455,6 @@ def test_video_poll_malformed_response_is_typed_technical_failure(monkeypatch) -
     [
         pytest.param(
             {"message": "provider worker exited"},
-            # 2026-09-05 契约：供应商没给结构化 failure 时默认可重试（换新任务，修复路由封顶），
-            # 不再首次失败就转人工——S3 上传 500 这类基础设施故障曾因此整集卡成待人工。
             {
                 "category": "technical",
                 "kind": "provider_execution_failed",
