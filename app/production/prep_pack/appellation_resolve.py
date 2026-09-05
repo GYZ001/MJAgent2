@@ -30,6 +30,8 @@ asset_manifest.characters/appellation_map 全空，即使人物谱里"里奥"已
 """
 from __future__ import annotations
 
+import re
+
 from app.evidence import repository as evidence_repository
 from app.harness import model_gateway
 from app.identity_authority import visual_entity_id_for_resolution
@@ -219,6 +221,31 @@ def _verified_verdicts(
     return verified
 
 
+_NAMING_CLAUSE = r"(?:他|她|此人|其人|那人|这人)?\s*(?:叫|名叫|名为|便是|正是|就是|乃是|唤作|唤做)\s*"
+
+
+def _alias_contradicted_by_naming(
+    verdict: _AppellationVerdict, candidates: set[str], texts_by_index: dict[int, str],
+) -> bool:
+    """「少年叹了口气，他叫孟浩」：原文在同一句里把这个称谓点名给了另一位候选，称谓就不能
+    登记成 ``verdict.identity`` 的别名——别名一旦进人物谱，分镜台的台词账本会按别名表把整段
+    戏判给错的人（我欲封天第 1 集：「少年」被登记为王有材别名，孟浩落榜独白全判给王有材，
+    模型连原文「我孟浩」都改写成「我王有材」）。年龄/身份称谓在一章里常指不止一人，模型只
+    按半山腰那处证据给了结论；这里用它申报的段落原文做结构复核。单字代词（他/她/我/你）
+    天然逐段易主，不做此判定。"""
+    label = verdict.raw_label
+    if len(label) < 2:
+        return False
+    others = [name for name in candidates if name != verdict.identity]
+    for index in verdict.segment_indexes:
+        text = texts_by_index.get(index) or ""
+        for hit in re.finditer(re.escape(label), text):
+            sentence = re.split(r"[。！？\n]", text[hit.end():], maxsplit=1)[0]
+            if any(re.search(_NAMING_CLAUSE + re.escape(other), sentence) for other in others):
+                return True
+    return False
+
+
 async def resolve_narration_appellations(
     conn, project_id: str, episode_id: str, episode_no: int, source_text: str,
     bible: Any, segments: list[Any], characters: dict[str, Any],
@@ -237,6 +264,7 @@ async def resolve_narration_appellations(
     for chunk in _chunk_segments(segments):
         dossier = [{"segment_index": index, "text": segment.text} for index, segment in chunk]
         valid_segment_indexes = {index for index, _ in chunk}
+        texts_by_index = {index: segment.text for index, segment in chunk}
         response = await _appellation_resolution_call(
             dossier=dossier, candidates=candidate_names,
             episode_id=episode_id, project_id=project_id,
@@ -246,6 +274,8 @@ async def resolve_narration_appellations(
             valid_segment_indexes=valid_segment_indexes,
         ):
             if verdict.identity in candidates_set:
+                if _alias_contradicted_by_naming(verdict, candidates_set, texts_by_index):
+                    continue  # 原文点名给了别人，不能把这个称谓登记成 identity 的别名
                 _apply_named_verdict(
                     verdict, conn=conn, project_id=project_id, episode_no=episode_no,
                     characters=characters, character_appellation_rows=character_appellation_rows,

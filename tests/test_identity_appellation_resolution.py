@@ -437,3 +437,40 @@ def test_resolve_persisted_character_ids_leaves_unmatched_alone_not_guessed():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_appellation_named_to_someone_else_in_source_is_not_registered_as_alias(monkeypatch):
+    """我欲封天第 1 集：模型按半山腰「也是一个少年」把「少年」归给王有材，但同一集原文
+    「“又落榜了……”少年叹了口气，他叫孟浩」把这个称谓点名给了孟浩。登记成王有材别名后，
+    分镜台台词账本会把孟浩落榜独白整段判给王有材。原文点名句是结构复核，不看关键词。"""
+    import asyncio
+
+    conn = _make_conn()
+    bible = _bible("孟浩", "王有材")
+    source = (
+        "少年有些瘦弱，手中拿着一个葫芦。\n“又落榜了……”少年叹了口气，他叫孟浩，是这大青山下云杰县一个普通书生。\n\n"
+        "“你……可是孟浩，救命。”从半山腰探出身子的也是一个少年，他一眼就看到了孟浩。\n“王有材？”孟浩睁大了眼。"
+    )
+
+    async def fake_call(*, dossier, candidates, episode_id, project_id):
+        seg = next(i["segment_index"] for i in dossier if "也是一个少年" in i["text"])
+        first = next(i["segment_index"] for i in dossier if "他叫孟浩" in i["text"])
+        return ar._AppellationResolutionResponse(appellations=[ar._AppellationVerdict(
+            raw_label="少年", identity="王有材",
+            evidence="从半山腰探出身子的也是一个少年", segment_indexes=sorted({first, seg}),
+        )])
+
+    monkeypatch.setattr(ar, "_appellation_resolution_call", fake_call)
+    from app.source_excerpt import index_source_segments
+    segments = index_source_segments(source)
+    characters: dict = {}
+    functional_extras: dict = {}
+    rows: list = []
+    asyncio.run(ar.resolve_narration_appellations(
+        conn, project_id="p1", episode_id="ep1", episode_no=1,
+        source_text=source, bible=bible, segments=segments,
+        characters=characters, functional_extras=functional_extras, character_appellation_rows=rows,
+    ))
+    aliases = {k: v.get("aliases") for k, v in characters.items()}
+    assert "少年" not in (aliases.get("bible:王有材") or []), aliases
+    assert not functional_extras, "被否决的别名不该变成一个无名角色卡"

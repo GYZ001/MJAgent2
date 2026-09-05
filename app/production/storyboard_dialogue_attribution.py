@@ -41,7 +41,7 @@ def _sorted_names(names: list[str] | set[str]) -> list[str]:
 #: 『……觉得虎爷声音大？』孟浩翻了个白眼——按最近名字归给孟浩，实际是虎爷在说）。
 _UTTERANCE_VERB_RE = (
     r"(?:说|道|问|喊|叫|笑|哼|骂|吼|叹|答|应|念|呼|嚷|喃|想|心|暗|沉声|冷声|轻声|低声|大声|淡淡|开口"
-    r"|沉吟|嘀咕|自语|呢喃|咕哝|嘟囔|思忖|疑惑|惊|摇头|摇了摇头|点头|点了点头|皱眉|皱了皱眉|眯|瞪|冷冷|怒|急)"
+    r"|沉吟|嘀咕|自语|嘲|喝|呢喃|咕哝|嘟囔|思忖|疑惑|惊|摇头|摇了摇头|点头|点了点头|皱眉|皱了皱眉|眯|瞪|冷冷|怒|急)"
 )
 
 
@@ -68,7 +68,7 @@ def attribute_prose_speaker(segment_text: str, quote_start: int, quote_end: int,
         if others:
             rest = rest[:min(others)]
         if re.search(_UTTERANCE_VERB_RE, rest):
-            return name
+            return _explicitly_named(after[m.end():], ordered, name) or name
     before = segment_text[max(0, quote_start - PRE_WINDOW):quote_start]
     last_quote = max((m.end() for m in _QUOTE_RE.finditer(before)), default=0)
     before = before[last_quote:]
@@ -79,6 +79,21 @@ def attribute_prose_speaker(segment_text: str, quote_start: int, quote_end: int,
             return name
     return ""
 
+
+
+_NAMING_CLAUSE = r"(?:他|她|此人|其人|那人|这人)?\s*(?:叫|名叫|名为|便是|正是|就是|乃是|唤作|唤做)\s*"
+
+
+def _explicitly_named(rest: str, ordered: list[str], token: str) -> str:
+    """「少年叹了口气，他叫孟浩」：说话人按称谓匹配到「少年」，但同一句里原文紧接着点了名——
+    以点名为准。称谓（少年/女子/老者）在一章里常指不止一个人，映射台把它登记成谁的别名都可能
+    在另一处出错（我欲封天第 1 集：「少年」被登记为王有材别名，整段孟浩的戏被判给王有材）；
+    而「他叫 X」这种点名句是原文给出的直接依据，比别名表更强。只在同一句（到句号/换行为止）内找。"""
+    sentence = re.split(r"[。！？\n]", rest, maxsplit=1)[0]
+    for other in ordered:
+        if other != token and re.search(_NAMING_CLAUSE + re.escape(other), sentence):
+            return other
+    return ""
 
 
 _TAIL_LINE_RE = re.compile(

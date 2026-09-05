@@ -130,3 +130,21 @@ def test_quoted_source_offscreen_line_keeps_character_speaker():
     line = _Line("bible:孟浩", "早晚有一日，我定要手刃此人！", "offscreen_voice")
     assert dialogue_speaker_errors(_draft([line]), [], manifest_name_to_identity(PAYLOAD), src) == []
     assert line.speaker_identity_id == "bible:孟浩"
+
+
+def test_explicit_naming_in_same_sentence_overrides_appellation_match():
+    """「少年叹了口气，他叫孟浩」：称谓匹配到「少年」（映射台曾把它登记成王有材别名），
+    但同一句原文点了名——以点名为准，孟浩落榜独白不能判给王有材。"""
+    names = ["孟浩", "王有材", "少年"]
+    text = "神色中多了一抹茫然。\n“又落榜了……”少年叹了口气，他叫孟浩，是这大青山下云杰县一个普通书生"
+    start = text.index("又落榜"); end = text.index("……”") + 2
+    assert attribute_prose_speaker(text, start, end, names) == "孟浩"
+    plain = "夜里。\n“走吧。”少年道，转身离开，孟浩跟在后面"
+    start = plain.index("走吧"); end = plain.index("。”") + 1
+    assert attribute_prose_speaker(plain, start, end, names) == "少年", "没有点名句时仍按称谓本身"
+
+
+def test_self_mocking_is_utterance_evidence():
+    text = "已贫贫如洗。\n“莫非科举真的不是我孟浩未来的路？”孟浩自嘲，低头看了一眼手中的葫芦"
+    start = text.index("莫非"); end = text.index("？”") + 1
+    assert attribute_prose_speaker(text, start, end, ["孟浩", "王有材"]) == "孟浩"
