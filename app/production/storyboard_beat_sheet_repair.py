@@ -192,3 +192,50 @@ def complete_missing_quote_decisions(draft: Any, quotes: list[Any]) -> list[str]
         draft.dropped_lines.append(_AiDroppedLine(quote_id=quote.quote_id, reason="模型未决定去留，由后端按可弃置规则补齐"))
         notes.append(f"{quote.quote_id}「{quote.text[:16]}」模型未决定去留，先补进 dropped_lines 再按规则复核")
     return notes
+
+
+def append_segments_for_uncovered_sources(
+    draft: Any, quotes: list[Any], source_segments: list[Any], paratext_indexes: set[int],
+) -> list[str]:
+    """模型把整个原文段漏排（segments 只覆盖 [1, 2]，原文段 3、4 的必保台词没有任何段覆盖）时，
+    按原文顺序补一段：source_segment_indexes=[N]、单元范围覆盖整段（容量归一化会再按 15 秒拆），
+    beat_ids 取节拍表里指向该原文段的节拍，色温沿用前一段（同场戏色温一致的既有规则）。
+    synopsis 只写「按原文补齐」的事实，不编内容——阶段二读的是该段原文，不是这句概括。
+    只对"有必保台词却无段覆盖"的原文段动手（判据从数据来），paratext 段不补。
+    2026-09-05 第 2 集：三次重试模型都没补段，整集失败。"""
+    from app.production.storyboard_beat_sheet import _AiSegmentPlan
+    from app.production.storyboard_segment_ranges import _AiSourceUnitRange, split_source_units
+    by_id = {q.quote_id: q for q in quotes}
+    covered = {i for p in draft.segments for i in p.source_segment_indexes}
+    needed = sorted({
+        by_id[k.quote_id].source_segment_index for k in draft.kept_lines
+        if k.quote_id in by_id and by_id[k.quote_id].source_segment_index not in covered
+        and by_id[k.quote_id].source_segment_index not in paratext_indexes
+    })
+    notes: list[str] = []
+    for index in needed:
+        if not (1 <= index <= len(source_segments)):
+            continue
+        units = len(split_source_units(source_segments[index - 1].text))
+        if units < 1:
+            continue
+        after = max([i for i, p in enumerate(draft.segments) if any(x < index for x in p.source_segment_indexes)], default=-1)
+        prev = draft.segments[after] if after >= 0 else None
+        new_plan = _AiSegmentPlan(
+            segment_no=0, synopsis=f"原文段 {index}（模型未排入，按原文补齐）",
+            source_segment_indexes=[index],
+            beat_ids=[b.beat_id for b in draft.beat_sheet if index in b.segment_indexes],
+            palette=prev.palette if prev is not None else "",
+            source_unit_ranges=[_AiSourceUnitRange(source_segment_index=index, from_unit=1, to_unit=units)],
+        )
+        draft.segments.insert(after + 1, new_plan)
+        notes.append(f"原文段 {index} 没有任何段覆盖，已在第 {after + 2} 位补一段（{units} 个单元）")
+    if notes:
+        old_to_new = {}
+        for pos, plan in enumerate(draft.segments, start=1):
+            if plan.segment_no:
+                old_to_new[plan.segment_no] = pos
+            plan.segment_no = pos
+        for item in draft.kept_lines:
+            item.segment_no = old_to_new.get(item.segment_no, item.segment_no)
+    return notes

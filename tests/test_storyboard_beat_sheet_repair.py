@@ -129,3 +129,24 @@ def test_beat_and_segment_key_confusion_is_normalized_before_validation():
     assert draft.beat_sheet[1].summary == "孟浩安慰小胖子" and draft.beat_sheet[1].segment_indexes == [3]
     assert draft.segments[1].synopsis == "孟浩安慰小胖子" and draft.segments[1].source_segment_indexes == [3]
     assert draft.beat_sheet[0].summary == "开篇", "本来就对的字段不动"
+
+
+def test_uncovered_source_segment_with_required_lines_gets_a_synthesized_segment():
+    """第 2 集真实形态：segments 只覆盖前两个原文段，原文段 4 的必保台词没有任何段覆盖。"""
+    from app.production.storyboard_beat_sheet_repair import append_segments_for_uncovered_sources
+    from app.production.storyboard_dialogue_ledger import DialogueQuote, _AiKeptLine
+    from app.production.storyboard_segment_ranges import reassign_kept_lines_to_covering_segments
+
+    draft = _draft([_plan(1, [(1, 1)], index=3)])
+    draft.kept_lines = [_AiKeptLine(quote_id="Q14", segment_no=1)]
+    quotes = [DialogueQuote(quote_id="Q14", source_segment_index=4, text="猫忽然跳上了桌子", content_chars=17, speaker="小胖子")]
+    notes = append_segments_for_uncovered_sources(draft, quotes, _scene_4_segments(), set())
+    assert len(notes) == 1
+    assert [s.segment_no for s in draft.segments] == [1, 2]
+    added = draft.segments[1]
+    assert added.source_segment_indexes == [4] and added.beat_ids == ["b1"] and added.palette == "暖黄"
+    assert (added.source_unit_ranges[0].from_unit, added.source_unit_ranges[0].to_unit) == (1, 12)
+    assert segment_unit_range_errors(draft.segments, _scene_4_segments(), set()) == []
+    reassign_kept_lines_to_covering_segments(draft.kept_lines, quotes, draft.segments, _scene_4_segments())
+    assert draft.kept_lines[0].segment_no == 2, "补段后台词按单元归位到新段"
+    assert append_segments_for_uncovered_sources(draft, quotes, _scene_4_segments(), set()) == [], "已覆盖不再补"
