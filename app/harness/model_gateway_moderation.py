@@ -60,3 +60,11 @@ async def attempt_moderation_fallback(
         )
     except hiagent.ProviderError:
         return None
+
+
+def replay_safe_stream_interruption(exc: object) -> bool:
+    """流式响应在 [DONE] 前中断（delivery_state=unknown）对**文本对话**调用可以安全重放：
+    对话调用没有供应商侧任务或状态，重放最多多花一次免费调用；``requires_explicit_retry``
+    的 fail-closed 语义是为视频 create 这类有供应商侧副作用的调用立的。2026-09-05 我欲封天
+    第三轮：新角色评估被中断即丢弃且不重试，人物谱因此缺了王有材、整轮样本作废。"""
+    return getattr(exc, "failure_kind", "") == "stream_interrupted"

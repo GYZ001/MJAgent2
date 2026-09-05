@@ -578,13 +578,13 @@ def test_current_functional_source_label_ep7_regression_rejects_separator_not_le
     # 17 字远小于新的防御性上限 64；如果修复后仍被拒绝，必须是因为分隔符。
     assert len(ep7_label) <= portraits.IDENTITY_SOURCE_LABEL_DEFENSIVE_MAX_LENGTH
 
-    with pytest.raises(ValidationError, match="分隔符"):
-        portraits.CurrentFunctionalIdentityDecision(
-            evidence_ref="E013",
-            source_label=ep7_label,
-            functional_identity_key="F1",
-            kind="onscreen",
-        )
+    normalized = portraits.CurrentFunctionalIdentityDecision(
+        evidence_ref="E013",
+        source_label=ep7_label,
+        functional_identity_key="F1",
+        kind="onscreen",
+    )
+    assert "，" not in normalized.source_label, "全角逗号必须被确定性剥掉，不再整条拒绝"
 
     # 证明约束维度真的换了：去掉那个全角逗号后，字符串仍然比旧的 16 字上限长，
     # 但不再含分隔符，必须放行。
@@ -630,13 +630,13 @@ def test_current_functional_source_label_accepts_long_label_without_separators()
 def test_current_functional_source_label_rejects_every_list_separator(
     separator: str,
 ) -> None:
-    with pytest.raises(ValidationError, match="分隔符"):
-        portraits.CurrentFunctionalIdentityDecision(
-            evidence_ref="E013",
-            source_label=f"甲{separator}乙",
-            functional_identity_key="F1",
-            kind="onscreen",
-        )
+    accepted = portraits.CurrentFunctionalIdentityDecision(
+        evidence_ref="E013",
+        source_label=f"甲{separator}乙",
+        functional_identity_key="F1",
+        kind="onscreen",
+    )
+    assert accepted.source_label == "甲乙"
 
 
 def test_current_functional_source_label_defensive_cap_still_applies() -> None:

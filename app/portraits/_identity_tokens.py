@@ -14,6 +14,12 @@ _IDENTITY_LIST_SEPARATOR_PATTERN = re.compile(
 )
 
 
+def _strip_identity_list_separators(value: str) -> str:
+    """去掉身份列表分隔符与空白（「周、尹二人」→「周尹二人」），供 functional source_label
+    的确定性归一化用；与 ``_identity_source_label_has_list_separator`` 用同一张字符表。"""
+    return _IDENTITY_LIST_SEPARATOR_PATTERN.sub("", str(value or ""))
+
+
 def _identity_source_label_has_list_separator(value: str) -> bool:
     """True if ``value`` contains a char the identity-list grammar splits on.
 

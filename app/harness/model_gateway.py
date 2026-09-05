@@ -11,7 +11,7 @@ from pydantic import BaseModel, ValidationError
 from app import config, hiagent
 from app.db import get_conn, now
 from app.evidence import repository
-from app.harness.model_gateway_moderation import attempt_moderation_fallback
+from app.harness.model_gateway_moderation import attempt_moderation_fallback, replay_safe_stream_interruption
 from app.observability.tracing import current_trace
 from app.orchestration.state_machine import transition_run
 
@@ -550,7 +550,7 @@ async def chat(
                     return fallback_result
             if (
                 not exc.retryable
-                or not exc.replay_safe
+                or not (exc.replay_safe or replay_safe_stream_interruption(exc))
                 or failure_no >= max_retries
             ):
                 raise

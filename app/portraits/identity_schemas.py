@@ -9,7 +9,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ._identity_tokens import _identity_source_label_has_list_separator
+from ._identity_tokens import (
+    _identity_source_label_has_list_separator,
+    _strip_identity_list_separators,
+)
 from .constants import (
     IDENTITY_NAME_FORMS,
     IDENTITY_SOURCE_LABEL_DEFENSIVE_MAX_LENGTH,
@@ -86,6 +89,18 @@ class CurrentFunctionalIdentityDecision(BaseModel):
     # 上限，拦的是整段抄录级失控值，不是语义约束——真实限定语（"县城木匠
     # 铺王伯，王有材的父亲"）可以带逗号顿号，见 field_validator 的说明。
     scope_qualifier: str = Field(default="", max_length=64)
+
+    @field_validator("source_label", mode="before")
+    @classmethod
+    def _source_label_strip_list_separators(cls, value: object) -> object:
+        """群体/并列称谓（「周、尹二人」「王腾飞 身后的男子」）里的分隔符与空白确定性剥掉：
+        functional 标签本来就允许非逐字的稳定描述（提示词规则 4，后端隔离为 synthetic
+        identity），而按"含分隔符即拒绝"让模型改写，2026-09-05 我欲封天第 23 集三次重试
+        都仍写「周、尹二人」，整集映射台失败。下游按这些字符切分身份列表的约束在剥掉之后
+        天然满足；剥完为空的仍由 min_length 拒绝。"""
+        if isinstance(value, str) and _identity_source_label_has_list_separator(value):
+            return _strip_identity_list_separators(value)
+        return value
 
     @field_validator("source_label")
     @classmethod
