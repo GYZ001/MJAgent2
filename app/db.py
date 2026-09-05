@@ -3074,6 +3074,8 @@ def log_provider_call(kind: str, model: str, status: str, http_status: int | Non
         )
     except sqlite3.OperationalError:
         # 观测写入为 best-effort：滚动升级或隔离单测库缺表时不应阻断业务。
+        if conn.in_transaction:
+            conn.rollback()  # 锁错误后不留开着的事务壳：后续写会在它里面悄悄开写锁
         pass
 
 
@@ -3210,6 +3212,8 @@ def start_provider_call(kind: str, model: str, *, meta: dict | None = None,
             conn, trace, kind, model, meta=meta, request_json=request_json,
         )
     except sqlite3.OperationalError:
+        if conn.in_transaction:
+            conn.rollback()  # 锁错误后不留开着的事务壳：后续写会在它里面悄悄开写锁
         return 0
 
 
@@ -3397,6 +3401,8 @@ def finish_provider_call(call_id: int, status: str, http_status: int | None,
             error=error, response_json=response_json,
         )
     except sqlite3.OperationalError:
+        if conn.in_transaction:
+            conn.rollback()  # 锁错误后不留开着的事务壳：后续写会在它里面悄悄开写锁
         pass
 
 
