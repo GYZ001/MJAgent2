@@ -322,10 +322,19 @@ def final_complete(conn, episode_id: str) -> bool:
     return path.is_file() and not path.with_suffix(".stale").is_file()
 
 
+_FINAL_LOCKS: dict[str, asyncio.Lock] = {}
+
+
 async def _run_final(episode_id: str) -> None:
+    """同一集的合片在进程内串行：补跑任务与主任务同时覆盖一集时，后到者等前者
+    发布完再看一眼判据，已成片就不再重复渲染、也不再与前者争发布租约。"""
     from app import worker
 
-    await asyncio.to_thread(worker.concatenate_episode, episode_id)
+    lock = _FINAL_LOCKS.setdefault(episode_id, asyncio.Lock())
+    async with lock:
+        if final_complete(get_conn(), episode_id):
+            return
+        await asyncio.to_thread(worker.concatenate_episode, episode_id)
 
 
 # -------------------------------------------------------------------- dispatch

@@ -125,15 +125,14 @@ class ProductionRevision(BaseModel):
 
 def ensure_production_revisions_table(conn=None) -> None:
     db = conn or get_conn()
+    # 只在本函数自己开启事务时提交，不在调用方的事务上隐式提交。
+    caller_in_transaction = db.in_transaction
     db.execute(
         """CREATE TABLE IF NOT EXISTS production_revisions (
-            id TEXT PRIMARY KEY,
-            episode_id TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'active',
+            id TEXT PRIMARY KEY, episode_id TEXT NOT NULL,
+            kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
             baseline_generation_count INTEGER NOT NULL DEFAULT 0,
-            first_evaluation_id TEXT,
-            baseline_artifact_id TEXT,
+            first_evaluation_id TEXT, baseline_artifact_id TEXT,
             working_artifact_id TEXT,
             published_artifact_id TEXT,
             grant_id TEXT,
@@ -150,7 +149,8 @@ def ensure_production_revisions_table(conn=None) -> None:
         "CREATE INDEX IF NOT EXISTS idx_production_revisions_episode_kind "
         "ON production_revisions(episode_id, kind, updated_at DESC)"
     )
-    db.commit()
+    if db.in_transaction and not caller_in_transaction:
+        db.commit()
 
 
 def _row_to_revision(row) -> ProductionRevision | None:

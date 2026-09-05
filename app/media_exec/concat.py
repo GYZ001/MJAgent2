@@ -268,13 +268,24 @@ def _content_versioned_final_url(final_path: Path, content_hash: str) -> str:
     return build_media_url(final_path, version=content_hash.removeprefix("sha256:"))
 
 
+def _ensure_publish_leases_table(conn) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS episode_video_publish_leases(
+               episode_id TEXT PRIMARY KEY,owner TEXT NOT NULL,video_manifest_hash TEXT NOT NULL,
+               status TEXT NOT NULL,updated_at REAL NOT NULL)"""
+    )
+
+
 def _assert_concat_sources_current(
     conn,
     *,
     episode_id: str,
     release_authority: dict[str, Any],
     video_delivery_manifest: dict[str, Any],
+    require_transaction: bool = False,
 ) -> None:
+    """复核冻结的分镜权威与已采纳清单仍是当前值。require_transaction：锁内复核必须为 True——
+    复核链路上任何在调用方连接上隐式提交的助手都会放掉写锁、让发布 CAS 被抢（第 24 集实测）。"""
     from app.downstream_authority import (
         current_partial_adopted_video_delivery_manifest,
         verify_current_storyboard_release_authority,
@@ -291,6 +302,8 @@ def _assert_concat_sources_current(
         episode_id, conn=conn,
     ) != video_delivery_manifest:
         raise ConcatOperationConflict("合片发布前已采纳视频发生漂移")
+    if require_transaction and not conn.in_transaction:
+        raise ConcatOperationConflict("合片发布事务已被复核链路隐式提交，写锁丢失，拒绝在锁外发布")
 
 
 def _resume_concat_promotion(
@@ -403,6 +416,7 @@ def _resume_concat_promotion(
             episode_id=episode_id,
             release_authority=release_authority,
             video_delivery_manifest=video_delivery_manifest,
+            require_transaction=True,
         )
         current = conn.execute(
             """SELECT claim_token,status,promotion_phase
@@ -418,12 +432,7 @@ def _resume_concat_promotion(
             raise ConcatOperationConflict("合片 finalize owner/phase CAS 冲突")
         if _media_sha256(final_path) != stage_sha or _media_sha256(report_path) != report_sha:
             raise ConcatOperationConflict("合片 finalize 文件哈希漂移")
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS episode_video_publish_leases(
-                   episode_id TEXT PRIMARY KEY,owner TEXT NOT NULL,
-                   video_manifest_hash TEXT NOT NULL,status TEXT NOT NULL,updated_at REAL NOT NULL
-               )"""
-        )
+        _ensure_publish_leases_table(conn)
         conn.execute(
             """INSERT INTO episode_video_publish_leases(
                    episode_id,owner,video_manifest_hash,status,updated_at
@@ -498,6 +507,7 @@ def _publish_concat_output(
                 episode_id=episode_id,
                 release_authority=release_authority,
                 video_delivery_manifest=video_delivery_manifest,
+                require_transaction=True,
             )
             prepared = conn.execute(
                 """UPDATE concat_operation_receipts
@@ -552,21 +562,12 @@ def _publish_concat_output(
             video_delivery_manifest=video_delivery_manifest,
         ) or result
 
-    from app.downstream_authority import (
-        current_partial_adopted_video_delivery_manifest,
-        verify_current_storyboard_release_authority,
-    )
     if conn.in_transaction:
         conn.commit()
     owner = new_id("concatpub")
     try:
         conn.execute("BEGIN IMMEDIATE")
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS episode_video_publish_leases(
-                   episode_id TEXT PRIMARY KEY,owner TEXT NOT NULL,
-                   video_manifest_hash TEXT NOT NULL,status TEXT NOT NULL,updated_at REAL NOT NULL
-               )"""
-        )
+        _ensure_publish_leases_table(conn)
         conn.execute(
             """INSERT INTO episode_video_publish_leases(
                    episode_id,owner,video_manifest_hash,status,updated_at
@@ -576,14 +577,13 @@ def _publish_concat_output(
                    status='publishing',updated_at=excluded.updated_at""",
             (episode_id, owner, video_delivery_manifest["manifest_hash"], now()),
         )
-        if verify_current_storyboard_release_authority(episode_id, conn=conn) != release_authority:
-            raise ValueError("合片发布前分镜权威发生漂移")
-        # 合片冻结的是部分交付清单（跳过缺镜/失效镜），发布前漂移复核要用同一
-        # 口径重算，否则本来就合法跳过的镜头会被严格版本误判成漂移。
-        if current_partial_adopted_video_delivery_manifest(
-            episode_id, conn=conn,
-        ) != video_delivery_manifest:
-            raise ValueError("合片发布前已采纳视频发生漂移")
+        _assert_concat_sources_current(
+            conn,
+            episode_id=episode_id,
+            release_authority=release_authority,
+            video_delivery_manifest=video_delivery_manifest,
+            require_transaction=True,
+        )
         report["final_video_sha256"] = _media_sha256(candidate_path)
         report.update(_video_delivery_report(candidate_path))
         atomic_copy(candidate_path, final_path)

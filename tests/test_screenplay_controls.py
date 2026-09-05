@@ -683,6 +683,9 @@ def test_stale_v14_document_is_not_new_baseline_step_authority(
             db.now(),
         ),
     )
+    # 显式提交：建表助手不再替调用方隐式提交，未提交的写入会让下面的 BEGIN IMMEDIATE 报
+    # "cannot start a transaction within a transaction"。
+    conn.commit()
     revision = ensure_production_revision(
         episode_id="e1",
         kind="screenplay",

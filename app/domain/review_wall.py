@@ -505,27 +505,26 @@ def _review_narrative_authority_snapshot(conn, ep: dict[str, Any]) -> dict[str, 
 
 
 def _ensure_review_wall_tables(conn=None) -> None:
-    """存量数据库的进程内兼容迁移。"""
+    """存量数据库的进程内兼容迁移。逐条 execute（executescript 会先隐式 COMMIT 调用方事务）。"""
     db = conn or get_conn()
-    db.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS video_version_archives (
+    caller_in_transaction = db.in_transaction
+    db.execute("""CREATE TABLE IF NOT EXISTS video_version_archives (
             version_id TEXT PRIMARY KEY, archived_by TEXT NOT NULL DEFAULT 'user',
             reason TEXT, archived_at REAL NOT NULL,
-            FOREIGN KEY(version_id) REFERENCES shot_versions(id) ON DELETE CASCADE
-        );
-        CREATE TABLE IF NOT EXISTS review_action_audit (
+            FOREIGN KEY(version_id) REFERENCES shot_versions(id) ON DELETE CASCADE)"""
+    )
+    db.execute("""CREATE TABLE IF NOT EXISTS review_action_audit (
             id TEXT PRIMARY KEY, action TEXT NOT NULL, scope_type TEXT NOT NULL,
             scope_id TEXT NOT NULL, target_version TEXT, idempotency_key TEXT,
             old_state_json TEXT NOT NULL DEFAULT '{}', new_state_json TEXT NOT NULL DEFAULT '{}',
-            reason TEXT, decided_by TEXT NOT NULL DEFAULT 'user', request_id TEXT, created_at REAL NOT NULL
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_review_action_idempotency
-            ON review_action_audit(action, idempotency_key)
-            WHERE idempotency_key IS NOT NULL AND idempotency_key != '';
-        """
+            reason TEXT, decided_by TEXT NOT NULL DEFAULT 'user', request_id TEXT, created_at REAL NOT NULL)"""
     )
-    db.commit()
+    db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS uq_review_action_idempotency
+            ON review_action_audit(action, idempotency_key)
+            WHERE idempotency_key IS NOT NULL AND idempotency_key != ''"""
+    )
+    if db.in_transaction and not caller_in_transaction:
+        db.commit()
 
 
 def _review_asset_qualification(conn, episode_id: str) -> dict[str, Any]:

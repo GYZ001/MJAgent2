@@ -47,6 +47,8 @@ class ProductionGrant(BaseModel):
 
 def ensure_production_grants_table(conn=None) -> None:
     db = conn or get_conn()
+    # 只在本函数自己开启事务时提交，不在调用方的事务上隐式提交。
+    caller_in_transaction = db.in_transaction
     db.execute(
         """CREATE TABLE IF NOT EXISTS production_grants (
             id TEXT PRIMARY KEY,
@@ -65,7 +67,8 @@ def ensure_production_grants_table(conn=None) -> None:
             consumed_at REAL
         )"""
     )
-    db.commit()
+    if db.in_transaction and not caller_in_transaction:
+        db.commit()
 
 
 def _hash_token(token: str) -> str:

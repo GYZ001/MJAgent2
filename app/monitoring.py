@@ -346,14 +346,18 @@ def redact_json_text(raw: str | None, *, mask_sensitive_content: bool = False) -
 
 
 def ensure_monitor_audit_table() -> None:
-    get_conn().execute(
+    db = get_conn()
+    # 只在本函数自己开启事务时提交，不在调用方的事务上隐式提交。
+    caller_in_transaction = db.in_transaction
+    db.execute(
         """CREATE TABLE IF NOT EXISTS monitor_audit(
                id TEXT PRIMARY KEY, ts REAL NOT NULL, action TEXT NOT NULL,
                object_type TEXT NOT NULL, object_id TEXT NOT NULL,
                outcome TEXT NOT NULL, detail_json TEXT NOT NULL DEFAULT '{}'
            )"""
     )
-    get_conn().commit()
+    if db.in_transaction and not caller_in_transaction:
+        db.commit()
 
 
 def audit(action: str, object_type: str, object_id: str, outcome: str, detail: dict[str, Any] | None = None) -> None:
