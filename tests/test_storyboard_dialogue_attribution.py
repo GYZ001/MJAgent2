@@ -34,6 +34,16 @@ def test_speaker_before_quote_used_when_nothing_follows():
     assert attribute_prose_speaker(text, start, end, NAMES) == "孟浩"
 
 
+def test_nearest_name_without_utterance_evidence_is_not_a_speaker():
+    """第 3 集真实形态：『……觉得虎爷声音大？』孟浩翻了个白眼——孟浩只是听者。没有发声证据就留空。"""
+    text = "“小个屁声，觉得虎爷声音大？”孟浩翻了个白眼，没有理会。"
+    names = NAMES + ["虎爷"]
+    start = text.index("小个"); end = text.index("大？”") + 2
+    assert attribute_prose_speaker(text, start, end, names) == ""
+    text2 = "“小个屁声，觉得虎爷声音大？”虎爷哼了一声。"
+    assert attribute_prose_speaker(text2, start, end, names) == "虎爷"
+
+
 def test_post_window_stops_at_next_quote_so_opponent_is_not_borrowed():
     text = "“你来做什么？”“我不是说过别再来了。”王腾飞冷冷道。"
     start = text.index("你来"); end = text.index("么？”") + 2

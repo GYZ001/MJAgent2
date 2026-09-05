@@ -36,9 +36,19 @@ def _sorted_names(names: list[str] | set[str]) -> list[str]:
     return sorted({n.strip() for n in names if n and n.strip()}, key=len, reverse=True)
 
 
+#: 归属证据：名字后面紧跟的「发声/反应」动词。这是正面证据（说话人行为的语言学信号），不是名单式
+#: 拦截——没有证据就留空交给第二阶段，绝不按「离引号最近的名字」猜（2026-09-05 第 3 集：
+#: 『……觉得虎爷声音大？』孟浩翻了个白眼——按最近名字归给孟浩，实际是虎爷在说）。
+_UTTERANCE_VERB_RE = (
+    r"(?:说|道|问|喊|叫|笑|哼|骂|吼|叹|答|应|念|呼|嚷|喃|想|心|暗|沉声|冷声|轻声|低声|大声|淡淡|开口"
+    r"|沉吟|嘀咕|自语|呢喃|咕哝|嘟囔|思忖|疑惑|惊|摇头|摇了摇头|点头|点了点头|皱眉|皱了皱眉|眯|瞪|冷冷|怒|急)"
+)
+
+
 def attribute_prose_speaker(segment_text: str, quote_start: int, quote_end: int, names: list[str] | set[str]) -> str:
-    """小说体引号台词的说话人：引号后窗口里最先出现的人物谱名字，否则引号前窗口里最后出现的。
-    窗口在下一个/上一个引号处截断，避免把对手的归属抄过来；找不到返回空串（不猜）。"""
+    """小说体引号台词的说话人。引号后：名字紧接引号（允许 3 字内的标点/副词）且名字后 3 字内有发声/反应
+    动词；否则引号前：名字在引号前 8 字内且以冒号引出，或名字后 4 字内有发声动词。窗口在相邻引号处截断；
+    两处都没有证据就返回空串（不猜）。"""
     ordered = _sorted_names(names)
     if not ordered:
         return ""
@@ -46,22 +56,29 @@ def attribute_prose_speaker(segment_text: str, quote_start: int, quote_end: int,
     cut = _QUOTE_RE.search(after)
     if cut:
         after = after[:cut.start()]
-    best: tuple[int, str] | None = None
     for name in ordered:
-        pos = after.find(name)
-        if pos >= 0 and (best is None or pos < best[0]):
-            best = (pos, name)
-    if best:
-        return best[1]
+        # quote_end 可能指向收尾引号本身（抽取偏移不含引号符号）：把引号与标点一起当作可跳过的前缀。
+        # 名字之后 16 字内出现发声/反应动词才算（「孟浩盘膝坐在洞府内，皱着眉头沉吟起来」），
+        # 但中途出现另一个人名就截断——动词属于后面那个人（「孟浩看着他，王腾飞冷笑道」）。
+        m = re.match(r"^[」”』\"，。！？…、\s]{0,3}" + re.escape(name), after)
+        if not m:
+            continue
+        rest = after[m.end():m.end() + 16]
+        others = [rest.find(o) for o in ordered if o != name and o in rest]
+        if others:
+            rest = rest[:min(others)]
+        if re.search(_UTTERANCE_VERB_RE, rest):
+            return name
     before = segment_text[max(0, quote_start - PRE_WINDOW):quote_start]
     last_quote = max((m.end() for m in _QUOTE_RE.finditer(before)), default=0)
     before = before[last_quote:]
-    latest: tuple[int, str] | None = None
     for name in ordered:
-        pos = before.rfind(name)
-        if pos >= 0 and (latest is None or pos > latest[0]):
-            latest = (pos, name)
-    return latest[1] if latest else ""
+        if re.search(re.escape(name) + r".{0,12}[：:]\s*[「“『\"]?$", before):
+            return name
+        if re.search(re.escape(name) + r".{0,4}?" + _UTTERANCE_VERB_RE + r".{0,4}[「“『\"]?$", before):
+            return name
+    return ""
+
 
 
 _TAIL_LINE_RE = re.compile(
