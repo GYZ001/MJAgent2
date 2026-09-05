@@ -288,6 +288,25 @@ def _beat_sheet_rules(paratext_indexes: set[int], context_indexes: set[int] = fr
     return rules
 
 
+_BEAT_SEGMENT_KEY_SWAPS = (("summary", "synopsis"), ("segment_indexes", "source_segment_indexes"))
+
+
+def _normalize_beat_sheet_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """节拍与段落两个子 schema 只差字段名（summary/synopsis、segment_indexes/source_segment_indexes），
+    模型偶尔在某一项上串用（2026-09-05 第 2 集：第 15 段写成 summary，格式修复又把 beat15 写成段的形状），
+    整份响应因此 pydantic 失败、重试耗尽整集失败。这里在校验前按字段名确定性回填，不改任何值。"""
+    if not isinstance(payload, dict):
+        return payload
+    for key, mine, theirs in (("beat_sheet", 0, 1), ("segments", 1, 0)):
+        for item in payload.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            for pair in _BEAT_SEGMENT_KEY_SWAPS:
+                if pair[mine] not in item and pair[theirs] in item:
+                    item[pair[mine]] = item[pair[theirs]]
+    return payload
+
+
 async def _generate_beat_sheet(
     *,
     episode_id: str,
@@ -336,6 +355,7 @@ async def _generate_beat_sheet(
             value, source_segments=segments, dialogue_quotes=dialogue_quotes,
             context_indexes=context_indexes, paratext_indexes=paratext_indexes,
         ),
+        normalize_payload=_normalize_beat_sheet_payload,
         operation_id=f"storyboard_pack_beat_sheet_{episode_id}_{fingerprint}",
         max_tokens=6000,
         format_retry_limit=1,

@@ -107,3 +107,25 @@ def test_missing_quote_decisions_are_completed_then_restored_by_rule():
     assert [k.quote_id for k in draft.kept_lines] == ["Q41"]
     assert [d.quote_id for d in draft.dropped_lines] == ["Q42"]
     assert complete_missing_quote_decisions(draft, quotes) == [], "已决定去留的不再重复补"
+
+
+def test_beat_and_segment_key_confusion_is_normalized_before_validation():
+    """第 2 集真实形态：第 15 段写成 summary（段 schema 要 synopsis）；格式修复又把 beat15 写成段的形状。"""
+    from app.production.storyboard_beat_sheet import _AiBeatSheetDraft, _normalize_beat_sheet_payload
+
+    payload = {
+        "beat_sheet": [
+            {"beat_id": "beat1", "summary": "开篇", "segment_indexes": [1]},
+            {"beat_id": "beat15", "synopsis": "孟浩安慰小胖子", "source_segment_indexes": [3], "beat_ids": ["beat15"],
+             "palette": "暖调", "source_unit_ranges": [{"source_segment_index": 3, "from_unit": 5, "to_unit": 12}]},
+        ],
+        "segments": [
+            {"segment_no": 1, "synopsis": "开篇", "source_segment_indexes": [1], "beat_ids": ["beat1"]},
+            {"segment_no": 15, "summary": "孟浩安慰小胖子", "segment_indexes": [3], "beat_ids": ["beat15"]},
+        ],
+        "kept_lines": [], "dropped_lines": [],
+    }
+    draft = _AiBeatSheetDraft.model_validate(_normalize_beat_sheet_payload(payload))
+    assert draft.beat_sheet[1].summary == "孟浩安慰小胖子" and draft.beat_sheet[1].segment_indexes == [3]
+    assert draft.segments[1].synopsis == "孟浩安慰小胖子" and draft.segments[1].source_segment_indexes == [3]
+    assert draft.beat_sheet[0].summary == "开篇", "本来就对的字段不动"
