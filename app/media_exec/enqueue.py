@@ -199,14 +199,20 @@ def pause_episode_video_tasks(episode_id: str) -> dict[str, object]:
     }
 
 
+# 这些 recovery_disposition 表示该 create 的供应商任务已死（终态失败/产出取不到/被重置清除）：按 operation_id
+# 找回任务号必须跳过，否则换新任务的重试会把死任务号找回来再轮（第 5 集第 2 镜：1 次 create、4 次轮同一个拒绝任务）。
+DEAD_PROVIDER_TASK_DISPOSITIONS: tuple[str, ...] = ("RESET_PURGED", "OUTPUT_UNREACHABLE", "TASK_FAILED")
+DEAD_PROVIDER_TASK_SQL = "COALESCE(recovery_disposition,'') NOT IN ('RESET_PURGED','OUTPUT_UNREACHABLE','TASK_FAILED')"
+
+
 def _recover_paused_provider_handle(conn, row) -> tuple[str, float] | None:
     operation_id = row["provider_operation_id"]
     if not operation_id:
         return None
     calls = conn.execute(
-        """SELECT ts,response_json FROM provider_calls
+        f"""SELECT ts,response_json FROM provider_calls
            WHERE kind='video_create' AND status='OK' AND operation_id=?
-             AND response_json IS NOT NULL
+             AND response_json IS NOT NULL AND {DEAD_PROVIDER_TASK_SQL}
            ORDER BY id DESC""",
         (operation_id,),
     ).fetchall()

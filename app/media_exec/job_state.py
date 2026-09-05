@@ -29,7 +29,7 @@ from app.orchestration.media_runs import mark_media_job_state
 from app.visual_styles import VISUAL_STYLE_PRESETS
 
 from .common import LeaseLost
-from .enqueue import _row_value
+from .enqueue import DEAD_PROVIDER_TASK_SQL, _row_value
 from .fences import VideoInputRepairRequired
 
 
@@ -270,9 +270,12 @@ def release_provider_poll(conn, job_id: str, owner: str, *, version_id: str) -> 
     ``shot_versions.provider_task_id`` 为准，非空就继续轮询旧任务而不是创建——
     2026-09-05 实测 3 个换新任务重试全部又轮回同一个取不到产出的旧任务。旧任务 id
     仍留在 provider_calls / video_generation_attempts 账本里，不丢审计。"""
+    # provider_non_cancellable 也要清：它表示"供应商那边可能还挂着一个任务"，而这条任务
+    # 已经终态；留着它，重跑时 _assert_provider_create_resolved 会因"可能已接单却没有
+    # task id"拒绝新建，把换新任务的重试直接打成 VIDEO_PROVIDER_CREATE_UNRESOLVED。
     conn.execute(
         """UPDATE jobs SET provider_poll_required=0, provider_result_adoptable=0,
-                  provider_create_state='not_started', updated_at=?
+                  provider_create_state='not_started', provider_non_cancellable=0, updated_at=?
             WHERE id=? AND lease_owner=?""",
         (now(), job_id, owner),
     )
@@ -395,9 +398,9 @@ def _recover_paid_video_task(conn, operation_id: str | None) -> tuple[str, float
     if not operation_id:
         return None
     rows = conn.execute(
-        """SELECT ts, response_json FROM provider_calls
+        f"""SELECT ts, response_json FROM provider_calls
            WHERE kind='video_create' AND status='OK' AND operation_id=?
-             AND response_json IS NOT NULL
+             AND response_json IS NOT NULL AND {DEAD_PROVIDER_TASK_SQL}
            ORDER BY id DESC""",
         (operation_id,),
     ).fetchall()
