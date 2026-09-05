@@ -29,7 +29,7 @@ from .contracts import (
     PREP_PACK_VERSION,
     PrepPackGateError,
 )
-from .provenance import _prep_pack_verify_manifest_provenance
+from .provenance_repair import verify_manifest_provenance_with_repair
 from .resolve_assets import _resolve_assets
 from .scene_degrade import (
     degrade_scene_provenance_failures,
@@ -377,7 +377,7 @@ async def _generate_prep_pack_once(
     # 不成立即门禁拦，不静默发布一份自称有证据、实际验不过的 manifest。场景
     # 侧的失败同上一段一样就地降级、不阻断（scene_degrade.degrade_scene_
     # provenance_failures）。
-    provenance_errors = _prep_pack_verify_manifest_provenance(
+    provenance_errors = verify_manifest_provenance_with_repair(
         segments, asset_manifest, source_text,
     )
     blocking_provenance_errors = degrade_scene_provenance_failures(asset_manifest, provenance_errors)
