@@ -164,7 +164,11 @@ def test_after_shot_anchor_skips_rejected_previous_shot(monkeypatch) -> None:
     _reject(conn, "s2")
     rebase_dependencies_past_rejected_shots(conn, "e1")
     conn.commit()
-    # 锚点取自已发布计划；这里的计划没有绑定分镜发布权威，把"计划仍是当前"的校验钉真。
+    # 锚点只在上一段画面参考开启时才有意义（2026-09-05 起默认关闭），这里显式打开；
+    # 计划没有绑定分镜发布权威，把"计划仍是当前"的校验钉真。
+    from app.video_plan import prev_frame_reference as pfr
+
+    monkeypatch.setattr(pfr, "get_setting", lambda key: "1")
     patch_video_plan_everywhere(monkeypatch, "verify_episode_plan_is_current", lambda plan, conn=None: True)
     assert _after_shot_id("e1", 3) == "s1"
     # 没有可用上游时干脆不挂锚，而不是等一个永远不会来的采纳版本。

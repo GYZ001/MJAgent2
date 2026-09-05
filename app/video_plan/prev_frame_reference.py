@@ -43,10 +43,11 @@ _PTS_RE = re.compile(r"pts_time:\s*([0-9]+(?:\.[0-9]+)?)")
 
 
 def prev_frame_reference_enabled() -> bool:
-    """默认启用（2026-09-04 用户看过串接成片后拍板进主线）；settings 表里
-    ``video_prev_frame_reference`` 显式写 0 才关闭，空或非数字按默认开。"""
+    """默认关闭（2026-09-05 用户看过 30 集实测后拍板放弃：上一段三帧作参考让相邻段
+    重演同一情节、已离场的人物又出现在画面里，改走无链依赖的并行生成）；settings 表里
+    ``video_prev_frame_reference`` 显式写 1/true/on/yes 才开启，空或其它值按默认关。"""
     raw = str(get_setting(SETTING_KEY) or "").strip().lower()
-    return raw not in {"0", "false", "off", "no"}  # 设置台存 true/false，旧行存 0/1
+    return raw in {"1", "true", "on", "yes"}  # 设置台存 true/false，旧行存 0/1
 
 
 def video_duration_s(video_path: str) -> float | None:

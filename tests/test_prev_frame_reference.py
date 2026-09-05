@@ -6,13 +6,15 @@ from app.video_plan import prev_frame_reference as pfr
 
 def test_flag_defaults_on_and_only_explicit_zero_turns_it_off(monkeypatch) -> None:
     monkeypatch.setattr(pfr, "get_setting", lambda key: "")
-    assert pfr.prev_frame_reference_enabled() is True  # 缺失/空 = 默认开
+    assert pfr.prev_frame_reference_enabled() is False  # 缺失/空 = 默认关（2026-09-05 放弃取帧方案）
     monkeypatch.setattr(pfr, "get_setting", lambda key: "0" if key == pfr.SETTING_KEY else "")
-    assert pfr.prev_frame_reference_enabled() is False  # 只有显式 0 才关
+    assert pfr.prev_frame_reference_enabled() is False
     monkeypatch.setattr(pfr, "get_setting", lambda key: "1")
-    assert pfr.prev_frame_reference_enabled() is True
+    assert pfr.prev_frame_reference_enabled() is True  # 只有显式 1/true/on/yes 才开
     monkeypatch.setattr(pfr, "get_setting", lambda key: "yes")
-    assert pfr.prev_frame_reference_enabled() is True  # 非数字不当成关闭
+    assert pfr.prev_frame_reference_enabled() is True
+    monkeypatch.setattr(pfr, "get_setting", lambda key: "maybe")
+    assert pfr.prev_frame_reference_enabled() is False  # 其它值不当成开启
     monkeypatch.setattr(pfr, "get_setting", lambda key: "false")
     assert pfr.prev_frame_reference_enabled() is False  # 设置台布尔项存的是 true/false
 

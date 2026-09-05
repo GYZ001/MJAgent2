@@ -22,7 +22,12 @@ from .models import ShotCoverageEntry, VideoSupervisorCheckpoint
 
 
 def _after_shot_id(episode_id: str, shot_no: int, *, degrade: bool = False) -> str | None:
-    if degrade or shot_no <= 1:
+    """上一段画面参考关闭时不挂锚点：锚点唯一的作用是等上一镜采纳后取尾帧作参考，
+    首尾帧模式早已废止；留着它只会让同场戏镜头串行空等（WAITING_CONTINUITY_ANCHOR），
+    与「放弃取帧、并行生成」的决定相悖。"""
+    from app.video_plan.prev_frame_reference import prev_frame_reference_enabled  # 包级导入成环
+
+    if degrade or shot_no <= 1 or not prev_frame_reference_enabled():
         return None
     from app.continuity import derive_continuity_mode, uses_previous_tail_frame
 

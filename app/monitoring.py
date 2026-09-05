@@ -89,7 +89,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
         "每个连播任务并行集数", "3", 1, 8, unit="集",
         description="一个连播任务内部同时生成多少集。项目内同时在跑的集数上限 = 并行任务数 × 本值；供应商并发配额另算。",
     ),
-    "video_prev_frame_reference": _boolean("上一段画面作空间参考", "true"),
+    "video_prev_frame_reference": _boolean("上一段画面作空间参考", "false"),
     "screenplay_scene_shards_enabled": _boolean("启用剧本场次分片", "true"),
     "screenplay_targeted_identity_enabled": _boolean("启用定向人物解析", "true"),
     "screenplay_targeted_blueprint_review_enabled": _boolean("启用蓝图风险审稿", "true"),
