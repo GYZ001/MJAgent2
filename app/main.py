@@ -101,6 +101,8 @@ async def lifespan(_: FastAPI):
         task_registry.spawn(
             "system", "video_supervisor_watchdog", video_supervisor_watchdog_loop(),
         )
+        from app.observability.write_lock_holders import long_transaction_watchdog
+        task_registry.spawn("system", "write_lock_watchdog", long_transaction_watchdog())
         # 软删除项目的回收站 24 小时自动彻底清理；只在恢复协调者实例上跑一份，
         # 避免热重载重叠的第二实例重复巡检同一批到期项目。
         from app.recovery import project_recycle_bin_sweep_loop

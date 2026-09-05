@@ -53,3 +53,16 @@ def test_progress_heartbeat_gives_up_instead_of_waiting_for_the_lock(tmp_path, m
     assert row["received_chars"] == 0  # 这一拍放弃了，没有写进去
     provider_heartbeat.update_provider_call_progress(call_id, received_chars=10, chunk_at=1.0)
     assert db.get_conn().execute("SELECT received_chars FROM provider_calls WHERE id=?", (call_id,)).fetchone()["received_chars"] == 10
+
+
+def test_holders_older_than_counts_only_transactions_seen_across_ticks() -> None:
+    from app.observability.write_lock_holders import holders_older_than
+
+    seen: dict = {}
+    a = {"task": "A", "coro": "", "frames": [], "last_sql": "UPDATE x"}
+    b = {"task": "B", "coro": "", "frames": [], "last_sql": "INSERT y"}
+    assert holders_older_than(100.0, seen, [a, b], threshold=8) == []          # 第一次看到：计时开始
+    assert holders_older_than(105.0, seen, [a], threshold=8) == []             # B 已提交，从追踪里移除
+    assert "B" not in seen
+    aged = holders_older_than(109.0, seen, [a, b], threshold=8)                 # A 已 9 秒；B 重新开始计时
+    assert [(h["task"], round(age)) for h, age in aged] == [("A", 9)]

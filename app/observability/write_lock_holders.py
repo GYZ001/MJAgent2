@@ -72,3 +72,49 @@ def log_open_write_holders(reason: str) -> None:
             reason, holder["task"], holder["coro"], holder.get("last_sql") or "（未记录）",
             "\n    ".join(holder["frames"]) or "（无栈）",
         )
+
+
+LONG_TRANSACTION_THRESHOLD_S = 8.0
+_SEEN_OPEN: dict[str, float] = {}
+_LAST_LONG_LOG: dict[str, float] = {}
+
+
+def holders_older_than(now: float, seen: dict[str, float], holders: list[dict[str, Any]], threshold: float) -> list[tuple[dict[str, Any], float]]:
+    """按「任务名」跨 tick 追踪未提交事务的持续时间；返回超过阈值的 (holder, 已持续秒数)。
+    连续两次 tick 都在事务里才计龄——单次采样区分不了「刚开始」和「一直没提交」。"""
+    current = {h["task"] for h in holders}
+    for key in list(seen):
+        if key not in current:
+            seen.pop(key)
+    aged: list[tuple[dict[str, Any], float]] = []
+    for holder in holders:
+        started = seen.setdefault(holder["task"], now)
+        age = now - started
+        if age >= threshold:
+            aged.append((holder, age))
+    return aged
+
+
+async def long_transaction_watchdog(interval_s: float = 5.0, threshold_s: float = LONG_TRANSACTION_THRESHOLD_S) -> None:
+    """每 interval 秒看一次哪些连接握着未提交事务；同一任务连续超过 threshold 秒就记
+    [LONG_WRITE_TRANSACTION]（每任务 60 秒限频）。这是「写事务跨 await」在生产上的直接证据：
+    2026-09-05 B 上 9 集并行起跑时事件循环反复冻结 30 秒，py-spy 只能看到等锁的一方。"""
+    import asyncio
+
+    while True:
+        try:
+            now = time.monotonic()
+            for holder, age in holders_older_than(now, _SEEN_OPEN, open_write_holders(), threshold_s):
+                if now - _LAST_LONG_LOG.get(holder["task"], 0.0) < 60.0:
+                    continue
+                _LAST_LONG_LOG[holder["task"]] = now
+                _LOGGER.warning(
+                    "[LONG_WRITE_TRANSACTION] 任务 %s 的未提交事务已持续 %.0f 秒 %s\n    最后一条写语句：%s\n    %s",
+                    holder["task"], age, holder["coro"], holder.get("last_sql") or "（未记录）",
+                    "\n    ".join(holder["frames"]) or "（无栈）",
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 -- 诊断循环不得因自身异常退出
+            _LOGGER.exception("write lock watchdog tick failed")
+        await asyncio.sleep(interval_s)
