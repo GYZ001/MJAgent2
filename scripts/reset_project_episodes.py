@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sqlite3
 import sys
 import urllib.error
@@ -115,12 +116,18 @@ def collect_scope(conn: sqlite3.Connection, project_id: str,
         "SELECT id FROM character_portraits WHERE project_id=?", (project_id,))]
     scene_refs = [r["id"] for r in conn.execute(
         "SELECT id FROM scene_references WHERE project_id=?", (project_id,))]
+    # 2026-09-05：物件库参考图与连播任务也是流水线产物（09-04 新增的表），一并纳入快照与残留验证。
+    props = [r["id"] for r in conn.execute(
+        "SELECT id FROM prop_references WHERE project_id=?", (project_id,))]
+    series_tasks = [r["id"] for r in conn.execute(
+        "SELECT id FROM series_tasks WHERE project_id=?", (project_id,))]
     scopes = [project_id, *eps, *shots]
     runs = _in_query(conn, "SELECT id FROM workflow_runs WHERE scope_id IN", scopes)
     arts = _in_query(conn, "SELECT id FROM artifacts WHERE scope_id IN", scopes)
     return {
         "episodes": eps, "shots": shots, "reference_sets": refsets,
         "portraits": portraits, "scene_references": scene_refs,
+        "props": props, "series_tasks": series_tasks,
         "workflow_runs": runs, "artifacts": arts,
     }
 
@@ -139,6 +146,8 @@ def _in_query(conn: sqlite3.Connection, prefix: str, values: list[str]) -> list[
 # 验证用：表名 -> 该表引用上面某个 id 集合的列名。删除清单可能不全，这份
 # 必须全——每加一张持有流水线产出的表都要在这里登记，漏登记就是漏验证。
 RESIDUE_PROBES: list[tuple[str, str, str]] = [
+    ("prop_references", "id", "props"),
+    ("series_tasks", "id", "series_tasks"),
     ("shots", "episode_id", "episodes"),
     ("screenplay_drafts", "episode_id", "episodes"),
     ("storyboard_source_bindings", "shot_id", "shots"),
@@ -263,7 +272,23 @@ PROJECT_ASSET_SWEEPS = [
     ("character_payment_quotes",
      "DELETE FROM character_payment_quotes WHERE project_id=?"),
     ("visual_entity_merges", "DELETE FROM visual_entity_merges WHERE project_id=?"),
+    ("prop_references", "DELETE FROM prop_references WHERE project_id=?"),
+    ("series_queue_state", "DELETE FROM series_queue_state WHERE project_id=?"),
 ]
+#: 项目媒体目录里全部是流水线产物（定妆照/场景图/物件图/分集视频/连播成片），小说原文在库里的
+#: chapters 表，不在文件系统——整目录删。只在范围覆盖全部有产出分集时执行（与视觉资产同一判据）。
+PROJECT_MEDIA_DIRS = ("episodes", "refs", "scene_refs", "prop_refs", "series")
+
+
+def purge_project_media(project_id: str) -> None:
+    root = Path(config.PROJECTS_DIR) / project_id
+    for name in PROJECT_MEDIA_DIRS:
+        target = root / name
+        if not target.exists():
+            continue
+        size = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
+        shutil.rmtree(target)
+        log(f"  删目录 {target.relative_to(Path(config.PROJECTS_DIR))}（{size / 1e6:.1f} MB）")
 
 # 画风是用户选的运维配置，重跑不该把它清掉（清了会跑在默认画风上）；
 # 其余状态字段回 idle，让人物谱/场景库回到"未生成"。
@@ -399,6 +424,7 @@ def main() -> int:
         # 要扩大范围。
         if _range_covers_all_produced_episodes(conn, project_id, scope):
             purge_project_assets(conn, project_id)
+            purge_project_media(project_id)
         else:
             log("  跳过项目级视觉资产：本次范围之外还有已产出的分集，"
                 "清掉定妆照/场景图会越界（要清就把范围扩到全部分集）")
