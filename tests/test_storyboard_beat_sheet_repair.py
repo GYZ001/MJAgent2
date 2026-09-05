@@ -55,3 +55,34 @@ def test_empty_palette_is_not_filled_in():
     draft = _draft(plans)
     repair_beat_sheet_draft(draft, _scene_4_segments(), set())
     assert draft.segments[1].palette == ""
+
+
+def test_undroppable_dropped_line_is_restored_to_a_covering_segment():
+    """第 3 集真实形态：整句台词被塞进 dropped_lines，放回覆盖其单元的段，不再打回模型。"""
+    from types import SimpleNamespace
+    from app.production.storyboard_beat_sheet import undroppable_quote_errors
+    from app.production.storyboard_beat_sheet_repair import restore_undroppable_lines
+    from app.production.storyboard_dialogue_ledger import DialogueQuote
+
+    plans = [_plan(1, [(1, 3)]), _plan(2, [(4, 12)])]
+    draft = _draft(plans)
+    draft.kept_lines = []
+    draft.dropped_lines = [SimpleNamespace(quote_id="Q22", reason="未在当前节拍中保留")]
+    quotes = [DialogueQuote(quote_id="Q22", source_segment_index=4, text="猫忽然跳上了桌子", content_chars=17, speaker="小胖子")]
+    notes = restore_undroppable_lines(draft, quotes, _scene_4_segments())
+    assert notes and draft.dropped_lines == []
+    assert [(k.quote_id, k.segment_no) for k in draft.kept_lines] == [("Q22", 1)]  # S03 在第 1 段范围内
+    assert undroppable_quote_errors(draft.dropped_lines, quotes) == []
+
+
+def test_droppable_filler_stays_dropped():
+    from types import SimpleNamespace
+    from app.production.storyboard_beat_sheet_repair import restore_undroppable_lines
+    from app.production.storyboard_dialogue_ledger import DialogueQuote
+
+    draft = _draft([_plan(1, [(1, 12)])])
+    draft.kept_lines = []
+    draft.dropped_lines = [SimpleNamespace(quote_id="Q01", reason="语气词")]
+    quotes = [DialogueQuote(quote_id="Q01", source_segment_index=4, text="喵", content_chars=1, speaker="橘座")]
+    assert restore_undroppable_lines(draft, quotes, _scene_4_segments()) == []
+    assert len(draft.dropped_lines) == 1

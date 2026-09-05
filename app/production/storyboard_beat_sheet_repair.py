@@ -135,3 +135,44 @@ def fix_order_and_fill_holes(segments: list[Any], unit_counts: dict[int, int]) -
             notes.append(f"原文段 {index}：单元 S{last.to_unit + 1:02d}-S{total:02d} 无人覆盖，并入第 {last_no} 段")
             last.to_unit = total
     return notes
+
+
+def restore_undroppable_lines(draft: Any, quotes: list[Any], source_segments: list[Any]) -> list[str]:
+    """模型把整句台词（有说话人、正文超过语气词长度）塞进 dropped_lines 时，放回 kept_lines：
+    先归到单元范围覆盖它的段，否则归到引用其原文段且必保台词字数最少的段；没有任何段引用
+    它的原文段就留在 dropped_lines，由 undroppable_quote_errors 报「新增段落」。
+    2026-09-05 我欲封天第 3 集：Q22「我爹是财主……」被弃置，三次重试仍打回。"""
+    from app.production.storyboard_dialogue_ledger import _AiKeptLine
+    from app.production.storyboard_beat_sheet import DROPPABLE_MAX_CHARS
+    from app.production.storyboard_segment_ranges import quote_unit_index
+
+    by_id = {q.quote_id: q for q in quotes}
+    chars: dict[int, int] = {}
+    for item in draft.kept_lines:
+        q = by_id.get(item.quote_id)
+        if q is not None:
+            chars[item.segment_no] = chars.get(item.segment_no, 0) + int(q.content_chars or 0)
+    notes: list[str] = []
+    remaining = []
+    for item in draft.dropped_lines:
+        quote = by_id.get(item.quote_id)
+        if quote is None or not getattr(quote, "speaker", "") or quote.content_chars <= DROPPABLE_MAX_CHARS:
+            remaining.append(item)
+            continue
+        idx = quote.source_segment_index
+        unit_no = quote_unit_index(quote, source_segments[idx - 1].text) if 1 <= idx <= len(source_segments) else -1
+        covering = [
+            p.segment_no for p in draft.segments
+            for r in p.source_unit_ranges
+            if r.source_segment_index == idx and unit_no >= 1 and r.from_unit <= unit_no <= r.to_unit
+        ]
+        candidates = covering or [p.segment_no for p in draft.segments if idx in list(p.source_segment_indexes)]
+        if not candidates:
+            remaining.append(item)
+            continue
+        target = min(candidates, key=lambda no: (chars.get(no, 0), no))
+        chars[target] = chars.get(target, 0) + int(quote.content_chars or 0)
+        draft.kept_lines.append(_AiKeptLine(quote_id=quote.quote_id, segment_no=target))
+        notes.append(f"{quote.quote_id}「{quote.text[:16]}」不可弃置，从 dropped_lines 放回第 {target} 段")
+    draft.dropped_lines = remaining
+    return notes
