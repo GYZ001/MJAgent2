@@ -48,6 +48,10 @@ def mutate_bible_json(
             (json.dumps(data, ensure_ascii=False), expected + 1, project_id, expected),
         )
         if cursor.rowcount == 1:
+            # 2026-09-05 B 实测：这条 UPDATE 不提交就返回，调用方（道具注册、场景别名）接着 await
+            # 模型/出图几十秒到几分钟，SQLite 单写锁一直被握着，全站每次写都等 30 秒、事件循环冻结。
+            # CAS 写本身就是独立原子动作，写成即提交；调用方再 commit 是空操作。
+            conn.commit()
             return True
     raise BibleJsonConflict(f"人物谱正被并发修改（project={project_id}），重试 {attempts} 次仍未写入，请刷新后重试")
 

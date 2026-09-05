@@ -61,6 +61,9 @@ class _RacingConn:
     def __init__(self, inner: sqlite3.Connection, races: int) -> None:
         self._inner, self._races, self.updates = inner, races, 0
 
+    def commit(self) -> None:  # mutate_bible_json 写成即提交
+        pass
+
     def execute(self, sql: str, params=()):
         if sql.lstrip().upper().startswith("UPDATE") and self.updates < self._races:
             self.updates += 1
