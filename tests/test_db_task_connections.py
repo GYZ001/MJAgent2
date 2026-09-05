@@ -220,3 +220,12 @@ def test_async_tasks_have_isolated_transactions_and_release_connections(
         assert verification.execute("SELECT id FROM events").fetchall() == []
     finally:
         verification.close()
+
+
+def test_write_transaction_lock_wait_budget_is_not_fail_fast():
+    """2026-09-05：busy_timeout=0 + 0.75 秒重试让开机恢复/9 集并行期间的分镜任务被
+    database is locked 打死。锁等待发生在工作线程里，给足预算不影响事件循环。"""
+    from app import db as db_mod
+
+    assert db_mod.WRITE_TXN_BUSY_TIMEOUT_S >= 1.0
+    assert sum(db_mod.ASYNC_WRITE_RETRY_DELAYS_S) >= 5.0

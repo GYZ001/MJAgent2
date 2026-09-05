@@ -36,7 +36,9 @@ def _remember_write_statement(conn_id: int):
     return _trace
 _T = TypeVar("_T")
 
-ASYNC_WRITE_RETRY_DELAYS_S = (0.05, 0.1, 0.2, 0.4)
+# 曾是 (0.05…0.4)+busy_timeout=0 共 0.75 秒：9 集并行/开机恢复时一次写锁排队就打成 database is locked。
+ASYNC_WRITE_RETRY_DELAYS_S = (0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2)  # 锁等待在工作线程里，不占事件循环
+WRITE_TXN_BUSY_TIMEOUT_S = 2.0
 
 
 class _WriteTransactionStartError(Exception):
@@ -1158,7 +1160,7 @@ def _run_write_transaction_once(
     operation: Callable[[sqlite3.Connection], _T],
 ) -> _T:
     try:
-        conn = _open_connection(timeout=0)
+        conn = _open_connection(timeout=WRITE_TXN_BUSY_TIMEOUT_S)
     except sqlite3.OperationalError as exc:
         raise _WriteTransactionStartError(exc) from exc
     try:
@@ -3195,10 +3197,8 @@ def _log_provider_call_inner(
 
 
 def _bookkeeping(conn: sqlite3.Connection, op: Callable[[], _T], *, default: _T) -> _T:
-    """provider_calls 账本写入的统一护栏：任何异常都先回滚，绝不把开着的事务壳留给业务
-    代码——后续写会在它里面悄悄开写锁直到下次 commit（2026-09-05 B 上定妆照/分镜素材任务
-    各握着 provider_calls 事务 3–5 分钟，事件循环等锁）。锁错误按 best-effort 吞掉（滚动
-    升级或隔离单测库缺表时不应阻断业务），其它异常回滚后照常抛出，不掩盖。"""
+    """账本写入护栏：任何异常都先回滚，绝不把开着的事务壳留给业务代码（2026-09-05 B 上定妆照/
+    分镜素材任务各握着 provider_calls 事务 3–5 分钟）；锁错误 best-effort 吞掉，其它异常照常抛出。"""
     try:
         return op()
     except sqlite3.OperationalError:
