@@ -110,7 +110,7 @@ def test_not_sent_text_retry_budget_is_bounded(monkeypatch) -> None:
     assert attempts == 3  # one initial call plus two configured retries
 
 
-def test_ambiguous_text_result_is_not_replayed_and_requires_page_retry(
+def test_ambiguous_text_result_is_replayed_until_budget_exhausted(
     tmp_path, monkeypatch,
 ) -> None:
     _fresh_database(tmp_path, monkeypatch)
@@ -153,15 +153,17 @@ def test_ambiguous_text_result_is_not_replayed_and_requires_page_retry(
         asyncio.run(recorder.step("storyboard", operation))
     recorder.fail(caught.value, conn=None)
 
-    assert attempts == 1
-    assert sleeps == 0
+    # 2026-09-05 起：文本对话没有供应商侧状态，结果不确定的传输故障在网关内重放到预算耗尽
+    # （模型调用免费，重放最多多花一次调用；第三轮 k 第 24 集曾因一次断网整集失败）。
+    assert attempts == 4
+    assert sleeps == 3
     assert repository.get_run(recorder.run_id)["status"] == "FAILED"
     events = repository.get_events(recorder.run_id, limit=100)
     interrupted = [
         event for event in events
         if event["event_type"] == "PROVIDER_RESULT_INTERRUPTED"
     ]
-    assert len(interrupted) == 1
+    assert len(interrupted) == 4
     assert interrupted[0]["payload"] == {
         "delivery_state": "unknown",
         "failure_kind": "request_outcome_unknown",
@@ -169,10 +171,9 @@ def test_ambiguous_text_result_is_not_replayed_and_requires_page_retry(
         "stage_key": "storyboard",
         "call_role": "stage_generate",
     }
-    assert not any(
-        event["event_type"] == "PROVIDER_RETRY_SCHEDULED"
-        for event in events
-    )
+    assert sum(
+        1 for event in events if event["event_type"] == "PROVIDER_RETRY_SCHEDULED"
+    ) == 3
 
 
 def test_retryable_http_response_is_not_treated_as_not_sent(monkeypatch) -> None:
@@ -247,8 +248,8 @@ def test_shared_auto_run_records_retry_without_pausing_siblings(tmp_path, monkey
     )
 
 
-def test_zero_byte_stream_read_timeout_does_not_schedule_retry(tmp_path, monkeypatch) -> None:
-    """A zero-byte read timeout is outcome-unknown and must not auto-replay."""
+def test_zero_byte_stream_read_timeout_is_replayed(tmp_path, monkeypatch) -> None:
+    """A zero-byte read timeout is outcome-unknown; chat has no provider-side state, so it is replayed."""
     _fresh_database(tmp_path, monkeypatch)
     monkeypatch.setattr(config, "TEXT_PROVIDER_MAX_RETRIES", 3)
     monkeypatch.setattr(config, "TEXT_PROVIDER_RETRY_BASE_DELAY", 0.0)
@@ -293,18 +294,16 @@ def test_zero_byte_stream_read_timeout_does_not_schedule_retry(tmp_path, monkeyp
         asyncio.run(recorder.step("storyboard", operation))
     recorder.fail(caught.value, conn=None)
 
-    assert attempts == 1
-    assert sleeps == 0
+    assert attempts == 4
+    assert sleeps == 3
     assert caught.value.requires_explicit_retry is True
     events = repository.get_events(recorder.run_id, limit=100)
-    assert not any(
-        event["event_type"] == "PROVIDER_RETRY_SCHEDULED" for event in events
-    )
+    assert sum(1 for event in events if event["event_type"] == "PROVIDER_RETRY_SCHEDULED") == 3
 
 
-def test_partial_byte_stream_read_timeout_does_not_schedule_retry(tmp_path, monkeypatch) -> None:
-    """End-to-end: a partial-byte streaming read timeout stays not-replay-safe,
-    so model_gateway.chat must NOT schedule an automatic retry."""
+def test_partial_byte_stream_read_timeout_is_replayed(tmp_path, monkeypatch) -> None:
+    """End-to-end: a partial-byte streaming read timeout on a chat call is replayed
+    within the retry budget (2026-09-05: chat has no provider-side state)."""
     _fresh_database(tmp_path, monkeypatch)
     monkeypatch.setattr(config, "TEXT_PROVIDER_MAX_RETRIES", 3)
     monkeypatch.setattr(config, "TEXT_PROVIDER_RETRY_BASE_DELAY", 0.0)
@@ -348,9 +347,7 @@ def test_partial_byte_stream_read_timeout_does_not_schedule_retry(tmp_path, monk
         asyncio.run(recorder.step("storyboard", operation))
     recorder.fail(caught.value, conn=None)
 
-    assert attempts == 1
-    assert sleeps == 0
+    assert attempts == 4
+    assert sleeps == 3
     events = repository.get_events(recorder.run_id, limit=100)
-    assert not any(
-        event["event_type"] == "PROVIDER_RETRY_SCHEDULED" for event in events
-    )
+    assert sum(1 for event in events if event["event_type"] == "PROVIDER_RETRY_SCHEDULED") == 3

@@ -67,4 +67,8 @@ def replay_safe_stream_interruption(exc: object) -> bool:
     对话调用没有供应商侧任务或状态，重放最多多花一次免费调用；``requires_explicit_retry``
     的 fail-closed 语义是为视频 create 这类有供应商侧副作用的调用立的。2026-09-05 我欲封天
     第三轮：新角色评估被中断即丢弃且不重试，人物谱因此缺了王有材、整轮样本作废。"""
-    return getattr(exc, "failure_kind", "") == "stream_interrupted"
+    if getattr(exc, "failure_kind", "") == "stream_interrupted":
+        return True
+    # 流式传输中途的网络错误（httpx.HTTPError，delivery_state=unknown）对文本对话同样可安全重放：
+    # 2026-09-05 第三轮 k 第 24 集分镜台因一次「流式网络错误」被判不可重试而整集失败。
+    return bool(getattr(exc, "retryable", False)) and getattr(exc, "delivery_state", "") == "unknown"

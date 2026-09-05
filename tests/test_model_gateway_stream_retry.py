@@ -20,8 +20,13 @@ def _interrupted() -> hiagent.ProviderError:
 
 def test_stream_interruption_is_replay_safe_for_chat():
     assert model_gateway_moderation.replay_safe_stream_interruption(_interrupted()) is True
-    other = hiagent.ProviderError("网络", retryable=True, delivery_state="unknown")
-    assert model_gateway_moderation.replay_safe_stream_interruption(other) is False
+    network = hiagent.ProviderError("流式网络错误：ReadError", retryable=True, delivery_state="unknown",
+                                    failure_kind="connection_failed", requires_explicit_retry=True)
+    assert model_gateway_moderation.replay_safe_stream_interruption(network) is True, "流式中途断网对对话调用同样可重放"
+    responded = hiagent.ProviderError("拒绝", retryable=False, delivery_state="responded")
+    assert model_gateway_moderation.replay_safe_stream_interruption(responded) is False
+    not_retryable = hiagent.ProviderError("x", retryable=False, delivery_state="unknown")
+    assert model_gateway_moderation.replay_safe_stream_interruption(not_retryable) is False
 
 
 def test_chat_replays_once_after_stream_interruption(monkeypatch):
