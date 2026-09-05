@@ -76,7 +76,7 @@ export default function SegmentResourcePanel({ resources, project }: {
           <div className="segres-groups">
             <CharacterGroup characters={characters} project={project} onPreview={onPreview} />
             <SceneGroup scenes={scenes} project={project} onPreview={onPreview} />
-            <PropGroup props={props} />
+            <PropGroup props={props} onPreview={onPreview} />
           </div>
         )}
       {preview && <ImageCompareModal title={preview.title} images={preview.images} onClose={() => setPreview(null)} />}
@@ -153,21 +153,31 @@ function SceneGroup({ scenes, project, onPreview }: {
   )
 }
 
-function PropGroup({ props }: { props: StoryboardPackResourceProp[] }) {
+function PropGroup({ props, onPreview }: { props: StoryboardPackResourceProp[]; onPreview: OnPreview }) {
   return (
     <div className="segres-group">
       <b>道具 · {props.length}</b>
       <div className="segres-list">
-        {/* 道具没有世界书图像素材库（设计使然），一律只有文字描述，用统一占位图标。 */}
-        {props.map((prop, index) => (
-          <div className="segres-item" key={`p-${index}`}>
-            <div className="segres-thumb-icon" aria-hidden="true">物</div>
-            <div className="segres-body">
-              <span className="segres-name">{prop.label || '未命名道具'}</span>
-              <span className="segres-desc">{prop.description || '暂无文字描述'}</span>
+        {/* 缩略图取后端按道具名现算的 current_prop_image_url（物件库定物图）；没有图才用占位图标。 */}
+        {props.map((prop, index) => {
+          const imageUrl = prop.current_prop_image_url ?? null
+          const label = prop.label || '未命名道具'
+          return (
+            <div className="segres-item" key={`p-${index}`}>
+              {imageUrl
+                ? (
+                  <button type="button" className="segres-thumb-btn" onClick={() => onPreview(label, imageUrl)} aria-label={`查看 ${label} 大图`}>
+                    <img className="segres-thumb" src={imageUrl} alt={label} loading="lazy" decoding="async" />
+                  </button>
+                )
+                : <div className="segres-thumb-icon" aria-hidden="true">物</div>}
+              <div className="segres-body">
+                <span className="segres-name">{label}</span>
+                <span className="segres-desc">{prop.description || (imageUrl ? '' : '暂无文字描述')}</span>
+              </div>
             </div>
-          </div>
-        ))}
+          )
+        })}
         {!props.length && <p className="segres-empty-hint">本段无道具</p>}
       </div>
     </div>

@@ -28,6 +28,7 @@ from fastapi import HTTPException
 
 from .current_portraits import attach_current_character_portraits
 from .current_scene_refs import attach_current_scene_references
+from .current_prop_refs import attach_current_prop_references
 from .resource_labels import attach_resource_display_names
 from .mutation_primitives import _apply_contract_to_public_shot
 from .public_shot_versions import _public_shot_versions
@@ -64,6 +65,7 @@ def episode_detail(episode_id: str, view: str | None = None):
     # 场景条目就地加展示用字段，不改变投影函数自身的字段依赖顺序。
     attach_current_character_portraits(detail, view)
     attach_current_scene_references(detail, view)
+    attach_current_prop_references(detail, view)
     attach_resource_display_names(detail, view)
     return detail
 

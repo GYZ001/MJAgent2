@@ -64,6 +64,9 @@ export interface StoryboardPackResourceScene {
 export interface StoryboardPackResourceProp {
   label: string;
   description?: string;
+  /** 后端按道具名实时解析出的物件库定物图（2026-09-05），与场景的 current_scene_* 同形 */
+  current_prop_reference_id?: string | null;
+  current_prop_image_url?: string | null;
 }
 
 export interface StoryboardPackResources {
