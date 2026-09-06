@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app import hiagent
+from app.generation_concurrency import run_with_provider_call_slot
 from app.db import get_setting
 from app.errors import ContentGenerationError
 from app.schemas import Bible
@@ -355,8 +356,13 @@ async def _chat_with_tools(messages: list[dict], tools: list[dict], **kwargs: An
     """Phase A 唯一的网关出口。tests/conftest.py 的 autouse 桩替换的是这个名字，
     不是 ``hiagent.chat_with_tools`` 本体——后者有自己的契约测试
     （tests/test_chat_with_tools.py、test_reasoning_token_budget.py）测的就是真函数，
-    全局替换会让它们静默测到桩子。"""
-    return await hiagent.chat_with_tools(messages, tools, **kwargs)
+    全局替换会让它们静默测到桩子。
+
+    必须过供应商请求槽位（settings.text_generation_concurrency）：2026-09-06 第 5 轮
+    30 集映射台同时起，这里的工具对话绕过槽位直打 HiAgent，网关在突发负载下用
+    「内容审核」话术 + content_filter 回绝，28 集映射台整台失败；同一步骤同时段
+    36 次照常通过，证明不是内容问题。"""
+    return await run_with_provider_call_slot(lambda: hiagent.chat_with_tools(messages, tools, **kwargs))
 
 
 async def _run_phase_a(

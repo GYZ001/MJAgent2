@@ -36,6 +36,13 @@ INTERRUPTED rows sharing this exact 22-character payload (same
 必须与实际行为一致」。现在一律要求复现：同一 operation_id 两次拿到字节相同的
 拒绝证据才算确定（真拒绝稳定复现，抖动不会），单次拒绝退回既有的"结果不确定，
 请确认后重试"契约。
+
+2026-09-06（第 5 轮 30 集并发映射台）：上面那条「同一 operation_id 两次字节相同」在
+**持续**过载下同样判错——重试间隔 30 秒仍在同一波过载里，两次都拿到同一段 22 字拒绝，
+28 集映射台被判 LLM-REJECTED；同一步骤同时段 36 次照常通过。补第三条结构判据：
+同一段拒绝字节在 ``SYSTEMIC_REFUSAL_WINDOW_S`` 内落在**其它** operation_id（不同请求体）
+上，就是供应商级现象，不是本请求内容——真拒绝只对特定请求体成立，不会同时对几十份
+不同的章节文本说同一句话。此时退回「结果不确定」，交给带退避的重放。
 """
 from __future__ import annotations
 
@@ -46,6 +53,8 @@ from typing import Any
 INTERRUPTED_STREAM_FRAME_CHARS = 300
 INTERRUPTED_STREAM_MAX_FRAMES = 4
 INTERRUPTED_STREAM_TEXT_CHARS = 300
+# 同一段拒绝字节在这个窗口内落到别的 operation_id 上，就是供应商级现象而非本请求内容。
+SYSTEMIC_REFUSAL_WINDOW_S = 300.0
 
 
 def remember_unconsumed_stream_frame(frames: list[str], line: str) -> None:
@@ -141,4 +150,30 @@ def classify_interrupted_stream(
     if len(signatures) < 2:
         return False
     tail = signatures[-2:]
-    return bool(tail[0]) and tail[0] == tail[1]
+    if not (bool(tail[0]) and tail[0] == tail[1]):
+        return False
+    return not _refusal_is_systemic(conn, call_id, operation_id, tail[1], max_signature_chars)
+
+
+def _refusal_is_systemic(
+    conn: sqlite3.Connection, call_id: int, operation_id: str, signature: str, max_signature_chars: int,
+) -> bool:
+    """窗口内是否有**别的** operation_id 也以字节相同的证据 INTERRUPTED（见模块 docstring 第三条）。"""
+    row = conn.execute("SELECT ts FROM provider_calls WHERE id=?", (call_id,)).fetchone()
+    ts = float((row["ts"] if row else 0) or 0)
+    rows = conn.execute(
+        """SELECT response_json, received_chars FROM provider_calls
+           WHERE status='INTERRUPTED' AND operation_id!=? AND ts BETWEEN ? AND ?
+           ORDER BY id DESC LIMIT 200""",
+        (operation_id, ts - SYSTEMIC_REFUSAL_WINDOW_S, ts + SYSTEMIC_REFUSAL_WINDOW_S),
+    ).fetchall()
+    for other in rows:
+        if int(other["received_chars"] or 0) >= max_signature_chars:
+            continue
+        try:
+            payload = json.loads(other["response_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if str((payload.get("interrupted_stream") or {}).get("summary") or "") == signature:
+            return True
+    return False

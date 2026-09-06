@@ -333,3 +333,46 @@ def test_public_error_text_quotes_the_provider_and_drops_the_retry_lie():
     assert REFUSAL_TEXT in record.public
     assert "可稍后重试" not in record.public
     assert "修复重试上限" not in record.public
+
+
+def _insert_interrupted_call_at(conn, *, operation_id: str, ts: float, summary: str) -> int:
+    cur = conn.execute(
+        """INSERT INTO provider_calls(ts, kind, model, status, http_status, latency_ms,
+               operation_id, attempt_no, received_chars, response_json)
+           VALUES(?, 'chat', 'm', 'INTERRUPTED', 200, 100, ?, 1, 22, ?)""",
+        (ts, operation_id, json.dumps({"interrupted_stream": {"summary": summary}}, ensure_ascii=False)),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def test_same_refusal_on_another_operation_in_window_is_systemic_not_deterministic():
+    """2026-09-06 第 5 轮：30 集并发映射台，28 个不同 operation_id 在三分钟内拿到字节相同的
+    22 字拒绝——供应商级过载，不是内容拒绝。同一 operation 两次相同也不能定性。"""
+    conn = _conn()
+    now = time.time()
+    _insert_interrupted_call_at(conn, operation_id="op-other-chapter", ts=now - 40, summary=REFUSAL_TEXT)
+    _insert_interrupted_call_at(conn, operation_id="op-mine", ts=now - 30, summary=REFUSAL_TEXT)
+    second = _insert_interrupted_call_at(conn, operation_id="op-mine", ts=now, summary=REFUSAL_TEXT)
+    assert hiagent_stream_evidence.classify_interrupted_stream(conn, second, "content_filter", 300) is False
+
+
+def test_other_operation_refusal_outside_window_does_not_rescue_a_real_rejection():
+    conn = _conn()
+    now = time.time()
+    _insert_interrupted_call_at(
+        conn, operation_id="op-other-chapter", ts=now - hiagent_stream_evidence.SYSTEMIC_REFUSAL_WINDOW_S - 60,
+        summary=REFUSAL_TEXT,
+    )
+    _insert_interrupted_call_at(conn, operation_id="op-mine", ts=now - 30, summary=REFUSAL_TEXT)
+    second = _insert_interrupted_call_at(conn, operation_id="op-mine", ts=now, summary=REFUSAL_TEXT)
+    assert hiagent_stream_evidence.classify_interrupted_stream(conn, second, None, 300) is True
+
+
+def test_other_operation_with_different_evidence_in_window_is_not_systemic():
+    conn = _conn()
+    now = time.time()
+    _insert_interrupted_call_at(conn, operation_id="op-other", ts=now - 10, summary="网络中断在别处")
+    _insert_interrupted_call_at(conn, operation_id="op-mine", ts=now - 30, summary=REFUSAL_TEXT)
+    second = _insert_interrupted_call_at(conn, operation_id="op-mine", ts=now, summary=REFUSAL_TEXT)
+    assert hiagent_stream_evidence.classify_interrupted_stream(conn, second, None, 300) is True
