@@ -121,6 +121,11 @@ def unimportant_verdict_result(
     终态结果；两种豁免成立时返回 ``None``（调用方继续走建卡流程，实际不会走到
     这个分支，只是与原调用点的条件写法对齐，避免额外分支判断）。
     """
+    if require_identity_card and not card_complete and verdict.get("model_important") and str(verdict.get("appearance_canonical") or "").strip():
+        # 身份已确认的真名、模型也判了 important，只是外观经原文依据核验后变薄（第 14 轮 上官修 9 字/何洛华 17 字）：
+        # 薄而诚实的卡照建（合同「卡再薄也要有条目」），标记 appearance_thin 让核查脚本看得见；不得为凑字数编特征。
+        verdict["appearance_thin"] = True
+        return None
     if (require_identity_card and (card_complete or verdict["important"])) or (verdict["important"] and card_complete):
         # 身份已确认的真名一律登记（合同 important=true，卡再薄也要有条目，见 portrait_generation_decision）；
         # 非身份路径的建卡必须卡片完整：画面在场证据只能把「非人」改判成「人」，不能让空外观的卡落库

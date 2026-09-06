@@ -33,6 +33,34 @@ from typing import Any
 _BATCH_FOLD_GROUP_RE = re.compile(r"current-\d+:F\d+", re.I)
 
 
+def fold_true_name_reveals(
+    groups_by_authority: dict[str, set[str]],
+    entries: dict[str, dict[str, Any]],
+) -> None:
+    """真名揭示：决议里新签发的真名（bible:许清）用的称谓正是人物谱里某张卡的名字/排他别名
+    （许师姐），那就是同一个人——把真名并进该卡的 source_labels，撤掉独立的新身份，而不是
+    让同一称谓在两个 authority 下相撞（第 14 轮第 29 集 ERR-20260907-e75d3a）。判据全是数据：
+    卡名按契约必须是专指称谓（card_name_is_specific），一个专指称谓不可能是另一个人的排他标签。
+    真名自身已经是人物谱卡名的不折（那是两张既有卡的冲突，照常报 issue）。"""
+    bible_ids = [aid for aid, e in entries.items() if "resolution" not in e]
+    bible_names = {entries[aid]["canonical_name"] for aid in bible_ids}
+    for authority_id in [aid for aid, e in entries.items() if "resolution" in e and e.get("identity_kind") == "named"]:
+        entry = entries[authority_id]
+        if entry["canonical_name"] in bible_names:
+            continue
+        owner = next((aid for aid in bible_ids if any(label in entries[aid]["source_labels"] for label in entry["source_labels"])), None)
+        if owner is None:
+            continue
+        target = entries[owner]
+        for label in (entry["canonical_name"], *entry["source_labels"]):
+            if label and label not in target["source_labels"]:
+                target["source_labels"].append(label)
+        target.setdefault("true_name_candidates", []).append(entry["canonical_name"])
+        target.setdefault("conflict_notes", []).append(f"决议新签发真名 {entry['canonical_name']} 的称谓 {entry['source_labels']} 属于已登记卡 {target['canonical_name']}，按同一人并入")
+        entries.pop(authority_id)
+        groups_by_authority.pop(authority_id, None)
+
+
 def reconcile_registered_authority_folds(
     groups_by_authority: dict[str, set[str]],
     entries: dict[str, dict[str, Any]],
@@ -44,6 +72,7 @@ def reconcile_registered_authority_folds(
     只处理"自身即注册路由 + 其余全部是批内折叠 token"这一种结构，其它冲突
     形态不改。
     """
+    fold_true_name_reveals(groups_by_authority, entries)
     for authority_id, identity_groups in groups_by_authority.items():
         if authority_id not in identity_groups or len(identity_groups) <= 1:
             continue
@@ -63,4 +92,4 @@ def reconcile_registered_authority_folds(
             )
 
 
-__all__ = ["reconcile_registered_authority_folds"]
+__all__ = ["fold_true_name_reveals", "reconcile_registered_authority_folds"]
