@@ -32,6 +32,8 @@ export type EpisodeStage = Exclude<Stage, "merge">;
 export type StageState = "pending" | "running" | "done" | "skipped" | "failed";
 
 export interface EpisodeEntry {
+  /** 这一步正由重启前起的那轮运行续跑时的说明（后端 _wait_until_episode_free 写入）。 */
+  waiting?: string | null
   episode_id: string;
   episode_no: number;
   title: string;

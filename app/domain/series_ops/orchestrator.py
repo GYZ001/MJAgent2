@@ -162,13 +162,19 @@ async def _run_episode(task_id: str, entry: dict, progress: dict, recorder) -> N
         await _run_single_stage(stage, episode_id, task_id, entry, progress, recorder)
 
 
-async def _wait_until_episode_free(episode_id: str, task_id: str, entry: dict, progress: dict) -> None:
+async def _wait_until_episode_free(
+    episode_id: str, task_id: str, entry: dict, progress: dict, stage: str | None = None,
+) -> None:
     """这一集正被单集任务占用就等（每 5 秒看一次），等待原因写进条目供界面展示；
-    不抢也不判失败——占用者往往就是重启前本任务自己起的那一轮运行。"""
+    不抢也不判失败——占用者往往就是重启前本任务自己起的那一轮运行。
+    等待期间这一步在界面上标成「进行中」并计入在跑集数：那轮运行确实在替本任务干这一步，
+    显示成「待办」会让人以为并发被卡住（2026-09-05 用户在 11-20 集任务页看到 14/15 集待办）。"""
     label = stages.busy_label(episode_id)
     if label is None:
         return
-    entry["waiting"] = f"第{entry['episode_no']}集正被{label}的任务占用，等它跑完后自动继续"
+    entry["waiting"] = f"第{entry['episode_no']}集的{label}正由重启前起的那轮运行续跑，跑完后本任务自动接着走"
+    if stage:
+        entry["stages"][stage] = "running"
     await state.persist_progress_async(task_id, progress)
     try:
         while stages.busy_label(episode_id) is not None:
@@ -181,7 +187,7 @@ async def _wait_until_episode_free(episode_id: str, task_id: str, entry: dict, p
 async def _run_single_stage(
     stage: str, episode_id: str, task_id: str, entry: dict, progress: dict, recorder,
 ) -> None:
-    await _wait_until_episode_free(episode_id, task_id, entry, progress)
+    await _wait_until_episode_free(episode_id, task_id, entry, progress, stage)
     if stages.stage_is_complete(stage, get_conn(), episode_id):
         entry["stages"][stage] = "skipped"
         await state.persist_progress_async(task_id, progress)

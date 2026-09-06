@@ -111,7 +111,9 @@ export default function SeriesProgressBoard({
                     const isCurrentCell = isCurrentEpisode && currentStage === col.key
                     return (
                       <td key={col.key} className={isCurrentCell ? 'series-board-cell-current' : ''}>
-                        <span className={seriesStageStampClass(state)}>{seriesStageMeta(state).label}</span>
+                        <span className={seriesStageStampClass(state)} title={state === 'running' && ep.waiting ? ep.waiting : undefined}>
+                          {seriesStageMeta(state).label}{state === 'running' && ep.waiting ? ' · 续跑中' : ''}
+                        </span>
                       </td>
                     )
                   })}
