@@ -192,6 +192,11 @@ JSON 字段或分点罗列）。
 - required_dialogue 里带 speaker 的台词，说话人就是它（原文里引号前后的归属，程序已核对），
   dialogue[] 的 speaker_identity_id 用 relevant_assets.characters 里这个正名对应的 identity_id，
   prompt_text 里这句也由同一个人说；画外音只能用本段原文里的句子，不得改写或另造。
+- required_dialogue 里没有 speaker 的引号台词，是原文没有点名说话人的话（群众议论、
+  无名同门的对话）：speaker 用本段 relevant_assets.characters 里的无名人物（identity_id
+  为 entity: 的那种），没有无名人物就写旁白按画外音处理；绝不安给在场的具名角色。
+  引号后紧跟「X听着……」「X闻言……」说明 X 是听者不是说话人（实测：「以王腾飞师兄的
+  资质……」是无名同门的议论，原文写「孟浩听着身边同门的议论」，成片却让孟浩张嘴说这句）。
 - 台词的人称决定 speaker：原文用第三人称叙述这个人物（「他跑得不算快」「他
   跳得不算高」）时，这是叙述者的画外音，speaker 必须写旁白，不能写成这个
   人物自己在说第三人称的自己；原文用第一人称自述（「我八岁的时候……」）时，
@@ -347,6 +352,12 @@ Rules:
   character speaking about himself in third person. A first-person
   self-narrating line (e.g. "At eight I was diagnosed...") is this character's
   own voice-over. Both are off-screen voice; only the speaker tag differs.
+- A quoted line in required_dialogue that carries no speaker is one the source
+  never attributes (crowd chatter, unnamed disciples talking): tag it with an
+  unnamed person from relevant_assets.characters (an entity: identity), or the
+  narrator as off-screen voice when no unnamed person exists; never hand it to
+  a named character who is present. "X listened to..." right after the closing
+  quote marks X as the listener, not the speaker.
 - Every speaker and every on-screen character must use the canonical name
   given in relevant_assets.characters, copied verbatim; only a person with a
   mere honorific in the source text that relevant_assets.characters cannot

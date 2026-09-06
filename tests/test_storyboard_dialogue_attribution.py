@@ -153,3 +153,48 @@ def test_self_mocking_is_utterance_evidence():
     text = "已贫贫如洗。\n“莫非科举真的不是我孟浩未来的路？”孟浩自嘲，低头看了一眼手中的葫芦"
     start = text.index("莫非"); end = text.index("？”") + 1
     assert attribute_prose_speaker(text, start, end, ["孟浩", "王有材"]) == "孟浩"
+
+
+# ---------------------------------------------------------------- 原文未点名说话人的台词
+CROWD_SRC = (
+    "“应该是这样，你们看外宗的韩宗师兄出现了。”"
+    "“以王腾飞师兄的资质，根本就不会在意这些丹药，他当年加入靠山宗，可是引起了掌门长老等人不小的轰动。”"
+    "孟浩听着身边同门的议论，尽管是第一次参与这种事，但也知晓每一次发丹将是争夺的关键。"
+)
+CROWD_LINE = "以王腾飞师兄的资质，根本就不会在意这些丹药，他当年加入靠山宗，可是引起了掌门长老等人不小的轰动。"
+CROWD_PAYLOAD = {"asset_manifest": {"characters": [
+    {"identity_id": "bible:孟浩", "display_name": "孟浩", "aliases": []},
+    {"identity_id": "entity:f747bf96e5b61fb0", "display_name": "议论的同门", "aliases": []},
+]}}
+
+
+def _crowd_required():
+    return [{"quote_id": "Q02", "text": CROWD_LINE, "speaker": "", "source_segment_index": 1}]
+
+
+def test_unattributed_crowd_line_given_to_the_listener_is_rejected():
+    """第 5 集实测：原文写「孟浩听着身边同门的议论」，模型却让孟浩张嘴说无名同门的话。"""
+    draft = _draft([_Line("bible:孟浩", CROWD_LINE)])
+    errors = dialogue_speaker_errors(draft, _crowd_required(), manifest_name_to_identity(CROWD_PAYLOAD), CROWD_SRC)
+    assert len(errors) == 1 and "听者" in errors[0] and "无名人物" in errors[0]
+
+
+def test_unattributed_line_given_to_a_name_absent_from_the_window_is_rejected():
+    # 引号后 40 字内没有孟浩（POST_WINDOW=30），引号前也没有 → 没有任何依据。
+    src = "“应该是这样，你们看外宗的韩宗师兄出现了。”" + "“" + CROWD_LINE + "”" + "广场上一片嘈杂。" * 5 + "孟浩走上前。"
+    draft = _draft([_Line("bible:孟浩", CROWD_LINE)])
+    errors = dialogue_speaker_errors(draft, _crowd_required(), manifest_name_to_identity(CROWD_PAYLOAD), src)
+    assert len(errors) == 1 and "不在这句前后" in errors[0]
+
+
+def test_unattributed_line_given_to_an_unnamed_entity_or_narrator_passes():
+    n2i = manifest_name_to_identity(CROWD_PAYLOAD)
+    assert dialogue_speaker_errors(_draft([_Line("entity:f747bf96e5b61fb0", CROWD_LINE)]), _crowd_required(), n2i, CROWD_SRC) == []
+    assert dialogue_speaker_errors(_draft([_Line(NARRATOR, CROWD_LINE)]), _crowd_required(), n2i, CROWD_SRC) == []
+
+
+def test_line_with_source_attribution_is_not_touched_by_the_unattributed_rule():
+    src = "孟浩沉声道：“" + CROWD_LINE + "”众人闻言一惊。"
+    required = [{"quote_id": "Q03", "text": CROWD_LINE, "speaker": "孟浩", "source_segment_index": 1}]
+    assert dialogue_speaker_errors(_draft([_Line("bible:孟浩", CROWD_LINE)]), required, manifest_name_to_identity(CROWD_PAYLOAD), src) == []
+

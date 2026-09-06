@@ -200,6 +200,7 @@ def dialogue_speaker_errors(
                 )
     if not segment_source_text:
         return errors
+    errors.extend(unattributed_quote_speaker_errors(draft, required_dialogue, identity_to_name, segment_source_text))
     dropped: list[int] = []
     for index, line in enumerate(draft.dialogue):
         if line.delivery != "offscreen_voice":
@@ -220,6 +221,55 @@ def dialogue_speaker_errors(
             line.speaker_identity_id = NARRATOR
     if dropped:
         draft.dialogue = [line for i, line in enumerate(draft.dialogue) if i not in dropped]
+    return errors
+
+
+_LISTENER_CUE_RE = r".{0,6}(?:听|闻)"
+
+
+def _quote_span(line: str, source_text: str) -> tuple[int, int] | None:
+    needle = textmatch.condense(line)
+    for m in _QUOTE_RE.finditer(source_text):
+        inner = textmatch.condense(m.group(1))
+        if needle and inner and (needle in inner or inner in needle):
+            return m.start(), m.end()
+    return None
+
+
+def unattributed_quote_speaker_errors(
+    draft: Any, required_dialogue: list[dict[str, Any]], identity_to_name: dict[str, str], source_text: str,
+) -> list[str]:
+    """原文没有点名说话人的引号台词，模型不得安给在场的具名角色（2026-09-05 第 5 集：「以王腾飞师兄的
+    资质……」是无名同门的议论，原文紧接着写「孟浩听着身边同门的议论」，成片却让孟浩张嘴说这句）。
+    判据是原文结构：账本对这句没有说话人证据（attribute_prose_speaker 留空），而模型写了具名角色 X——
+    引号后 X 紧跟听/闻类动词（X 是听者），或 X 根本不在这句前后窗口里，都算没有依据。"""
+    errors: list[str] = []
+    unattributed = {
+        textmatch.condense(str(item.get("text") or "")) for item in required_dialogue
+        if not str(item.get("speaker") or "").strip()
+    }
+    for index, line in enumerate(draft.dialogue):
+        speaker = str(line.speaker_identity_id or "")
+        name = identity_to_name.get(speaker, "")
+        if not speaker.startswith("bible:") or not name:
+            continue
+        needle = textmatch.condense(line.line)
+        if not any(needle in u or u in needle for u in unattributed if u):
+            continue
+        span = _quote_span(line.line, source_text)
+        if span is None:
+            continue
+        start, end = span
+        after = source_text[end:end + POST_WINDOW]
+        before = source_text[max(0, start - PRE_WINDOW):start]
+        listener = re.match(r"^[」”』\"，。！？…、\s]{0,3}" + re.escape(name) + _LISTENER_CUE_RE, after)
+        if listener or (name not in before and name not in after):
+            why = f"引号后原文是「{name}听/闻……」，{name} 是听者" if listener else f"{name} 不在这句前后的原文里"
+            errors.append(
+                f"dialogue[{index}]『{line.line[:20]}』原文没有点名说话人（{why}），不得安给具名角色；"
+                "speaker 改用本段 relevant_assets.characters 里的无名人物（entity），没有无名人物就写旁白按"
+                "画外音处理，prompt_text 里这句也不得让具名角色张嘴说"
+            )
     return errors
 
 
