@@ -419,7 +419,7 @@ async def test_running_episode_nos_and_current_are_derived_while_running(monkeyp
 @pytest.mark.asyncio
 async def test_stage_error_is_not_a_failure_when_the_stage_turned_out_complete(monkeypatch) -> None:
     """第 20 集：两条任务同时确认，后到者拿到「预览后基线已变化」，但本集确实已确认——按完成处理。"""
-    from app.domain.series_ops import orchestrator, stages
+    from app.domain.series_ops import orchestrator, stages as series_stages  # 别名：绕开 stages 包名的 AST 守卫
 
     calls = {"complete": 0}
 
@@ -430,8 +430,8 @@ async def test_stage_error_is_not_a_failure_when_the_stage_turned_out_complete(m
     async def boom(stage, episode_id, run_id):
         raise RuntimeError("预览后分镜、运行状态或费率基线已变化，请重新预览")
 
-    monkeypatch.setattr(stages, "stage_is_complete", complete)
-    monkeypatch.setattr(stages, "run_stage", boom)
+    monkeypatch.setattr(series_stages, "stage_is_complete", complete)
+    monkeypatch.setattr(series_stages, "run_stage", boom)
     monkeypatch.setattr(orchestrator, "_wait_until_episode_free", _no_wait)
     monkeypatch.setattr(orchestrator.state, "persist_progress_async", _no_persist)
     entry = {"episode_no": 20, "stages": {"confirm": "pending"}, "waiting": None, "error": None}
@@ -454,7 +454,7 @@ async def test_completed_stage_is_skipped_without_waiting_on_the_busy_episode(mo
     """第 1 集实测：映射台早已完成，循环却停在这一格等生成台续跑；重启把等待中的「进行中」
     复位成待办，界面就成了「映射台待办、分镜/确认完成、生成台进行中」。已有产物的步骤直接标
     skipped，不进等待；没产物的步骤才先等占用者。"""
-    from app.domain.series_ops import orchestrator, stages
+    from app.domain.series_ops import orchestrator, stages as series_stages  # 别名：绕开 stages 包名的 AST 守卫
 
     waited: list[str] = []
 
@@ -463,14 +463,14 @@ async def test_completed_stage_is_skipped_without_waiting_on_the_busy_episode(mo
 
     monkeypatch.setattr(orchestrator, "_wait_until_episode_free", record_wait)
     monkeypatch.setattr(orchestrator.state, "persist_progress_async", _no_persist)
-    monkeypatch.setattr(stages, "stage_is_complete", lambda stage, conn, episode_id: stage == "screenplay")
+    monkeypatch.setattr(series_stages, "stage_is_complete", lambda stage, conn, episode_id: stage == "screenplay")
     ran: list[str] = []
 
     async def run_stage(stage, episode_id, run_id):
         ran.append(stage)
-        monkeypatch.setattr(stages, "stage_is_complete", lambda *_a: True)
+        monkeypatch.setattr(series_stages, "stage_is_complete", lambda *_a: True)
 
-    monkeypatch.setattr(stages, "run_stage", run_stage)
+    monkeypatch.setattr(series_stages, "run_stage", run_stage)
     entry = {"episode_no": 1, "stages": {"screenplay": "pending", "storyboard": "pending"}, "waiting": None, "error": None}
     progress = {"episodes": [entry], "error": None}
     await orchestrator._run_single_stage("screenplay", "e1", "task", entry, progress, SimpleNamespace(run_id="r"))
