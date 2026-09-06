@@ -39,8 +39,8 @@ def test_settings_schema_rejects_illegal_values_and_dependency_conflicts(monkeyp
     for patch in (
         {"video_submit_concurrency": "abc"},
         {"video_submit_concurrency": "Infinity"},
-        {"video_submit_concurrency": 0},
-        {"text_generation_concurrency": 17},
+        {"video_submit_concurrency": -1},  # 0 现在是「自动」，合法
+        {"text_generation_concurrency": 33},  # 安全阀 32
         {"use_character_refs": "yes"},
         {"media_scheduler_policy": "random"},
         {"video_ready_low_watermark": 9, "video_ready_high_watermark": 3},

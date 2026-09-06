@@ -41,6 +41,17 @@ SETTING_KEYS = {
     RESOURCE_TEXT_PROVIDER: "text_generation_concurrency",
 }
 
+# 0/空 = 自动：不设固定上限（用户 2026-09-06 拍板：所有并发不设上限，以机器与供应商的实际表现为界）。
+# 自动模式下硬上限只是安全阀，真正生效的并发由供应商信号自适应发现：慢启动——没见过拥塞前每个健康
+# 周期翻倍，见过拥塞后每周期 +1，拥塞（429/5xx/超时/掐流）减半。机器内存/磁盘/CPU 水位另有
+# app/observability/machine_watermark 在准入处把关。
+AUTO_CEILINGS: dict[str, int] = {
+    S.RESOURCE_REFERENCE: 64, S.RESOURCE_IMAGE: 64, S.RESOURCE_VLM: 64, S.RESOURCE_VIDEO_SUBMIT: 64,
+    S.RESOURCE_VIDEO_INFLIGHT: 128, S.RESOURCE_VIDEO_POLL: 128, S.RESOURCE_DOWNLOAD: 16, S.RESOURCE_FINALIZE: 16,
+    RESOURCE_TEXT_PROVIDER: 32,
+}
+AUTO_HEALTHY_INTERVAL_S = 60.0   # 自动模式：每分钟健康就升一档，几分钟内探到供应商真实容量
+FIXED_HEALTHY_INTERVAL_S = 600.0  # 固定上限模式沿用原来的 10 分钟 +1
 # 兼容旧键：读时回填到新键
 LEGACY_MAP = {
     "video_concurrency": S.RESOURCE_VIDEO_SUBMIT,
@@ -57,6 +68,8 @@ class _ChannelState:
     healthy_since: float | None = None
     cooldown_until: float = 0.0
     semaphore: asyncio.Semaphore | None = field(default=None, repr=False)
+    auto: bool = False
+    slow_start: bool = True
 
 
 _channels: dict[str, _ChannelState] = {}
@@ -76,6 +89,20 @@ def _int_setting(key: str, default: int) -> int:
         raise RuntimeError(f"非法运行时设置 {key}={raw!r}；请在监制房修正") from exc
 
 
+def _setting_mode(key: str | None, default: int, resource: str) -> tuple[int, bool]:
+    """(硬上限, 是否自动)。0/空/auto = 自动，硬上限取安全阀；显式数字 = 固定上限。"""
+    if not key:
+        return max(1, int(default)), False
+    try:
+        raw = get_setting(key)
+    except Exception:  # noqa: BLE001 设置表未就绪
+        raw = None
+    text = str(raw or "").strip().lower()
+    if text in ("", "0", "auto"):
+        return AUTO_CEILINGS.get(resource, max(1, int(default))), True
+    return _int_setting(key, default), False
+
+
 def channel_limit(resource: str) -> int:
     """当前生效并发（含自适应下调后的值，不超过硬上限）。"""
     state = ensure_channel(resource)
@@ -90,9 +117,9 @@ def ensure_channel(resource: str) -> _ChannelState:
     if resource not in _channels:
         key = SETTING_KEYS.get(resource)
         default = CHANNEL_DEFAULTS.get(resource, 2)
-        limit = _int_setting(key, default) if key else default
-        _channels[resource] = _ChannelState(
-            name=resource, hard_limit=limit, current=limit,
+        limit, auto = _setting_mode(key, default, resource)
+        _channels[resource] = _ChannelState(  # 自动：从均衡档热启动，靠慢启动往上探；固定：直接顶到上限
+            name=resource, hard_limit=limit, current=(min(default, limit) if auto else limit), auto=auto,
         )
     return _channels[resource]
 
@@ -101,14 +128,16 @@ def reload_limits_from_settings() -> None:
     """设置变更后即时生效：更新硬上限；当前值向硬上限对齐（升），或立即下调。"""
     for resource, key in SETTING_KEYS.items():
         state = ensure_channel(resource)
-        new_hard = _int_setting(key, CHANNEL_DEFAULTS[resource])
+        new_hard, auto = _setting_mode(key, CHANNEL_DEFAULTS[resource], resource)
         old_hard = state.hard_limit
         state.hard_limit = new_hard
+        state.auto = auto
         if new_hard < state.current:
             state.current = new_hard
             _resize_semaphore(resource)
-        elif new_hard > old_hard and state.current < new_hard and time.time() >= state.cooldown_until:
-            # 提高硬上限时立刻放开到新上限（健康增长仍由 report_healthy 微调）
+        elif not auto and new_hard > old_hard and state.current < new_hard and time.time() >= state.cooldown_until:
+            # 固定模式：提高硬上限时立刻放开到新上限（健康增长仍由 report_healthy 微调）
+            # 自动模式不跳到安全阀——那等于把 30 集的突发直接砸向供应商，让慢启动去探
             state.current = new_hard
             _resize_semaphore(resource)
 
@@ -147,6 +176,7 @@ def report_congestion(resource: str, *, reason: str = "429") -> None:
     state.congestion_hits = 0
     previous = state.current
     state.current = max(1, state.current // 2)
+    state.slow_start = False  # 见过拥塞：此后只加法爬升
     state.cooldown_until = time.time() + 60.0
     state.healthy_since = None
     _resize_semaphore(resource)
@@ -158,7 +188,7 @@ def report_congestion(resource: str, *, reason: str = "429") -> None:
 
 
 def report_healthy(resource: str) -> None:
-    """连续 10 分钟健康：每次 +1，直到硬上限。"""
+    """固定模式：连续 10 分钟健康 +1；自动模式：每分钟健康就升——慢启动翻倍，见过拥塞后 +1，直到安全阀。"""
     state = ensure_channel(resource)
     now = time.time()
     if now < state.cooldown_until:
@@ -167,11 +197,11 @@ def report_healthy(resource: str) -> None:
     if state.healthy_since is None:
         state.healthy_since = now
         return
-    if now - state.healthy_since < 600.0:
+    if now - state.healthy_since < (AUTO_HEALTHY_INTERVAL_S if state.auto else FIXED_HEALTHY_INTERVAL_S):
         return
     if state.current < state.hard_limit:
         previous = state.current
-        state.current += 1
+        state.current = min(state.hard_limit, state.current * 2 if (state.auto and state.slow_start) else state.current + 1)
         _resize_semaphore(resource)
         _LOGGER.info(
             "concurrency-upgrade resource=%s %d->%d hard_limit=%d",
@@ -229,6 +259,8 @@ def snapshot() -> dict[str, dict]:
             "current": state.current,
             "cooldown_until": state.cooldown_until,
             "setting_key": SETTING_KEYS.get(resource),
+            "auto": state.auto,
+            "slow_start": state.slow_start,
         }
     return out
 
@@ -245,6 +277,6 @@ def migrate_legacy_settings() -> None:
     # 写入均衡档缺省，方便监制房展示
     for resource, key in SETTING_KEYS.items():
         if not get_setting(key):
-            set_setting(key, str(CHANNEL_DEFAULTS[resource]))
+            set_setting(key, "0")  # 新安装默认自动（0）
 
 

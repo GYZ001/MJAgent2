@@ -14,8 +14,7 @@ import hashlib
 import inspect
 import json
 import re
-import sqlite3
-import shutil
+import shutil, sqlite3  # noqa: E401 -- 行数基线顶格，合并一行
 import subprocess
 import time
 import weakref
@@ -28,6 +27,7 @@ from urllib.parse import urljoin
 import httpx
 
 from app import config
+from app.generation_concurrency import with_channel_outcome
 from app.chat_response_probe import (_content_delivery_absent, _empty_content_detail,
                                      _reasoning_present, _reasoning_used_all_output_budget)
 from app.atomic_io import atomic_write_bytes
@@ -3108,11 +3108,11 @@ async def generate_image(prompt: str, *, size: str = "1024x1024",
                                 write=config.TIMEOUT_IMAGE_WRITE, pool=10)
         async with _image_semaphore():
             async with httpx.AsyncClient(timeout=timeout) as client:
-                data = await _post_json(
+                data = await with_channel_outcome("image_request", _post_json(  # 图片通道自适应：成功升档、拥塞减半
                     client, f"{base_url}/images/generations", payload,
                     kind=kind, model=model, headers=model_headers, key_name=f"model:{model}",
                     meta=request_meta,
-                    idempotency_key=operation_id)
+                    idempotency_key=operation_id))
     items = data.get("data") or []
     if not items:
         raise ProviderError(f"图像生成响应为空：{json.dumps(data, ensure_ascii=False)[:300]}")

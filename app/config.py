@@ -442,13 +442,14 @@ DEFAULT_SETTINGS = {
     # 兼容旧键；新调度以分通道为准（见 media_pipeline.concurrency）
     "video_concurrency": "15",
     "auto_concurrency": "15",
-    "reference_pipeline_concurrency": "15",
-    "image_request_concurrency": "4",
-    "video_submit_concurrency": "15",
-    "video_inflight_limit": "15",
-    "video_poll_concurrency": "15",
-    "download_concurrency": "3",
-    "finalize_concurrency": "4",
+    "reference_pipeline_concurrency": "0",
+    "image_request_concurrency": "0",
+    "vlm_request_concurrency": "0",
+    "video_submit_concurrency": "0",
+    "video_inflight_limit": "0",
+    "video_poll_concurrency": "0",
+    "download_concurrency": "0",
+    "finalize_concurrency": "0",
     "episode_video_inflight_limit": "15",
     "project_video_inflight_limit": "15",
     "reference_prepared_backlog": "8",
@@ -478,7 +479,7 @@ DEFAULT_SETTINGS = {
     "hiagent_model_image": MODEL_IMAGE,
     "minimax_h3_model_video": DEFAULT_MINIMAX_H3_MODEL_VIDEO,
     "minimax_h3_base_url": MINIMAX_H3_BASE_URL,
-    "text_generation_concurrency": "6", # 剧本与分镜共享文本模型资源池；见 monitoring.py 同名项注释的 RCA
+    "text_generation_concurrency": "0", # 剧本与分镜共享文本模型资源池；见 monitoring.py 同名项注释的 RCA
     "text_generation_workflow_concurrency": "10", # 活跃文本工作流；真实请求另受 provider call gate 约束
     "screenplay_scene_shards_enabled": "true",
     "screenplay_targeted_identity_enabled": "true",

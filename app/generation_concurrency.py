@@ -287,6 +287,29 @@ def _congestion_reason(exc: BaseException) -> str | None:
     return None
 
 
+async def with_channel_outcome(resource: str, awaitable):
+    """把一次真实供应商调用的结果接进该通道的自适应状态机（成功=健康，拥塞类失败=降档），异常原样抛出。
+    给不经 run_with_provider_call_slot 的通道（图片）用；文本通道由 _report_text_provider_outcome 负责。"""
+    try:
+        result = await awaitable
+    except BaseException as exc:
+        _report_channel_outcome(resource, exc)
+        raise
+    _report_channel_outcome(resource, None)
+    return result
+
+
+def _report_channel_outcome(resource: str, exc: BaseException | None) -> None:
+    from app.media_pipeline.concurrency import report_congestion, report_healthy  # 延迟导入：media_pipeline 在上层
+
+    if exc is not None:
+        reason = _congestion_reason(exc)
+        if reason is not None:
+            report_congestion(resource, reason=reason)
+        return
+    report_healthy(resource)
+
+
 def _report_text_provider_outcome(exc: BaseException | None) -> None:
     """把一次真实文本 provider 调用的结果接进媒体流水线那套"拥塞减半 + 健康爬升"
     自适应状态机（复用 app/media_pipeline/concurrency.py，不另写一套）。
