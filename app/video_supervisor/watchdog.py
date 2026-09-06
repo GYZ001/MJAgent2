@@ -45,7 +45,10 @@ async def reconcile_stale_video_supervisors() -> int:
         # explicit confirmation path owns that migration.
         if not task_running and cp.deadline_at is None:
             return False
-        if heartbeat and now() - heartbeat <= SUPERVISOR_HEARTBEAT_STALE_S:
+        if task_running or (heartbeat and now() - heartbeat <= SUPERVISOR_HEARTBEAT_STALE_S):
+            # 本进程里 supervisor 的 asyncio 任务还活着就不是僵尸：持久化心跳只为跨进程/重启接管服务。
+            # 第 13 轮实测：SQLite 写锁风暴让心跳线程 60 秒写不进去，同进程的 watchdog 却按「心跳过期」
+            # 收口了 7 集正在跑的生成台（SUPERVISOR_HEARTBEAT_STALE 取消了活任务）。
             return False
         try:
             _verify_supervisor_paid_authority(cp, stage="watchdog_takeover")

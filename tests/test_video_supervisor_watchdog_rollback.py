@@ -160,3 +160,27 @@ def test_watchdog_takeover_rolls_back_pending_adoption_before_marking_failed_clo
         "_mark_failed_closed 的检查点提交一并带下去"
     )
     assert recorders and recorders[0].fail_calls, "recorder.fail 应当被调用一次"
+
+
+def test_watchdog_never_takes_over_a_supervisor_whose_task_is_alive_in_this_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """第 13 轮：SQLite 写锁风暴让心跳线程 60 秒写不进去，同进程 watchdog 按「心跳过期」收口了 7 集
+    正在跑的生成台。本进程里 supervisor 的任务还活着就不是僵尸——持久化心跳只为跨进程接管服务。"""
+    episode_id = "ep_watchdog_alive_test"
+    project_id = "proj_watchdog_alive_test"
+    _seed_stale_episode(episode_id, project_id, "run-alive")
+    fake_cp = video_supervisor.VideoSupervisorCheckpoint(
+        episode_id=episode_id, run_id="run-alive", phase="DISPATCHING",
+        deadline_at=time.time() + 3600, last_heartbeat_at=time.time() - 3600, grant_id="grant-1",
+    )
+    patch_video_supervisor_everywhere(monkeypatch, "load_latest_checkpoint", lambda _eid: fake_cp)
+
+    def must_not_verify(cp, *, stage):
+        raise AssertionError("活任务不该走到接管路径")
+
+    patch_video_supervisor_everywhere(monkeypatch, "_verify_supervisor_paid_authority", must_not_verify)
+    monkeypatch.setattr(task_registry, "active", lambda *_a, **_k: True)
+    import asyncio
+    recovered = asyncio.run(video_supervisor.reconcile_stale_video_supervisors())
+    assert recovered == 0
