@@ -13,6 +13,7 @@ from typing import Any, Callable, TypeVar
 import weakref
 
 from app.config import DATA_DIR, DB_PATH, DEFAULT_SETTINGS
+from app.observability.provider_call_payload import compact_exact_request, compact_provider_payload
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -2920,26 +2921,11 @@ def set_setting(key: str, value: str) -> None:
 
 
 def _trim_for_call_log(value: Any, *, max_string: int = 120_000) -> Any:
-    """按 120,000 字符裁单个字符串，超限追加 ``"...[truncated N chars]"``。
-
-    只作用于落库前的 ``response_json``/``request_json`` 快照，不影响
-    ``provider_calls.received_chars``——后者在 ``app/hiagent.py``
-    ``_stream_chat_completion`` 里逐帧累加、不经这里裁剪。核对两者时若忽略
-    这条裁剪，会把「存储裁剪」误读成「received_chars 计数多算」（已核实：
-    2026-08-29 抽查全部 status=OK 的 chat 记录，把裁剪标记还原成真实长度后
-    两者严格相等）。
-    """
-    if isinstance(value, dict):
-        return {k: _trim_for_call_log(v, max_string=max_string) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_trim_for_call_log(v, max_string=max_string) for v in value]
-    if isinstance(value, str):
-        if ";base64," in value[:80]:
-            prefix = value.split(";base64,", 1)[0]
-            return f"{prefix};base64,[omitted {len(value)} chars]"
-        if len(value) > max_string:
-            return f"{value[:max_string]}\n...[truncated {len(value) - max_string} chars]"
-    return value
+    """落库前的快照压缩（实现见 ``app.observability.provider_call_payload``）：base64 换占位、
+    单个字符串按 120,000 字符裁断。只作用于 ``response_json``/``request_json``，不影响
+    ``provider_calls.received_chars``（后者在 ``app/hiagent.py`` 逐帧累加、不经这里裁剪；
+    2026-08-29 抽查全部 status=OK 的 chat 记录，还原裁剪标记后两者严格相等）。"""
+    return compact_provider_payload(value, max_string=max_string)
 
 
 def _dump_call_json(value: Any) -> str | None:
@@ -3371,10 +3357,10 @@ def update_provider_call_request(
     """Persist the exact outbound request before the non-idempotent write."""
     if not call_id:
         return
-    if preserve_exact:
+    if preserve_exact:  # 逐字保留文本，只把 base64 参考图换成摘要占位（第 13 轮 1.6 MB/行）
         try:
             encoded = json.dumps(
-                request_json,
+                compact_exact_request(request_json),
                 ensure_ascii=False,
                 separators=(",", ":"),
             )

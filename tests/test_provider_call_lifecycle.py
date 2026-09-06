@@ -2182,7 +2182,7 @@ def test_video_create_persists_exact_request_and_rejects_operation_drift(
     saved = db.latest_provider_request_json(
         "video_create", "video-model", operation_id,
     )
-    assert saved["content"][1]["image_url"]["url"] == data_url
+    assert saved["content"][1]["image_url"]["url"].startswith("data:image/png;base64,[omitted ")  # 参考图落库只留长度+摘要占位
 
     with pytest.raises(
         hiagent.ProviderError,

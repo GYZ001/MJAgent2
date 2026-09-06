@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 
 from app import config
+from app.observability.provider_call_payload import compact_exact_request
 
 # Doubao Seedance（火山方舟）支持 resolution 顶层字段，取值 480p/720p/1080p；
 # 不传时网关按自身默认档位出片——实测（docs/PROVIDER_CAPABILITY_NOTES.md）15s
@@ -98,7 +99,7 @@ class SeedanceAdapter:
         saved_request = _latest_provider_operation_request(
             "video_create", operation_id,
         )
-        if saved_request is not None and saved_request != payload:
+        if saved_request is not None and compact_exact_request(saved_request) != compact_exact_request(payload):
             raise ProviderError(
                 "Seedance 同一业务操作的请求内容发生变化，已阻止复用幂等键；"
                 "请保留原任务等待供应商结果确认，或通过页面明确创建新的生成尝试",

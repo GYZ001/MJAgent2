@@ -107,6 +107,7 @@ allowed_exceptions = []
 "app.observability.provider_heartbeat" = 2  # 2026-09-04：流式心跳写入，从 app.db 挪出，app.hiagent(3) 使用
 "app.observability.machine_watermark" = 2  # 2026-09-05：/proc 水位采样，只依赖 app.db/app.config；准入点在 L3-L5
 "app.observability.lock_pressure" = 2  # 2026-09-06：写锁争用计数，纯标准库；machine_watermark(2)/write_lock_holders(2) 使用
+"app.observability.provider_call_payload" = 1  # 2026-09-06：落库前载荷压缩，纯标准库；app.db(2)/app.seedance(3) 使用
 "app.auth" = 1  # 前缀：principal/passwords/deps 零 db 依赖，真 L1；
                 # sessions/api/admin_api 碰 db，2026-08-30 用更具体的 key
                 # 覆盖到 2（见下方新增 L2 持久化，及本文件末尾变更说明）
