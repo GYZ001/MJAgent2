@@ -30,3 +30,19 @@ def test_apply_card_merge_alias_treats_generic_label_as_done_without_writing(mon
     ok = card_merge.apply_card_merge_alias(conn, "p1", "许师姐", {"text": "女子", "name_kind": "referential", "evidence_chapter_index": 1, "evidence_quote": "那女子…许师姐", "is_exclusive": False})
     assert ok is True
     assert json.loads(conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"])["characters"][0]["aliases"] == []
+
+
+def test_bare_relational_titles_and_demonstrative_names_are_rejected_as_card_names() -> None:
+    for label in ("师弟", "师兄", "师姐"):
+        assert not alias_is_specific(label), label
+    from app.portraits.card_merge import accepted_card_name
+    assert accepted_card_name("王腾飞师兄", "王腾飞", "王腾飞师兄走了过来") == "王腾飞"
+    assert accepted_card_name("王腾飞师兄", "王腾", "…") == "王腾飞师兄"  # 随意截短仍不采信
+
+
+def test_card_names_allow_qualified_descriptors_but_not_bare_or_demonstrative_ones() -> None:
+    from app.portraits.card_aliases import card_name_is_specific
+    for ok in ("守墓老人", "高大老者", "清瘦老者", "灰袍老者", "绿袍男子", "小胖子", "许师姐"):
+        assert card_name_is_specific(ok), ok
+    for bad in ("这青年", "那女子", "老者", "青年男子", "年轻女性", "师弟", ""):
+        assert not card_name_is_specific(bad), bad

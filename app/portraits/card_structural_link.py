@@ -39,14 +39,14 @@ def structural_candidates(bible: Bible, label: str) -> list[str]:
     """人物谱里与 ``label`` 同姓氏键的卡名：卡名或别名自身能分解出同一姓氏键，或以该字开头
     的 ≥2 字称谓（汉语姓在前——「许青」对「许师姐」也是合法候选，选不选由裁决与共现核验定）。"""
     key = surname_key(label)
-    if not key:
-        return []
     names: list[str] = []
     for character in getattr(bible, "characters", None) or []:
         forms = [character.name, *(alias.text for alias in character.aliases)]
         if character.name in names or character.name == label:
             continue
-        if any(f and (surname_key(f) == key or (len(f) >= 2 and f[0] == key)) for f in forms):
+        # 包含关系：「虎爷」⊂「自称虎爷的大汉」（第 13 轮两张卡）——一方逐字含另一方（≥2 字）就是候选
+        contained = len(label) >= 2 and any(f and f != label and (label in f or (len(f) >= 2 and f in label)) for f in forms)
+        if contained or (key and any(f and (surname_key(f) == key or (len(f) >= 2 and f[0] == key)) for f in forms)):
             names.append(character.name)
     return names
 

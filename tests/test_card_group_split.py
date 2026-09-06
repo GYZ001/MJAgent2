@@ -67,3 +67,12 @@ def test_group_label_builds_member_cards_and_registers_group_alias(monkeypatch) 
     assert names == ["孟浩", "高大老者", "清瘦老者"]  # 合称本身没有建卡
     aliases = {c["name"]: {a["text"] for a in c["aliases"]} for c in _characters(conn)}
     assert "两个老者" not in aliases["高大老者"]  # 合称是泛称：不登记成全局别名（card_aliases.alias_is_specific）
+
+
+def test_presence_forced_person_without_appearance_is_card_incomplete_not_a_card() -> None:
+    """第 13 轮：妖蟒/两色雾魂被画面在场证据改判为人、important 恢复，但外观为空，仍落了卡还出了图。"""
+    from app.portraits.card_verdict import unimportant_verdict_result
+    verdict = {"important": True, "model_important": True, "reason": "有戏份", "incomplete_reason": "appearance_canonical 长度 0 字"}
+    result = unimportant_verdict_result("妖蟒", verdict, require_identity_card=False, card_complete=False,
+                                        project_id="p1", fragment_signature="sig")
+    assert result["status"] == "card_incomplete"

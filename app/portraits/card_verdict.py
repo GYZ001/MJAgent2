@@ -121,7 +121,10 @@ def unimportant_verdict_result(
     终态结果；两种豁免成立时返回 ``None``（调用方继续走建卡流程，实际不会走到
     这个分支，只是与原调用点的条件写法对齐，避免额外分支判断）。
     """
-    if verdict["important"] or (require_identity_card and card_complete):
+    if (require_identity_card and (card_complete or verdict["important"])) or (verdict["important"] and card_complete):
+        # 身份已确认的真名一律登记（合同 important=true，卡再薄也要有条目，见 portrait_generation_decision）；
+        # 非身份路径的建卡必须卡片完整：画面在场证据只能把「非人」改判成「人」，不能让空外观的卡落库
+        # （第 13 轮 妖蟒/两色雾魂：外观为空还出了三张定妆）。
         return None
     if require_identity_card:
         return {

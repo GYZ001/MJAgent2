@@ -44,7 +44,8 @@ from app.schemas import Bible, Character, CharacterAlias
 from app.source_excerpt import index_source_segments
 
 from ._db_probe import _has_column, _has_table
-from .card_aliases import _cooccurrence_evidence, alias_is_specific
+from .card_aliases import _cooccurrence_evidence, alias_is_specific, card_name_is_specific
+from .card_owner import strip_relational_title
 from .card_aliases import new_card_aliases
 from .card_rebind import _cas_write_bible
 from .card_structural_link import structural_candidates, with_structural_entries
@@ -384,6 +385,8 @@ def accepted_card_name(label: str, proposed: str | None, fragments: str) -> str:
     """
     label = str(label or "").strip()
     proposed = str(proposed or "").strip()
+    if proposed and proposed == strip_relational_title(label):
+        return proposed  # 「王腾飞师兄」→「王腾飞」：去掉关系称谓是合法的定名，不是截短（第 13 轮卡名带师兄）
     if not proposed or proposed == label or proposed in label:  # 空、相同、或只是把称谓截短：都不采信
         return label
     if label in proposed:
@@ -397,6 +400,9 @@ async def resolve_card_name(
 ) -> dict | str:
     """建卡用哪个名字：``accepted_card_name`` 定名；若该名字已有卡，则把称谓登记为其别名并复用。"""
     card_name = accepted_card_name(label, verdict.get("canonical_name"), fragments)
+    if not card_name_is_specific(card_name):
+        # 「这青年」「那女子」当卡名：指谁都行，建卡只会污染人物谱（第 13 轮）。模型没按契约加限定，这里不猜。
+        return {"status": "skipped_generic_name", "name": label, "reason": f"「{card_name}」不是能单独指认一个人的称谓"}
     if card_name == label or _card_owner_lookup(conn, project_id, card_name) is None:
         return card_name
     found = _cooccurrence_evidence(chapters_by_idx, label, label)

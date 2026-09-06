@@ -88,3 +88,13 @@ def test_same_surname_without_cooccurrence_is_not_merged(monkeypatch) -> None:
     assert result["status"] == "added" and result["name"] == "许师姐"
     assert [c["name"] for c in _characters(conn)] == ["许姓女子", "许师姐"]
     assert json.loads(conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"])["characters"][0]["aliases"] == []
+
+
+def test_containment_between_label_and_card_name_is_a_structural_candidate() -> None:
+    bible = Bible(world=World(visual_style_canonical="国漫"), characters=[
+        Character(name="自称虎爷的大汉", role="重要配角", appearance_canonical="面黄肌瘦的杂役"),
+        Character(name="孟浩", role="主角", appearance_canonical="少年"),
+    ])
+    assert link.structural_candidates(bible, "虎爷") == ["自称虎爷的大汉"]
+    assert link.structural_candidates(bible, "自称虎爷的大汉的兄弟") == ["自称虎爷的大汉"]
+    assert link.structural_candidates(bible, "浩") == []  # 单字不算

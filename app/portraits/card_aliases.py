@@ -58,10 +58,35 @@ def alias_is_specific(label: str) -> bool:
     才配登记成全局别名。「女子」「这青年」在同一章里指谁都行，登记成别名会把别的人绑到这张卡上
     （2026-09-06 第 11 轮人物谱：许师姐 别名['女子']、王腾飞 别名['这青年']）。"""
     from .appearance_grounding import _GENERIC_RE  # 同一份闭集语法词元，不另抄一份
+    from .card_owner import RELATIONAL_TITLE_SUFFIXES
 
-    residue = _GENERIC_RE.sub("", str(label or ""))
+    text = str(label or "").strip()
+    if text in RELATIONAL_TITLE_SUFFIXES:
+        return False  # 「师弟」「师兄」单独出现指谁都行（第 13 轮：孟浩 别名['师弟']）
+    residue = _GENERIC_RE.sub("", text)
     residue = "".join(ch for ch in residue if ch not in _DEMONSTRATIVES and "一" <= ch <= "鿿")
     return bool(residue)
+
+
+_HEAD_NOUNS = frozenset({
+    "男子", "女子", "女性", "男性", "老者", "老人", "修士", "女修", "男修", "少年", "少女", "青年", "孩童",
+    "修真青年", "青年修士", "女修士", "男修士",
+})
+_AGE_ONLY = frozenset({"年轻", "中年", "老年", "幼年", "成年", "中年偏老"})
+
+
+def card_name_is_specific(label: str) -> bool:
+    """卡名比别名宽一档：「守墓老人」「高大老者」这类「限定 + 通称」是契约要求的无名角色定名，
+    合法；「老者」「青年男子」（光有通称）、「这青年」（指示词 + 通称）指谁都行，不合法。"""
+    from .appearance_grounding import _GENERIC_RE
+
+    text = str(label or "").strip()
+    if not text or text[0] in _DEMONSTRATIVES:
+        return False
+    if alias_is_specific(text):
+        return True
+    tokens = _GENERIC_RE.findall(text)
+    return len(tokens) >= 2 and tokens[-1] in _HEAD_NOUNS and any(t not in _HEAD_NOUNS and t not in _AGE_ONLY for t in tokens[:-1])
 
 
 def new_card_aliases(
