@@ -83,3 +83,19 @@ def test_migration_seeds_blank_keys_with_auto(_fresh_channels) -> None:
     cc.migrate_legacy_settings()
     assert _fresh_channels["image_request_concurrency"] == "0"
     assert _fresh_channels["text_generation_concurrency"] == "0"
+
+
+def test_congestion_halves_at_most_once_per_cooldown_window(monkeypatch, _fresh_channels) -> None:
+    """一波同时失败（重启掐流、批量取消）只算一次拥塞证据：冷却期内不再连续减半（实测 10→5→2→1 在同一秒内）。"""
+    _fresh_channels["text_generation_concurrency"] = "0"
+    now = [1000.0]
+    monkeypatch.setattr(cc.time, "time", lambda: now[0])
+    state = cc.ensure_channel(cc.RESOURCE_TEXT_PROVIDER)
+    state.current = 16
+    for _ in range(6):
+        cc.report_congestion(cc.RESOURCE_TEXT_PROVIDER, reason="stream_interrupted")
+    assert cc.channel_limit(cc.RESOURCE_TEXT_PROVIDER) == 8  # 六次连击只减半一次
+    now[0] += 61
+    cc.report_congestion(cc.RESOURCE_TEXT_PROVIDER, reason="stream_interrupted")
+    cc.report_congestion(cc.RESOURCE_TEXT_PROVIDER, reason="stream_interrupted")
+    assert cc.channel_limit(cc.RESOURCE_TEXT_PROVIDER) == 4  # 冷却过了才允许再减半

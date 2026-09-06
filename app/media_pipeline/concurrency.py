@@ -170,6 +170,8 @@ def report_congestion(resource: str, *, reason: str = "429") -> None:
     带上通道名、旧/新并发值和触发原因，落进后端运行日志。
     """
     state = ensure_channel(resource)
+    if time.time() < state.cooldown_until:
+        return  # 冷却期内不再连续减半：一波同时失败（重启掐流、批量取消）只算一次拥塞证据
     state.congestion_hits += 1
     if state.congestion_hits < 2:
         return
