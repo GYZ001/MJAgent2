@@ -38,6 +38,7 @@ from .planner_contract import (
     planner_system_prompt,
 )
 from .primitives import VideoPlanValidationError, _hash, _json
+from .plan_fill import fill_omitted_shots
 from .publish import load_latest_plan, publish_plan
 from .release_manifest import (
     bind_plan_release_identity,
@@ -664,7 +665,7 @@ async def generate_episode_plan(
         planner_provider=hiagent.active_provider("text"),
         planner_model=hiagent.active_model("text"),
         planner_prompt_fingerprint=_hash(prompt_payload),
-        shots=shot_plans,
+        shots=fill_omitted_shots(shot_plans, list(rows), shot_payload, plan_id=plan_id, plan_revision=next_revision, revision_id=revision_id, snapshot_id=snapshot.id, asset_fingerprints=asset_fingerprints, episode_id=episode_id, model=active_model),  # 模型漏报的镜头按确定性默认补齐
     )
     bind_plan_release_identity(plan, list(rows), release_manifest)
     validate_episode_plan(
