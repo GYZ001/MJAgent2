@@ -1926,8 +1926,8 @@ def test_required_identity_card_accepts_complete_card_despite_importance_vote(
             "reason": "只出现一次",
             "role": "重要配角",
             "appearance_canonical": (
-                "成年黑发男子，身穿深灰色皮甲短衫，腰间佩刀，"
-                "体格壮实，左眉留有一道浅疤"
+                "成年黑发男子，身穿深灰色短衫，体格壮实，"  # 通用形态：原文没写外貌，标志性特征不能编
+                "身形高大，黑发束起"
             ),
             "personality": "服从命令",
             "speech_style": "简短应答",
@@ -1968,8 +1968,8 @@ def test_required_identity_card_prompt_does_not_reapply_importance_gate(
             "reason": "只出现一次",
             "role": "重要配角",
             "appearance_canonical": (
-                "成年黑发男子，身穿深灰色皮甲短衫，腰间佩刀，"
-                "体格壮实，左眉留有一道浅疤"
+                "成年黑发男子，身穿深灰色短衫，体格壮实，"  # 通用形态：原文没写外貌，标志性特征不能编
+                "身形高大，黑发束起"
             ),
             "personality": "服从命令",
             "speech_style": "简短应答",
@@ -2019,8 +2019,8 @@ def test_required_identity_card_retries_once_when_first_card_too_thin(
             "reason": "已确认真名",
             "role": "重要配角",
             "appearance_canonical": (
-                "成年黑发男子，身穿深灰色皮甲短衫，腰间佩刀，"
-                "体格壮实，左眉留有一道浅疤"
+                "成年黑发男子，身穿深灰色短衫，体格壮实，"  # 通用形态：原文没写外貌，标志性特征不能编
+                "身形高大，黑发束起"
             ),
             "personality": "服从命令",
             "speech_style": "简短应答",

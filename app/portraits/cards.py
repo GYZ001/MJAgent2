@@ -18,6 +18,7 @@ from app.refs import production_appearance_anchor
 from app.schemas import Bible, Character, extract_json
 
 from ._db_probe import _has_column
+from .appearance_grounding import ground_appearance
 from .bible_compat import (  # noqa: F401 -- 重新导出，见下方模块末尾的说明注释
     bible_with_pending_characters_for_text,
     bible_with_provisional_characters,
@@ -106,7 +107,7 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
 {decision_contract}
 - appearance_canonical 是"固定外观锚点串"：40~60 字，只写视觉可见信息，不写性格。通用
   形态（性别年龄感/发型发色/服装款式与颜色）原文没写处按画风（{style}）合理设定，不需要
-  举证；标志性特征只有原文对这个角色本人确有描写才写，且要在 source_evidence 里给出
+  举证；标志性特征（材质、图案、兽皮、饰物、法器、伤疤等）只有原文对这个角色本人确有描写才写，后端会删掉没有原文依据的子句，且要在 source_evidence 里给出
   evidence_chapter_index（取原文片段【第 N 章】块头里的数字）与 evidence_quote（支撑该
   特征的原文逐字短句，40 字以内、必须原样连续照抄，短句本身要能读出是在写这个角色
   本人，不是同段落里的其他人）；原文没有就不写，source_evidence 留空数组即可，不是缺陷。
@@ -152,6 +153,7 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
         appearance = production_appearance_anchor(
             (obj.get("appearance_canonical") or "").strip()
         )
+        appearance, dropped_appearance = ground_appearance(appearance, fragments)  # 标志性特征必须有原文依据，见 appearance_grounding
         if len(appearance) > APPEARANCE_MAX:
             appearance = appearance[:APPEARANCE_MAX]
         role = (obj.get("role") or "重要配角").strip() or "重要配角"
@@ -241,6 +243,7 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
             "relationships": rels,
             "source_evidence": verified_evidence,
             "rejected_evidence": rejected_evidence,
+            "dropped_appearance": dropped_appearance,
             "members": verbatim_member_labels(obj.get("members"), fragments) if subject_kind == CHARACTER_SUBJECT_GROUP else [],
         }
 
@@ -250,8 +253,10 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
     # 重试提示按实际失败原因动态拼接，不是静态模板：证据核验不通过时明确给出"换一条
     # 真实证据"或"去掉这个特征只写通用形态"两条合法出路，不再逼模型必须保留一个
     # 标志性特征（那正是王有材事故的激励结构）。
-    if require_identity_card and (not verdict["card_complete"] or verdict["rejected_evidence"]):
+    if (require_identity_card and (not verdict["card_complete"] or verdict["rejected_evidence"])) or (verdict["dropped_appearance"] and not verdict["card_complete"]):
         reasons: list[str] = []
+        if verdict["dropped_appearance"]:
+            reasons.append("以下子句在原文里没有依据，已被删除：" + "；".join(verdict["dropped_appearance"]) + "。材质、图案、兽皮、饰物、法器、伤疤等都是标志性特征，只写原文对该角色本人确有描写的；原文没写就只保留通用形态（性别年龄感/发型发色/服装款式与颜色），这同样是合法结果。")
         if not verdict["card_complete"]:
             reasons.append(
                 f"appearance_canonical 不完整（当前 {len(verdict['appearance_canonical'])} 字，"
