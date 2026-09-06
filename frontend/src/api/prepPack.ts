@@ -111,9 +111,9 @@ export interface PrepPackSceneAsset {
 }
 
 /**
- * 2.0.0 新增：道具/物品——世界书没有道具图像素材库，只有文字描述
- * （description），不映射任何图片，见 app/production/prep_pack.py 的
- * _prep_pack_build_prop_manifest。
+ * 2.0.0 新增：道具/物品。2026-09-04 起有物件库（app/props）：后端在 GET /episodes/{id}
+ * 时按道具名现算 current_prop_image_url（app/domain/storyboard_ops/current_prop_refs.py，
+ * 别名归正名、登记集之前回退最早那张）；解析不到为 null，前端照实显示占位。
  */
 export interface PrepPackProp {
   label: string;
@@ -121,6 +121,9 @@ export interface PrepPackProp {
   /** 2.0.0+ 字段，undefined 于旧产物——语义同 PrepPackCharacterAsset.segment_indexes。 */
   segment_indexes?: number[];
   provenance?: PrepPackProvenance;
+  /** 物件库里当前实际会用的那张定物图；null=尚无定物图或文件已丢失。 */
+  current_prop_reference_id?: string | null;
+  current_prop_image_url?: string | null;
 }
 
 /**

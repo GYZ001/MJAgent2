@@ -855,19 +855,18 @@ export function PrepPackView({
           <div className="prep-roster">
             {props.map((prop, index) => {
               const coverageText = assetCoverageText(prop.segment_indexes)
+              const imageUrl = prop.current_prop_image_url ?? null
               return (
                 <div className="prep-roster-item" key={`prop:${prop.label || 'prop'}-${index}`}>
-                  {/* 道具没有世界书图像素材库（设计使然，见 app/production/prep_pack.py
-                      _prep_pack_build_prop_manifest），只有文字描述，用统一占位图标。 */}
-                  <div className="prep-roster-icon" aria-hidden="true">物</div>
+                  {/* 缩略图取后端按道具名现算的 current_prop_image_url（物件库定物图，2026-09-04 起有）；null 才用占位。 */}
+                  {imageUrl ? <img className="prep-roster-thumb" src={imageUrl} alt={prop.label || '道具'} loading="lazy" decoding="async" /> : <div className="prep-roster-icon" aria-hidden="true">物</div>}
                   <div className="prep-roster-body">
                     <span className="prep-roster-name">
                       <span className="prep-roster-name-text" title={prop.description || undefined}>
                         {prop.label || '未命名道具'}
                       </span>
                     </span>
-                    {/* meta 的 title 改成覆盖段号全文（原来复用了 description，
-                        跟名字那格的 title 重复，且丢了"悬停拿完整区间"这个诉求）。 */}
+                    {/* meta 的 title 是覆盖段号全文（名字那格的 title 是 description，两者不重复）。 */}
                     <span className="prep-roster-meta" title={coverageText}>
                       {coverageText}
                     </span>
