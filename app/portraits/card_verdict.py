@@ -85,6 +85,10 @@ def non_character_or_unimportant_result(
     docstring），否则同一段原文永远不会因为"分镜后来标出了在场证据"而重判。
     """
     subject_kind = str(verdict.get("subject_kind") or "").strip()
+    if subject_kind == "group" and verdict.get("members"):
+        # 多人合称且原文能区分成员：不建合称卡、不进负缓存（成员卡由 cards.py 的
+        # split_group_members 逐个建），合称留给成员卡登记为共享别名。
+        return {"status": "skipped_group", "name": name, "members": list(verdict["members"]), "reason": verdict["reason"]}
     if subject_kind != "person":
         # 人格是独立的硬闸门，不能被 require_identity_card 绕过：身份消歧确认的
         # 是"这是一个稳定的专名"，不是"这是一个人"。宗门、器物、地点即使专名

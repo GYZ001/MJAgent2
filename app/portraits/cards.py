@@ -24,20 +24,11 @@ from .bible_compat import (  # noqa: F401 -- 重新导出，见下方模块末�
 )
 from .card_commit import append_character_or_merge
 from .card_merge import courtesy_name_redirect, resolve_card_build_or_merge, resolve_card_name
-from .card_verdict import (
-    non_character_or_unimportant_result,
-    portrait_generation_decision,
-    reconsider_verdict_with_presence_evidence,
-)
+from .card_verdict import non_character_or_unimportant_result, portrait_generation_decision, reconsider_verdict_with_presence_evidence
 from .constants import APPEARANCE_MAX, APPEARANCE_MIN, CHARACTER_CARD_MAX_TOKENS
+from .card_group_split import CHARACTER_SUBJECT_GROUP, split_group_members, verbatim_member_labels
 from .discovery_fragments import (
-    _bible_lock,
-    _card_lock,
-    _card_owner_lookup,
-    _discovery_skip_key,
-    _forward_fragments,
-    _fragment_signature,
-    _name_in_bible,
+    _bible_lock, _card_lock, _card_owner_lookup, _discovery_skip_key, _forward_fragments, _fragment_signature, _name_in_bible,
 )
 from .portrait_io import _generate_discovered_character_portrait
 from .presence_evidence import collect_presence_evidence, fetch_project_shot_rows, presence_evidence_fingerprint
@@ -127,13 +118,14 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
 - subject_kind=place：地点、建筑、区域。
 - subject_kind=object：器物、法宝、典籍、功法、丹药等物品。
 - subject_kind=other：以上都不是。
-人物谱只登记 person。组织、地点、器物即使在剧情里极其重要、也确实需要视觉一致性，
+- subject_kind=group：多人合称（两个老者、三名弟子）。原文能区分成员时，在 members 里逐个列出：每个成员的 source_label 必须是上面片段里逐字出现、能单独指认该成员的称呼（如「高大老者」）；原文不区分的成员不列，members 留空数组。
+人物谱只登记 person；group 本身不建卡，其成员各自建卡。组织、地点、器物即使在剧情里极其重要、也确实需要视觉一致性，
 也一律 important=false——它们属于场景库，不属于人物谱。
 
 - canonical_name 是这张卡的固定名字：「{name}」是人名就原样填；原文明确给出此人真名就填真名（须逐字出现在上面片段里）；
   「{name}」只是称呼/身份/外貌描述（老人、女孩、黑衣人）时，在它基础上加限定写成有区分度的固定称谓（如「守墓老人」），不得只填通称或凭空起名。
 只输出一个 JSON 对象：
-{{"subject_kind": "person|organization|place|object|other", "important": true/false, "canonical_name": str, "reason": "一句话依据", "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "source_evidence": [{{"evidence_chapter_index": int, "evidence_quote": str}}]}}"""
+{{"subject_kind": "person|organization|place|object|other|group", "important": true/false, "canonical_name": str, "reason": "一句话依据", "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "source_evidence": [{{"evidence_chapter_index": int, "evidence_quote": str}}], "members": [{{"source_label": str}}]}}"""
 
     async def _assess_once(extra_instruction: str) -> dict:
         messages = [{"role": "user", "content": prompt + extra_instruction}]
@@ -249,6 +241,7 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
             "relationships": rels,
             "source_evidence": verified_evidence,
             "rejected_evidence": rejected_evidence,
+            "members": verbatim_member_labels(obj.get("members"), fragments) if subject_kind == CHARACTER_SUBJECT_GROUP else [],
         }
 
     verdict = _build_verdict(await _assess_once(""))
@@ -423,8 +416,8 @@ async def ensure_character_card(
                 card_complete=card_complete, project_id=project_id,
                 cache_signature=cache_signature,
             )
-            if gate_result is not None:
-                return gate_result
+            if gate_result is not None:  # 合称：原文能区分的成员各建各的卡（card_group_split）
+                return await split_group_members(gate_result, project_id, from_episode_no, ensure=ensure_character_card, generate_portrait=generate_portrait, write_guard=write_guard) if gate_result.get("status") == "skipped_group" else gate_result
             named = await resolve_card_name(conn, project_id, name, verdict, fragments, forward_chapters_by_idx, write_guard)
             if isinstance(named, dict):
                 return named
