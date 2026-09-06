@@ -39,6 +39,7 @@ from .planner_contract import (
 )
 from .primitives import VideoPlanValidationError, _hash, _json
 from .plan_fill import fill_omitted_shots
+from .planner_window_call import planner_window_response
 from .publish import load_latest_plan, publish_plan
 from .release_manifest import (
     bind_plan_release_identity,
@@ -83,7 +84,6 @@ async def generate_episode_plan(
     should continue to surface as a real, visible error.
     """
     from app import hiagent
-    from app.harness import model_gateway
 
     db = conn or get_conn()
     episode = db.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
@@ -517,7 +517,7 @@ async def generate_episode_plan(
             cached_call_id = int(cached["id"])
             break
         if response is None:
-            response = await model_gateway.chat(
+            response = await planner_window_response(  # 输出不合法就带证据有界重问（第 14 轮第 28 集少一个引号整集收口）
                 messages,
                 temperature=0.1,
                 max_tokens=max(4096, min(20000, len(window_shots) * 900)),
