@@ -190,9 +190,15 @@ async def _wait_until_episode_free(
 async def _run_single_stage(
     stage: str, episode_id: str, task_id: str, entry: dict, progress: dict, recorder,
 ) -> None:
+    if stages.stage_is_complete(stage, get_conn(), episode_id):
+        # 已有产物的步骤不等占用者：等的只能是「要跑」的那一步。第 1 集实测：映射台早已完成，
+        # 循环却停在这一格等生成台续跑，重启一复位就成了「映射台待办、生成台进行中」。
+        entry["stages"][stage] = "skipped"
+        await state.persist_progress_async(task_id, progress)
+        return
     await _wait_until_episode_free(episode_id, task_id, entry, progress, stage)
     if stages.stage_is_complete(stage, get_conn(), episode_id):
-        entry["stages"][stage] = "skipped"
+        entry["stages"][stage] = "skipped"  # 等待期间占用者把这一步做完了
         await state.persist_progress_async(task_id, progress)
         return
     entry["stages"][stage] = "running"
