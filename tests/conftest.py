@@ -84,16 +84,11 @@ import app.production.shot_uid  # noqa: F401,E402
 def patch_stages_everywhere(monkeypatch, name, value, **kwargs):
     """Patch a symbol on ``app.stages`` in every submodule that actually binds it.
 
-    ``app/stages.py`` was one file until it was split into the ``app.stages``
-    package (see ``app/stages/__init__.py``); every call site shared a single
-    module namespace, so ``monkeypatch.setattr(stages, name, value)`` reached
-    all of them.  After the split each submodule holds its own copy of any
-    name it imported (from ``app.stages`` re-exports or from elsewhere), so
-    patching only the package-level re-export silently misses whichever
-    submodule the real call happens to live in -- the patch appears to apply
-    (no error) but the mocked code path is never exercised. This walks every
-    submodule of ``app.stages`` and patches ``name`` wherever it is bound,
-    which reproduces the pre-split single-namespace patch semantics.
+    ``app/stages.py`` was one file until it became the ``app.stages`` package; each
+    submodule now holds its own copy of any imported name, so patching only the
+    package-level re-export silently misses the submodule the real call lives in
+    (the patch "applies" but the mocked path never runs). This walks every submodule
+    and patches ``name`` wherever it is bound -- the pre-split single-namespace semantics.
     """
     import pkgutil
     import sys
@@ -479,16 +474,9 @@ def patch_narrative_everywhere(monkeypatch, name, value, **kwargs):
 def patch_video_plan_everywhere(monkeypatch, name, value, **kwargs):
     """Patch a symbol on ``app.video_plan`` in every submodule that actually binds it.
 
-    Same rationale as ``patch_stages_everywhere`` above: ``app/video_plan.py`` was
-    one file until it was split into the ``app.video_plan`` package (see
-    ``app/video_plan/__init__.py``), so ``monkeypatch.setattr(video_plan, name,
-    value)`` only reaches the package's own re-export attribute now, not the
-    independent copy each submodule bound for itself at import time -- including
-    a submodule that calls a sibling submodule's function, e.g. ``generate.py``
-    calling ``validate_episode_plan`` via its own ``from .validate import
-    validate_episode_plan``. This walks every submodule and patches ``name``
-    wherever it is bound, reproducing the pre-split single-namespace patch
-    semantics.
+    Same rationale as ``patch_stages_everywhere``: ``app/video_plan.py`` became the
+    ``app.video_plan`` package, so patching only the package re-export misses the
+    submodule copy each call site bound at import time; this reaches every binding.
     """
     import pkgutil
     import sys
@@ -1142,3 +1130,11 @@ def patch_completion_grant_everywhere(monkeypatch, name, value, **kwargs):
         submodule = sys.modules.get(f"{completion_grant.__name__}.{mod_name}")
         if submodule is not None and hasattr(submodule, name):
             monkeypatch.setattr(submodule, name, value, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _machine_watermark_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """机器水位闸默认关：它读宿主机真实 /proc，本机跑全量时负载/核常 ≥0.8 会随机限流；要验限流的用例自己再打桩 throttle_reason。"""
+    from app.observability import machine_watermark
+    monkeypatch.setattr(machine_watermark, "throttle_reason", lambda: None)
+

@@ -7,15 +7,10 @@ from typing import Any
 from app.db import get_conn, now
 from app.media_pipeline import stages as S
 from app.media_pipeline.retry_policy import (
-    episode_inflight_cap,
-    first_pass_retake_slot_fraction,
-    prepared_reference_backlog,
-    project_inflight_cap,
-    reference_shot_cohort_limit,
-    scheduler_policy,
-    video_ready_high_watermark,
-    video_ready_low_watermark,
+    episode_inflight_cap, first_pass_retake_slot_fraction, prepared_reference_backlog, project_inflight_cap,
+    reference_shot_cohort_limit, scheduler_policy, video_ready_high_watermark, video_ready_low_watermark,
 )
+from app.observability import machine_watermark
 
 
 def continuity_anchor_ready(
@@ -222,12 +217,8 @@ def claim_video_submit_slot(
 
     def count(where: str = "", args: tuple[Any, ...] = ()) -> int:
         return int(db.execute(
-            """SELECT COUNT(*) AS c FROM jobs
-                 WHERE kind='video'
-                   AND status IN ('running','waiting_provider')
-                   AND provider_non_cancellable=1
-                   AND cancellation_requested=0 AND abandoned=0"""
-            + where,
+            "SELECT COUNT(*) AS c FROM jobs WHERE kind='video' AND status IN ('running','waiting_provider') "
+            "AND provider_non_cancellable=1 AND cancellation_requested=0 AND abandoned=0" + where,
             args,
         ).fetchone()["c"])
 
@@ -246,8 +237,9 @@ def claim_video_submit_slot(
         if bool(owned["provider_non_cancellable"]):
             db.commit()
             return True, None
-
+        throttle = machine_watermark.throttle_reason()  # 机器水位闸先于供应商侧上限（2026-09-05 用户拍板）
         limits = (
+            (1 if throttle else 0, 1, f"机器水位限流：{throttle}"),  # 超标才 1≥1 命中
             (count(), channel_limit(S.RESOURCE_VIDEO_INFLIGHT), "全局上游视频槽位已满"),
             (count(" AND project_id=?", (project_id,)), project_inflight_cap(), "项目上游视频槽位已满"),
             (count(" AND episode_id=?", (episode_id,)), episode_inflight_cap(), "本集上游视频槽位已满"),

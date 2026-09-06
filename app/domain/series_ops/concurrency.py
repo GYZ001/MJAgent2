@@ -18,19 +18,26 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from app.db import get_setting
+from app.observability import machine_watermark
 
 TASK_SETTING_KEY = "series_queue_concurrency"
 EPISODE_SETTING_KEY = "series_episode_concurrency"
 DEFAULT_CONCURRENCY = 3
-MAX_CONCURRENCY = 8
-SLOT_RECHECK_S = 5.0  # 等槽位时重读设置的间隔，测试打桩调小
+MAX_CONCURRENCY = 32  # 安全阀：并发以机器水位为准（0=自动），这个数只防失控
+AUTO_CONCURRENCY = 0
+SLOT_RECHECK_S = 5.0  # 等槽位时重读设置/水位的间隔，测试打桩调小
 
 
 def _read_concurrency(key: str) -> int:
+    """2026-09-05 用户拍板：并发以机器性能为上限。设置空或 0 表示自动——只受机器水位闸
+    （app.observability.machine_watermark）约束，这里返回安全阀 MAX_CONCURRENCY；显式数字仍尊重。"""
+    raw = str(get_setting(key) or "").strip()
     try:
-        value = int(float(str(get_setting(key) or "").strip() or DEFAULT_CONCURRENCY))
+        value = int(float(raw)) if raw else AUTO_CONCURRENCY
     except ValueError:
-        value = DEFAULT_CONCURRENCY
+        value = AUTO_CONCURRENCY
+    if value <= AUTO_CONCURRENCY:
+        return MAX_CONCURRENCY
     return max(1, min(MAX_CONCURRENCY, value))
 
 
@@ -65,7 +72,7 @@ class EpisodeSlots:
         async with cond:
             # 等待时每隔 SLOT_RECHECK_S 秒重读一次设置：调大并行数不会有人 notify（只有 release 会），
             # 只靠 wait_for 的话要等到本任务下一集跑完才放行（2026-09-05 实测 3→5 后 20 分钟没补位）。
-            while self.running(scope) >= episode_concurrency():
+            while self.running(scope) >= episode_concurrency() or machine_watermark.throttle_reason():
                 try:
                     await asyncio.wait_for(cond.wait(), timeout=SLOT_RECHECK_S)
                 except asyncio.TimeoutError:

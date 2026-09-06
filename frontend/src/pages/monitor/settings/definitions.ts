@@ -32,6 +32,14 @@ export interface SettingGroupDefinition {
 
 export const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
   {
+    id: "machine-admission",
+    title: "机器水位闸",
+    description:
+      "并发以机器性能为上限：内存占用、磁盘 IO 利用率或 CPU 负载达到阈值就不再放新的并发（连播台集槽位、视频提交、文本调用），已在跑的不受影响。连播台并行数填 0 即完全交给水位闸。",
+    affects: ["连播台", "视频生成", "文本模型"],
+    keys: ["admission_memory_pct", "admission_disk_io_pct", "admission_cpu_load_ratio", "series_queue_concurrency", "series_episode_concurrency"],
+  },
+  {
     id: "text-generation",
     title: "映射包与分镜生成",
     description:
@@ -113,6 +121,9 @@ export const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
 ];
 
 export const SETTING_FIELD_IMPACTS: Record<string, string> = {
+  admission_memory_pct: "内存占用率达到该值即暂停放新并发",
+  admission_disk_io_pct: "数据盘 IO 利用率达到该值即暂停放新并发",
+  admission_cpu_load_ratio: "1 分钟负载/核数达到该值即暂停放新并发",
   text_generation_workflow_concurrency: "同一时间最多运行多少集的剧本或分镜工作流",
   text_generation_concurrency:
     "同一时间最多发起多少个真实文本模型请求（剧本、分镜等工作流共用同一个请求池）",

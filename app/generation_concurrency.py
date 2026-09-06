@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import TypeVar
 
 from app.db import get_setting
+from app.observability import machine_watermark
 
 T = TypeVar("T")
 
@@ -357,6 +358,7 @@ async def run_with_provider_call_slot(
         _report_text_provider_outcome(None)
         return result
 
+    await machine_watermark.wait_until_admitted()  # 机器水位闸：超标就等回落，不放新调用
     gate = gate_for("text_provider_calls")
     await gate.acquire(
         current_generation_priority() if priority is None else int(priority)

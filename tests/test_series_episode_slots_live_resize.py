@@ -41,3 +41,32 @@ async def test_lowered_limit_stops_new_admissions_until_releases_catch_up(monkey
     await slots.release("task")  # 1 → 0，放行
     await asyncio.wait_for(waiter, timeout=1.0)
     assert slots.running("task") == 1
+
+
+@pytest.mark.asyncio
+async def test_waiter_holds_while_machine_watermark_is_exceeded(monkeypatch) -> None:
+    from app.observability import machine_watermark
+
+    monkeypatch.setattr(concurrency, "episode_concurrency", lambda: 4)
+    monkeypatch.setattr(concurrency, "SLOT_RECHECK_S", 0.05)
+    state = {"reason": "内存占用 91% ≥ 70%"}
+    monkeypatch.setattr(machine_watermark, "throttle_reason", lambda: state["reason"])
+    slots = concurrency.EpisodeSlots()
+    waiter = asyncio.create_task(slots.acquire("task"))
+    await asyncio.sleep(0.15)
+    assert not waiter.done() and slots.running("task") == 0  # 有空槽也不放：机器水位超标
+    state["reason"] = None
+    await asyncio.wait_for(waiter, timeout=1.0)
+    assert slots.running("task") == 1
+
+
+def test_auto_concurrency_means_safety_ceiling(monkeypatch) -> None:
+    values = {"series_episode_concurrency": "0", "series_queue_concurrency": ""}
+    monkeypatch.setattr(concurrency, "get_setting", lambda key: values.get(key))
+    assert concurrency.episode_concurrency() == concurrency.MAX_CONCURRENCY
+    assert concurrency.queue_concurrency() == concurrency.MAX_CONCURRENCY
+    values["series_episode_concurrency"] = "5"
+    assert concurrency.episode_concurrency() == 5
+    values["series_episode_concurrency"] = "999"
+    assert concurrency.episode_concurrency() == concurrency.MAX_CONCURRENCY
+

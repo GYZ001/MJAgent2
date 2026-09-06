@@ -82,12 +82,24 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
         description="同一时间最多运行多少集剧本或分镜工作流。",
     ),
     "series_queue_concurrency": _number(
-        "连播台并行任务数", "3", 1, 8, unit="任务",
-        description="同一项目同时跑多少个连播任务；任务之间互不等待，失败的任务不会挡住后面的。",
+        "连播台并行任务数", "0", 0, 32, unit="任务",
+        description="同一项目同时跑多少个连播任务；0=自动（只受机器水位闸约束，安全上限 32）。任务之间互不等待。",
     ),
     "series_episode_concurrency": _number(
-        "每个连播任务并行集数", "3", 1, 8, unit="集",
-        description="一个连播任务内部同时生成多少集。项目内同时在跑的集数上限 = 并行任务数 × 本值；供应商并发配额另算。",
+        "每个连播任务并行集数", "0", 0, 32, unit="集",
+        description="一个连播任务内部同时生成多少集；0=自动（只受机器水位闸约束，安全上限 32）。供应商并发配额另算。",
+    ),
+    "admission_memory_pct": _number(
+        "机器水位闸：内存占用率上限", "70", 30, 95, unit="%",
+        description="内存占用率达到本值就不再放新并发（连播台集槽位、视频提交、文本调用），已在跑的不受影响。",
+    ),
+    "admission_disk_io_pct": _number(
+        "机器水位闸：磁盘 IO 利用率上限", "70", 30, 100, unit="%",
+        description="数据目录所在磁盘的 IO 利用率（同 iostat %util）达到本值就不再放新并发。",
+    ),
+    "admission_cpu_load_ratio": _number(
+        "机器水位闸：CPU 负载/核上限", "0.8", 0.3, 4, unit="倍", step=0.1,
+        description="1 分钟平均负载除以核数达到本值就不再放新并发；合片编码吃的是 CPU。",
     ),
     "video_prev_frame_reference": _boolean("上一段画面作空间参考", "false"),
     "screenplay_scene_shards_enabled": _boolean("启用剧本场次分片", "true"),

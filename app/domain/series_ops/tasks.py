@@ -9,6 +9,7 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 from app.db import new_id, now
+from app.observability import machine_watermark
 
 from . import merge, state
 
@@ -289,6 +290,7 @@ def queue_snapshot(conn, project_id: str) -> dict:
         "running_task_ids": [r["id"] for r in running_rows],
         "queued_count": int(queued_count),
         "stop_reason": (row["stop_reason"] if row else None),
+        "machine": machine_watermark.snapshot(),
     }
 
 
