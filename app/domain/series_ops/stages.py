@@ -47,10 +47,19 @@ EPISODE_BUSY_KINDS: dict[str, str] = {
 
 def busy_label(episode_id: str) -> str | None:
     """这一集正被哪个台的单集任务占用；空闲返回 None。"""
-    for kind, label in EPISODE_BUSY_KINDS.items():
+    kind = busy_kind(episode_id)
+    return EPISODE_BUSY_KINDS[kind] if kind else None
+
+
+def busy_kind(episode_id: str) -> str | None:
+    """占用本集的单集任务种类（screenplay/storyboard/video_completion）；空闲返回 None。"""
+    for kind in EPISODE_BUSY_KINDS:
         if task_registry.active(kind, episode_id):
-            return label
+            return kind
     return None
+
+
+BUSY_KIND_TO_STAGE = {"screenplay": "screenplay", "storyboard": "storyboard", "video_completion": "video"}
 
 
 def _http_error_code(exc: HTTPException) -> str | None:

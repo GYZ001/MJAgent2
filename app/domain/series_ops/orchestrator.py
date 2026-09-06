@@ -169,12 +169,15 @@ async def _wait_until_episode_free(
     不抢也不判失败——占用者往往就是重启前本任务自己起的那一轮运行。
     等待期间这一步在界面上标成「进行中」并计入在跑集数：那轮运行确实在替本任务干这一步，
     显示成「待办」会让人以为并发被卡住（2026-09-05 用户在 11-20 集任务页看到 14/15 集待办）。"""
-    label = stages.busy_label(episode_id)
-    if label is None:
+    kind = stages.busy_kind(episode_id)
+    if kind is None:
         return
+    label = stages.EPISODE_BUSY_KINDS[kind]
     entry["waiting"] = f"第{entry['episode_no']}集的{label}正由重启前起的那轮运行续跑，跑完后本任务自动接着走"
-    if stage:
-        entry["stages"][stage] = "running"
+    # 标「进行中」的是真正在跑的那个台，不是本任务循环走到的那一步（第 1 集实测：生成台在续跑，
+    # 任务循环还停在映射台那一格，把映射台标成了进行中）。
+    del stage
+    entry["stages"][stages.BUSY_KIND_TO_STAGE[kind]] = "running"
     await state.persist_progress_async(task_id, progress)
     try:
         while stages.busy_label(episode_id) is not None:
