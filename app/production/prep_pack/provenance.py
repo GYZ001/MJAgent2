@@ -112,7 +112,7 @@ def _prep_pack_citation_forms(phrase: str) -> list[str]:
     逐字，是把「逐字」定义在文字上。
     """
     forms: list[str] = []
-    for base in (phrase, phrase.strip(_PREP_PACK_QUOTATION_MARKS)):
+    for base in (phrase, phrase.strip(_PREP_PACK_QUOTATION_MARKS + "…")):  # 两端省略号是「此处有省略」的引用标记，不是被引内容（ERR-20260906-45b1b6）
         base = base.strip()
         if not base:
             continue

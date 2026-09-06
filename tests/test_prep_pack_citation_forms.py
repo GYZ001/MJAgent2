@@ -70,3 +70,16 @@ def test_citation_forms_do_not_strip_interior_punctuation():
 def test_empty_and_punctuation_only_phrases_are_not_anchors():
     assert _prep_pack_locate_phrase(SOURCE, "") == ([], "")
     assert _prep_pack_locate_phrase(SOURCE, "。。。") == ([], "")
+
+
+def test_edge_ellipses_and_quote_marks_are_citation_marks_not_content():
+    """ERR-20260906-45b1b6：卷宗截断/模型引句在两端带「…”」「。…」，正文逐字全对，
+    落库的必须是原文里真存在的形态，自校验才过得去。"""
+    source = [_Seg("孟浩一愣。"), _Seg("说出这个字的不是王有材，而是他旁边探出身子的一个八九岁少年，这少年虎头虎脑，大声开口。")]
+    quote = "…”说出这个字的不是王有材，而是他旁边探出身子的一个八九岁少年，这少年虎头虎脑，大声开口。…"
+    segments, phrase = _prep_pack_locate_phrase(source, quote)
+    assert segments == [2]
+    assert phrase == "说出这个字的不是王有材，而是他旁边探出身子的一个八九岁少年，这少年虎头虎脑，大声开口。"  # 句号原文里有，保留
+    assert phrase in source[1].text
+    # 编造的引文剥完两端标记照样定位不到
+    assert _prep_pack_locate_phrase(source, "…”说出这个字的是王有材。…") == ([], "")

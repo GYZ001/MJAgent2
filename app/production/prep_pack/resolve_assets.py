@@ -40,7 +40,7 @@ from .discovery import (
 from .functional_candidate_verdict import _prep_pack_resolve_functional_extra_candidate
 from .provenance import (
     _prep_pack_first_evidence_segment,
-    _prep_pack_local_text_anchor,
+    _prep_pack_local_text_anchor, _prep_pack_locate_phrase,
     _prep_pack_mention_has_text_evidence,
     _prep_pack_provenance,
     _prep_pack_scene_alias_provenance,
@@ -482,13 +482,13 @@ async def _resolve_assets(
                 # 话在不在本集本地"，两者不是一回事，空 anchor_segments
                 # 不代表 anchor_phrase 也该是空的），连同裁决真正引用的
                 # 章节号一并写进 provenance，供审计核对。
-                local_index = _prep_pack_first_evidence_segment(
+                local_segments, local_phrase = _prep_pack_locate_phrase(  # 落库的必须是原文里真存在的形态（剥引号/省略号）
                     segments, true_name_pinned_quote,
                 )
-                if local_index is not None:
+                if local_segments:
                     method = "resolution"
-                    anchor_segments = [local_index]
-                    anchor_phrase = true_name_pinned_quote
+                    anchor_segments = local_segments
+                    anchor_phrase = local_phrase
                 else:
                     method = "resolution_forward"
                     anchor_segments, anchor_phrase = [], true_name_pinned_quote
@@ -511,8 +511,8 @@ async def _resolve_assets(
                 # 链短路，不会执行到这里）。
                 method = "candidate_verdict"
                 pin = candidate_verdict_pins[name]
-                anchor_segments = [pin["segment_index"]]
-                anchor_phrase = pin["text"]
+                located = _prep_pack_locate_phrase(segments, pin["text"])  # 模型引句带省略号/引号时取原文里真存在的形态
+                anchor_segments, anchor_phrase = located if located[0] else ([pin["segment_index"]], pin["text"])
             elif came_via_resolution:
                 method = "resolution"
                 anchor_segments, anchor_phrase = _prep_pack_local_text_anchor(
@@ -726,13 +726,13 @@ async def _resolve_assets(
                 # 只该是 anchor_segments 这个"本地段号"，不该连带着把
                 # anchor_phrase 这句话本身也清空），把裁决真正引用的
                 # 章节号写进 provenance。
-                local_index = _prep_pack_first_evidence_segment(
+                local_segments, local_phrase = _prep_pack_locate_phrase(  # 同角色侧：落库原文里真存在的形态
                     segments, true_name_pinned_quote,
                 )
-                if local_index is not None:
+                if local_segments:
                     scene_method = "resolution"
-                    scene_anchor_segments = [local_index]
-                    scene_anchor_phrase = true_name_pinned_quote
+                    scene_anchor_segments = local_segments
+                    scene_anchor_phrase = local_phrase
                 else:
                     scene_method = "resolution_forward"
                     scene_anchor_segments, scene_anchor_phrase = [], true_name_pinned_quote
