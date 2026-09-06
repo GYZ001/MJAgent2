@@ -184,14 +184,22 @@ def dialogue_speaker_errors(
     """必保台词说话人一致性（报错）、画外音可追溯性（报错）、叙述句画外音改旁白（就地修补）。"""
     errors: list[str] = []
     identity_to_name = {v: k for k, v in name_to_identity.items()}
-    for item in required_dialogue:
+    condensed = [textmatch.condense(line.line) for line in draft.dialogue]
+    needles = [textmatch.condense(str(item.get("text") or "")) for item in required_dialogue]
+    # 账本项与草稿台词先按逐字相等配对；只有没有精确命中的才退到包含匹配，且不再抢别人精确命中的那句。
+    # 第 29 集实测：『认输……』是『上去就立刻认输。』的子串，包含匹配把两句的说话人交叉判错，三次重试整集失败。
+    exact_claimed = {index for index, text in enumerate(condensed) if text in needles}
+    for item, needle in zip(required_dialogue, needles):
         expected = name_to_identity.get(str(item.get("speaker") or "").strip())
-        needle = textmatch.condense(str(item.get("text") or ""))
         if not expected or not needle:
             continue
-        for index, line in enumerate(draft.dialogue):
-            if needle not in textmatch.condense(line.line) and textmatch.condense(line.line) not in needle:
-                continue
+        exact = [index for index, text in enumerate(condensed) if text == needle]
+        matched = exact or [
+            index for index, text in enumerate(condensed)
+            if index not in exact_claimed and (needle in text or text in needle)
+        ]
+        for index in matched:
+            line = draft.dialogue[index]
             if line.speaker_identity_id != expected and line.speaker_identity_id != NARRATOR:
                 errors.append(
                     f"dialogue[{index}]『{line.line[:20]}』的说话人按原文归属应为「{item.get('speaker')}」"

@@ -197,3 +197,24 @@ def test_line_with_source_attribution_is_not_touched_by_the_unattributed_rule():
     required = [{"quote_id": "Q03", "text": CROWD_LINE, "speaker": "孟浩", "source_segment_index": 1}]
     assert dialogue_speaker_errors(_draft([_Line("bible:孟浩", CROWD_LINE)]), required, manifest_name_to_identity(CROWD_PAYLOAD), src) == []
 
+
+def test_substring_lines_are_paired_exactly_not_crosswise():
+    """第 29 集：『认输……』是『上去就立刻认输。』的子串，包含匹配把两句说话人交叉判错。"""
+    payload = {"asset_manifest": {"characters": [
+        {"identity_id": "bible:孟浩", "display_name": "孟浩", "aliases": []},
+        {"identity_id": "bible:小胖子", "display_name": "小胖子", "aliases": []},
+    ]}}
+    n2i = manifest_name_to_identity(payload)
+    required = [
+        {"quote_id": "Q03", "text": "上去就立刻认输。", "speaker": "孟浩", "source_segment_index": 1},
+        {"quote_id": "Q04", "text": "认输……", "speaker": "小胖子", "source_segment_index": 1},
+    ]
+    draft = _draft([_Line("bible:孟浩", "上去就立刻认输。"), _Line("bible:小胖子", "认输……")])
+    assert dialogue_speaker_errors(draft, required, n2i, "") == []
+    wrong = _draft([_Line("bible:小胖子", "上去就立刻认输。"), _Line("bible:孟浩", "认输……")])
+    errors = dialogue_speaker_errors(wrong, required, n2i, "")
+    assert len(errors) == 2 and "应为「孟浩」" in errors[0] and "应为「小胖子」" in errors[1]
+    # 草稿只有长句且被拆写（包含匹配仍要工作）：短账本项没有精确命中时不去抢长句
+    partial = _draft([_Line("bible:孟浩", "上去就立刻认输。")])
+    assert dialogue_speaker_errors(partial, required, n2i, "") == []
+
