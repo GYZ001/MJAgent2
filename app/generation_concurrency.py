@@ -257,6 +257,9 @@ _CONGESTION_FAILURE_KINDS = frozenset({
     "upstream_unavailable",
     "connection_failed",
     "request_outcome_unknown",
+    # 2026-09-06：HiAgent 过载时用「内容审核」话术 + content_filter 掐断流（stream_interrupted），
+    # 同一波里几十个不同请求同时被掐——这是拥塞证据，要让并发降档而不是原速撞墙。
+    "stream_interrupted",
 })
 
 

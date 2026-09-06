@@ -439,9 +439,9 @@ def test_congestion_reason_classifies_429_5xx_timeout_and_ignores_other_failures
     # _FirstTokenTimeout(TimeoutError) 与 asyncio.TimeoutError 都是内建 TimeoutError
     # 的子类；直接用 TimeoutError 覆盖同一条 isinstance 分支，不用伸进 hiagent 私有类。
     first_token_timeout = TimeoutError("首字超时")
-    # 不是拥塞证据：业务校验失败、以及协议/数据完整性问题（重试也解决不了拥塞）。
+    # 不是拥塞证据：业务校验失败（重试也解决不了）。
     business_failure = ValueError("结构化输出校验失败")
-    stream_interrupted = hiagent.ProviderError(
+    stream_interrupted = hiagent.ProviderError(  # 2026-09-06：过载时 HiAgent 用 content_filter 掐流回绝，计入拥塞
         "流式响应在 [DONE] 前中断", retryable=True, failure_kind="stream_interrupted",
     )
 
@@ -453,7 +453,7 @@ def test_congestion_reason_classifies_429_5xx_timeout_and_ignores_other_failures
     )
     assert generation_concurrency._congestion_reason(first_token_timeout) == "timeout"
     assert generation_concurrency._congestion_reason(business_failure) is None
-    assert generation_concurrency._congestion_reason(stream_interrupted) is None
+    assert generation_concurrency._congestion_reason(stream_interrupted) == "stream_interrupted"
 
 
 def test_provider_call_slot_halves_channel_limit_after_two_congestion_failures(

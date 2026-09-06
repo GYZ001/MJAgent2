@@ -553,7 +553,7 @@ async def chat(
                 raise
 
             retry_no = failure_no + 1
-            delay = config.TEXT_PROVIDER_RETRY_BASE_DELAY * (2 ** failure_no)
+            delay = min(config.TEXT_PROVIDER_RETRY_BASE_DELAY * (2 ** failure_no), config.TEXT_PROVIDER_RETRY_MAX_DELAY)  # 封顶：过载拒绝波要靠次数熬过去，不是靠越等越久
             message = (
                 f"文本模型请求明确未送达，约 {int(delay)} 秒后自动执行"
                 f"第 {retry_no}/{max_retries} 次重试"

@@ -348,12 +348,12 @@ VIDEO_CONTINUITY_ORPHAN_TIMEOUT = max(
     30.0, float(os.environ.get("VIDEO_CONTINUITY_ORPHAN_TIMEOUT", "180"))
 )
 
-# 文本模型调用只在连接阶段能证明请求未送达时，由 Harness 做外层有界重试。
-# ReadTimeout、流中断和其他已发送后的不确定结果必须等待页面显式重试，避免重复计费。
-TEXT_PROVIDER_MAX_RETRIES = max(0, int(os.environ.get("TEXT_PROVIDER_MAX_RETRIES", "3")))
-TEXT_PROVIDER_RETRY_BASE_DELAY = max(
-    0.0, float(os.environ.get("TEXT_PROVIDER_RETRY_BASE_DELAY", "30"))
-)
+# 文本模型调用在「请求明确未送达」与「文本对话流中断」（可安全重放）时由 Harness 做外层有界重试。
+# 2026-09-06 实测 HiAgent 的过载拒绝波持续十几分钟：3 次 30/60/120s 用完仍在同一波里，
+# 改为 8 次、单次退避封顶 120s（≈13.5 分钟预算）；ReadTimeout 等已发送后的不确定结果仍等页面显式重试。
+TEXT_PROVIDER_MAX_RETRIES = max(0, int(os.environ.get("TEXT_PROVIDER_MAX_RETRIES", "8")))
+TEXT_PROVIDER_RETRY_BASE_DELAY = max(0.0, float(os.environ.get("TEXT_PROVIDER_RETRY_BASE_DELAY", "30")))
+TEXT_PROVIDER_RETRY_MAX_DELAY = max(0.0, float(os.environ.get("TEXT_PROVIDER_RETRY_MAX_DELAY", "120")))
 
 # 会先思考再作答的模型把 reasoning token 与 message.content 计入**同一份**
 # completion 预算（`_reject_truncated_chat_response` 的注释早已点明这一点）。
