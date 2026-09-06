@@ -47,6 +47,7 @@ from ._db_probe import _has_column, _has_table
 from .card_aliases import _cooccurrence_evidence
 from .card_aliases import new_card_aliases
 from .card_rebind import _cas_write_bible
+from .card_structural_link import structural_candidates, with_structural_entries
 from .constants import CAST_DISCOVERY_SOURCE_BUDGET, IDENTITY_NAME_FORM_REFERENTIAL
 from .discovery_fragments import _bible_lock, _card_owner_lookup
 from .name_intro import find_name_introductions, intro_owner_of
@@ -239,23 +240,26 @@ async def resolve_card_merge_target(
     dossier_text = "".join(item["text"] for item in dossier)
     # 「姓关，名羽，字长生」里「关羽」两字不相连：显式介绍句把 label 链接到的全名也是合法候选。
     intro_linked_names = {intro.full_name for intro in find_name_introductions(dossier_text) if label in intro.alt_names}
+    structural = structural_candidates(bible, label)  # 同姓氏键的既有卡（「许师姐」↔「许姓女子」），见 card_structural_link
     candidates = [
         name for name, forms in roster.items()
-        if name in intro_linked_names or any(f and f in dossier_text for f in forms)
+        if name in intro_linked_names or name in structural or any(f and f in dossier_text for f in forms)
     ]
     if not candidates:
         return None
+    dossier = with_structural_entries(dossier, chapters_by_idx, [f for n in structural for f in roster[n]], label)
     response = await _card_merge_verdict(label=label, dossier=dossier, candidates=candidates)
     if response.selected_candidate not in candidates:
         return None
     pinned = _card_merge_pin_entry(dossier, response.supporting_entry_index)
-    if pinned is None or label not in pinned["text"]:
+    structural_pick = response.selected_candidate in structural  # 钉证段可在候选一侧；共现核验仍是硬闸
+    if pinned is None or (label not in pinned["text"] and not structural_pick):
         return None
     forms = roster[response.selected_candidate]
     intro = intro_owner_of(label, find_name_introductions(pinned["text"]))
     # 「姓关，名羽，字长生」：全名两字不相连，逐字包含查不到；显式介绍句本身就是最强的身份链接证据。
     intro_linked = intro is not None and intro.full_name == response.selected_candidate
-    if not intro_linked and not any(form and form in pinned["text"] for form in forms):
+    if not intro_linked and not structural_pick and not any(form and form in pinned["text"] for form in forms):
         return None
     evidence = (
         (int(pinned["chapter_idx"]), intro.quote) if intro_linked

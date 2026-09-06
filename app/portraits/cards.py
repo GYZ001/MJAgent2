@@ -22,17 +22,14 @@ from .bible_compat import (  # noqa: F401 -- 重新导出，见下方模块末�
     bible_with_pending_characters_for_text,
     bible_with_provisional_characters,
 )
+from .card_commit import append_character_or_merge
 from .card_merge import courtesy_name_redirect, resolve_card_build_or_merge, resolve_card_name
 from .card_verdict import (
     non_character_or_unimportant_result,
     portrait_generation_decision,
     reconsider_verdict_with_presence_evidence,
 )
-from .constants import (
-    APPEARANCE_MAX,
-    APPEARANCE_MIN,
-    CHARACTER_CARD_MAX_TOKENS,
-)
+from .constants import APPEARANCE_MAX, APPEARANCE_MIN, CHARACTER_CARD_MAX_TOKENS
 from .discovery_fragments import (
     _bible_lock,
     _card_lock,
@@ -42,7 +39,7 @@ from .discovery_fragments import (
     _fragment_signature,
     _name_in_bible,
 )
-from .portrait_io import _append_character_to_bible, _generate_discovered_character_portrait
+from .portrait_io import _generate_discovered_character_portrait
 from .presence_evidence import collect_presence_evidence, fetch_project_shot_rows, presence_evidence_fingerprint
 
 # 人物谱是"可以被选角、被定妆、能出镜表演的人"的登记表。宗门、地点、器物、
@@ -464,7 +461,7 @@ async def ensure_character_card(
         async with bible_lock:
             if write_guard:
                 write_guard()
-            appended = _append_character_to_bible(conn, project_id, card)
+            appended = await append_character_or_merge(conn, project_id, card, snapshot_labels=set(known), write_guard=write_guard)  # 快照后人物谱有新称谓就先归并（并发建卡竞态）
         if not appended and (owner_result := _card_owner_lookup(conn, project_id, name)) is not None:
             # 并发竞态：写锁内复查（_append_character_to_bible 自己也会用
             # card_owner 复核）发现名字/别名已经被另一路并发调用抢先落库，不是
