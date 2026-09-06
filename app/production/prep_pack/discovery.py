@@ -157,7 +157,7 @@ async def _discover_new_characters(
 
 
 async def _discover_new_scenes(
-    conn, *, project_id: str, episode_no: int, labels: list[str],
+    conn, *, project_id: str, episode_no: int, labels: list[str], segments: list | None = None,
 ) -> dict[str, Any]:
     """谱外新场景 → 发现 → 补录场景库 → 生成场景参考图。
 
@@ -169,9 +169,11 @@ async def _discover_new_scenes(
     discovery logic duplicated). Only called when pass 1 below leaves a scene
     mention unresolved.
     """
+    from app.production.scene_evidence import evidence_by_label
     from app.scenes import ensure_scenes_for_labels
 
-    return await ensure_scenes_for_labels(project_id, episode_no, labels)
+    # 判定要看本集原文里含该地点的段落，不只看标签（第 12/13 轮场景库近重复的根因）
+    return await ensure_scenes_for_labels(project_id, episode_no, labels, evidence=evidence_by_label(labels, segments or []))
 
 
 async def _discover_new_props(

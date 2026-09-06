@@ -71,6 +71,16 @@ def _normalize_key(value: str) -> str:
     return _STRIP_RE.sub("", (value or "").strip())
 
 
+def _candidates_section(candidates_block: str) -> str:
+    if not candidates_block.strip():
+        return ""
+    return f"""
+与「本场景」字面互含的既有场景（结构候选，逐条对照各自的原文摘录判断是不是同一物理地点；
+是就把 existing_scene_name 填成它的完整名称、important=false；都不是就照常判定）：
+{candidates_block}
+"""
+
+
 def scene_granularity_prompt(
     label: str,
     spatial_context: str,
@@ -82,6 +92,7 @@ def scene_granularity_prompt(
     canonical_min: int,
     canonical_max: int,
     same_location_match_rule: str,
+    candidates_block: str = "",
 ) -> str:
     """构造粒度判定提示词（正面陈述，不用黑名单/词表）。``known_scenes`` 是
     ``[(name, scene_canonical), ...]``——带上锚点串本身，而不只是名字，模型才有
@@ -98,7 +109,7 @@ def scene_granularity_prompt(
 
 本场景的原文依据（{ep_label}）：
 {spatial_context[:1000]}
-
+{_candidates_section(candidates_block)}
 画面可共用性判据（粒度判定的唯一标准，正面陈述）：
 - location_key：这个地点的物理身份归一化标签——同一物理地点、同一年代/时期用同一个
   location_key；location_key 写地点本身的稳定短语，不写成整句描述，也不含单纯的白天/
@@ -120,7 +131,8 @@ def scene_granularity_prompt(
   绝不改写、不得虚构、不得跨句拼接。
 - important=true 当且仅当 role="anchor" 且它不属于任何已有场景的同一 location_key+
   era_anchor；important=false 时的既有口径：{same_location_match_rule}
-- name：稳定的场景短标签（4~10 字），不要与已有场景重名。
+- name：稳定的场景短标签（4~10 字），写地点本身的稳定短语（如「外宗广场」「南峰洞府」），
+  不加「场景/外景/内景」这类后缀、不带画风词，不要与已有场景重名。
 - scene_canonical 是"固定场景锚点串"：{canonical_min}~{canonical_max} 字（硬门禁，写完
   数一遍），须含 地点/室内外/光线时段/标志陈设/氛围色调；只写视觉可见的环境信息，不写
   人物、不写剧情动作。{style_rule}

@@ -626,7 +626,7 @@ def test_unresolved_new_character_routes_through_discovery_and_resolves(monkeypa
 def test_unresolved_new_scene_routes_through_discovery_and_resolves(monkeypatch):
     calls = {"n": 0}
 
-    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels):
+    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels, evidence=None):
         calls["n"] += 1
         assert labels == ["藏经阁"]
         conn.execute(
@@ -663,7 +663,7 @@ def test_alias_scene_resolves_via_canonical_name_after_discovery(monkeypatch):
     )
     conn.commit()
 
-    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels):
+    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels, evidence=None):
         return {"added": [], "errors": [], "ready_scenes": [],
                 "resolved_names": {"门派前庭": "宗门广场"}}
 
@@ -900,7 +900,7 @@ def test_scene_discovery_finding_nothing_degrades_instead_of_gate_fail(monkeypat
     """未解析场景不再整批门禁失败（WS6 追加：真实事故橘座在上 ×2/神墓 ×1）——降级见 test_coverage_ledger_honesty.py。"""
     conn = _make_conn()
 
-    async def noop_scene_discovery(project_id, episode_no, labels):
+    async def noop_scene_discovery(project_id, episode_no, labels, evidence=None):
         return {"added": [], "errors": [], "ready_scenes": [], "resolved_names": {}}
 
     monkeypatch.setattr(scenes, "ensure_scenes_for_labels", noop_scene_discovery)
@@ -992,7 +992,7 @@ def test_ep5_hallucinated_scene_bind_with_no_text_evidence_routes_through_discov
 
     calls = {"n": 0}
 
-    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels):
+    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels, evidence=None):
         calls["n"] += 1
         assert labels == ["大青山山顶"]
         conn.execute(
@@ -1137,7 +1137,7 @@ def test_suspected_true_name_hypothesis_rejected_with_no_evidence_routes_to_disc
 
     calls = {"n": 0}
 
-    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels):
+    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels, evidence=None):
         calls["n"] += 1
         assert labels == ["山峰"]
         conn.execute(
@@ -1251,7 +1251,7 @@ def test_synthetic_scene_labels_get_independent_anchor_from_mention_quote(monkey
         )
     conn.commit()
 
-    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels):
+    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels, evidence=None):
         assert set(labels) == {label for label, _s, _q in _EP1_REAL_SCENE_QUOTES}
         return {
             "added": [],  # 已经在 scene_references 里挂号，不是"新建"
@@ -1324,7 +1324,7 @@ def test_synthetic_scene_label_without_any_independent_evidence_still_blocked(mo
     )
     conn.commit()
 
-    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels):
+    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels, evidence=None):
         assert labels == ["大青山山顶"]
         return {
             "added": [], "errors": [], "ready_scenes": list(labels),
@@ -1376,7 +1376,7 @@ def test_scene_sibling_mention_quote_rescues_empty_quote_anchor(monkeypatch):
     )
     conn.commit()
 
-    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels):
+    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels, evidence=None):
         assert set(labels) == {"大青山半山腰裂缝", "半山裂缝处"}
         return {
             "added": [], "errors": [], "ready_scenes": list(labels),
@@ -1434,7 +1434,7 @@ def test_scene_sibling_quote_does_not_leak_across_unrelated_scenes(monkeypatch):
     )
     conn.commit()
 
-    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels):
+    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels, evidence=None):
         mapping = {"大青山半山腰裂缝": "大青山半山裂缝", "河边渡口": "青山下大河"}
         assert set(labels) == set(mapping)
         return {

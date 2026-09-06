@@ -16,9 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64, hashlib  # noqa: E401 -- 行数基线顶格，合并一行
-import json
-import logging
-import re
+import json, logging, re  # noqa: E401 -- 行数基线顶格，合并一行
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -34,6 +32,7 @@ from app.evidence.media import record_reference_asset
 from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
 from app.production.scene_refresh import refresh_verdict_if_scenes_changed
+from app.production.scene_evidence import candidate_block, structural_scene_candidates
 from app.production.scene_granularity import (
     ROLE_TRANSITIONAL,
     anchor_discovery_sources,
@@ -838,6 +837,7 @@ async def assess_new_scene(label: str, spatial_context: str, *, style: str,
         known_scenes=[(s.name, s.scene_canonical) for s in known_scenes],
         ep_label=ep_label, canonical_min=SCENE_CANONICAL_MIN, canonical_max=SCENE_CANONICAL_MAX,
         same_location_match_rule=SCENE_SAME_LOCATION_MATCH_RULE,
+        candidates_block=candidate_block(structural_scene_candidates(label, known_scenes)),  # 字面互含的既有场景连同原文摘录做选择题
     )
     raw = await model_gateway.chat(
         [{"role": "user", "content": prompt}], temperature=0.3, max_tokens=600,
@@ -1147,8 +1147,7 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
     blocking_errors: list[str] = []
     transitional_only: set[str] = set()
     for label in unmatched:
-        _scene_time, location = split_legacy_scene_setting(label)
-        spatial_context = location or label
+        spatial_context = split_legacy_scene_setting(label)[1] or label  # 分镜台只给地点标签（剧情概括不进锚点串，见 test_storyboard_scene_preflight）
         try:
             verdict = await assess_new_scene(
                 label, spatial_context, style=style,
@@ -1331,7 +1330,7 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
     }
 
 
-async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: list[str]) -> dict:
+async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: list[str], evidence: dict[str, str] | None = None) -> dict:
     """反应式场景发现，供没有编译剧本对象的调用方使用（如 episode_prep_pack 的资产
     映射，app/production/prep_pack.py）：对给定的原始场景提及标签逐个做 新场景/
     已有场景别名 判定，新场景则建库。出场景参考图不在本函数内联完成，见下方
@@ -1377,7 +1376,7 @@ async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: lis
     transitional_only: set[str] = set()
     for label in unmatched:
         _scene_time, location = split_legacy_scene_setting(label)
-        spatial_context = location or label
+        spatial_context = (evidence or {}).get(label) or location or label  # 本集原文里含该地点的段落（scene_evidence）
         try:
             verdict = await assess_new_scene(
                 label, spatial_context, style=style,

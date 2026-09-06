@@ -932,7 +932,7 @@ async def _resolve_assets(
             stats["scene_discovery_calls"] += 1
             scene_discovery_result = await _run_async_step(
                 run_id, "episode_prep_pack_scene_discovery",
-                lambda: _discover_new_scenes(conn, project_id=project_id, episode_no=episode_no, labels=unresolved_scenes),
+                lambda: _discover_new_scenes(conn, project_id=project_id, episode_no=episode_no, labels=unresolved_scenes, segments=segments),
             )
             # 同人物发现后那次重读：新场景已追加进人物谱，旧快照下 pass2 的 scene_card_matched 永远看不见它，
             # 本轮必失败、只能指望下一轮时后台已出图（ERR-20260902-982a95：曲阳 02:45:41 建库，02:45:50 判未解析）。

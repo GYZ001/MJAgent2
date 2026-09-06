@@ -58,6 +58,17 @@ names = collections.Counter(r["scene_name"] for r in scenes)
 for r in scenes:
     print(f"  {r['scene_name']:<14} ep{r['ep_start']}-{r['ep_end']}  {'图' if r['img'] else '无图'} {r['pack_status'] or ''}  | {(r['scene_canonical'] or '')[:40]}")
 print("重名场景:", [n for n, k in names.items() if k > 1] or "无")
+# 近重复：剥掉「场景/外景/内景」后缀后按尾二字分组（数据推导，不设名单），≥2 条的组要人工/模型复核
+def _head(name):
+    n = name
+    for suf in ("场景", "外景", "内景"):
+        if n.endswith(suf) and len(n) > len(suf):
+            n = n[: -len(suf)]
+    return n[-2:]
+groups = collections.defaultdict(list)
+for n in names:
+    groups[_head(n)].append(n)
+print("同尾词场景组（疑似近重复）:", {k: v for k, v in groups.items() if len(v) > 1} or "无")
 print("\n== 物件库 ==")
 props = c.execute("select prop_name, ep_start, ep_end, appearance, image_path is not null img, status from prop_references where project_id=? order by ep_start, prop_name", (PID,)).fetchall()
 pnames = collections.Counter(r["prop_name"] for r in props)
