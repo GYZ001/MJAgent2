@@ -47,6 +47,7 @@ from typing import Any
 
 from app import hiagent
 from app.generation_concurrency import run_with_provider_call_slot
+from app.harness.undelivered_replay import replay_undelivered
 from app.db import get_setting
 from app.errors import ContentGenerationError
 from app.schemas import Bible
@@ -362,7 +363,12 @@ async def _chat_with_tools(messages: list[dict], tools: list[dict], **kwargs: An
     30 集映射台同时起，这里的工具对话绕过槽位直打 HiAgent，网关在突发负载下用
     「内容审核」话术 + content_filter 回绝，28 集映射台整台失败；同一步骤同时段
     36 次照常通过，证明不是内容问题。"""
-    return await run_with_provider_call_slot(lambda: hiagent.chat_with_tools(messages, tools, **kwargs))
+    # 未送达/未处理（read 超时 0 字、流中断、网关信封）按网关同一条退避表重放，退避睡在槽位之外
+    # （2026-09-06 第 11 轮第 23 集：工具对话 read 超时 300s 一次就整台失败）。
+    return await replay_undelivered(
+        lambda: run_with_provider_call_slot(lambda: hiagent.chat_with_tools(messages, tools, **kwargs)),
+        call_meta=kwargs.get("call_meta"),
+    )
 
 
 async def _run_phase_a(
