@@ -1,4 +1,4 @@
-"""人物卡不得用通称命名（2A）：「老人」→「守墓老人」，原称谓登记为别名。
+"""人物卡不得用通称命名（2A）：「老人」→「守墓老人」；原称谓是通称，不登记为全局别名（2026-09-06 起）。
 
 真实事故（2026-09-02《神墓》）：映射台按称谓「老人」「孩子」「神秘人」各建了一张卡，后续每集里的同称谓
 都与这些卡冲突（ERR-20260902-ba850c）。现在评估模型必须给出 canonical_name，代码只在两种可核验形态下
@@ -60,8 +60,7 @@ def test_resolve_card_name_reuses_existing_card_and_registers_label_as_alias(mon
     result = asyncio.run(resolve_card_name(conn, "p1", "老人", {"canonical_name": "守墓老人"}, CHAPTER, {1: CHAPTER}, None))
     assert result == {"status": "exists", "name": "守墓老人"}
     bible = Bible.model_validate(json.loads(conn.execute("SELECT bible_json FROM projects").fetchone()[0]))
-    alias = next(a for a in bible.characters[0].aliases if a.text == "老人")
-    assert alias.is_exclusive is False and "老人" in alias.evidence_quote
+    assert bible.characters[0].aliases == []  # 「老人」是通称，不得登记成全局别名（第 11 轮泛称别名闸 alias_is_specific）
 
 
 def test_ensure_character_card_builds_under_distinctive_name_with_label_alias(monkeypatch) -> None:
@@ -81,5 +80,4 @@ def test_ensure_character_card_builds_under_distinctive_name_with_label_alias(mo
     bible = Bible.model_validate(json.loads(conn.execute("SELECT bible_json FROM projects").fetchone()[0]))
     names = [c.name for c in bible.characters]
     assert names == ["守墓老人"]
-    assert [a.text for a in bible.characters[0].aliases] == ["老人"]
-    assert bible.characters[0].aliases[0].is_exclusive is False
+    assert bible.characters[0].aliases == []  # 通称标签只在本集解析里指向这张卡，不进全局别名

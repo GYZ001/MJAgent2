@@ -46,7 +46,7 @@ def test_scene_added_by_discovery_is_resolved_in_the_same_attempt(monkeypatch) -
     conn = _conn()
     calls: list[list[str]] = []
 
-    async def fake_discover_new_scenes(conn_, *, project_id, episode_no, labels):
+    async def fake_discover_new_scenes(conn_, *, project_id, episode_no, labels, segments=None):
         # 与真实 ensure_scenes_for_labels 同样的副作用：把新场景写进 projects.bible_json。
         calls.append(list(labels))
         row = conn_.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
