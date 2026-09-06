@@ -8,8 +8,7 @@ API 形态依据 M0 实测（docs/HIAGENT_INTEGRATION.md）：
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
+import base64, binascii  # noqa: E401 -- 行数基线顶格，合并一行
 import hashlib
 import inspect
 import json
@@ -28,6 +27,7 @@ import httpx
 
 from app import config
 from app.generation_concurrency import with_channel_outcome
+from app.harness.reasoning_effort_policy import stage_reasoning_effort
 from app.chat_response_probe import (_content_delivery_absent, _empty_content_detail,
                                      _reasoning_present, _reasoning_used_all_output_budget)
 from app.atomic_io import atomic_write_bytes
@@ -1478,7 +1478,7 @@ def text_reasoning_effort(call_meta: dict | None) -> str:
     override = (get_setting("text_reasoning_effort") or "").strip()
     if override:
         return override
-    return config.TEXT_REASONING_EFFORT
+    return stage_reasoning_effort(call_meta) or config.TEXT_REASONING_EFFORT  # 短 JSON 判定按阶段表用 low，见 reasoning_effort_policy
 
 
 def _first_token_timeout_s(call_meta: dict | None) -> float | None:
