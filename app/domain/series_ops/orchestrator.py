@@ -201,6 +201,12 @@ async def _run_single_stage(
         await stages.run_stage(stage, episode_id, recorder.run_id)
         ok = stages.stage_is_complete(stage, get_conn(), episode_id)
     except Exception as exc:
+        # 判据挂产物：步骤抛错但这件事已经成了（另一条任务同时确认了本集，本任务的确认拿到
+        # 「预览后基线已变化」——2026-09-05 第 20 集）就按完成处理，不判失败。
+        if stages.stage_is_complete(stage, get_conn(), episode_id):
+            entry["stages"][stage] = "skipped"
+            await state.persist_progress_async(task_id, progress)
+            return
         await _fail_stage(entry, progress, task_id, recorder, stage, _exception_message(exc))
         raise StageFailure from exc
     if not ok:

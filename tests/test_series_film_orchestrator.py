@@ -17,6 +17,7 @@ import asyncio
 import sqlite3
 
 import pytest
+from types import SimpleNamespace
 from fastapi import HTTPException
 
 from app import db
@@ -413,3 +414,36 @@ async def test_running_episode_nos_and_current_are_derived_while_running(monkeyp
     with pytest.raises(orchestrator.StageFailure):  # stage_is_complete 恒 False → 两集都判失败
         await task
     assert snapshots and snapshots[-1] == ([1, 2], 1, "screenplay")
+
+
+@pytest.mark.asyncio
+async def test_stage_error_is_not_a_failure_when_the_stage_turned_out_complete(monkeypatch) -> None:
+    """第 20 集：两条任务同时确认，后到者拿到「预览后基线已变化」，但本集确实已确认——按完成处理。"""
+    from app.domain.series_ops import orchestrator, stages
+
+    calls = {"complete": 0}
+
+    def complete(stage, conn, episode_id):
+        calls["complete"] += 1
+        return calls["complete"] > 1  # 运行前未完成，抛错后再看已完成
+
+    async def boom(stage, episode_id, run_id):
+        raise RuntimeError("预览后分镜、运行状态或费率基线已变化，请重新预览")
+
+    monkeypatch.setattr(stages, "stage_is_complete", complete)
+    monkeypatch.setattr(stages, "run_stage", boom)
+    monkeypatch.setattr(orchestrator, "_wait_until_episode_free", _no_wait)
+    monkeypatch.setattr(orchestrator.state, "persist_progress_async", _no_persist)
+    entry = {"episode_no": 20, "stages": {"confirm": "pending"}, "waiting": None, "error": None}
+    progress = {"episodes": [entry], "error": None}
+    await orchestrator._run_single_stage("confirm", "e20", "task", entry, progress, SimpleNamespace(run_id="r"))
+    assert entry["stages"]["confirm"] == "skipped" and entry["error"] is None
+
+
+async def _no_wait(*_args, **_kwargs):
+    return None
+
+
+async def _no_persist(*_args, **_kwargs):
+    return None
+
