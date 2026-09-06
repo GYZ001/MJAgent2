@@ -3123,31 +3123,31 @@ def test_strict_durable_replay_cache_miss_is_not_sent() -> None:
     assert caught.value.replay_safe is True
 
 
-def test_blueprint_disables_hidden_gateway_retries(
+def test_blueprint_flag_blocks_rerolls_not_unsent_replays(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """该标志禁的是重摇已送达的答案；未送达（not_sent）仍按网关退避预算重放（第 7 轮语义，见 test_text_provider_retry_disabled_flag）。睡眠打桩，否则真等 13 分钟。"""
     calls = 0
 
     async def not_sent(*_args, **_kwargs):
         nonlocal calls
         calls += 1
         raise hiagent.ProviderError(
-            "not sent",
-            retryable=True,
-            failure_kind="connection_failed",
-            delivery_state="not_sent",
-            replay_safe=True,
+            "not sent", retryable=True, failure_kind="connection_failed",
+            delivery_state="not_sent", replay_safe=True,
         )
 
-    monkeypatch.setattr(stages.model_gateway.hiagent, "chat", not_sent)
+    async def no_sleep(_delay):
+        return None
 
+    monkeypatch.setattr(stages.model_gateway.hiagent, "chat", not_sent)
+    monkeypatch.setattr(stages.model_gateway.asyncio, "sleep", no_sleep)
     with pytest.raises(hiagent.ProviderError, match="not sent"):
         asyncio.run(stages.model_gateway.chat(
             [{"role": "user", "content": "x"}],
             call_meta={"disable_provider_retries": True},
         ))
-
-    assert calls == 1
+    assert calls == stages.model_gateway.config.TEXT_PROVIDER_MAX_RETRIES + 1
 
 
 def test_effective_model_cap_controls_unknown_exposure() -> None:
