@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import sys
+import traceback
 import time
 from typing import Any
 
@@ -69,10 +71,20 @@ def open_write_holders() -> list[dict[str, Any]]:
         except sqlite3.ProgrammingError:
             continue
         holders.append({
-            "task": f"thread-{thread_id}", "coro": "（线程局部连接，无协程栈）", "frames": [],
+            "task": f"thread-{thread_id}", "coro": "（线程局部连接，无协程栈）",
+            "frames": _thread_stack_frames(thread_id),
             "last_sql": _last_write_sql.get(id(conn)),
         })
     return holders
+
+
+def _thread_stack_frames(thread_id: int, limit: int = 8) -> list[str]:
+    """线程局部连接握着事务时，把该线程此刻的栈顶几帧带出来（第 13 轮：30 个 thread-xxx 只剩
+    「UPDATE workflow_runs」一句，根本不知道是谁）。"""
+    frame = sys._current_frames().get(thread_id)
+    if frame is None:
+        return []
+    return [f"{fs.filename.rsplit('/', 1)[-1]}:{fs.lineno} {fs.name}" for fs in traceback.extract_stack(frame)[-limit:]]
 
 
 def log_open_write_holders(reason: str) -> None:
