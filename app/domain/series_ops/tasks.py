@@ -291,6 +291,7 @@ def queue_snapshot(conn, project_id: str) -> dict:
         "queued_count": int(queued_count),
         "stop_reason": (row["stop_reason"] if row else None),
         "machine": machine_watermark.snapshot(),
+        "channels": _channel_snapshot(),  # 供应商通道自适应并发的当前值/安全阀，让「并发到底是多少」可见
     }
 
 
@@ -469,3 +470,13 @@ def reset_running_to_queued(conn) -> set[str]:
     if rows:
         conn.commit()
     return project_ids
+
+
+def _channel_snapshot() -> dict:
+    """各供应商通道（文本/图片/VLM/视频…）的自适应并发快照；读不到时给空字典而不是让队列接口挂掉。"""
+    from app.media_pipeline.concurrency import snapshot  # 延迟导入：media_pipeline 在编排层之上，不做模块级依赖
+
+    try:
+        return snapshot()
+    except Exception:  # noqa: BLE001 -- 观测信息，不影响队列本体
+        return {}
