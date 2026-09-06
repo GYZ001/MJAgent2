@@ -9,14 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import base64, binascii  # noqa: E401 -- 行数基线顶格，合并一行
-import hashlib
-import inspect
-import json
-import re
+import hashlib, inspect  # noqa: E401 -- 行数基线顶格，合并一行
+import json, re  # noqa: E401 -- 行数基线顶格，合并一行
 import shutil, sqlite3  # noqa: E401 -- 行数基线顶格，合并一行
 import subprocess
-import time
-import weakref
+import time, weakref  # noqa: E401 -- 行数基线顶格，合并一行
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -1595,6 +1592,9 @@ async def _custom_protocol_chat(
         config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY,
     )
     payload = with_rf({"model": custom_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens})
+    effort = text_reasoning_effort(call_meta)  # 按阶段表/运维覆盖定思考档位——此前只有智谱内置路径设这个字段，HiAgent 自定义路径从没带过
+    if effort:
+        payload["reasoning_effort"] = effort
     if call_meta.get("reasoning_fallback"):
         # 2026-09-03 在 B 上直连 HiAgent 网关实测：thinking.type=disabled 被 400 拒绝
         # （与网关默认 reasoning_effort=medium 冲突），reasoning_effort=minimal 才把
