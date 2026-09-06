@@ -13,6 +13,7 @@ from app.db import get_conn
 from app.schemas import Bible, Prop
 
 from .image import generate_prop_reference_image, prop_ref_prompt
+from .labels import normalize_prop_label
 from .judge import assess_prop_appearance, is_key_prop_mention
 from .store import ensure_schema, latest_prop_reference_status, upsert_prop_reference
 
@@ -41,6 +42,20 @@ def _append_prop_to_bible(conn: sqlite3.Connection, project_id: str, prop: Prop)
         data.setdefault("props", []).append(prop.model_dump(mode="json"))
         return True
 
+    return mutate_bible_json(conn, project_id, mutate)
+
+
+def _append_prop_alias(conn: sqlite3.Connection, project_id: str, name: str, alias: str) -> bool:
+    """把归一前的原标签登记为本体道具的别名（「两只野鸡」→「野鸡」），下游按别名仍能查到图。"""
+    def mutate(data: dict) -> bool:
+        for entry in data.get("props", []):
+            if entry.get("name") == name:
+                aliases = [str(a).strip() for a in entry.get("aliases") or [] if str(a).strip()]
+                if alias in aliases or alias == name:
+                    return False
+                entry["aliases"] = [*aliases, alias]
+                return True
+        return False
     return mutate_bible_json(conn, project_id, mutate)
 
 
@@ -129,16 +144,25 @@ async def ensure_props_for_labels(
             continue
         if not is_key_prop_mention(mention, source_text=source_text):
             continue
-        try:
-            result = await _register_one_prop(
-                conn, project_id, episode_no, mention, style=style, ep_label=ep_label,
-            )
-        except Exception as exc:  # noqa: BLE001 单个道具登记失败不影响其它道具继续
-            errors.append(f"{label}：道具库登记失败：{exc}")
-            continue
-        if result:
-            added.append(result)
-            known.add(label)
+        # 标签先归一成物件本体（「两只野鸡」→野鸡、「凝灵丹与半块灵石」→凝灵丹+灵石，见 props.labels）：
+        # 本体已登记就只补别名，不再另建一件；本体未登记就以本体名建卡、原标签作别名。
+        for base in normalize_prop_label(label):
+            if base in known:
+                if base != label and _append_prop_alias(conn, project_id, base, label):
+                    known.add(label)
+                continue
+            try:
+                result = await _register_one_prop(
+                    conn, project_id, episode_no, {**mention, "label": base}, style=style, ep_label=ep_label,
+                )
+            except Exception as exc:  # noqa: BLE001 单个道具登记失败不影响其它道具继续
+                errors.append(f"{label}：道具库登记失败：{exc}")
+                continue
+            if result:
+                added.append(result)
+                known.add(base)
+                if base != label and _append_prop_alias(conn, project_id, base, label):
+                    known.add(label)
     return {"added": added, "errors": errors}
 
 

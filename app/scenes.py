@@ -15,8 +15,7 @@ scene_references（按"适用集区间"分段，ep_end=NULL 表示开区间=当�
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
+import base64, hashlib  # noqa: E401 -- 行数基线顶格，合并一行
 import json
 import logging
 import re
@@ -34,6 +33,7 @@ from app.evidence import repository as evidence_repository
 from app.evidence.media import record_reference_asset
 from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
+from app.production.scene_refresh import refresh_verdict_if_scenes_changed
 from app.production.scene_granularity import (
     ROLE_TRANSITIONAL,
     anchor_discovery_sources,
@@ -1389,6 +1389,7 @@ async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: lis
                 context={"project_id": project_id, "scene": label, "episode_no": episode_no},
             ))
             continue
+        scenes, verdict = await refresh_verdict_if_scenes_changed(conn, project_id, scenes, verdict, assess=lambda fresh, _l=label, _c=spatial_context: assess_new_scene(_l, _c, style=style, known_scenes=fresh, ep_label=f"第 {episode_no} 集"))  # 并发建场景复核，见 scene_refresh
         anchor_name = resolve_existing_anchor_name(
             location_key=verdict.get("location_key") or verdict.get("name") or "", scenes=scenes,
             era_anchor=verdict.get("era_anchor") or "", existing_scene_name=verdict.get("existing_scene_name") or "",

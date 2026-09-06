@@ -38,3 +38,14 @@ def test_generic_garment_with_colour_is_allowed_without_evidence() -> None:
 def test_empty_and_fully_grounded_inputs_pass_through() -> None:
     assert ground_appearance("", "x") == ("", [])
     assert ground_appearance("须发皆白的老者", "两个老者盘膝坐在山顶，须发皆白。") == ("须发皆白的老者", [])
+
+
+def test_narrative_clauses_are_dropped_even_when_grounded() -> None:
+    """第 11 轮：赵武刚的外观把兽化/恢复/尸体的剧情经过写进去了；这些子句原文里有，但不是静态外观。"""
+    source = "赵武刚青年男性，束发。赵武刚本集短暂变为全身浓密金毛、爪牙锋利的兽化形态，后恢复人形，最终尸体倒地。"
+    kept, dropped = ground_appearance("青年男性，束发。本集短暂变为全身浓密金毛、爪牙锋利的兽化形态，后恢复人形，最终尸体倒地", source)
+    assert kept == "青年男性，束发"
+    assert dropped == ["本集短暂变为全身浓密金毛", "爪牙锋利的兽化形态", "后恢复人形", "最终尸体倒地"]
+    # 同一句里没有句号分隔时，整句都是剧情经过
+    kept2, _ = ground_appearance("青年男性，本集变为兽化形态，束发", source)
+    assert kept2 == ""

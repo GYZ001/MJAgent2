@@ -256,3 +256,27 @@ def test_key_prop_when_head_noun_repeats_in_source_text():
     assert is_key_prop_mention(mention, source_text=source) is True
     assert is_key_prop_mention({"label": "泡面碗", "description": "桌上的泡面碗", "segment_indexes": [3]}, source_text=source) is False
     assert is_key_prop_mention(mention) is False
+
+
+async def test_ensure_props_for_labels_normalises_quantifier_and_compound_labels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """第 11 轮物件库核查：野鸡/两只野鸡、灵石/半块灵石/凝灵丹与半块灵石 各建了一条。归一后本体已登记只补别名，
+    未登记的以本体名建卡、原标签作别名。"""
+    _seed_project("p1", props_list=[
+        {"name": "野鸡", "appearance_canonical": "已登记的野鸡锚点", "aliases": []},
+        {"name": "灵石", "appearance_canonical": "已登记的灵石锚点", "aliases": []},
+    ])
+    monkeypatch.setattr(judge.model_gateway, "chat_structured", _fake_chat_structured)
+    monkeypatch.setattr(service, "generate_prop_reference_image", _fake_generate_image)
+    mentions = [
+        {"label": "两只野鸡", "description": "两只野鸡", "segment_indexes": [2, 9]},
+        {"label": "凝灵丹与半块灵石", "description": "凝灵丹与半块灵石", "segment_indexes": [3, 8]},
+    ]
+    result = await service.ensure_props_for_labels("p1", 6, mentions)
+    assert result["errors"] == []
+    assert [item["name"] for item in result["added"]] == ["凝灵丹"]
+    conn = get_conn()
+    bible = json.loads(conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"])
+    by_name = {p["name"]: p for p in bible["props"]}
+    assert set(by_name) == {"野鸡", "灵石", "凝灵丹"}
+    assert by_name["野鸡"]["aliases"] == ["两只野鸡"]
+    assert "凝灵丹与半块灵石" in by_name["灵石"]["aliases"] and "凝灵丹与半块灵石" in by_name["凝灵丹"]["aliases"]

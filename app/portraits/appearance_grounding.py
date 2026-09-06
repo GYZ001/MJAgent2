@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import re
 
-_CLAUSE_SPLIT_RE = re.compile(r"[，,；;。、\n]+")
+_SENTENCE_SPLIT_RE = re.compile(r"[。；;\n]+")
+_CLAUSE_SPLIT_RE = re.compile(r"[，,、]+")
 _FUNCTION_CHARS = set("的地得着了一张件把其中")
 _CJK_RE = re.compile(r"[一-鿿]")
 
@@ -39,6 +40,9 @@ _GENERIC_TOKENS: tuple[str, ...] = tuple(sorted({
     "一", "二", "两", "三", "四", "五", "六", "七", "八", "九", "十",
 }, key=len, reverse=True))
 _GENERIC_RE = re.compile("|".join(re.escape(t) for t in _GENERIC_TOKENS))
+# 叙事时序词元（闭集语法成分）：带这些词的子句写的是剧情经过，不是可跨镜稳定复现的静态外观
+# （第 11 轮：赵武刚「本集短暂变为兽化形态，后恢复人形，最终尸体…」整段进了外观锚点）。
+_NARRATIVE_RE = re.compile(r"本集|随后|后来|最终|最后|短暂|一度|曾经|曾|变为|变成|化作|恢复|尸体|死后|此刻|当时|之后|之前")
 
 
 def _residue(clause: str) -> str:
@@ -70,14 +74,17 @@ def ground_appearance(appearance: str, fragments: str) -> tuple[str, list[str]]:
     source = str(fragments or "")
     kept: list[str] = []
     dropped: list[str] = []
-    for clause in (c.strip() for c in _CLAUSE_SPLIT_RE.split(text)):
-        if not clause:
+    for sentence in (x.strip() for x in _SENTENCE_SPLIT_RE.split(text)):
+        clauses = [c.strip() for c in _CLAUSE_SPLIT_RE.split(sentence) if c.strip()]
+        if _NARRATIVE_RE.search(sentence):
+            dropped.extend(clauses)  # 整句在讲剧情经过（变为/恢复/最终…），不是外观
             continue
-        residue = _residue(clause)
-        if not residue or _grounded(residue, source):
-            kept.append(clause)
-        else:
-            dropped.append(clause)
+        for clause in clauses:
+            residue = _residue(clause)
+            if not residue or _grounded(residue, source):
+                kept.append(clause)
+            else:
+                dropped.append(clause)
     if not dropped:
         return text, []
     return "，".join(kept), dropped
