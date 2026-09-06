@@ -29,17 +29,20 @@ def test_watermark_reports_lock_pressure(monkeypatch) -> None:
     assert any("写锁争用" in r for r in reasons)
 
 
-def test_run_write_transaction_counts_real_lock_waits_not_probe_collisions(monkeypatch) -> None:
+def test_write_transaction_start_failure_counts_once_per_wait(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(lock_pressure, "_events", type(lock_pressure._events)(maxlen=512))
-
-    def start_fails(_operation):
-        raise db._WriteTransactionStartError(sqlite3.OperationalError("database is locked"))
-
-    monkeypatch.setattr(db, "_run_write_transaction_once", start_fails)
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "locked.db")
+    monkeypatch.setattr(db, "WRITE_TXN_BUSY_TIMEOUT_S", 0.05)
+    db.init_db()
+    holder = sqlite3.connect(str(tmp_path / "locked.db"))
+    holder.execute("BEGIN IMMEDIATE")  # 另一条连接握着写锁，BEGIN IMMEDIATE 等满 busy_timeout 后失败
     try:
-        asyncio.run(db.run_write_transaction(lambda conn: None, retry_delays=(0.0,)))
-    except sqlite3.OperationalError:
-        pass
-    else:
-        raise AssertionError("expected the original OperationalError after retries")
-    assert lock_pressure.recent_contention_count() == 2  # 首次 + 一次重试，各等满一次 busy_timeout
+        try:
+            asyncio.run(db.run_write_transaction(lambda conn: None, retry_delays=(0.0,)))
+        except sqlite3.OperationalError:
+            pass
+        else:
+            raise AssertionError("expected database is locked after retries")
+    finally:
+        holder.rollback()
+    assert lock_pressure.recent_contention_count() == 2  # 首次 + 一次重试，各等满一次；run_write_transaction 不再重复计

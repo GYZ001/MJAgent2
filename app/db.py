@@ -1169,6 +1169,7 @@ def _run_write_transaction_once(
         try:
             conn.execute("BEGIN IMMEDIATE")
         except sqlite3.OperationalError as exc:
+            lock_pressure.note_lock_contention()  # 等满 busy_timeout 仍拿不到写锁：同步/异步写路径都经这里，计一次
             raise _WriteTransactionStartError(exc) from exc
         result = operation(conn)
         conn.commit()
@@ -1222,8 +1223,7 @@ async def run_write_transaction(
             return await run_in_thread_cancellation_safe(
                 lambda: _run_write_transaction_once(operation)
             )
-        except _WriteTransactionStartError as exc:
-            lock_pressure.note_lock_contention()  # 等满 busy_timeout 仍拿不到写锁：机器水位的真实争用信号
+        except _WriteTransactionStartError as exc:  # 争用已在 _run_write_transaction_once 计过
             if attempt >= len(retry_delays):
                 raise exc.original from exc
             await asyncio.sleep(max(0.0, float(retry_delays[attempt])))
