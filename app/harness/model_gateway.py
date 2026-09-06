@@ -505,11 +505,8 @@ async def chat(
         messages,
         effective_response_format,
     )
-    max_retries = (
-        0
-        if meta.get("disable_provider_retries")
-        else config.TEXT_PROVIDER_MAX_RETRIES
-    )
+    retries_disabled = bool(meta.get("disable_provider_retries"))  # 禁的是"换一次语义答案再摇一次"（见 hiagent.py 该标志说明）
+    max_retries = config.TEXT_PROVIDER_MAX_RETRIES  # 未送达的流中断（过载拒绝波）即便禁重试也按退避重放：那不是重摇答案
     stage_key = str(meta.get("stage_key") or "") or None
     for failure_no in range(max_retries + 1):
         try:
@@ -548,6 +545,7 @@ async def chat(
             if (
                 not exc.retryable
                 or not (exc.replay_safe or replay_safe_stream_interruption(exc))
+                or (retries_disabled and not replay_safe_stream_interruption(exc))
                 or failure_no >= max_retries
             ):
                 raise
