@@ -12,6 +12,7 @@ from app import config, hiagent
 from app.db import get_conn, now
 from app.evidence import repository
 from app.harness.model_gateway_moderation import attempt_moderation_fallback, replay_safe_stream_interruption
+from app.harness.structured_key_case import snake_case_keys_for_model
 from app.observability.tracing import current_trace
 from app.orchestration.state_machine import transition_run
 
@@ -293,7 +294,7 @@ def _model_schema(model_type: Any) -> dict[str, Any]:
 def _coerce_structured(model_type: Any, payload: dict[str, Any]) -> Any:
     validator = getattr(model_type, "model_validate", None)
     if callable(validator):
-        return validator(payload)
+        return validator(snake_case_keys_for_model(model_type, payload))  # 驼峰键→下划线键，见 structured_key_case
     if callable(model_type):
         return model_type(payload)
     return payload
@@ -307,11 +308,7 @@ def _validation_messages(value: Any) -> list[str]:
     if isinstance(value, str):
         return [value]
     if isinstance(value, (list, tuple, set)):
-        return [
-            str(getattr(item, "message", item))
-            for item in value
-            if item not in (None, "")
-        ]
+        return [str(getattr(item, "message", item)) for item in value if item not in (None, "")]
     return [str(value)]
 
 
