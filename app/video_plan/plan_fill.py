@@ -29,9 +29,12 @@ def fill_omitted_shots(
             if identifier:
                 db_id_by_identifier[str(identifier)] = str(row["id"])
     covered = {db_id_by_identifier.get(item.shot_id, item.shot_id) for item in shot_plans}
+    # 模型把 shot_id 写错（后面按 shot_no 兜底解析）的条目：按它的 shot_no 算已覆盖，
+    # 否则这里补一条、绑定时又解析回同一镜，校验判 DUPLICATE_SHOT_PLAN（第 12 轮第 24 集）。
+    covered_nos = {int(item.shot_no or 0) for item in shot_plans if item.shot_id not in db_id_by_identifier}
     filled: list[ShotVideoGenerationPlan] = []
     for index, (row, payload) in enumerate(zip(rows, shot_payload)):
-        if str(row["id"]) in covered:
+        if str(row["id"]) in covered or int(payload.get("shot_no") or index + 1) in covered_nos:
             continue
         filled.append(ShotVideoGenerationPlan(
             shot_plan_id=new_id("svp"), episode_video_plan_id=plan_id, plan_revision=plan_revision,

@@ -44,3 +44,15 @@ def test_complete_plan_is_returned_untouched(monkeypatch) -> None:
         plans, rows, payload, plan_id="evp", plan_revision=1, revision_id="rev", snapshot_id="cap",
         asset_fingerprints={}, episode_id="e1", model="m",
     ) is plans
+
+
+def test_mangled_shot_id_counts_as_covered_by_shot_no(monkeypatch) -> None:
+    """第 12 轮第 24 集：模型把第 3 镜的 shot_id 写错，绑定时按 shot_no 解析回同一镜；补齐若再补一条就成 DUPLICATE_SHOT_PLAN。"""
+    monkeypatch.setattr(plan_fill, "log_provider_call", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("不该补")))
+    rows, payload = _rows_and_payload(3)
+    plans = [_item("SH-1", 1), _item("SH-2", 2), _item("shot_3_typo", 3)]
+    out = plan_fill.fill_omitted_shots(
+        plans, rows, payload, plan_id="evp", plan_revision=1, revision_id="rev", snapshot_id="cap",
+        asset_fingerprints={}, episode_id="e1", model="m",
+    )
+    assert out is plans
