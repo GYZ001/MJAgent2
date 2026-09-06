@@ -23,6 +23,7 @@ TASK_SETTING_KEY = "series_queue_concurrency"
 EPISODE_SETTING_KEY = "series_episode_concurrency"
 DEFAULT_CONCURRENCY = 3
 MAX_CONCURRENCY = 8
+SLOT_RECHECK_S = 5.0  # 等槽位时重读设置的间隔，测试打桩调小
 
 
 def _read_concurrency(key: str) -> int:
@@ -62,7 +63,13 @@ class EpisodeSlots:
     async def acquire(self, scope: str) -> None:
         cond = self._condition(scope)
         async with cond:
-            await cond.wait_for(lambda: self.running(scope) < episode_concurrency())
+            # 等待时每隔 SLOT_RECHECK_S 秒重读一次设置：调大并行数不会有人 notify（只有 release 会），
+            # 只靠 wait_for 的话要等到本任务下一集跑完才放行（2026-09-05 实测 3→5 后 20 分钟没补位）。
+            while self.running(scope) >= episode_concurrency():
+                try:
+                    await asyncio.wait_for(cond.wait(), timeout=SLOT_RECHECK_S)
+                except asyncio.TimeoutError:
+                    continue
             self._running[scope] = self.running(scope) + 1
 
     async def release(self, scope: str) -> None:
