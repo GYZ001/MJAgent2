@@ -13,6 +13,7 @@ from typing import Any, Callable, TypeVar
 import weakref
 
 from app.config import DATA_DIR, DB_PATH, DEFAULT_SETTINGS
+from app.observability import lock_pressure
 from app.observability.provider_call_payload import compact_exact_request, compact_provider_payload
 
 _LOGGER = logging.getLogger(__name__)
@@ -1222,6 +1223,7 @@ async def run_write_transaction(
                 lambda: _run_write_transaction_once(operation)
             )
         except _WriteTransactionStartError as exc:
+            lock_pressure.note_lock_contention()  # 等满 busy_timeout 仍拿不到写锁：机器水位的真实争用信号
             if attempt >= len(retry_delays):
                 raise exc.original from exc
             await asyncio.sleep(max(0.0, float(retry_delays[attempt])))
@@ -1231,6 +1233,7 @@ async def run_write_transaction(
                 or attempt >= len(retry_delays)
             ):
                 raise
+            lock_pressure.note_lock_contention()
             await asyncio.sleep(max(0.0, float(retry_delays[attempt])))
     raise AssertionError("unreachable")
 

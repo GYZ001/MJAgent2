@@ -5,6 +5,10 @@ provider_call_progress / persist_progress / resolve_session 一分钟里十几�
 这里只做一件事：把每次写锁争用记一个时间戳，准入闸在最近 ``WINDOW_S`` 秒内争用次数 ≥
 ``THRESHOLD`` 时不再放新调用进来（已在跑的不动），让写者自然退潮。判据来自本进程真实撞锁
 次数，不是配置里的猜测；退潮后自动放开。
+
+计的是**等满 busy_timeout 仍拿不到写锁**的失败（``app.db.run_write_transaction`` 的重试分支），
+不计 ``provider_heartbeat`` 那种 busy_timeout=0 探针的瞬时碰撞——30 个写者并发时探针碰撞是常态，
+按它计数会让准入闸在正常负载下常开。
 """
 from __future__ import annotations
 
