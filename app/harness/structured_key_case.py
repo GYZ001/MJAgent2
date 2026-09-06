@@ -48,8 +48,11 @@ def snake_case_keys_for_model(model_type: Any, payload: Any) -> Any:
         name = key
         if isinstance(key, str) and key not in fields:
             snake = to_snake_case(key)
-            if snake != key and snake in fields and snake not in payload:
-                name = snake
+            if snake != key and snake in fields:
+                if snake not in payload:
+                    name = snake
+                elif payload[snake] == value:
+                    continue  # 同一字段驼峰/下划线各写了一遍且值相同：多余的那份丢掉（2026-09-06 第 1 集 appellations.22）
         field = fields.get(name)
         nested = _model_classes(field.annotation) if field is not None else []
         if len(nested) == 1 and isinstance(value, (dict, list)):

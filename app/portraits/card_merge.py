@@ -44,7 +44,7 @@ from app.schemas import Bible, Character, CharacterAlias
 from app.source_excerpt import index_source_segments
 
 from ._db_probe import _has_column, _has_table
-from .card_aliases import _cooccurrence_evidence
+from .card_aliases import _cooccurrence_evidence, alias_is_specific
 from .card_aliases import new_card_aliases
 from .card_rebind import _cas_write_bible
 from .card_structural_link import structural_candidates, with_structural_entries
@@ -326,8 +326,8 @@ def apply_card_merge_alias(
     if target is None:
         return False
     existing_texts = {str(a.get("text") or "").strip() for a in target.get("aliases") or []}
-    if alias["text"] in existing_texts:
-        return True
+    if alias["text"] in existing_texts or not alias_is_specific(alias["text"]):
+        return True  # 泛称（女子/这青年）不登记成全局别名：归属仍成立，只是不留一条会把别人绑过来的键
     target.setdefault("aliases", []).append(alias)
     payload = json.dumps(data, ensure_ascii=False)
     next_artifact_id = None
@@ -440,7 +440,7 @@ async def resolve_card_build_or_merge(
             apply_card_merge_alias(conn, project_id, merge_target, alias)
         return {"status": "exists", "name": merge_target}
     aliases = new_card_aliases(name, identity_source_labels, forward_chapters_by_idx)
-    if descriptive_label and descriptive_label != name and (found := _cooccurrence_evidence(forward_chapters_by_idx, descriptive_label, descriptive_label)):
+    if descriptive_label and descriptive_label != name and alias_is_specific(descriptive_label) and (found := _cooccurrence_evidence(forward_chapters_by_idx, descriptive_label, descriptive_label)):
         # 卡名是称谓加限定合成的（「守墓老人」），原文里逐字出现的是称谓本身：把称谓登记为非独占别名。
         aliases.append(CharacterAlias(
             text=descriptive_label, name_kind=IDENTITY_NAME_FORM_REFERENTIAL,

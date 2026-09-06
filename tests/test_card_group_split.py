@@ -66,4 +66,4 @@ def test_group_label_builds_member_cards_and_registers_group_alias(monkeypatch) 
     names = [c["name"] for c in _characters(conn)]
     assert names == ["孟浩", "高大老者", "清瘦老者"]  # 合称本身没有建卡
     aliases = {c["name"]: {a["text"] for a in c["aliases"]} for c in _characters(conn)}
-    assert "两个老者" in aliases["高大老者"]  # 同段共现，合称登记为共享别名
+    assert "两个老者" not in aliases["高大老者"]  # 合称是泛称：不登记成全局别名（card_aliases.alias_is_specific）

@@ -8,9 +8,8 @@
   必须逐字出现在给模型看过的原文片段里（``verbatim_member_labels`` 机械核验，编造的称呼
   一律丢弃）——「穿着灰色长袍的高大老者」里的「高大老者」是合法成员称呼。
 * 合称本身不建卡；每个成员走一遍正常的 ``ensure_character_card``（自己的原文片段、自己的
-  判定、自己的定妆），并把合称作为 ``identity_source_labels`` 传入——既有的
-  ``card_aliases.new_card_aliases`` 只在合称与成员称呼同章共现时才登记为非独占别名，
-  不确定不登记。
+  判定、自己的定妆）。合称作为 ``identity_source_labels`` 传入，但「两个老者」这类泛称过不了
+  ``card_aliases.alias_is_specific``，不会登记成全局别名——它在别的章里指谁都行。
 * 原文不区分成员（members 为空）的合称仍走 ``skipped_not_person`` 那条路，留在群像/群演里。
 """
 from __future__ import annotations

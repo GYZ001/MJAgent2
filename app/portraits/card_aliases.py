@@ -50,6 +50,20 @@ def _cooccurrence_evidence(
     return None
 
 
+_DEMONSTRATIVES = "这那此该其位个名人们某"
+
+
+def alias_is_specific(label: str) -> bool:
+    """别名必须能单独指认一个人：去掉通用形态词元（男子/女子/青年/老者…）与指示/量词后还剩字，
+    才配登记成全局别名。「女子」「这青年」在同一章里指谁都行，登记成别名会把别的人绑到这张卡上
+    （2026-09-06 第 11 轮人物谱：许师姐 别名['女子']、王腾飞 别名['这青年']）。"""
+    from .appearance_grounding import _GENERIC_RE  # 同一份闭集语法词元，不另抄一份
+
+    residue = _GENERIC_RE.sub("", str(label or ""))
+    residue = "".join(ch for ch in residue if ch not in _DEMONSTRATIVES and "一" <= ch <= "鿿")
+    return bool(residue)
+
+
 def new_card_aliases(
     name: str,
     identity_source_labels: list[str] | None,
@@ -67,7 +81,7 @@ def new_card_aliases(
     seen = {name}
     for raw in identity_source_labels or []:
         label = str(raw or "").strip()
-        if not label or label in seen:
+        if not label or label in seen or not alias_is_specific(label):
             continue
         seen.add(label)
         found = _cooccurrence_evidence(chapters_by_idx, name, label)
