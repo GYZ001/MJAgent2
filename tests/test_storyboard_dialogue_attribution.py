@@ -179,12 +179,11 @@ def test_unattributed_crowd_line_given_to_the_listener_is_rejected():
     assert len(errors) == 1 and "听者" in errors[0] and "无名人物" in errors[0]
 
 
-def test_unattributed_line_given_to_a_name_absent_from_the_window_is_rejected():
-    # 引号后 40 字内没有孟浩（POST_WINDOW=30），引号前也没有 → 没有任何依据。
+def test_unattributed_line_given_to_a_name_absent_from_the_window_is_not_rejected():
+    """缺席不是证据：对话轮替、自称（第 4 集「为兄」）都能合法推出说话人；只有「X听/闻」这种听者证据才打回。"""
     src = "“应该是这样，你们看外宗的韩宗师兄出现了。”" + "“" + CROWD_LINE + "”" + "广场上一片嘈杂。" * 5 + "孟浩走上前。"
     draft = _draft([_Line("bible:孟浩", CROWD_LINE)])
-    errors = dialogue_speaker_errors(draft, _crowd_required(), manifest_name_to_identity(CROWD_PAYLOAD), src)
-    assert len(errors) == 1 and "不在这句前后" in errors[0]
+    assert dialogue_speaker_errors(draft, _crowd_required(), manifest_name_to_identity(CROWD_PAYLOAD), src) == []
 
 
 def test_unattributed_line_given_to_an_unnamed_entity_or_narrator_passes():

@@ -261,14 +261,14 @@ def unattributed_quote_speaker_errors(
             continue
         start, end = span
         after = source_text[end:end + POST_WINDOW]
-        before = source_text[max(0, start - PRE_WINDOW):start]
+        # 只认「引号后紧跟 X听/闻」这一条正向证据：X 不在窗口里不算错——对话轮替、自称（「为兄」）
+        # 都能合法推断出说话人（第 4 集实测按缺席打回是误伤，整集分镜台失败）。
         listener = re.match(r"^[」”』\"，。！？…、\s]{0,3}" + re.escape(name) + _LISTENER_CUE_RE, after)
-        if listener or (name not in before and name not in after):
-            why = f"引号后原文是「{name}听/闻……」，{name} 是听者" if listener else f"{name} 不在这句前后的原文里"
+        if listener:
             errors.append(
-                f"dialogue[{index}]『{line.line[:20]}』原文没有点名说话人（{why}），不得安给具名角色；"
-                "speaker 改用本段 relevant_assets.characters 里的无名人物（entity），没有无名人物就写旁白按"
-                "画外音处理，prompt_text 里这句也不得让具名角色张嘴说"
+                f"dialogue[{index}]『{line.line[:20]}』原文没有点名说话人，引号后原文是「{name}听/闻……」，"
+                f"{name} 是听者不是说话人，不得安给具名角色；speaker 改用本段 relevant_assets.characters 里的"
+                "无名人物（entity），没有无名人物就写旁白按画外音处理，prompt_text 里这句也不得让具名角色张嘴说"
             )
     return errors
 
