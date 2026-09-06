@@ -25,11 +25,20 @@ LOW_EFFORT_STAGES: frozenset[str] = frozenset({
     "episode_video_mode_plan",
 })
 LOW_EFFORT = "low"
+# 2026-09-06 实测：普通 chat 判定 low 把延迟/思考砍半（assess_new_character 17.8s→9.2s），但工具对话
+# （身份调查 Phase A）带 low 后 p50 27.7s/思考 3.4k 几乎不变——需要 minimal（火山 seed 实测 minimal
+# 才把 reasoning_tokens 压到 0）的子阶段登记在这里；子阶段键先于阶段键匹配。默认空：切之前要用
+# 人物谱核查盯质量。
+MINIMAL_EFFORT_SUBSTAGES: frozenset[str] = frozenset()
+MINIMAL_EFFORT = "minimal"
 
 
 def stage_reasoning_effort(call_meta: dict | None) -> str:
     """该调用按阶段应当使用的思考档位；不在表里返回空串（由调用方回落到默认）。"""
     meta = call_meta or {}
+    substage = str(meta.get("substage") or "").strip()
+    if substage and substage in MINIMAL_EFFORT_SUBSTAGES:
+        return MINIMAL_EFFORT
     for key in ("stage", "stage_key", "purpose", "call_role_label"):
         value = str(meta.get(key) or "").strip()
         if value and value in LOW_EFFORT_STAGES:

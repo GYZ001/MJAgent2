@@ -30,3 +30,10 @@ def test_precedence_call_meta_then_operator_override_then_stage_table_then_defau
     values["text_reasoning_effort"] = ""
     monkeypatch.setattr(config, "TEXT_REASONING_EFFORT", "max")
     assert hiagent.text_reasoning_effort({"stage_key": "storyboard_pack_segment"}) == "max"
+
+
+def test_substage_minimal_table_wins_over_stage_low(monkeypatch) -> None:
+    from app.harness import reasoning_effort_policy as policy
+    monkeypatch.setattr(policy, "MINIMAL_EFFORT_SUBSTAGES", frozenset({"current_identity_investigation"}))
+    assert policy.stage_reasoning_effort({"stage": "discover_character_candidates", "substage": "current_identity_investigation"}) == "minimal"
+    assert policy.stage_reasoning_effort({"stage": "discover_character_candidates", "substage": "current_identity"}) == "low"
