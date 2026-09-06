@@ -1,9 +1,11 @@
 """连播成片：五步全部完成后，把各集 ``final/episode.mp4`` 用 ffmpeg 拼接。
 
-各集编码参数可能不一致，用 ``filter_complex`` 的 ``concat`` 滤镜逐路先统一
-``scale/crop/fps``、音频重采样，再拼接、重编码（交付编码参数照
+各集成片若探测出完全相同的流参数且正好是交付画布（h264 1080×1920 24fps + aac 48k），
+走 concat demuxer 流拷贝，零转码、几秒完成；参数不一致才用 ``filter_complex`` 的
+``concat`` 滤镜逐路先统一 ``scale/crop/fps``、音频重采样，再拼接、重编码（交付编码参数照
 ``app/media_pipeline/delivery_encode.py::DELIVERY_VIDEO_ARGS``，与成片台/
-``app/final_edit.py`` 同一份）。先写 ``film.tmp.mp4`` 再原子改名，时长用
+``app/final_edit.py`` 同一份）。合并全机串行（``_MERGE_LOCK``）：2026-09-05 六条任务
+同时整段重编码，8 核负载冲到 43，其余流水线全被 CPU 水位闸卡住。先写 ``film.tmp.mp4`` 再原子改名，时长用
 ``app/media_exec/concat.py::_probe_concat_media`` 校验（容差沿用它的
 ``_CONCAT_DURATION_TOLERANCE_*`` 常量），失败时旧长片原封不动。
 """
@@ -12,6 +14,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -25,7 +29,8 @@ from app.media_exec.concat import (
     _probe_concat_media,
 )
 from app.media_pipeline.delivery_encode import (
-    DELIVERY_VIDEO_ARGS, canvas_filter, encode_timeout_s, probe_resolution,
+    DELIVERY_HEIGHT, DELIVERY_VIDEO_ARGS, DELIVERY_WIDTH, canvas_filter, encode_timeout_s,
+    probe_resolution,
 )
 from app.media_urls import build_media_url
 
@@ -81,6 +86,56 @@ def _build_filter_complex(count: int) -> str:
     return ";".join(parts) + ";" + concat
 
 
+_MERGE_LOCK = threading.Lock()
+_CANVAS_SIGNATURE = (
+    ("h264", DELIVERY_WIDTH, DELIVERY_HEIGHT, f"{FINAL_FPS}/1", "yuv420p"),
+    ("aac", str(FINAL_AUDIO_RATE), 2),
+)
+
+
+def _stream_signature(path: Path) -> tuple | None:
+    """(视频签名, 音频签名)；探测失败或缺流返回 None，调用方按需要重编码处理。"""
+    try:
+        raw = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "stream=codec_type,codec_name,width,height,r_frame_rate,pix_fmt,sample_rate,channels",
+             "-of", "json", str(path)],
+            check=True, capture_output=True, text=True, timeout=30,
+        ).stdout
+        streams = json.loads(raw).get("streams") or []
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+    video = next((x for x in streams if x.get("codec_type") == "video"), None)
+    audio = next((x for x in streams if x.get("codec_type") == "audio"), None)
+    if not video or not audio:
+        return None
+    return (
+        (video.get("codec_name"), int(video.get("width") or 0), int(video.get("height") or 0),
+         str(video.get("r_frame_rate")), video.get("pix_fmt")),
+        (audio.get("codec_name"), str(audio.get("sample_rate")), int(audio.get("channels") or 0)),
+    )
+
+
+def _stream_copy_eligible(paths: list[Path]) -> bool:
+    """全部输入流参数一致且正好是交付画布时才可流拷贝；任何一路探不出来就重编码。"""
+    return all(_stream_signature(path) == _CANVAS_SIGNATURE for path in paths)
+
+
+def _run_copy_concat_ffmpeg(paths: list[Path], out_path: Path, timeout_s: float) -> None:
+    list_path = out_path.with_suffix(".concat.txt")
+    list_path.write_text(
+        "".join("file '" + str(path).replace("'", "'\\''") + "'\n" for path in paths), encoding="utf-8",
+    )
+    try:
+        _run_ffmpeg(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path),
+             "-c", "copy", "-movflags", "+faststart", str(out_path)],
+            timeout=timeout_s, context="连播成片流拷贝合并",
+        )
+    finally:
+        list_path.unlink(missing_ok=True)
+
+
 def _run_concat_ffmpeg(paths: list[Path], out_path: Path, timeout_s: float) -> None:
     cmd = ["ffmpeg", "-y"]
     for path in paths:
@@ -134,7 +189,9 @@ def build_series_film(
     out_dir.mkdir(parents=True, exist_ok=True)
     tmp_path = out_dir / "film.tmp.mp4"
     timeout_s = encode_timeout_s(expected_total)
-    _run_concat_ffmpeg(final_paths, tmp_path, timeout_s)
+    stream_copy = _stream_copy_eligible(final_paths)
+    with _MERGE_LOCK:  # 全机一次只跑一个合并，见模块 docstring
+        (_run_copy_concat_ffmpeg if stream_copy else _run_concat_ffmpeg)(final_paths, tmp_path, timeout_s)
     probe = _validate_merged_duration(tmp_path, expected_total)
     film_path = out_dir / "film.mp4"
     os.replace(tmp_path, film_path)
@@ -150,7 +207,9 @@ def build_series_film(
         "created_at": time.time(),
         "input_fingerprints": _input_fingerprints(final_paths),
         "storyboard_artifact_ids": _storyboard_artifact_ids(project_id, episode_nos),
+        "merge_mode": "stream_copy" if stream_copy else "reencode",
         "ffmpeg_command_summary": (
+            "concat demuxer -c copy + faststart（各集成片流参数一致且为交付画布）" if stream_copy else
             "filter_complex concat(scale/crop/fps/aresample 归一化，lanczos) -> "
             "DELIVERY_VIDEO_ARGS(h264 medium crf20) + aac + faststart"
         ),
