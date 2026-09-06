@@ -40,6 +40,7 @@ from app.schemas import Bible
 
 from .constants import FUTURE_IDENTITY_DECISION_VERSION, IDENTITY_REQUEST_MAX_TOKENS
 from .discovery_resample import _identity_operation_retry_epoch, _identity_structured_with_resample
+from .future_identity_anchor_rebind import rebind_or_defer_missing_anchor
 from .future_identity_authorities import (
     _future_identity_authority_by_id,
     _future_identity_known_names,
@@ -212,7 +213,7 @@ async def resolve_future_identity_candidates(
         output_schema=identity_schema,
         response_format=identity_response_format,
         require_response_format=True,
-        normalize_payload=lambda payload: _normalize_future_identity_payload(payload, context),
+        normalize_payload=lambda payload: rebind_or_defer_missing_anchor(_normalize_future_identity_payload(payload, context), context),  # 缺逐字真名锚点：改绑/降 F:
     )
 
     # 真实第20轮 EP4 回归 ERR-20260824-407c9b 结构性排查命中：resolved_by_group
