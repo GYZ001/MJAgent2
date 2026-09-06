@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.db import get_setting
+from app.observability import lock_pressure
 
 SETTING_MEMORY_PCT = "admission_memory_pct"
 SETTING_DISK_IO_PCT = "admission_disk_io_pct"
@@ -146,6 +147,9 @@ class MachineWatermark:
             reasons.append(f"磁盘 IO {wm.disk_io_pct:.0f}% ≥ {io_cap:.0f}%")
         if wm.cpu_load_ratio is not None and wm.cpu_load_ratio >= cpu_cap:
             reasons.append(f"CPU 负载/核 {wm.cpu_load_ratio:.2f} ≥ {cpu_cap:.2f}")
+        lock_reason = lock_pressure.lock_pressure_reason()  # 同一个 SQLite 文件上的写者排队也是机器水位（第 13 轮写锁风暴）
+        if lock_reason:
+            reasons.append(lock_reason)
         return reasons
 
 

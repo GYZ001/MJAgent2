@@ -35,7 +35,21 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+_ENSURED_DB_PATHS: set[str] = set()
+
+
+def _database_path(conn) -> str:
+    row = conn.execute("PRAGMA database_list").fetchone()
+    return str(row[2] if row else "")
+
+
 def ensure_completion_grants_table(conn) -> None:
+    """建表 + 补列 + 清理已废止的分镜类授权。一个库文件在本进程里只做一次：第 13 轮实测它跟着
+    每次签发授权在 30 个线程里反复跑，12 条必失败的 ALTER 加一条 DELETE 每次都要抢写锁，
+    是写锁风暴里最后一条写语句排第二的来源。内存库（路径为空）不缓存，测试各建各的。"""
+    path = _database_path(conn)
+    if path and path in _ENSURED_DB_PATHS:
+        return
     db = conn
     db.execute(
         """CREATE TABLE IF NOT EXISTS completion_grants (
@@ -79,6 +93,8 @@ def ensure_completion_grants_table(conn) -> None:
         "DELETE FROM completion_grants WHERE kind='storyboard' OR permission='storyboard.generate_and_confirm'"
     )
     db.commit()
+    if path:
+        _ENSURED_DB_PATHS.add(path)
 
 
 def default_max_fallback_shots(shots_total: int) -> int:

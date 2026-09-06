@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from app.db import _last_write_sql, _task_connections, _task_connections_lock, _thread_connections
+from app.observability import lock_pressure
 
 _LOGGER = logging.getLogger(__name__)
 _LAST_DUMP_AT = 0.0
@@ -77,6 +78,7 @@ def open_write_holders() -> list[dict[str, Any]]:
 def log_open_write_holders(reason: str) -> None:
     """写锁争用时（限频 30 秒一次）把持锁任务连同协程栈写进日志。"""
     global _LAST_DUMP_AT
+    lock_pressure.note_lock_contention()  # 每次争用都计入机器水位（限频只管日志，不管计数）
     stamp = time.monotonic()
     if stamp - _LAST_DUMP_AT < DUMP_INTERVAL_S:
         return
