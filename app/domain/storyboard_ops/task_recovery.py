@@ -4,16 +4,11 @@
 """
 from __future__ import annotations
 
-from app import (
-    errors,
-    task_registry,
-)
+from app import errors, task_registry
 from app.db import get_conn
+from app.orchestration.state_machine import transition_run
 
-from .task_run import (
-    _new_storyboard_recorder,
-    _storyboard_guarded_recorded,
-)
+from .task_run import _new_storyboard_recorder, _storyboard_guarded_recorded
 
 
 def recover_storyboard_tasks() -> int:
@@ -45,10 +40,12 @@ def recover_storyboard_tasks() -> int:
             (episode_id,),
         ).fetchone()
         if latest:
-            if latest["status"] in {"CREATED", "RUNNING"}:
-                # A durable run may belong to another live service instance.
-                continue
-            if latest["status"] != "PAUSED_EXTERNAL" or latest["failure_code"] != "SERVICE_RESTART":
+            if latest["status"] == "CREATED":
+                # 重启前排队等工作流槽位、没来得及开始的孤儿（2026-09-05 第 4 轮 8 集分镜台失败）：
+                # CREATED→CANCELLED 收掉，再像 PAUSED_EXTERNAL 一样以它为父运行续跑。RUNNING 仍归
+                # 下面那条：可能属于另一个活着的实例，不接管。
+                transition_run(latest["id"], {"CREATED"}, "CANCELLED", "服务重启前尚未开始，开机恢复接管", failure_code="SERVICE_RESTART", conn=None)
+            elif latest["status"] != "PAUSED_EXTERNAL" or latest["failure_code"] != "SERVICE_RESTART":
                 # PARTIAL / WAITING_HUMAN / user_pause are explicit manual resume points.
                 continue
             parent = latest

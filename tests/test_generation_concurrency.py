@@ -74,12 +74,13 @@ def test_screenplay_and_storyboard_share_one_process_wide_limit(
 
 
 def test_live_resize_releases_existing_generation_waiters(monkeypatch) -> None:
+    # 工作流并发只认 text_generation_workflow_concurrency（2026-09-05 起不再回落到供应商请求并发键）。
     configured = {"value": "2"}
     monkeypatch.setattr(
         generation_concurrency,
         "get_setting",
         lambda key: configured["value"]
-        if key == "text_generation_concurrency"
+        if key == "text_generation_workflow_concurrency"
         else None,
     )
 

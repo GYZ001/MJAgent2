@@ -78,8 +78,8 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
         description="同一时间最多发起多少个真实文本 provider 请求；活动队列会立即按新值扩缩容。",
     ),
     "text_generation_workflow_concurrency": _number(
-        "剧本/分镜工作流并发", "10", 1, 16, unit="集",
-        description="同一时间最多运行多少集剧本或分镜工作流。",
+        "剧本/分镜工作流并发", "0", 0, 32, unit="集",
+        description="同一时间最多运行多少集剧本或分镜工作流；0=自动（只受机器水位闸约束，安全阀 32）。",
     ),
     "series_queue_concurrency": _number(
         "连播台并行任务数", "0", 0, 32, unit="任务",

@@ -18,7 +18,7 @@ PRIORITY_INTERACTIVE = 0
 PRIORITY_RECOVERY = 10
 PRIORITY_BATCH = 20
 DEFAULT_TEXT_GENERATION_CONCURRENCY = 10
-MAX_TEXT_GENERATION_CONCURRENCY = 16
+MAX_TEXT_GENERATION_CONCURRENCY = 32  # 安全阀：工作流并发以机器水位为准（0=自动），只防失控
 
 _generation_priority: contextvars.ContextVar[int] = contextvars.ContextVar(
     "generation_priority",
@@ -107,20 +107,17 @@ def _configured_limit(workflow_type: str) -> int:
 
         return max(1, min(MAX_TEXT_GENERATION_CONCURRENCY, channel_limit(RESOURCE_TEXT_PROVIDER)))
     if resource == "text_generation_workflows":
-        raw = (
-            get_setting("text_generation_workflow_concurrency")
-            or get_setting("text_generation_concurrency")
-        )
-    else:
-        raw = get_setting(f"{resource}_concurrency")
+        # 2026-09-05 用户拍板并发以机器性能为上限：空或 0 表示自动——只受机器水位闸约束，
+        # 这里返回安全阀；显式数字仍尊重。不再回落到 text_generation_concurrency（那是供应商请求并发）。
+        raw = get_setting("text_generation_workflow_concurrency")
+        try:
+            value = int(raw) if str(raw or "").strip() else 0
+        except (TypeError, ValueError):
+            value = 0
+        return MAX_TEXT_GENERATION_CONCURRENCY if value <= 0 else max(1, min(MAX_TEXT_GENERATION_CONCURRENCY, value))
+    raw = get_setting(f"{resource}_concurrency")
     try:
-        return max(
-            1,
-            min(
-                MAX_TEXT_GENERATION_CONCURRENCY,
-                int(raw or DEFAULT_TEXT_GENERATION_CONCURRENCY),
-            ),
-        )
+        return max(1, min(MAX_TEXT_GENERATION_CONCURRENCY, int(raw or DEFAULT_TEXT_GENERATION_CONCURRENCY)))
     except (TypeError, ValueError):
         return DEFAULT_TEXT_GENERATION_CONCURRENCY
 
@@ -176,6 +173,7 @@ async def run_with_generation_slot(
     priority: int = PRIORITY_INTERACTIVE,
 ) -> T:
     """Run an operation under the process-wide priority-aware concurrency limit."""
+    await machine_watermark.wait_until_admitted()  # 机器水位闸：超标就等回落，不起新工作流
     gate = gate_for(workflow_type)
     await gate.acquire(priority)
     priority_token = _generation_priority.set(int(priority))
