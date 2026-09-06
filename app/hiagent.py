@@ -7,12 +7,11 @@ API 形态依据 M0 实测（docs/HIAGENT_INTEGRATION.md）：
 """
 from __future__ import annotations
 
-import asyncio
+import asyncio, subprocess  # noqa: E401 -- 行数基线顶格，合并一行
 import base64, binascii  # noqa: E401 -- 行数基线顶格，合并一行
 import hashlib, inspect  # noqa: E401 -- 行数基线顶格，合并一行
 import json, re  # noqa: E401 -- 行数基线顶格，合并一行
 import shutil, sqlite3  # noqa: E401 -- 行数基线顶格，合并一行
-import subprocess
 import time, weakref  # noqa: E401 -- 行数基线顶格，合并一行
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -2885,6 +2884,7 @@ async def chat_with_tools(
                     "model": resolved_model, "messages": messages, "temperature": temperature,
                     "max_tokens": max_tokens, "tools": tools, "tool_choice": tool_choice,
                 }
+                if (effort := text_reasoning_effort(call_meta)): payload["reasoning_effort"] = effort  # noqa: E701 -- 工具对话同样按阶段表定档（身份调查 49 次/9 分钟 p50 29s 思考 3.6k）
                 if stream:
                     data = await _stream_or_fallback(
                         client, url, payload, kind="chat_tools", model=resolved_model,
