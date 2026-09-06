@@ -11,6 +11,8 @@ ProviderFailure.model_rejection()``），此前无条件抛出、整步作废。
 """
 from __future__ import annotations
 
+import json
+
 from typing import Any
 
 from app import hiagent
@@ -72,3 +74,19 @@ def replay_safe_stream_interruption(exc: object) -> bool:
     # 流式传输中途的网络错误（httpx.HTTPError，delivery_state=unknown）对文本对话同样可安全重放：
     # 2026-09-05 第三轮 k 第 24 集分镜台因一次「流式网络错误」被判不可重试而整集失败。
     return bool(getattr(exc, "retryable", False)) and getattr(exc, "delivery_state", "") == "unknown"
+
+
+def provider_envelope_unprocessed(exc: object) -> bool:
+    """限流/网关故障且带结构化 error 信封 = 网关自己说没处理这次请求（HiAgent 504
+    ``{"error":{"code":"timeout_cancelled"}}``，2026-09-06 第 9 轮第 9 集），重放不会重摇答案。
+    只供带退避的外层重放（``model_gateway.chat``）使用；``hiagent._post_json`` 的即时重放不认它，
+    429 立刻重发只会更糟——所以不动分类器里的 ``replay_safe``。"""
+    if not getattr(exc, "retryable", False):
+        return False
+    if getattr(exc, "failure_kind", "") not in ("rate_limited", "upstream_unavailable"):
+        return False
+    try:
+        payload = json.loads(str(getattr(exc, "raw", "") or ""))
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and isinstance(payload.get("error"), dict)

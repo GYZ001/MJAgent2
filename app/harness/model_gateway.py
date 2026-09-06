@@ -11,7 +11,7 @@ from pydantic import BaseModel, ValidationError
 from app import config, hiagent
 from app.db import get_conn, now
 from app.evidence import repository
-from app.harness.model_gateway_moderation import attempt_moderation_fallback, replay_safe_stream_interruption
+from app.harness.model_gateway_moderation import attempt_moderation_fallback, provider_envelope_unprocessed, replay_safe_stream_interruption
 from app.harness.structured_key_case import snake_case_keys_for_model
 from app.observability.tracing import current_trace
 from app.orchestration.state_machine import transition_run
@@ -505,7 +505,7 @@ async def chat(
         messages,
         effective_response_format,
     )
-    retries_disabled = bool(meta.get("disable_provider_retries"))  # 禁的是"换一次语义答案再摇一次"（见 hiagent.py 该标志说明）
+    # disable_provider_retries（身份判定等调用）禁的是"换一次语义答案再摇一次"，网关本来就不重摇送达的答案；
     max_retries = config.TEXT_PROVIDER_MAX_RETRIES  # 未送达的流中断（过载拒绝波）即便禁重试也按退避重放：那不是重摇答案
     stage_key = str(meta.get("stage_key") or "") or None
     for failure_no in range(max_retries + 1):
@@ -542,13 +542,9 @@ async def chat(
                 )
                 if fallback_result is not None:
                     return fallback_result
-            if (
-                not exc.retryable
-                or not (exc.replay_safe or replay_safe_stream_interruption(exc))
-                or (retries_disabled and not replay_safe_stream_interruption(exc))
-                or failure_no >= max_retries
-            ):
-                raise
+            replayable = exc.replay_safe or replay_safe_stream_interruption(exc) or provider_envelope_unprocessed(exc)
+            if not exc.retryable or not replayable or failure_no >= max_retries:
+                raise  # retries_disabled 不再单独拦：能重放的都是未送达/未处理，不是重摇答案（见该标志说明）
 
             retry_no = failure_no + 1
             delay = min(config.TEXT_PROVIDER_RETRY_BASE_DELAY * (2 ** failure_no), config.TEXT_PROVIDER_RETRY_MAX_DELAY)  # 封顶：过载拒绝波要靠次数熬过去，不是靠越等越久
