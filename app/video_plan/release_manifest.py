@@ -235,7 +235,8 @@ def shot_id_aliases(shot_rows: list[Any]) -> tuple[dict[str, str], dict[int, str
     for row in shot_rows:
         db_id = str(row["id"])
         aliases[db_id] = db_id
-        by_shot_no[int(row["shot_no"])] = db_id
+        if (shot_no := _row_value(row, "shot_no", None)) is not None:  # 测试/裸行可能没带 shot_no
+            by_shot_no[int(shot_no)] = db_id
         for key in ("shot_uid",):
             value = str(_row_value(row, key, "") or "").strip()
             if value:

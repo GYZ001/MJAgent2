@@ -56,3 +56,30 @@ def test_mangled_shot_id_counts_as_covered_by_shot_no(monkeypatch) -> None:
         asset_fingerprints={}, episode_id="e1", model="m",
     )
     assert out is plans
+
+
+def test_phantom_entry_colliding_with_exact_shot_is_dropped_and_logged(monkeypatch) -> None:
+    """第 14 轮第 24 集：18 镜窗口回了 19 条，凭空多出的 id 按位置占了第 18 号，真第 18 镜被挤到第 19 号。"""
+    logged: list[dict] = []
+    monkeypatch.setattr(plan_fill, "log_provider_call", lambda *a, **kw: logged.append(kw.get("meta") or {}))
+    rows, payload = _rows_and_payload(3)
+    plans = [_item("SH-1", 1), _item("SH-2", 2), _item("shot_af6d8f9ca1f4", 3), _item("shot_3", 3)]  # 第 3 条是幻影；真第 3 镜序号已由 planner_shot_numbers 修回 3
+    out = plan_fill.fill_omitted_shots(
+        plans, rows, payload, plan_id="evp", plan_revision=1, revision_id="rev", snapshot_id="cap",
+        asset_fingerprints={}, episode_id="e1", model="m",
+    )
+    assert [(item.shot_id, item.shot_no) for item in out] == [("SH-1", 1), ("SH-2", 2), ("shot_3", 3)]
+    assert logged[0]["changes"] == [{"code": plan_fill.PHANTOM_SHOT_REASON, "shot_ids": ["shot_af6d8f9ca1f4"], "shot_nos": [3]}]
+
+
+def test_two_exact_entries_for_one_shot_keep_the_first(monkeypatch) -> None:
+    logged: list[dict] = []
+    monkeypatch.setattr(plan_fill, "log_provider_call", lambda *a, **kw: logged.append(kw.get("meta") or {}))
+    rows, payload = _rows_and_payload(2)
+    plans = [_item("SH-1", 1), _item("shot_1", 1), _item("SH-2", 2)]
+    out = plan_fill.fill_omitted_shots(
+        plans, rows, payload, plan_id="evp", plan_revision=1, revision_id="rev", snapshot_id="cap",
+        asset_fingerprints={}, episode_id="e1", model="m",
+    )
+    assert [item.shot_id for item in out] == ["SH-1", "SH-2"]
+    assert logged[0]["changes"][0]["code"] == plan_fill.PHANTOM_SHOT_REASON and logged[0]["changes"][0]["shot_ids"] == ["shot_1"]
