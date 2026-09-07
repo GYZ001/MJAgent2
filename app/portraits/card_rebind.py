@@ -231,3 +231,34 @@ async def rebind_character_card(
         return _rebind_character_card_cas(
             conn, project_id, from_label, to_canonical_name,
         )
+
+
+async def rebind_for_revealed_true_name(
+    project_id: str, *, authority_id: str, canonical_name: str, source_labels: list[str],
+) -> bool:
+    """身份决议揭示真名后的卡片改名入口，两种形态合成一处：
+
+    - 授权本身就写着旧称谓（``bible:<旧称谓>`` 而 canonical_name 是真名）：原有口径，直接改名。
+    - 授权已是 ``bible:<真名>``，而**旧称谓正是人物谱里某张卡的卡名**：第 15 轮实测「陈师兄」
+      在第 29 集被揭示为「陈凡」、「许师姐」被揭示为「许清」，决议都落了地，卡名却还停在关系
+      称谓上（用户明确反对过「王腾飞师兄」这类卡名）。这里把那张卡改名为真名，旧称谓由改名
+      原语留作别名。
+
+    真名在人物谱里已有归属时不动：那是「两张卡其实是同一个人」，属于归并通道的职责，
+    这里不猜（``_reject_if_target_name_owned`` 的 fail closed 语义原样保留）。
+    """
+    revealed = str(canonical_name or "").strip()
+    if not revealed:
+        return False
+    from_label = str(authority_id or "").removeprefix("bible:")
+    if from_label != authority_id and from_label != revealed:
+        return await rebind_character_card(project_id, from_label, revealed)
+    row = get_conn().execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+    if not row or not str(row["bible_json"] or "").strip():
+        return False
+    bible = Bible.model_validate(json.loads(row["bible_json"]))
+    if resolve_card_owner(bible, revealed)[0] != "none":
+        return False
+    card_names = {character.name for character in bible.characters}
+    label = next((s for s in (str(x or "").strip() for x in source_labels) if s in card_names and s != revealed), None)
+    return await rebind_character_card(project_id, label, revealed) if label else False

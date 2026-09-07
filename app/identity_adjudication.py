@@ -16,7 +16,7 @@ from app.identity_authority import (
     normalize_character_resolution,
 )
 from app.portraits.card_owner import bible_known_labels
-from app.portraits.card_rebind import rebind_character_card
+from app.portraits.card_rebind import rebind_for_revealed_true_name
 from app.schemas import Bible, EpisodeScreenplay
 from app.screenplay_ir import (
     ScreenplayGenerationIR,
@@ -457,8 +457,7 @@ async def adjudicate_screenplay_ir_identities(
         identity = identities_by_key[key]
         if decision.status == "bind":
             identity.authority_id = decision.authority_id
-            if (revealed_name := decision.canonical_name.strip()) and (from_label := decision.authority_id.removeprefix("bible:")) != decision.authority_id and from_label != revealed_name:
-                await rebind_character_card(str(episode.get("project_id") or ""), from_label, revealed_name)
+            await rebind_for_revealed_true_name(str(episode.get("project_id") or ""), authority_id=decision.authority_id, canonical_name=decision.canonical_name, source_labels=list(identity.source_names or []))
             continue
         if decision.status == "new_named":
             from app.portraits import ensure_character_card
