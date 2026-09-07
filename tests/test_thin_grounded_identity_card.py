@@ -55,3 +55,26 @@ def test_presence_override_needs_an_appearance_to_stand() -> None:
     grounded = {**blank, "appearance_canonical": "十六七岁少年，黑发束起"}
     fixed = reconsider_verdict_with_presence_evidence("孟浩", grounded, evidence)
     assert fixed["subject_kind"] == "person" and fixed["important"] is True
+
+
+def test_every_unattended_identity_call_site_carries_the_exemption() -> None:
+    """映射台的三个无人值守调用点都必须带薄卡豁免，用户提名必须不带。
+
+    2026-09-07 第 35 集：豁免只接了两个调用点，发现路径（cards_ensure）漏了，
+    「楚玉嫣」外观 18 字仍然整集失败。清单式回归：漏接一个就红。
+    """
+    import ast
+    import pathlib
+
+    unattended = {
+        "app/identity_adjudication.py",
+        "app/portraits/cards_ensure.py",
+        "app/production/prep_pack/persistent_appellation.py",
+    }
+    attended = {"app/domain/bible_ops/nominate.py"}
+    root = pathlib.Path(__file__).resolve().parents[1]
+    for path in sorted(unattended | attended):
+        source = (root / path).read_text(encoding="utf-8")
+        ast.parse(source)  # 语法完好才谈得上断言内容
+        has_flag = "accept_thin_grounded_card=True" in source or '"accept_thin_grounded_card": True' in source
+        assert has_flag is (path in unattended), path

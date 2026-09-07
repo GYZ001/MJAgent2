@@ -400,7 +400,7 @@ async def ensure_cards_for_text(
     for name, items in unknown_by_name.items():
         ensure_kwargs = {
             "generate_portrait": generate_portraits,
-            "require_identity_card": True,
+            "require_identity_card": True, "accept_thin_grounded_card": True,  # 映射台无人值守：外观被原文核验削薄也照建，别让整集失败
             "identity_source_labels": [str(item.get("source_label") or "") for item in items],
         }
         if write_guard is not None:
