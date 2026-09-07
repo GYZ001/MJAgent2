@@ -14,19 +14,31 @@ def _verdict(**over) -> dict:
     return base
 
 
-def test_identity_path_accepts_thin_grounded_card(monkeypatch) -> None:
+def _call(name, verdict, **over):
+    kwargs = dict(require_identity_card=True, card_complete=False, project_id="p1", fragment_signature="sig")
+    kwargs.update(over)
+    return unimportant_verdict_result(name, verdict, **kwargs)
+
+
+def test_mapping_stage_accepts_thin_grounded_card() -> None:
     verdict = _verdict()
-    assert unimportant_verdict_result("上官修", verdict, require_identity_card=True, card_complete=False, project_id="p1", fragment_signature="sig") is None
+    assert _call("上官修", verdict, accept_thin_grounded_card=True) is None
     assert verdict["appearance_thin"] is True
 
 
-def test_non_identity_path_still_reports_incomplete(monkeypatch) -> None:
-    result = unimportant_verdict_result("上官修", _verdict(), require_identity_card=False, card_complete=False, project_id="p1", fragment_signature="sig")
+def test_nomination_path_still_reports_the_real_reason() -> None:
+    """用户提名时人就站在界面前：越界数值必须如实报出来，不得静默建一张薄卡。"""
+    result = _call("上官修", _verdict())  # accept_thin_grounded_card 默认关
+    assert result["status"] == "error" and "20~80" in result["reason"]
+
+
+def test_non_identity_path_still_reports_incomplete() -> None:
+    result = _call("上官修", _verdict(), require_identity_card=False)
     assert result["status"] == "card_incomplete"
 
 
-def test_identity_path_with_empty_appearance_or_unimportant_still_errors(monkeypatch) -> None:
-    empty = unimportant_verdict_result("妖蟒", _verdict(appearance_canonical=""), require_identity_card=True, card_complete=False, project_id="p1", fragment_signature="sig")
+def test_empty_appearance_or_unimportant_is_never_exempted() -> None:
+    empty = _call("妖蟒", _verdict(appearance_canonical=""), accept_thin_grounded_card=True)
     assert empty["status"] == "error"
-    minor = unimportant_verdict_result("路人", _verdict(model_important=False), require_identity_card=True, card_complete=False, project_id="p1", fragment_signature="sig")
+    minor = _call("路人", _verdict(model_important=False), accept_thin_grounded_card=True)
     assert minor["status"] == "error"

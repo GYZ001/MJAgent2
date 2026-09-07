@@ -74,7 +74,7 @@ def reconsider_verdict_with_presence_evidence(name: str, verdict: dict, evidence
 
 def non_character_or_unimportant_result(
     name: str, verdict: dict, *, require_identity_card: bool, card_complete: bool,
-    project_id: str, cache_signature: str,
+    project_id: str, cache_signature: str, accept_thin_grounded_card: bool = False,
 ) -> dict | None:
     """``ensure_character_card`` 的"非人 / 不重要"终态判定：subject_kind 硬闸门
     + ``unimportant_verdict_result`` 收拢到一处（从 ``cards.py`` 内联搬出——
@@ -105,6 +105,7 @@ def non_character_or_unimportant_result(
         name, verdict, require_identity_card=require_identity_card,
         card_complete=card_complete, project_id=project_id,
         fragment_signature=cache_signature,
+        accept_thin_grounded_card=accept_thin_grounded_card,
     )
 
 
@@ -116,14 +117,17 @@ def unimportant_verdict_result(
     card_complete: bool,
     project_id: str,
     fragment_signature: str,
+    accept_thin_grounded_card: bool = False,
 ) -> dict | None:
     """``verdict["important"]`` 为假、且不在"身份已确认+卡片完整"豁免路径时的
     终态结果；两种豁免成立时返回 ``None``（调用方继续走建卡流程，实际不会走到
     这个分支，只是与原调用点的条件写法对齐，避免额外分支判断）。
     """
-    if require_identity_card and not card_complete and verdict.get("model_important") and str(verdict.get("appearance_canonical") or "").strip():
-        # 身份已确认的真名、模型也判了 important，只是外观经原文依据核验后变薄（第 14 轮 上官修 9 字/何洛华 17 字）：
-        # 薄而诚实的卡照建（合同「卡再薄也要有条目」），标记 appearance_thin 让核查脚本看得见；不得为凑字数编特征。
+    if accept_thin_grounded_card and not card_complete and verdict.get("model_important") and str(verdict.get("appearance_canonical") or "").strip():
+        # 映射台的身份路径：真名已确认、模型也判了 important，只是外观经原文依据核验后变薄
+        # （第 14 轮 上官修 9 字 / 何洛华 17 字，整集因此失败）。薄而诚实的卡照建（合同「卡再薄
+        # 也要有条目」），标记 appearance_thin 让核查脚本看得见；不得为凑字数编特征。
+        # 用户提名路径不开这个豁免：那时人就站在界面前，该把越界数值如实报出来让他改。
         verdict["appearance_thin"] = True
         return None
     if (require_identity_card and (card_complete or verdict["important"])) or (verdict["important"] and card_complete):

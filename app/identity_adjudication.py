@@ -467,8 +467,8 @@ async def adjudicate_screenplay_ir_identities(
                 str(episode.get("project_id") or ""),
                 decision.canonical_name,
                 int(episode.get("episode_no") or 1),
-                generate_portrait=False, require_identity_card=True,
-                identity_source_labels=identity.source_names,
+                generate_portrait=False, require_identity_card=True, accept_thin_grounded_card=True,
+                identity_source_labels=identity.source_names,  # 薄外观照建，不因长度让整集失败
             )
             if card.get("status") not in {"exists", "added", "ready", "created"}:
                 raise ContentGenerationError(

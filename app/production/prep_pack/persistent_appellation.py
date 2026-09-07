@@ -85,6 +85,7 @@ async def resolve_persistent_appellation(
         project_id, label, episode_no,
         # 与 discovery 同一条：出图解耦到后台，这里只建卡。
         generate_portrait=False, require_identity_card=True,
+        accept_thin_grounded_card=True,  # 外观被原文核验削薄时照建，不因长度让整集失败
     )
     status = str((result or {}).get("status") or "")
     # "exists" 是这个称谓命中了人物谱里已有角色的别名，返回的 name 是归属者的

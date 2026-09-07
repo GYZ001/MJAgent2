@@ -294,6 +294,7 @@ async def ensure_character_card(
     require_identity_card: bool = False,
     write_guard: Callable[[], None] | None = None,
     identity_source_labels: list[str] | None = None,
+    accept_thin_grounded_card: bool = False,
 ) -> dict:
     """检查新角色的原文份量，并自动完成建卡与定妆包。
 
@@ -417,7 +418,8 @@ async def ensure_character_card(
             # 模块 docstring）：本函数已顶格 function_lines 基线，新判据不能
             # 再塞进这里。
             gate_result = non_character_or_unimportant_result(
-                name, verdict, require_identity_card=require_identity_card,
+                name, verdict, accept_thin_grounded_card=accept_thin_grounded_card,
+                require_identity_card=require_identity_card,
                 card_complete=card_complete, project_id=project_id,
                 cache_signature=cache_signature,
             )
