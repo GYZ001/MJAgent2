@@ -473,7 +473,7 @@ def test_each_test_owns_its_database_and_completed_tasks_release_connections(
         text=True,
         capture_output=True,
         check=False,
-        timeout=8,
+        timeout=30,  # 2026-09-06 实测：2 核机器跑全量时内层用例全部通过（打印到 100%）却卡在退出，8 秒预算周期性误报
     )
 
     assert result.returncode == pytest.ExitCode.OK, result.stdout + result.stderr
