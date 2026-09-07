@@ -60,6 +60,12 @@ def reconsider_verdict_with_presence_evidence(name: str, verdict: dict, evidence
     subject_kind = str(verdict.get("subject_kind") or "").strip()
     if subject_kind == "person" or not has_onscreen_evidence(evidence):
         return verdict
+    if not str(verdict.get("appearance_canonical") or "").strip():
+        # 外观一个字都没有时改判不成立：拿它建出来的卡定不了妆，出图只能凭空编。
+        # 第 13/15 轮实测「妖蟒」——模型自己判的是「漫剧出镜的视觉一致性锚点」（非人），
+        # 被围杀的在场证据把它改判成人，空外观照样落库并出了定妆照。非人视觉锚点要有自己的
+        # 外观语法与证据核验（P1），在那之前宁可不建卡：留空是诚实的，编一张图不是。
+        return verdict
     citation = presence_evidence_citation(evidence)
     overridden = dict(verdict)
     overridden["subject_kind"] = "person"

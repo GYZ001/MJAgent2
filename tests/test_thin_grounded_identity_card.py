@@ -42,3 +42,16 @@ def test_empty_appearance_or_unimportant_is_never_exempted() -> None:
     assert empty["status"] == "error"
     minor = _call("路人", _verdict(model_important=False), accept_thin_grounded_card=True)
     assert minor["status"] == "error"
+
+
+def test_presence_override_needs_an_appearance_to_stand() -> None:
+    """空外观时「非人→人」的改判不成立：拿它建的卡定不了妆（第 13/15 轮 妖蟒 空外观仍出图）。"""
+    from app.portraits.card_verdict import reconsider_verdict_with_presence_evidence
+
+    evidence = {"onscreen_mentions": [{"chapter_index": 23, "quote": "围杀妖蟒，轰鸣阵阵"}]}
+    blank = {"subject_kind": "creature", "model_important": True, "appearance_canonical": "", "reason": "视觉锚点"}
+    assert reconsider_verdict_with_presence_evidence("妖蟒", blank, evidence) is blank  # 原样返回，不改判
+
+    grounded = {**blank, "appearance_canonical": "十六七岁少年，黑发束起"}
+    fixed = reconsider_verdict_with_presence_evidence("孟浩", grounded, evidence)
+    assert fixed["subject_kind"] == "person" and fixed["important"] is True
