@@ -41,7 +41,7 @@ _BUMP = (
 )
 
 
-def _direct_triggers(table: str, expression: str) -> str:
+def _direct_triggers(table: str, expression: str) -> list[str]:
     statements = []
     for event, rows in (("INSERT", ("NEW",)), ("UPDATE", ("OLD", "NEW")), ("DELETE", ("OLD",))):
         body = " ".join(_BUMP.format(key=expression.format(row=row)) for row in rows)
@@ -49,10 +49,10 @@ def _direct_triggers(table: str, expression: str) -> str:
             f"CREATE TRIGGER IF NOT EXISTS bump_authority_{table}_{event.lower()} "
             f"AFTER {event} ON {table} BEGIN {body} END;"
         )
-    return "\n".join(statements)
+    return statements
 
 
-def _evaluation_triggers() -> str:
+def _evaluation_triggers() -> list[str]:
     """评估行本身不带作用域，要顺着 artifact_id 取。"""
     statements = []
     for event, row in (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")):
@@ -64,7 +64,7 @@ def _evaluation_triggers() -> str:
             f"WHERE artifact.id={row}.artifact_id "
             "ON CONFLICT(scope_key) DO UPDATE SET version=version+1; END;"
         )
-    return "\n".join(statements)
+    return statements
 
 
 def _existing_tables(conn: Any, names: tuple[str, ...]) -> set[str]:
@@ -81,17 +81,18 @@ def ensure_authority_version_triggers(conn: Any) -> None:
     完成凭证与生产修订是按需建表的，所以不能一次性写死——那两张表的 ensure 函数建完表后
     也要调本函数，否则历史库里表已存在却没有触发器，围栏会读到过期版本号而 fail open。
     """
-    conn.executescript(SCOPE_TABLE_DDL)
+    # 逐条 execute：``executescript`` 会隐式 COMMIT 调用方的事务，本仓库已因此三次毁掉真实数据
+    # （见 CLAUDE.md「不得在调用方的连接上隐式提交」，tests/test_ensure_tables_no_implicit_commit.py 钉着）。
+    conn.execute(SCOPE_TABLE_DDL.strip().rstrip(";"))
     present = _existing_tables(conn, ("artifacts", "evaluations", *_DIRECT_SCOPE_TABLES))
-    script = [
-        _direct_triggers(table, expression)
-        for table, expression in _DIRECT_SCOPE_TABLES.items()
-        if table in present
-    ]
+    statements: list[str] = []
+    for table, expression in _DIRECT_SCOPE_TABLES.items():
+        if table in present:
+            statements.extend(_direct_triggers(table, expression))
     if "evaluations" in present and "artifacts" in present:
-        script.append(_evaluation_triggers())
-    if script:
-        conn.executescript("\n".join(script))
+        statements.extend(_evaluation_triggers())
+    for statement in statements:
+        conn.execute(statement)
 
 
 def scope_versions(conn: Any, *, episode_id: str, project_id: str) -> list[tuple[str, float]]:
@@ -116,7 +117,12 @@ def scope_versions(conn: Any, *, episode_id: str, project_id: str) -> list[tuple
     return [(key, int(found.get(key) or 0)) for key in keys]
 
 
-def scope_trigger_ddl(table: str) -> str:
-    """一张按需建表的触发器 DDL，供它自己的建表语句直接拼上——调用方不必额外多写一行，
-    也就不会出现「表建了、触发器没挂」的窗口。"""
-    return "\n" + _direct_triggers(table, _DIRECT_SCOPE_TABLES[table])
+def ensure_table_with_triggers(conn: Any, table: str, ddl: str) -> None:
+    """按需建表 + 立刻挂上它的版本号触发器，一个入口两件事——分成两处调用就会出现
+    「表建了、触发器没挂」的窗口，而那个窗口里的写入不会被围栏看见（fail open）。
+    逐条 ``execute``：``executescript`` 会隐式 COMMIT 调用方的事务（CLAUDE.md 红线，
+    tests/test_ensure_tables_no_implicit_commit.py 钉着）。"""
+    conn.execute(ddl)
+    conn.execute(SCOPE_TABLE_DDL.strip().rstrip(";"))
+    for statement in _direct_triggers(table, _DIRECT_SCOPE_TABLES[table]):
+        conn.execute(statement)

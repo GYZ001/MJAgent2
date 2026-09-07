@@ -127,8 +127,7 @@ def ensure_production_revisions_table(conn=None) -> None:
     db = conn or get_conn()
     # 只在本函数自己开启事务时提交，不在调用方的事务上隐式提交。
     caller_in_transaction = db.in_transaction
-    db.executescript(
-        """CREATE TABLE IF NOT EXISTS production_revisions (
+    authority_version.ensure_table_with_triggers(db, "production_revisions", """CREATE TABLE IF NOT EXISTS production_revisions (
             id TEXT PRIMARY KEY, episode_id TEXT NOT NULL,
             kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
             baseline_generation_count INTEGER NOT NULL DEFAULT 0,
@@ -143,8 +142,7 @@ def ensure_production_revisions_table(conn=None) -> None:
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL,
             UNIQUE(episode_id, kind, id)
-        );""" + authority_version.scope_trigger_ddl("production_revisions")  # 建表与挂触发器同一条脚本
-    )
+        )""")
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_production_revisions_episode_kind "
         "ON production_revisions(episode_id, kind, updated_at DESC)"
