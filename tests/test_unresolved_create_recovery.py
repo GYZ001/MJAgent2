@@ -18,6 +18,11 @@ def _conn(monkeypatch) -> sqlite3.Connection:
         "CREATE TABLE jobs(id TEXT PRIMARY KEY, shot_id TEXT, kind TEXT, status TEXT, "
         "reason_code TEXT, error TEXT, updated_at REAL)"
     )
+    conn.execute("CREATE TABLE shots(id TEXT PRIMARY KEY, adopted_version_id TEXT)")
+    conn.executemany("INSERT INTO shots VALUES(?,?)", [
+        ("shot_a", None), ("shot_b", None), ("shot_c", None), ("shot_d", None), ("shot_e", None),
+        ("shot_f", "ver_done"),  # 镜头已有采用版本 → 残留
+    ])
     rows = [
         # 镜 A：残留 + 同镜在跑 → 清理
         ("j_a_stuck", "shot_a", "video", "waiting_human", ucr.UNRESOLVED_REASON, None, 1.0),
@@ -32,6 +37,8 @@ def _conn(monkeypatch) -> sqlite3.Connection:
         ("j_d_failed", "shot_d", "video", "failed", None, None, 7.0),
         # 别的原因停在 waiting_human 的不归本模块管
         ("j_e_other", "shot_e", "video", "waiting_human", "SOMETHING_ELSE", None, 8.0),
+        # 镜头已被别的版本补齐：任何 reason_code 的残留都该清（2026-09-07 收官时 46 条全属此类）
+        ("j_f_settled", "shot_f", "video", "waiting_human", "VIDEO_UNCLASSIFIED_PROVIDER_FAILURE", None, 9.0),
     ]
     conn.executemany("INSERT INTO jobs VALUES(?,?,?,?,?,?,?)", rows)
     conn.commit()
@@ -45,15 +52,16 @@ def _status(conn, job_id: str) -> str:
 
 def test_only_redundant_leftovers_are_cleared(monkeypatch) -> None:
     conn = _conn(monkeypatch)
-    assert ucr.resolve_redundant_unresolved_creates() == 2
+    assert ucr.resolve_redundant_unresolved_creates() == 3
     assert _status(conn, "j_a_stuck") == "abandoned" and _status(conn, "j_b_stuck") == "abandoned"
-    assert _status(conn, "j_c_stuck") == "waiting_human"  # 镜头真没人在跑，不替部署方决定
+    assert _status(conn, "j_f_settled") == "abandoned"  # 镜头已有采用版本，任何 reason_code 都算残留
+    assert _status(conn, "j_c_stuck") == "waiting_human"  # 镜头真没人在跑、也没产出，不替部署方决定
     assert _status(conn, "j_d_stuck") == "waiting_human"  # failed 不算活动作业
-    assert _status(conn, "j_e_other") == "waiting_human"  # 别的原因不归本模块
+    assert _status(conn, "j_e_other") == "waiting_human"  # 镜头未 settled，别的原因也不动
     assert ucr.resolve_redundant_unresolved_creates() == 0  # 幂等
 
 
 def test_resubmittable_jobs_are_reported_not_touched(monkeypatch) -> None:
     conn = _conn(monkeypatch)
-    assert sorted(ucr.resubmittable_unresolved_jobs()) == ["j_c_stuck", "j_d_stuck"]
+    assert sorted(ucr.resubmittable_unresolved_jobs()) == ["j_c_stuck", "j_d_stuck", "j_e_other"]
     assert _status(conn, "j_c_stuck") == "waiting_human"

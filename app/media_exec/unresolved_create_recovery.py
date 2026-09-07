@@ -22,15 +22,25 @@ UNRESOLVED_REASON = "VIDEO_PROVIDER_CREATE_UNRESOLVED"
 
 
 def _unresolved_jobs(conn) -> list:
+    """所有停在等待人工的视频作业——不再只看 create 未决那一种 reason_code：
+    撞供应商保护上限、外部终态等等留下的残留同样等不到「人」，判据一律看镜头本身settled 没有。"""
     return conn.execute(
-        """SELECT id, shot_id FROM jobs
-            WHERE kind='video' AND status='waiting_human' AND reason_code=?
+        """SELECT id, shot_id, reason_code FROM jobs
+            WHERE kind='video' AND status='waiting_human'
             ORDER BY updated_at""",
-        (UNRESOLVED_REASON,),
     ).fetchall()
 
 
-def _shot_has_active_sibling(conn, job_id: str, shot_id: str) -> bool:
+def _shot_is_settled(conn, job_id: str, shot_id: str) -> bool:
+    """这条 waiting_human 作业是否已经无关紧要：镜头已经有采用版本（结论已定），
+    或同镜另有作业还在跑（正常推进中）。两者都说明它拦不住任何人，只是看板噪声。
+
+    「已有采用版本」这一条比「另有活动作业」更强：2026-09-07 验收轮收官时 46 条
+    waiting_human 全部属于这一类——它们的镜头早已被别的版本补齐，采用率 100%。
+    """
+    adopted = conn.execute("SELECT adopted_version_id FROM shots WHERE id=?", (shot_id,)).fetchone()
+    if adopted is not None and str(adopted["adopted_version_id"] or "").strip():
+        return True
     marks = ",".join("?" * len(ACTIVE_SIBLING_STATUSES))
     row = conn.execute(
         f"SELECT 1 FROM jobs WHERE shot_id=? AND id!=? AND kind='video' AND status IN ({marks}) LIMIT 1",
@@ -44,11 +54,11 @@ def resolve_redundant_unresolved_creates() -> int:
     conn = get_conn()
     cleared = 0
     for row in _unresolved_jobs(conn):
-        if not _shot_has_active_sibling(conn, str(row["id"]), str(row["shot_id"])):
+        if not _shot_is_settled(conn, str(row["id"]), str(row["shot_id"])):
             continue
         conn.execute(
             "UPDATE jobs SET status='abandoned', error=?, updated_at=? WHERE id=? AND status='waiting_human'",
-            ("同镜头另有活动视频任务，本条 create 未确认记录已作废", now(), str(row["id"])),
+            ("镜头已有采用版本或另有活动任务，本条待人工记录已作废", now(), str(row["id"])),
         )
         conn.commit()
         cleared += 1
@@ -63,5 +73,5 @@ def resubmittable_unresolved_jobs() -> list[str]:
     return [
         str(row["id"])
         for row in _unresolved_jobs(conn)
-        if not _shot_has_active_sibling(conn, str(row["id"]), str(row["shot_id"]))
+        if not _shot_is_settled(conn, str(row["id"]), str(row["shot_id"]))
     ]

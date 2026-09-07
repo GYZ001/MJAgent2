@@ -72,27 +72,34 @@ def test_auto_side_is_not_rejected_by_the_cross_field_check() -> None:
 
 def _reset_latency(monkeypatch) -> None:
     monkeypatch.setattr(concurrency, "_delivery_latencies", type(concurrency._delivery_latencies)(maxlen=concurrency.LATENCY_SAMPLE_WINDOW))
-    monkeypatch.setattr(concurrency, "_best_delivery_median", None)
 
 
-def test_latency_inflation_is_the_congestion_signal(monkeypatch) -> None:
-    """供应商对超发不报错、只变慢：只认错误的 AIMD 会一路顶到安全阀（2026-09-07 实测 p50 7.8→24.8 分钟）。"""
+def test_latency_is_judged_against_the_measured_healthy_value(monkeypatch) -> None:
+    """参照实测常量而不是跟自己学：学来的基线两次都被污染（成型前冲顶、重启后遗留任务）。"""
     _reset_latency(monkeypatch)
     half = concurrency.LATENCY_SAMPLE_WINDOW // 2
     for _ in range(half - 1):
-        assert concurrency.delivery_latency_verdict(480.0) == "unknown"  # 样本不足不表态
-    assert concurrency.delivery_latency_verdict(480.0) == "healthy"  # 首次成样，记为最好基线
+        assert concurrency.delivery_latency_verdict(concurrency.HEALTHY_DELIVERY_S) == "unknown"
+    assert concurrency.delivery_latency_verdict(concurrency.HEALTHY_DELIVERY_S) == "healthy"
     for _ in range(concurrency.LATENCY_SAMPLE_WINDOW):
-        verdict = concurrency.delivery_latency_verdict(1500.0)  # 中位数抬到 3 倍
+        verdict = concurrency.delivery_latency_verdict(concurrency.HEALTHY_DELIVERY_S * 3)
     assert verdict == "congested"
 
 
-def test_latency_back_at_baseline_is_healthy_again(monkeypatch) -> None:
+def test_a_slow_start_does_not_poison_the_reference(monkeypatch) -> None:
+    """先来一批慢样本（重启后遗留的在途任务），恢复正常后必须重新判为健康。"""
     _reset_latency(monkeypatch)
     for _ in range(concurrency.LATENCY_SAMPLE_WINDOW):
-        concurrency.delivery_latency_verdict(480.0)
+        concurrency.delivery_latency_verdict(concurrency.HEALTHY_DELIVERY_S * 3)  # 全是慢的
     for _ in range(concurrency.LATENCY_SAMPLE_WINDOW):
-        verdict = concurrency.delivery_latency_verdict(600.0)  # 1.25 倍，未越阈
+        verdict = concurrency.delivery_latency_verdict(concurrency.HEALTHY_DELIVERY_S)
+    assert verdict == "healthy"  # 跟自己学的话这里会被慢基线带偏
+
+
+def test_mildly_slower_than_healthy_is_still_healthy(monkeypatch) -> None:
+    _reset_latency(monkeypatch)
+    for _ in range(concurrency.LATENCY_SAMPLE_WINDOW):
+        verdict = concurrency.delivery_latency_verdict(concurrency.HEALTHY_DELIVERY_S * 1.5)
     assert verdict == "healthy"
 
 

@@ -49,7 +49,9 @@ SETTING_KEYS = {
 # app/observability/machine_watermark 在准入处把关。
 AUTO_CEILINGS: dict[str, int] = {
     S.RESOURCE_REFERENCE: 64, S.RESOURCE_IMAGE: 64, S.RESOURCE_VLM: 64, S.RESOURCE_VIDEO_SUBMIT: 64,
-    S.RESOURCE_VIDEO_INFLIGHT: 128, S.RESOURCE_VIDEO_POLL: 128, S.RESOURCE_DOWNLOAD: 16, S.RESOURCE_FINALIZE: 16,
+    # 视频在途安全阀 32：实测在途 15 时供应商单任务 p50 7.8 分钟，128 时涨到 20-38 分钟且吞吐只涨 1.7 倍
+    # ——远在 128 之前就劣化了。32 是保守阀门（已知健康档位的两倍余量），真实水位仍由上面的自适应发现。
+    S.RESOURCE_VIDEO_INFLIGHT: 32, S.RESOURCE_VIDEO_POLL: 128, S.RESOURCE_DOWNLOAD: 16, S.RESOURCE_FINALIZE: 16,
     RESOURCE_TEXT_PROVIDER: 32,
 }
 AUTO_HEALTHY_INTERVAL_S = 60.0   # 自动模式：每分钟健康就升一档，几分钟内探到供应商真实容量
@@ -300,22 +302,23 @@ def report_video_submit_congestion(*, reason: str) -> None:
 # 就当拥塞降档，让通道停在供应商真实容量附近，而不是名义上限。
 LATENCY_SAMPLE_WINDOW = 20
 LATENCY_CONGESTION_FACTOR = 2.0
+# 参照值取实测的「不拥挤时单镜要多久」，不跟自己学：2026-09-07 B 库实测，在途 15 时
+# 提交→完成 p50 7.8 分钟（395 个样本），拉到 128 后 p50 涨到 20-38 分钟。
+# 跟自己学的基线（历史最好中位数）两次都被污染——第一次是通道在基线成型前就冲到安全阀，
+# 样本本身是饱和耗时；第二次是重启后最先完成的那批任务带着重启前的排队时间。参照一个
+# 实测常量就不会被样本到达顺序左右。
+HEALTHY_DELIVERY_S = 480.0
 _delivery_latencies: collections.deque[float] = collections.deque(maxlen=LATENCY_SAMPLE_WINDOW)
-_best_delivery_median: float | None = None
 
 
 def delivery_latency_verdict(duration_s: float) -> str:
     """记一次交付耗时并给出 ``"healthy"`` / ``"congested"`` / ``"unknown"``（样本不足）。"""
-    global _best_delivery_median
     if duration_s > 0:
         _delivery_latencies.append(float(duration_s))
     if len(_delivery_latencies) < LATENCY_SAMPLE_WINDOW // 2:
         return "unknown"
     median = statistics.median(_delivery_latencies)
-    if _best_delivery_median is None or median < _best_delivery_median:
-        _best_delivery_median = median
-        return "healthy"
-    return "congested" if median > _best_delivery_median * LATENCY_CONGESTION_FACTOR else "healthy"
+    return "congested" if median > HEALTHY_DELIVERY_S * LATENCY_CONGESTION_FACTOR else "healthy"
 
 
 def report_video_delivered(duration_s: float = 0.0) -> None:
