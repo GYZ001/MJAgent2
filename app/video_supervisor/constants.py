@@ -39,6 +39,13 @@ CHECKPOINT_ARTIFACT_TYPE = "video_supervisor_checkpoint"
 REPORT_ARTIFACT_TYPE = "video_coverage_report"
 CONTROL_PLANE_MAX_RECOVERIES = 3
 SUPERVISOR_HEARTBEAT_STALE_S = 60.0
+# 墙钟到期后的续期判据（见 deadline.py）：整条流水线这么久没有任何视频作业到终态才算真卡住。
+# 第 14 轮实测 500 多镜排队时全局每分钟都有作业收尾，15 分钟静默是明确的「卡住」信号。
+DEADLINE_STALL_GRACE_S = 900.0
+# 每次续期的长度：略长于实测单镜端到端 p50（89 分钟）的一半，够排完一波再复查。
+DEADLINE_EXTENSION_S = 1800.0
+# 续期次数上限：卡死的集必须终止。8 次 = 最多多给 4 小时，覆盖实测最长单镜 248 分钟。
+MAX_DEADLINE_EXTENSIONS = 8
 ASSET_PREP_HEARTBEAT_INTERVAL_S = 20.0
 DISPATCH_HEARTBEAT_INTERVAL_S = 20.0
 LIFECYCLE_HEARTBEAT_INTERVAL_S = 20.0

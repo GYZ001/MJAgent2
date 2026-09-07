@@ -148,6 +148,9 @@ class VideoSupervisorCheckpoint(BaseModel):
     tick_no: int = 0
     started_at: float = 0.0
     deadline_at: float | None = None
+    # 墙钟到期但流水线仍在排队时的有界续期（见 deadline.py）；两者取较晚者才是生效截止时刻。
+    deadline_extended_until: float | None = None
+    deadline_extensions: int = 0
     last_heartbeat_at: float | None = None
     dispatch_fenced_at: float | None = None
     closeout_started_at: float | None = None

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-
 from app.completion_grant import (
     GrantValidationError,
     VideoCompletionGrant,
@@ -28,7 +27,8 @@ from .budget import (
     _rebuild_budgeted_coverage_ledger_async,
     _rebuild_coverage_ledger_async,
 )
-from .checkpoint import _save_checkpoint_async, load_latest_checkpoint
+from .checkpoint import _save_checkpoint_async, load_latest_checkpoint  # noqa: E501 -- 行数基线顶格
+from .deadline import resolve_deadline
 from .closeout import _deadline_closeout_async, _finalize_covered_async
 from .constants import (
     MAX_REPAIR_EPOCHS,
@@ -122,7 +122,7 @@ async def run_video_completion_supervisor(
         else (cp.budget.get("wall_clock_cap_s") or 4 * 3600)
     )
     cp.deadline_at = cp.deadline_at or ((cp.started_at or now()) + initial_wall_cap)
-    if now() >= cp.deadline_at:
+    if resolve_deadline(cp) == "closeout":
         return await _deadline_closeout_async(
             cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED",
         )
@@ -143,7 +143,7 @@ async def run_video_completion_supervisor(
             cp.deadline_at = float(grant.deadline_at)
             cp.budget["wall_clock_cap_s"] = float(grant.wall_clock_cap_s)
         except GrantValidationError as exc:
-            if cp.deadline_at and now() >= cp.deadline_at:
+            if resolve_deadline(cp) == "closeout":
                 return await _deadline_closeout_async(
                     cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED",
                 )
@@ -195,7 +195,7 @@ async def run_video_completion_supervisor(
         cp.deadline_at = (cp.started_at or now()) + wall_cap
 
     while True:
-        if cp.deadline_at and now() >= cp.deadline_at:
+        if resolve_deadline(cp) == "closeout":
             return await _deadline_closeout_async(
                 cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED",
             )
@@ -269,7 +269,7 @@ async def run_video_completion_supervisor(
         if ledger.covered_within_quota():
             return await _finalize_covered_async(cp, ledger, run_id=run_id)
 
-        if cp.deadline_at and now() >= cp.deadline_at:
+        if resolve_deadline(cp) == "closeout":
             return await _deadline_closeout_async(
                 cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED",
             )
