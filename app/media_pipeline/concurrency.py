@@ -324,9 +324,17 @@ def report_video_delivered(duration_s: float = 0.0) -> None:
     交付本身是升档证据（此前 ``video_inflight`` 只被 ``channel_limit`` 读取、没有任何调用点
     上报成败，慢启动永远停在热启动值 15，550 个镜头排了三个多小时）；但交付**变慢**同样是
     证据——见上方 ``LATENCY_CONGESTION_FACTOR``，饱和时降档而不是继续往上顶。
+
+    样本不足以判断快慢时**按兵不动**，既不升也不降：2026-09-07 实测，把「未知」当成健康会让
+    通道在基线成型之前就翻倍冲到安全阀 128，等攒够样本时这些样本本身已是饱和耗时（中位 19.9
+    分钟，而低并发档位只要 7.8），基线被记成饱和值，此后再慢也超不过它的 2 倍——闭环就此失灵。
+    先在热启动档位攒出一个真实的「快」基线，再开始往上探。
     """
     verdict = delivery_latency_verdict(duration_s)
+    if verdict == "unknown":
+        return
     if verdict == "congested":
         report_congestion(S.RESOURCE_VIDEO_INFLIGHT, reason="delivery_latency")
+        _delivery_latencies.clear()  # 旧样本描述的是降档前的水位，留着会连环降档一路砍到 1
         return
     report_healthy(S.RESOURCE_VIDEO_INFLIGHT)

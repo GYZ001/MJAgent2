@@ -15,17 +15,21 @@ def _fresh(monkeypatch, *, setting: str = "0") -> None:
 
 
 def test_delivery_reports_let_the_inflight_channel_grow(monkeypatch) -> None:
+    """攒够样本、确认交付没变慢之后，慢启动才开始翻倍。"""
     _fresh(monkeypatch)
+    _reset_latency(monkeypatch)
     state = concurrency.ensure_channel(S.RESOURCE_VIDEO_INFLIGHT)
     assert state.auto and state.current == concurrency.CHANNEL_DEFAULTS[S.RESOURCE_VIDEO_INFLIGHT]
     start = state.current
     now = [1_000.0]
     monkeypatch.setattr(concurrency.time, "time", lambda: now[0])
-    concurrency.report_video_delivered()  # 第一次只记起点
+    for _ in range(concurrency.LATENCY_SAMPLE_WINDOW // 2):
+        concurrency.report_video_delivered(480.0)  # 攒基线期间按兵不动
     assert concurrency.channel_limit(S.RESOURCE_VIDEO_INFLIGHT) == start
+    concurrency.report_video_delivered(480.0)  # 有基线后第一次只记健康起点
     now[0] += concurrency.AUTO_HEALTHY_INTERVAL_S + 1
-    concurrency.report_video_delivered()
-    assert concurrency.channel_limit(S.RESOURCE_VIDEO_INFLIGHT) == start * 2  # 慢启动翻倍
+    concurrency.report_video_delivered(480.0)
+    assert concurrency.channel_limit(S.RESOURCE_VIDEO_INFLIGHT) == start * 2
 
 
 def test_submit_congestion_downgrades_both_channels(monkeypatch) -> None:
@@ -100,3 +104,27 @@ def test_delivery_report_downgrades_when_saturated(monkeypatch) -> None:
     concurrency.report_video_delivered(9999.0)
     concurrency.report_video_delivered(9999.0)  # 两次拥塞才降档
     assert concurrency.channel_limit(S.RESOURCE_VIDEO_INFLIGHT) < before
+
+
+def test_channel_holds_still_until_a_real_baseline_exists(monkeypatch) -> None:
+    """样本不足时既不升也不降：把「未知」当健康会让通道在基线成型前冲到安全阀，
+    基线随之被记成饱和值，闭环永远收不紧（2026-09-07 实测顶到 128、单任务 7.8→19.9 分钟）。"""
+    _fresh(monkeypatch)
+    _reset_latency(monkeypatch)
+    start = concurrency.channel_limit(S.RESOURCE_VIDEO_INFLIGHT)
+    now = [1_000.0]
+    monkeypatch.setattr(concurrency.time, "time", lambda: now[0])
+    for _ in range(concurrency.LATENCY_SAMPLE_WINDOW // 2 - 1):
+        now[0] += concurrency.AUTO_HEALTHY_INTERVAL_S + 1  # 就算时间足够升档也不许升
+        concurrency.report_video_delivered(480.0)
+    assert concurrency.channel_limit(S.RESOURCE_VIDEO_INFLIGHT) == start
+
+
+def test_congestion_clears_the_window_so_it_does_not_cascade(monkeypatch) -> None:
+    """降档后旧样本描述的是降档前的水位；不清空会连环降档一路砍到 1。"""
+    _fresh(monkeypatch)
+    _reset_latency(monkeypatch)
+    monkeypatch.setattr(concurrency, "delivery_latency_verdict", lambda _d: "congested")
+    concurrency._delivery_latencies.extend([1500.0] * concurrency.LATENCY_SAMPLE_WINDOW)
+    concurrency.report_video_delivered(1500.0)
+    assert not concurrency._delivery_latencies
