@@ -826,11 +826,11 @@ async def chat_structured(
                     parse_error = ValueError("JSON 根节点不是对象")
 
         if payload is not None:
-            candidate_payload = (
-                normalize_payload(payload)
-                if normalize_payload is not None
-                else payload
-            )
+            # 键形态归一必须先于业务修复：模型只写了 rawLabel 时，修复钩子会以为 raw_label 缺失
+            # 而借一个值补上，同一条于是同时带两个键且值不同，归一器只处理「值相同」的重复，
+            # 驼峰键原样留下被 extra="forbid" 拒掉整条响应（2026-09-06 第 15 轮第 10 集）。
+            shaped = snake_case_keys_for_model(model_type, payload)
+            candidate_payload = normalize_payload(shaped) if normalize_payload is not None else shaped
             normalized_locally = candidate_payload != payload
             repair_payload = candidate_payload
             local_recovery = bool(
