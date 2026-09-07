@@ -2673,6 +2673,12 @@ def _backfill_quota_period_anchor(conn: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_authority_version_triggers(conn) -> None:
+    from app.evidence.authority_version import ensure_authority_version_triggers  # 循环导入：evidence 依赖 db
+
+    ensure_authority_version_triggers(conn)
+
+
 def init_db(*, reconcile_interrupted: bool = False) -> None:
     """初始化/迁移数据库。
 
@@ -2683,6 +2689,7 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
     """
     conn = get_conn()
     conn.executescript(SCHEMA)
+    _ensure_authority_version_triggers(conn)  # 写路径维护权威版本号，见 app.evidence.authority_version
     for stmt in MIGRATIONS:
         try:
             conn.execute(stmt)

@@ -558,37 +558,13 @@ def screenplay_ready_identity(data: dict) -> str:
             "WHERE project_id=? AND idx>? ORDER BY idx LIMIT 1",
             (project_id, max(source_indexes)),
         )
-    artifacts = _rows_or_empty(
-        conn,
-        "SELECT id, type, status, version, content_hash, contract_version, "
-        "       parent_artifact_ids_json, file_path "
-        "  FROM artifacts "
-        " WHERE (scope_type='episode' AND scope_id=?) "
-        "    OR (scope_type='project' AND scope_id=?) "
-        " ORDER BY id",
-        (episode_id, project_id),
-    )
-    # 完成凭证与 production revision 表是按需建表的；表不存在等价于「一条也没有」，
-    # 建表并写入后行会自然出现在指纹里。
-    certificates = _rows_or_empty(
-        conn,
-        "SELECT * FROM completion_certificates WHERE scope_id=? ORDER BY id",
-        (episode_id,),
-    )
-    revisions = _rows_or_empty(
-        conn,
-        "SELECT * FROM production_revisions WHERE episode_id=? ORDER BY id",
-        (episode_id,),
-    )
-    evaluations = _rows_or_empty(
-        conn,
-        "SELECT evaluation.* FROM evaluations AS evaluation "
-        "  JOIN artifacts AS artifact ON artifact.id=evaluation.artifact_id "
-        " WHERE (artifact.scope_type='episode' AND artifact.scope_id=?) "
-        "    OR (artifact.scope_type='project' AND artifact.scope_id=?) "
-        " ORDER BY evaluation.id",
-        (episode_id, project_id),
-    )
+    # 上游「变没变」由写路径维护的作用域版本号回答，不再每次重扫工件/评估/凭证/修订：
+    # 原实现是 O(项目规模) × 作业并发度，2026-09-07 实测占后端 47.8% CPU（见
+    # app.evidence.authority_version 模块说明）。判据一字未改——任何一类输入写入都会由
+    # 触发器把对应作用域的版本号加一，指纹随之改变。
+    from app.evidence.authority_version import scope_versions
+
+    versions = scope_versions(conn, episode_id=episode_id, project_id=project_id)
     return _digest(
         "screenplay-ready.v1",
         NARRATIVE_CONTRACT_VERSION,
@@ -596,10 +572,7 @@ def screenplay_ready_identity(data: dict) -> str:
         data,
         [dict(row) for row in ([project_row] if project_row else [])],
         [dict(row) for row in chapters],
-        [dict(row) for row in artifacts],
-        [dict(row) for row in certificates],
-        [dict(row) for row in revisions],
-        [dict(row) for row in evaluations],
+        versions,
     )
 
 

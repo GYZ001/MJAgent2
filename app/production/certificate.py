@@ -7,7 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from app.db import get_conn, new_id, now
-from app.evidence import repository as evidence_repository
+from app.evidence import authority_version, repository as evidence_repository
 from app.production.metrics import record_certificate_issued, record_publish_without_certificate
 
 
@@ -42,7 +42,7 @@ def ensure_completion_certificates_table(conn=None) -> None:
     # 只在本函数自己开启事务时提交：合片发布在 BEGIN IMMEDIATE 锁内复核分镜权威
     # 会走到这里，在调用方事务上隐式提交等于把写锁放掉（曾让发布 CAS 被抢）。
     caller_in_transaction = db.in_transaction
-    db.execute(
+    db.executescript(
         """CREATE TABLE IF NOT EXISTS completion_certificates (
             id TEXT PRIMARY KEY, kind TEXT NOT NULL,
             scope_id TEXT NOT NULL, artifact_id TEXT NOT NULL,
@@ -55,7 +55,7 @@ def ensure_completion_certificates_table(conn=None) -> None:
             issued_at REAL NOT NULL,
             consumed_at REAL,
             payload_json TEXT NOT NULL DEFAULT '{}'
-        )"""
+        );""" + authority_version.scope_trigger_ddl("completion_certificates")  # 建表与挂触发器同一条脚本
     )
     if db.in_transaction and not caller_in_transaction:
         db.commit()
