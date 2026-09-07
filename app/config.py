@@ -324,8 +324,8 @@ VIDEO_POLL_INTERVAL = 10.0
 VIDEO_POLL_RESUME_DELAY = float(os.environ.get("VIDEO_POLL_RESUME_DELAY", "10"))
 # 供应商任务允许的总墙钟时间。用于防止上游永远停在 running；正常长任务跨越
 # 多次 waiting_provider 轮询继续等待。
-# 单任务等待上限 45 分钟 = 实测最长的两倍多（2026-09-07 B 库 395 个已完成任务：p50 7.8 / p99 20.0 / 最长 21.1 分钟），且远小于整集墙钟 4 小时——旧值 6 小时比整集预算还长，任务没被放弃集子先收口（第 14 轮 7 集）。
-VIDEO_PROVIDER_MAX_WAIT = float(os.environ.get("VIDEO_PROVIDER_MAX_WAIT", str(45 * 60)))
+# 单任务等待上限 90 分钟：供应商耗时随在途水位变化（2026-09-07 实测在途 15 时 p50 7.8/p99 20 分钟，拉到 128 后 p50 24.8/p99 45.9），45 分钟按低并发分布定的，饱和时正好卡在 p99 上误杀 53 个任务；90 分钟给自适应降档留出收敛余地，且仍远小于整集墙钟 4 小时。
+VIDEO_PROVIDER_MAX_WAIT = float(os.environ.get("VIDEO_PROVIDER_MAX_WAIT", str(90 * 60)))
 
 # 上游瞬时故障（超时/网络/限流/5xx）的 job 级自动重试。_post_json 的单次调用内重试只覆盖约 90s，
 # 扛不住分钟级的上游抖动；没有 job 级兜底时，一次可恢复的瞬时故障会把整镜任务永久判失败、逼人工重试。

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
+import statistics
 import time
 from dataclasses import dataclass, field
 
@@ -291,9 +293,40 @@ def report_video_submit_congestion(*, reason: str) -> None:
         report_congestion(resource, reason=reason)
 
 
-def report_video_delivered() -> None:
-    """供应商在当前在途水位下真的交付了一个视频——这是唯一能让在途通道升档的证据。
-    此前 ``video_inflight`` 只被 ``channel_limit`` 读取、从没有任何调用点上报成败，
-    慢启动永远停在热启动值 15：2026-09-07 实测供应商单任务 p50 7.8 分钟、p99 20 分钟，
-    550 个镜头却排了三个多小时，正是被这个升不上去的在途水位压住的。"""
+# 交付延迟是这条通道唯一的拥塞信号：供应商对超发不回 429、不报错，只是**变慢**
+# （2026-09-07 实测：在途 15 时单任务 p50 7.8 分钟，拉到 128 后 p50 24.8、p99 45.9，
+# 吞吐只涨 1.7 倍而延迟涨 3 倍——过饱和都排在供应商内部）。只认错误的 AIMD 因此会一路
+# 顶到安全阀。这里用「当前中位数 / 历史最好中位数」判饱和：超过 LATENCY_CONGESTION_FACTOR
+# 就当拥塞降档，让通道停在供应商真实容量附近，而不是名义上限。
+LATENCY_SAMPLE_WINDOW = 20
+LATENCY_CONGESTION_FACTOR = 2.0
+_delivery_latencies: collections.deque[float] = collections.deque(maxlen=LATENCY_SAMPLE_WINDOW)
+_best_delivery_median: float | None = None
+
+
+def delivery_latency_verdict(duration_s: float) -> str:
+    """记一次交付耗时并给出 ``"healthy"`` / ``"congested"`` / ``"unknown"``（样本不足）。"""
+    global _best_delivery_median
+    if duration_s > 0:
+        _delivery_latencies.append(float(duration_s))
+    if len(_delivery_latencies) < LATENCY_SAMPLE_WINDOW // 2:
+        return "unknown"
+    median = statistics.median(_delivery_latencies)
+    if _best_delivery_median is None or median < _best_delivery_median:
+        _best_delivery_median = median
+        return "healthy"
+    return "congested" if median > _best_delivery_median * LATENCY_CONGESTION_FACTOR else "healthy"
+
+
+def report_video_delivered(duration_s: float = 0.0) -> None:
+    """供应商在当前在途水位下交付了一个视频。
+
+    交付本身是升档证据（此前 ``video_inflight`` 只被 ``channel_limit`` 读取、没有任何调用点
+    上报成败，慢启动永远停在热启动值 15，550 个镜头排了三个多小时）；但交付**变慢**同样是
+    证据——见上方 ``LATENCY_CONGESTION_FACTOR``，饱和时降档而不是继续往上顶。
+    """
+    verdict = delivery_latency_verdict(duration_s)
+    if verdict == "congested":
+        report_congestion(S.RESOURCE_VIDEO_INFLIGHT, reason="delivery_latency")
+        return
     report_healthy(S.RESOURCE_VIDEO_INFLIGHT)

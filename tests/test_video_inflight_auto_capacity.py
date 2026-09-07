@@ -64,3 +64,39 @@ def test_auto_side_is_not_rejected_by_the_cross_field_check() -> None:
     current = {"episode_video_inflight_limit": "0", "project_video_inflight_limit": "0"}
     assert monitoring.validate_settings_patch({"episode_video_inflight_limit": "20"}, current)
     assert monitoring.validate_settings_patch({"project_video_inflight_limit": "0"}, current)
+
+
+def _reset_latency(monkeypatch) -> None:
+    monkeypatch.setattr(concurrency, "_delivery_latencies", type(concurrency._delivery_latencies)(maxlen=concurrency.LATENCY_SAMPLE_WINDOW))
+    monkeypatch.setattr(concurrency, "_best_delivery_median", None)
+
+
+def test_latency_inflation_is_the_congestion_signal(monkeypatch) -> None:
+    """供应商对超发不报错、只变慢：只认错误的 AIMD 会一路顶到安全阀（2026-09-07 实测 p50 7.8→24.8 分钟）。"""
+    _reset_latency(monkeypatch)
+    half = concurrency.LATENCY_SAMPLE_WINDOW // 2
+    for _ in range(half - 1):
+        assert concurrency.delivery_latency_verdict(480.0) == "unknown"  # 样本不足不表态
+    assert concurrency.delivery_latency_verdict(480.0) == "healthy"  # 首次成样，记为最好基线
+    for _ in range(concurrency.LATENCY_SAMPLE_WINDOW):
+        verdict = concurrency.delivery_latency_verdict(1500.0)  # 中位数抬到 3 倍
+    assert verdict == "congested"
+
+
+def test_latency_back_at_baseline_is_healthy_again(monkeypatch) -> None:
+    _reset_latency(monkeypatch)
+    for _ in range(concurrency.LATENCY_SAMPLE_WINDOW):
+        concurrency.delivery_latency_verdict(480.0)
+    for _ in range(concurrency.LATENCY_SAMPLE_WINDOW):
+        verdict = concurrency.delivery_latency_verdict(600.0)  # 1.25 倍，未越阈
+    assert verdict == "healthy"
+
+
+def test_delivery_report_downgrades_when_saturated(monkeypatch) -> None:
+    _fresh(monkeypatch)
+    _reset_latency(monkeypatch)
+    monkeypatch.setattr(concurrency, "delivery_latency_verdict", lambda _d: "congested")
+    before = concurrency.channel_limit(S.RESOURCE_VIDEO_INFLIGHT)
+    concurrency.report_video_delivered(9999.0)
+    concurrency.report_video_delivered(9999.0)  # 两次拥塞才降档
+    assert concurrency.channel_limit(S.RESOURCE_VIDEO_INFLIGHT) < before

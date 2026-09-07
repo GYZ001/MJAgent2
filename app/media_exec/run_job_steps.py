@@ -60,9 +60,11 @@ async def download_provider_result(conn, meta: dict, job, ep, shot, version, res
     """下载供应商产出视频到本地路径；叙事计划已失效则围栏拒绝。返回本地路径。"""
     from app.media_pipeline.concurrency import report_video_delivered
 
-    report_video_delivered()  # 供应商在当前在途水位下真的交付了，见该函数 docstring
     from app import hiagent
     from .enqueue import _row_value, _video_path
+
+    submitted_at = float(_row_value(job, "provider_submitted_at") or 0.0)
+    report_video_delivered(now() - submitted_at if submitted_at else 0.0)  # 交付 + 耗时都是自适应证据
 
     meta["provider_video_source_url"] = result["video_url"]
     # Current provider contract advertises a seven-day URL. Keep a
