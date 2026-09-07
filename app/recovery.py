@@ -29,6 +29,17 @@ _runtime_lock_handle = None
 _STALE_RUN_THRESHOLD_S = 4 * TIMEOUT_CHAT_STORYBOARD_PACK_READ
 
 
+def _recover_half_finished_video_jobs() -> dict[str, int]:
+    """重启打断留下的两类半成品：已落盘未校验的候选、以及「供应商可能已接单但本地没有
+    task id」的冗余残留。两者都只在本地状态上收尾，不向供应商发任何新请求。"""
+    from app.media_exec.candidate_recovery import recover_unvalidated_video_candidates
+    from app.media_exec.unresolved_create_recovery import resolve_redundant_unresolved_creates
+
+    healed = recover_unvalidated_video_candidates()
+    cleared = resolve_redundant_unresolved_creates()
+    return {"unvalidated_candidates": healed, "unresolved_create_cleanup": cleared} if (healed or cleared) else {}
+
+
 def _try_lock(handle) -> None:
     handle.seek(0)
     if fcntl is not None:
@@ -151,8 +162,7 @@ async def recover_all() -> dict[str, Any]:
     from app import db
     run_step("startup_business_status_repair", lambda: _repair_startup_business_status(db.get_conn()))
     run_step("media", worker.recover_media_jobs)
-    from app.media_exec.candidate_recovery import recover_unvalidated_video_candidates
-    run_step("video_candidates_unvalidated", recover_unvalidated_video_candidates, record_empty=False)
+    run_step("video_half_finished_jobs", _recover_half_finished_video_jobs, record_empty=False)
     from app.artifacts import flush_pending_media_cleanup
     run_step("media_cleanup_outbox", flush_pending_media_cleanup)
     run_step("abandoned_partial_files_removed", lambda: cleanup_abandoned_parts(PROJECTS_DIR))
