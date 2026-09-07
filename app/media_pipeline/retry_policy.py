@@ -12,12 +12,25 @@ def first_pass_retake_slot_fraction() -> float:
     return 0.25
 
 
+def _video_inflight_cap(key: str) -> int:
+    """0/空 = 自动：不再单独设一个手填的数字，由全局视频在途通道（机器水位 + 供应商拥塞
+    自适应）兜底。这两个上限原本是写死的 15/24——2026-09-07 实测正是它们把 550 个镜头
+    压成三个多小时（供应商单任务 p50 7.8 分钟、p99 20 分钟，我们却只放 15-24 个在途）。"""
+    from app.media_pipeline import stages as media_stages
+    from app.media_pipeline.concurrency import channel_limit
+
+    raw = str(get_setting(key) or "").strip()
+    if raw and raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return channel_limit(media_stages.RESOURCE_VIDEO_INFLIGHT)
+
+
 def episode_inflight_cap() -> int:
-    return int(get_setting("episode_video_inflight_limit") or 15)
+    return _video_inflight_cap("episode_video_inflight_limit")
 
 
 def project_inflight_cap() -> int:
-    return int(get_setting("project_video_inflight_limit") or 15)
+    return _video_inflight_cap("project_video_inflight_limit")
 
 
 def prepared_reference_backlog() -> int:

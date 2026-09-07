@@ -432,7 +432,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                         raise LeaseLost(f"video submit lost lease: {job_id} / {owner}")
                     conn.commit()
                     from app.media_pipeline.concurrency import (
-                        report_congestion, report_healthy, semaphore_for,
+                        report_healthy, report_video_submit_congestion, semaphore_for,
                     )
                     async with semaphore_for(media_stages.RESOURCE_VIDEO_SUBMIT):
                         _assert_job_lease(job_id, owner)
@@ -523,7 +523,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                             report_healthy(media_stages.RESOURCE_VIDEO_SUBMIT)
                         except ProviderError as submit_exc:
                             if submit_exc.retryable:
-                                report_congestion(media_stages.RESOURCE_VIDEO_SUBMIT, reason="submit")
+                                report_video_submit_congestion(reason="submit")
                             raise
                     _assert_job_lease(job_id, owner)
                 except ProviderError as exc:

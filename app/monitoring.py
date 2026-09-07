@@ -140,8 +140,8 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "vlm_request_concurrency": _number("VLM 请求并发", "0", 0, 64, unit="请求", description="0=自动（供应商信号自适应，安全阀 64）"),
     "download_concurrency": _number("下载并发", "0", 0, 16, unit="任务", description="0=自动（安全阀 16，另受机器水位闸）"),
     "finalize_concurrency": _number("落盘/校验并发", "0", 0, 16, unit="任务", description="0=自动（安全阀 16，另受机器水位闸）"),
-    "episode_video_inflight_limit": _number("单集上游在途上限", "15", 1, 128, unit="任务"),
-    "project_video_inflight_limit": _number("单项目上游在途上限", "15", 1, 256, unit="任务"),
+    "episode_video_inflight_limit": _number("单集上游在途上限", "0", 0, 128, unit="任务", description="0=自动（由全局视频在途通道兜底，不再手填数字）"),
+    "project_video_inflight_limit": _number("单项目上游在途上限", "0", 0, 256, unit="任务", description="0=自动（同上）"),
     "reference_prepared_backlog": _number("参考图领先视频槽位数", "8", 0, 128, unit="镜"),
     "video_ready_low_watermark": _number("视频就绪低水位", "2", 0, 128, unit="镜"),
     "video_ready_high_watermark": _number("视频就绪高水位", "6", 0, 128, unit="镜"),
@@ -313,9 +313,9 @@ def validate_settings_patch(patch: dict[str, Any], current: dict[str, str]) -> d
             "field": "video_ready_high_watermark",
             "message": "视频就绪高水位不能低于低水位",
         })
-    episode_limit = int(merged.get("episode_video_inflight_limit") or 1)
-    project_limit = int(merged.get("project_video_inflight_limit") or 1)
-    if episode_limit > project_limit:
+    episode_limit = int(merged.get("episode_video_inflight_limit") or 0)
+    project_limit = int(merged.get("project_video_inflight_limit") or 0)
+    if episode_limit and project_limit and episode_limit > project_limit:  # 0=自动，两侧都手填才比得出大小
         raise HTTPException(422, detail={
             "field": "project_video_inflight_limit",
             "message": "单项目在途上限不能低于单集上限",

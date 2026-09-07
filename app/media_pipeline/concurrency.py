@@ -282,3 +282,18 @@ def migrate_legacy_settings() -> None:
             set_setting(key, "0")  # 新安装默认自动（0）
 
 
+
+
+def report_video_submit_congestion(*, reason: str) -> None:
+    """提交侧遭遇拥塞时同时给提交通道与在途通道降档：两者面对同一个供应商，
+    在途水位过高正是提交被拒的原因之一（2026-09-07 第 15 轮：在途通道从没人上报过成败）。"""
+    for resource in (S.RESOURCE_VIDEO_SUBMIT, S.RESOURCE_VIDEO_INFLIGHT):
+        report_congestion(resource, reason=reason)
+
+
+def report_video_delivered() -> None:
+    """供应商在当前在途水位下真的交付了一个视频——这是唯一能让在途通道升档的证据。
+    此前 ``video_inflight`` 只被 ``channel_limit`` 读取、从没有任何调用点上报成败，
+    慢启动永远停在热启动值 15：2026-09-07 实测供应商单任务 p50 7.8 分钟、p99 20 分钟，
+    550 个镜头却排了三个多小时，正是被这个升不上去的在途水位压住的。"""
+    report_healthy(S.RESOURCE_VIDEO_INFLIGHT)
