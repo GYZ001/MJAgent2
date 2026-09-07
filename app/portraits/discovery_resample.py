@@ -89,6 +89,39 @@ IDENTITY_RESAMPLE_TEMPERATURE_CAP = 1.0
 # value but before closing every open container ('{'/'[' left unmatched at EOF). This
 # reminder does not touch a single word of the identity-judgement rules -- only asks
 # for syntactically closed JSON.
+# 业务校验失败的有界纠正：只允许一次，且必须把违反的那条规则原样告诉模型。
+# 这不是"换一次语义答案再摇骰子"（那对身份判定是禁止的）——摇骰子是原样再问一遍碰运气，
+# 这里是指名道姓地说"你违反了第 N 条，把它改过来"，与 cards.py 对不完整人物卡、
+# video_plan 对走样规划 JSON 的做法同源。改不过来仍然第一时间 fail closed。
+# 2026-09-07 第 53 集：模型给 G001 选了非 N: 决议（判断本身没问题），却顺手填了下游根本
+# 不读的侧载字段，整集映射台因此失败。
+IDENTITY_SEMANTIC_CORRECTION_RETRIES = 1
+IDENTITY_SEMANTIC_CORRECTION_PREFIX = (
+    "\n\n【纠正须知】上一次输出违反了下列硬性规则，请只修正这些点后重新输出完整 JSON："
+)
+IDENTITY_SEMANTIC_CORRECTION_SUFFIX = (
+    "\n判断结论本身不必改动：沿用你上一次对每个 group 的决议选择，只把上面指出的字段"
+    "改成规则要求的形态。不要新增或删除任何 group_key，不要输出 JSON 之外的文字。"
+)
+
+
+# 唯一允许纠正的违规类：模型给非 N: 决议的组多填了侧载字段。它下游一个字都不读
+# （只有 new_named 才会消费 revealed_names/reveal_evidence_ids/revealed_name_kinds），
+# 决议本身完好无损，所以这不是"判断错了再摇一次"。其余任何一类——伪造 decision_id、
+# 覆盖不全、N: 却给空 evidence_id、真名不可追溯——都是判断本身有问题，照旧第一时间
+# fail closed（tests/test_character_discovery.py 里那一批 one_call 回归钉着）。
+INERT_SIDELOAD_VIOLATION = "future identity 非 NEW 决议侧载必须为空"
+
+
+def _semantic_correction_note(exc: Exception) -> str:
+    """仅当报告的每一条错误都是「非 NEW 决议多填侧载」时，返回指名纠正指令；否则空串（不重问）。"""
+    detail = str(getattr(exc, "args", None) and exc.args[0] or exc).strip()
+    reported = [part for part in detail.split("；") if part.strip()]
+    if not reported or not all(INERT_SIDELOAD_VIOLATION in part for part in reported):
+        return ""
+    return IDENTITY_SEMANTIC_CORRECTION_PREFIX + detail[:600] + IDENTITY_SEMANTIC_CORRECTION_SUFFIX
+
+
 IDENTITY_RESAMPLE_FORMAT_REMINDER = (
     "\n\n【重试须知】上一次尝试没有交付一个语法完整的 JSON 对象（可能是提前结束、"
     "遗漏了收尾的 } 或 ]）。本次请确保输出的 JSON 里每一个 { [ 都有对应的 } ] 严格"
@@ -96,6 +129,36 @@ IDENTITY_RESAMPLE_FORMAT_REMINDER = (
     "响应，也不要输出 JSON 对象之外的任何文字。除此之外，判断规则、证据要求与输出"
     "内容本身不变。"
 )
+
+
+def _attempt_inputs(
+    messages: list[dict[str, str]], kwargs: dict[str, Any], *, attempt: int, correction_note: str,
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """本次尝试真正要发出去的消息与参数。
+
+    三种形态互斥：首次原样；有纠正指令时把它追加到最后一条消息（温度不动——纠正的是
+    被指名的字段，不是再摇一次骰子）；否则是「未交付」重采样，追加语法提醒并抬温度
+    （见 ``IDENTITY_RESAMPLE_TEMPERATURE_BUMP``：原样重发不算真正的第二次机会）。
+    """
+    if correction_note:
+        return _messages_with_suffix(messages, correction_note), kwargs
+    if attempt <= 0:
+        return messages, kwargs
+    bumped = dict(kwargs)
+    base_temperature = float(bumped.get("temperature") or 0.0)
+    bumped["temperature"] = min(
+        IDENTITY_RESAMPLE_TEMPERATURE_CAP,
+        base_temperature + IDENTITY_RESAMPLE_TEMPERATURE_BUMP,
+    )
+    return _messages_with_suffix(messages, IDENTITY_RESAMPLE_FORMAT_REMINDER), bumped
+
+
+def _messages_with_suffix(messages: list[dict[str, str]], suffix: str) -> list[dict[str, str]]:
+    if not messages:
+        return messages
+    last = dict(messages[-1])
+    last["content"] = str(last.get("content") or "") + suffix
+    return [*messages[:-1], last]
 
 
 async def _identity_structured_with_resample(
@@ -127,24 +190,15 @@ async def _identity_structured_with_resample(
     unchanged from the caller's exact input.
     """
     last_error: Exception | None = None
-    for attempt in range(IDENTITY_UNUSABLE_RESPONSE_RESAMPLES + 1):
-        attempt_messages = messages
-        attempt_kwargs = kwargs
-        if attempt > 0:
-            attempt_messages = list(messages)
-            if attempt_messages:
-                last_message = dict(attempt_messages[-1])
-                last_message["content"] = (
-                    str(last_message.get("content") or "")
-                    + IDENTITY_RESAMPLE_FORMAT_REMINDER
-                )
-                attempt_messages[-1] = last_message
-            attempt_kwargs = dict(kwargs)
-            base_temperature = float(attempt_kwargs.get("temperature") or 0.0)
-            attempt_kwargs["temperature"] = min(
-                IDENTITY_RESAMPLE_TEMPERATURE_CAP,
-                base_temperature + IDENTITY_RESAMPLE_TEMPERATURE_BUMP,
-            )
+    correction_note = ""
+    corrections_used = 0
+    attempt = -1
+    budget = IDENTITY_UNUSABLE_RESPONSE_RESAMPLES + 1
+    while (attempt := attempt + 1) < budget:
+        attempt_messages, attempt_kwargs = _attempt_inputs(
+            messages, kwargs, attempt=attempt, correction_note=correction_note,
+        )
+        correction_note = ""
         try:
             # model_type/validate/max_tokens stay explicit here so the
             # gateway call-site contract test still sees them named.
@@ -157,6 +211,15 @@ async def _identity_structured_with_resample(
                 call_meta={**call_meta, "resample_attempt": attempt},
                 **attempt_kwargs,
             )
+        except model_gateway.StructuredSemanticError as exc:
+            # 指名违规、要求改正的一次有界重问；判断结论不动，改不过来照旧 fail closed。
+            note = _semantic_correction_note(exc)
+            if not note or corrections_used >= IDENTITY_SEMANTIC_CORRECTION_RETRIES:
+                raise
+            corrections_used += 1
+            correction_note = note
+            budget += 1
+            last_error = exc
         except model_gateway.StructuredFormatError as exc:
             if not getattr(exc, "unparseable", False):
                 raise
