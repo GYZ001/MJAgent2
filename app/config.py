@@ -319,7 +319,7 @@ IMAGE_REQUEST_CONCURRENCY = max(1, int(os.environ.get("IMAGE_REQUEST_CONCURRENCY
 MEDIA_INPUT_MAX_EDGE = max(512, int(os.environ.get("MEDIA_INPUT_MAX_EDGE", "1280")))
 # ffmpeg JPEG qscale：2 最高质量，31 最低质量。
 MEDIA_INPUT_JPEG_QUALITY = min(31, max(2, int(os.environ.get("MEDIA_INPUT_JPEG_QUALITY", "5"))))
-VIDEO_POLL_INTERVAL = 10.0
+VIDEO_POLL_INTERVAL = 30.0  # 10 秒轮询无意义：供应商单任务 p50 7.8/p99 20 分钟，而 170 个在途时每秒 17 次轮询、每次重入作业入口要算两遍审阅围栏指纹（py-spy 实测占后端 47.8% CPU，静态首页 9 秒）
 # Phase 1：提交后单次查询即释放 worker；不再用 15 分钟连续占槽窗口。
 VIDEO_POLL_RESUME_DELAY = float(os.environ.get("VIDEO_POLL_RESUME_DELAY", "10"))
 # 供应商任务允许的总墙钟时间。用于防止上游永远停在 running；正常长任务跨越
