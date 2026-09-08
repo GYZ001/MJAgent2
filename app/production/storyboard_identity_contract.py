@@ -27,11 +27,12 @@ def canonical_segment_identities(segment: dict, payload: dict) -> dict:
         entry["identity_id"] = identity
         if identity in entries:
             entry["display_name"] = entries[identity].get("display_name") or identity
-            entry["subject_kind"] = "character"
+            if entry.get("subject_kind") not in {"extra", "crowd"}:
+                entry["subject_kind"] = "character"
         elif identity in extras:
             entry["display_name"] = extras[identity].get("label") or identity
             entry["subject_kind"] = "crowd" if (extras[identity].get("provenance") or {}).get("collective") else "extra"
-            entry["portrait_id"] = None
+            # 显式错误的角色卡引用保留给校验器拒绝，不能规范化后悄悄洗掉。
         normalized.append(entry)
     result.setdefault("resources", {})["characters"] = normalized
     for line in result.get("dialogue") or []:
@@ -74,6 +75,8 @@ def identity_contract_errors(segment: dict, *, require_explicit: bool = False) -
             errors.append("旁白属于声音清单，请从画面人物资源中移除")
         if require_explicit and c.get("visibility", "unknown") == "unknown":
             errors.append(f"人物「{identity}」需要明确 visibility=visible 或 voice_only")
+        if require_explicit and c.get("subject_kind", "unknown") == "unknown":
+            errors.append(f"人物「{identity}」需要明确为已确认角色、独立群演或人群")
         if c.get("subject_kind") in {"extra", "crowd"} and (c.get("portrait_id") or identity.startswith("bible:")):
             errors.append(f"独立群演「{identity}」不能绑定正式角色卡，请核对其原文身份")
     for line in segment.get("dialogue") or []:
