@@ -309,6 +309,32 @@ def _public_model(item: dict) -> dict:
     return public
 
 
+def _validated_model_definition(body: dict, *, current: dict | None = None) -> tuple[str, str, str, list[str], str, bool]:
+    """校验新增/编辑共用的模型能力与协议合同。"""
+    saved = current or {}
+    provider = str(saved.get("provider") or body.get("provider") or "").strip().lower()
+    custom_provider = provider == "custom" or provider.startswith("custom:")
+    if provider not in MODEL_PROVIDER_KINDS and not custom_provider:
+        raise HTTPException(422, "不支持该模型服务商")
+    model = str(body.get("model") or saved.get("model") or "").strip()
+    label = str(body.get("label") or saved.get("label") or "").strip()
+    selected_kinds = body.get("kinds") or saved.get("kinds") or []
+    kinds = list(dict.fromkeys(str(kind).strip().lower() for kind in selected_kinds))
+    if not model or len(model) > 180 or any(ch.isspace() for ch in model):
+        raise HTTPException(422, "模型 ID 必填，且不能包含空格")
+    if not label or len(label) > 80:
+        raise HTTPException(422, "模型名称必填，且不能超过 80 个字符")
+    allowed_kinds = CUSTOM_PROVIDER_KINDS if custom_provider else MODEL_PROVIDER_KINDS[provider]
+    if not kinds or any(kind not in allowed_kinds for kind in kinds):
+        raise HTTPException(422, "所选服务商不支持该模型能力")
+    protocol = str(body.get("protocol") or saved.get("protocol") or "").strip().lower()
+    available = media_protocol_options(kinds)
+    if protocol not in available:
+        message = f"必须声明接入协议，可选：{', '.join(sorted(available))}"
+        raise HTTPException(422, detail={"field": "protocol", "message": message})
+    return provider, model, label, kinds, protocol, custom_provider
+
+
 @router.get("/models")
 def get_models():
     from app import image_providers, text_providers, video_providers
@@ -336,29 +362,7 @@ async def add_model_route(body: dict):
 
 
 def add_model(body: dict):
-    provider = str(body.get("provider") or "").strip().lower()
-    model = str(body.get("model") or "").strip()
-    label = str(body.get("label") or "").strip()
-    kinds = list(dict.fromkeys(str(k).strip().lower() for k in (body.get("kinds") or [])))
-    custom_provider = provider == "custom"
-    if provider not in MODEL_PROVIDER_KINDS and not custom_provider:
-        raise HTTPException(422, "不支持该模型服务商")
-    if not model or len(model) > 180 or any(ch.isspace() for ch in model):
-        raise HTTPException(422, "模型 ID 必填，且不能包含空格")
-    if not label or len(label) > 80:
-        raise HTTPException(422, "模型名称必填，且不能超过 80 个字符")
-    allowed_kinds = CUSTOM_PROVIDER_KINDS if custom_provider else MODEL_PROVIDER_KINDS[provider]
-    if not kinds or any(k not in allowed_kinds for k in kinds):
-        raise HTTPException(422, "所选服务商不支持该模型能力")
-    # 每条模型都要声明走哪套接入协议。代码里只有协议实现，没有模型；
-    # 声明清楚了，同一协议下换服务就只是改地址和密钥，不必再改代码。
-    protocol = str(body.get("protocol") or "").strip().lower()
-    available = media_protocol_options(kinds)
-    if protocol not in available:
-        raise HTTPException(422, detail={
-            "field": "protocol",
-            "message": f"必须声明接入协议，可选：{', '.join(sorted(available))}",
-        })
+    provider, model, label, kinds, protocol, custom_provider = _validated_model_definition(body)
     base_url = str(body.get("base_url") or "").strip().rstrip("/")
     api_key = str(body.get("api_key") or "").strip()
     provider_label = str(body.get("provider_label") or "").strip()
@@ -613,17 +617,14 @@ def update_model(model_id: str, body: dict):
     item = next((m for m in custom if m.get("id") == model_id), None)
     if not item:
         raise HTTPException(404, "模型不存在或为内置模型")
-    label = str(body.get("label") or item.get("label") or "").strip()
-    model = str(body.get("model") or item.get("model") or "").strip()
-    kinds = list(dict.fromkeys(str(k).strip().lower() for k in (body.get("kinds") or item.get("kinds") or [])))
-    if not label or not model or any(ch.isspace() for ch in model):
-        raise HTTPException(422, "模型名称和模型 ID 必填，模型 ID 不能包含空格")
-    if not kinds or any(k not in {"text", "vlm"} for k in kinds):
-        raise HTTPException(422, "自定义 OpenAI 兼容模型仅支持 Text/VLM")
-    item.update({"label": label, "model": model, "kinds": kinds})
+    # 编辑与新增共用协议合同；不能把 Seedance 等媒体模型套进旧 Text/VLM 限制。
+    _, model, label, kinds, protocol, custom_provider = _validated_model_definition(
+        body, current=item,
+    )
+    item.update({"label": label, "model": model, "kinds": kinds, "protocol": protocol})
     if any(key in body for key in ("context_window_tokens", "max_output_tokens", "token_limits_source")):
         item.update(normalize_token_limits({**item, **body}))
-    if str(item.get("provider", "")).startswith("custom:"):
+    if custom_provider:
         provider_label = str(body.get("provider_label") or item.get("provider_label") or "").strip()
         base_url = str(body.get("base_url") or item.get("base_url") or "").strip().rstrip("/")
         if not provider_label or not re.fullmatch(r"https?://[^\s]+", base_url):
@@ -648,9 +649,10 @@ async def test_saved_model(model_id: str, body: dict | None = None):
         raise HTTPException(404, "模型不存在")
     override = body or {}
     provider = str(item.get("provider") or "")
+    protocol = str(override.get("protocol") or item.get("protocol") or "").strip().lower()
     uses_h3 = provider == "minimax_h3" or (
         provider.startswith("custom:")
-        and str(item.get("protocol") or "") == "minimax_h3"
+        and protocol == "minimax_h3"
     )
     if uses_h3:
         from app import hiagent, minimax_h3
@@ -692,7 +694,7 @@ async def test_saved_model(model_id: str, body: dict | None = None):
     base_url = str(override.get("base_url") or saved.get("base_url") or item.get("base_url") or "")
     api_key = str(override.get("api_key") or saved.get("api_key") or item.get("api_key") or "")
     model = str(override.get("model") or item.get("model") or "")
-    kind = probe_kind(item.get("kinds"))
+    kind = probe_kind(override.get("kinds") or item.get("kinds"))
     result = await _probe_openai_model(base_url, api_key, model, kind)
     if kind in {"text", "vlm"}:
         overrides = _token_capability_overrides()
