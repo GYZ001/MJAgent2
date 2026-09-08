@@ -330,8 +330,7 @@ def _validated_model_definition(body: dict, *, current: dict | None = None) -> t
     protocol = str(body.get("protocol") or saved.get("protocol") or "").strip().lower()
     available = media_protocol_options(kinds)
     if protocol not in available:
-        message = f"必须声明接入协议，可选：{', '.join(sorted(available))}"
-        raise HTTPException(422, detail={"field": "protocol", "message": message})
+        raise HTTPException(422, detail={"field": "protocol", "message": f"必须声明接入协议，可选：{', '.join(sorted(available))}"})
     return provider, model, label, kinds, protocol, custom_provider
 
 
