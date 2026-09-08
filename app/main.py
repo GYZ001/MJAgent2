@@ -27,6 +27,7 @@ from app.auth.api import router as auth_router
 from app.auth.deps import require_system_admin
 from app.auth.principal import set_current_principal
 from app.authz import require_project_owner_access
+from app.domain.storyboard_ops.identity_review import router as identity_review_router
 from app.config import PROJECTS_DIR, ROOT
 from app.db import init_db
 from app.mcp import router as mcp_router
@@ -291,6 +292,7 @@ app.include_router(audit_router)  # /api/system/audit/*：路由自身逐条挂 
 app.include_router(payments_router)  # /api/payments/orders*：账号级自助购买，路由自身挂 require_local_session
 app.include_router(payments_public_router)  # /api/payments/notify/*：渠道回调，公开端点，验签是唯一防线
 app.include_router(router, dependencies=_PROJECT_OWNER_DEPS)
+app.include_router(identity_review_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(planning_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(orchestration_router, dependencies=_PROJECT_OWNER_DEPS)
 # 观测数据（任务/运行/调用原文/链路/证据产物）只对租户管理员开放：普通账号在前端

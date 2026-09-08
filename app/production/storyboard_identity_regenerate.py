@@ -23,7 +23,7 @@ def refreshed_required_dialogue(stored: dict, quotes: list) -> list[dict]:
             matches = [q for q in matches if q.start_offset == item["source_start"]]
         if len(matches) == 1:
             kept.append(_AiKeptLine(quote_id=matches[0].quote_id, segment_no=stored["segment_no"]))
-        elif text:
+        elif text and stored.get("required_dialogue"):
             raise ValueError(f"台词『{item.get('text', '')[:20]}』没有唯一原文位置，请先核对本片段原文引用")
     return required_dialogue_for_segments(kept, quotes).get(stored["segment_no"], [])
 

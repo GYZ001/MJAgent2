@@ -6,9 +6,14 @@
  * 连续镜头的字段在这里粒度失效，段内 3-4 个镜头切换全部写在 prompt_text 文本里。
  */
 export interface StoryboardPackDialogueLine {
+  utterance_id?: string;
   speaker_identity_id: string;
   line: string;
   source_segment_index: number;
+  delivery?: 'spoken_dialogue' | 'offscreen_voice';
+  delivery_kind?: '' | 'spoken_dialogue' | 'offscreen_dialogue' | 'inner_monologue' | 'narration';
+  source_quote_id?: string;
+  attribution_evidence?: string;
 }
 
 /**
@@ -23,6 +28,8 @@ export interface StoryboardPackSegmentBeat {
 
 export interface StoryboardPackResourceCharacter {
   identity_id: string;
+  visibility?: 'visible' | 'voice_only' | 'unknown';
+  subject_kind?: 'character' | 'extra' | 'crowd' | 'unknown';
   /**
    * 非持久化展示字段（GET /episodes/{id} 投影时按本集映射包现算）：这个条目的
    * 人类可读名字。段落清单里只有内部键——群演是 entity:<sha256 前16位>，界面直接
@@ -76,6 +83,9 @@ export interface StoryboardPackResources {
 }
 
 export interface StoryboardPackSegment {
+  identity_contract_version?: string;
+  speech_template?: string;
+  speech_dialect?: string;
   segment_no: number;
   duration_s: number;
   synopsis: string;

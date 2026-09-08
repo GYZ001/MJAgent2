@@ -11,7 +11,7 @@ IDENTITY_GENERATION_RULES = [
     "subject_kind：素材库已确认角色本人用 character；独立无名人物用 extra；复数人群用 crowd。群演可以使用 relevant_assets.functional_extras[].visual_entity_id；未收录的无名人保留原文称谓并独立描述。身份由原文关系决定，不由外观相似或可用角色卡决定。",
     "每句 dialogue 有唯一 utterance_id（U01、U02 等）。delivery_kind 区分 spoken_dialogue（画内开口）、offscreen_dialogue（人物画外对白）、inner_monologue（人物内心独白）、narration（叙述者旁白）。后三类 delivery=offscreen_voice，画内对白 delivery=spoken_dialogue。",
     "在 prompt_text 的准确发声时机写 {{speech:U01}} 这样的占位符，每句一次；台词原话、声音归属仅写入 dialogue[]，系统会按合同展开为实际声道标签和原话。镜头动作仍由你完整撰写。",
-    "required_dialogue 的台词必须逐字保留；speaker_identity_id、excluded_speaker_identity_ids、delivery_kind、quote_id 和来源偏移是原文证据：明确归属须保持，听者不能充当发声者。没有明确归属时使用有证据的无名人物，并填写 attribution_evidence；旁白只用于原文叙述者发声。source_quote_id 引用对应 quote_id。",
+    "必保台词清单的原话必须逐字保留；speaker_identity_id、excluded_speaker_identity_ids、delivery_kind、quote_id 和来源偏移是原文证据：明确归属须保持，听者不能充当发声者。没有明确归属时使用有证据的无名人物，并填写 attribution_evidence；旁白只用于原文叙述者发声。source_quote_id 引用对应 quote_id。",
     "resources.characters[].display_name 使用输入角色正名或群演 label；有图的可见角色用 @完整名字 后接空格或标点，群演用独立描述。仅有声音的角色使用 speech 占位符发声，无需 @人物图片。",
 ]
 

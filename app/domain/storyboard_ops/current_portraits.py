@@ -92,5 +92,8 @@ def attach_current_character_portraits(detail: dict[str, Any], view: str | None)
         segment = (shot or {}).get("storyboard_pack_segment") or {}
         resources = segment.get("resources") or {}
         for character in resources.get("characters") or []:
+            if character.get("visibility") == "voice_only" or character.get("subject_kind") in {"extra", "crowd"}:
+                character.update(current_portrait_id=None, current_portrait_image_url=None)
+                continue
             if _is_bible_character(character):
                 character.update(resolved(character.get("identity_id")))

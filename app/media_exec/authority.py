@@ -22,6 +22,7 @@ from typing import Any
 from app.db import get_conn, now, run_write_transaction
 from app.hiagent import ProviderError
 from app.orchestration import media_scheduler
+from app.media_exec.identity_fence import assert_identity_revision
 
 from .common import LeaseLost
 from .enqueue import _load_shot_model, _row_value
@@ -160,7 +161,7 @@ def _assert_video_provider_submission_authority(
         )
 
         selected, _snapshot = assert_video_provider_submission_authority(
-            shot_id=str(job["shot_id"]),
+            shot_id=str(row["shot_id"] if row else ""),
             shot_plan_id=shot_plan_id,
             actual_mode=actual_mode,
             expected_capability_snapshot_id=(
@@ -303,8 +304,7 @@ def _assert_review_dependency_fence(job, version_id: str, write_point: str) -> N
         meta = json.loads(row["image_inputs"] or "{}") if row else {}
     except (TypeError, ValueError, json.JSONDecodeError):
         meta = {}
-    from app.media_exec.identity_fence import assert_identity_revision  # 该围栏依赖本模块初始化后的 fences，由写入边界加载。
-    assert_identity_revision(conn, shot_id=str(job["shot_id"]), meta=meta, write_point=write_point)
+    assert_identity_revision(conn, shot_id=str(row["shot_id"] if row else ""), meta=meta, write_point=write_point)
     captured = meta.get("review_dependency_snapshot") or {}
     expected = captured.get("qualification_version")
     if not expected:

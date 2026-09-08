@@ -11,6 +11,7 @@ import EpisodeCrumb from '../components/EpisodeCrumb'
 import { ItemTaskTimer, ServerTaskTimer } from '../components/TaskTimer'
 import DecisionDialog from '../components/DecisionDialog'
 import QueryState from '../components/QueryState'
+import SegmentIdentityReview from '../components/SegmentIdentityReview'
 import SegmentResourcePanel from '../components/SegmentResourcePanel'; import { useRefsSettledRefresh } from '../hooks/useRefsSettledRefresh'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { storyboardTaskNotice } from '../lib/productionNotices'
@@ -1020,7 +1021,7 @@ export default function BoardPage() {
             )}
             {selectedShot && (
               <StoryboardPackSegmentView key={selectedShot.id}
-                shot={selectedShot} notify={toast} project={project} />
+                shot={selectedShot} notify={toast} project={project} onSaved={() => void refresh({ force: true })} />
             )}
           </section>
         </div>
@@ -1155,8 +1156,7 @@ export default function BoardPage() {
 /**
  * 分镜台唯一的段落展示（docs/STORYBOARD_PROMPT_IR_DESIGN.md 冻结契约）。
  * shot_size/camera_move/first_frame_desc 等经典逐镜字段在这一行没有意义
- * （见 api.ts 的 StoryboardPackSegment 注释）；后端也没有提供段落编辑能力，
- * 这里只做展示、只保留一个动作——复制整段提示词，不做没有动作的编辑入口。
+ * （见 api.ts 的 StoryboardPackSegment 注释）。身份与发声修订使用独立复核入口。
  *
  * 信息分层（用户拍板，不得自由发挥）：
  * 1. 永远可见——段号 + 时长 + 一句话梗概；右侧素材缩略图行。
@@ -1164,7 +1164,8 @@ export default function BoardPage() {
  * 3. 次要——shot_count/目标模型/原文段号回指/台词条数/节拍/降级角标，小字与角标，
  *    不占正文层级，用 <details> 收起可展开的长内容（台词全文、节拍摘要、素材详情）。
  */
-function StoryboardPackSegmentView({ shot, notify, project }: {
+function StoryboardPackSegmentView({ shot, notify, project, onSaved }: {
+  onSaved: () => void
   shot: Shot
   project: ImageGenTaskLike | null | undefined
   notify: (message: string, error?: boolean) => void
@@ -1206,6 +1207,7 @@ function StoryboardPackSegmentView({ shot, notify, project }: {
       </header>
 
       <SegmentResourcePanel resources={segment.resources} project={project} />
+      <SegmentIdentityReview shotId={shot.id} notify={notify} onSaved={onSaved} />
 
       <section className="storyboard-pack-prompt-block">
         <div className="storyboard-pack-prompt-head">
