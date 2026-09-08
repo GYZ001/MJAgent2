@@ -15,7 +15,7 @@ from app.production.storyboard_identity_regenerate import refreshed_required_dia
 from app.production.storyboard_identity_scope import bind_quote_identities
 from app.production.storyboard_identity_submission import segment_submission_errors
 from app.production.storyboard_pack import _load_indexed_source_segments, _manifest_speaker_names, _paratext_segment_indexes
-from app.production.storyboard_speech_render import render_segment_speech, speech_template_errors
+from app.production.storyboard_speech_render import attach_quote_provenance, render_segment_speech, speech_template_errors
 from app.production.storyboard_identity_validation import identity_schema_errors
 from .mutation_primitives import _board_from_shot_rows
 
@@ -57,7 +57,7 @@ def prepare_identity_candidate(conn, *, shot_id: str, candidate: dict) -> dict:
     row, episode, payload, original = load_identity_workspace(conn, shot_id)
     result = deepcopy(original)
     # 修改范围固定，客户端不能顺带更改时长、镜头号、来源范围或整集规划。
-    for key in ("dialogue", "resources", "speech_template", "speech_dialect", "prompt_text"):
+    for key in ("dialogue", "resources", "speech_template", "prompt_text"):
         if key in candidate:
             result[key] = deepcopy(candidate[key])
     errors = identity_schema_errors(result)
@@ -65,6 +65,7 @@ def prepare_identity_candidate(conn, *, shot_id: str, candidate: dict) -> dict:
         errors = identity_contract_errors(result)
     if errors:
         raise ValueError("；".join(errors))
+    result["speech_dialect"] = "minimax_h3_native_fields" if original.get("target_model") == "minimax_h3" else "seedance_compact_director_brief"
     result["resources"]["scenes"] = (original.get("resources") or {}).get("scenes") or []
     result["resources"]["props"] = (original.get("resources") or {}).get("props") or []
     result["required_dialogue"] = _source_requirements(conn, episode, payload, original)
@@ -74,6 +75,7 @@ def prepare_identity_candidate(conn, *, shot_id: str, candidate: dict) -> dict:
     errors = [*identity_contract_errors(result, require_explicit=True), *speech_template_errors(result, require_tokens=True)]
     if errors:
         raise ValueError("；".join(errors))
+    attach_quote_provenance(result)
     render_segment_speech(result, dialect=str(result.get("speech_dialect") or ""))
     stamp_identity_contract(result)
     errors = segment_submission_errors(result, source_text=row["source_excerpt"] or "")

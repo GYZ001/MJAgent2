@@ -6,6 +6,7 @@ from app.production.storyboard_dialogue_attribution import dialogue_speaker_erro
 from app.production.storyboard_identity_contract import identity_contract_errors
 from app.production.storyboard_speech_render import explicit_prompt_speaker_errors, speaker_names
 from app.production.storyboard_identity_validation import final_identity_prompt_errors, identity_schema_errors, quote_provenance_errors
+from app.production.storyboard_dialogue_ledger import required_dialogue_missing_errors
 
 
 def segment_submission_errors(segment: dict, *, source_text: str) -> list[str]:
@@ -13,6 +14,7 @@ def segment_submission_errors(segment: dict, *, source_text: str) -> list[str]:
     if schema_errors:
         return schema_errors
     errors = identity_contract_errors(segment, require_explicit=bool(segment.get("identity_contract_version")))
+    errors.extend(required_dialogue_missing_errors(segment.get("required_dialogue") or [], [str(line.get("line") or "") for line in segment.get("dialogue") or []]))
     errors.extend(explicit_prompt_speaker_errors(segment))
     if segment.get("identity_contract_version"):
         errors.extend(final_identity_prompt_errors(segment))

@@ -1,9 +1,11 @@
 import { useState } from 'react'
 import { api, type StoryboardPackSegment } from '../api'
+import '../styles/SegmentIdentityReview.css'
 
-type Review = { baseline: string; segment: StoryboardPackSegment; issues: string[]; versions: { id: string; version_no: number; status: string; prompt_text: string; video_url?: string }[] }
+type Review = { baseline: string; segment: StoryboardPackSegment; issues: string[]; versions: { id: string; version_no: number; status: string; prompt_text: string; video_url?: string; observations?: { notes: string }[]; reference_images?: { label: string; url?: string }[] }[] }
 type Props = { shotId: string; onSaved: () => void; notify: (message: string, error?: boolean) => void }
 const speechKinds = { spoken_dialogue: '画内对白', offscreen_dialogue: '人物画外对白', inner_monologue: '内心独白', narration: '旁白' }
+const versionStatuses: Record<string, string> = { succeeded: '已生成', stale: '历史版本', queued: '排队中', running: '生成中', failed: '生成失败' }
 
 export default function SegmentIdentityReview({ shotId, onSaved, notify }: Props) {
   const [review, setReview] = useState<Review | null>(null)
@@ -55,6 +57,7 @@ export default function SegmentIdentityReview({ shotId, onSaved, notify }: Props
         <fieldset disabled={busy}><legend>每句由谁发声</legend>
           {candidate.dialogue.map((line, i) => <div key={line.utterance_id || i}>
             <p>{line.line}</p>
+            <small>原文第 {line.source_segment_index} 段 · {line.attribution_evidence || '请结合原文核对归属'}</small>
             <label>说话人 <select value={line.speaker_identity_id} onChange={event => {
               const id = event.target.value
               const kind = id === '旁白' ? 'narration' : line.delivery_kind === 'narration' ? 'offscreen_dialogue' : line.delivery_kind
@@ -83,14 +86,21 @@ export default function SegmentIdentityReview({ shotId, onSaved, notify }: Props
             update({ ...candidate, resources: { ...candidate.resources, characters: [...candidate.resources.characters, { identity_id: label, display_name: label, visibility: 'visible', subject_kind: 'extra', description: label }] } }); setExtraLabel('')
           }}>添加独立群演</button>
         </fieldset>
+        <label>片段镜头稿（保留每句台词的发声位置标记）<textarea rows={8} value={candidate.speech_template || candidate.prompt_text} onChange={event => update({ ...candidate, speech_template: event.target.value })} /></label>
         <button type="button" disabled={busy} onClick={() => void perform(preview)}>校验并预览修订</button>
         {previewed && <div><pre style={{ whiteSpace: 'pre-wrap' }}>{candidate.prompt_text}</pre><button type="button" disabled={busy} onClick={() => void perform(save)}>保存本段修订</button></div>}
       </>}
       {!!review.versions.length && <details><summary>成片与实际提交记录</summary>
-        <select aria-label="视频版本" value={versionId} onChange={event => setVersionId(event.target.value)}>{review.versions.map(v => <option key={v.id} value={v.id}>版本 {v.version_no} · {v.status}</option>)}</select>
-        {review.versions.filter(v => v.id === versionId).map(v => <div key={v.id}>{v.video_url && <video controls preload="none" src={v.video_url} style={{ maxWidth: '100%', maxHeight: 360 }} />}<pre style={{ whiteSpace: 'pre-wrap' }}>{v.prompt_text}</pre></div>)}
+        <select aria-label="视频版本" value={versionId} onChange={event => setVersionId(event.target.value)}>{review.versions.map(v => <option key={v.id} value={v.id}>版本 {v.version_no} · {versionStatuses[v.status] || '处理中'}</option>)}</select>
+        {review.versions.filter(v => v.id === versionId).map(v => <div key={v.id}>{v.video_url && <video controls preload="none" src={v.video_url} style={{ maxWidth: '100%', maxHeight: 360 }} />}<pre style={{ whiteSpace: 'pre-wrap' }}>{v.prompt_text}</pre>
+          {v.reference_images?.map((ref, i) => <figure key={i}>{ref.url && <img src={ref.url} alt={ref.label} loading="lazy" />}<figcaption>{ref.label}</figcaption></figure>)}
+          {v.observations?.map((observation, i) => <p key={i}>复核记录：{observation.notes}</p>)}
+        </div>)}
         <label>视听复核记录<textarea value={notes} onChange={e => setNotes(e.target.value)} placeholder="记录实际听到的说话人、看到的人物，以及无法判断的部分" /></label>
-        <button type="button" disabled={busy || !notes.trim() || !versionId} onClick={() => void perform(async () => { await api.post(`${base}/observation`, { version_id: versionId, notes }); notify('复核记录已保存，不会自动重抽'); setNotes('') })}>保存复核记录</button>
+        <button type="button" disabled={busy || !notes.trim() || !versionId} onClick={() => void perform(async () => {
+          await api.post(`${base}/observation`, { version_id: versionId, notes }); notify('复核记录已保存，不会自动重抽')
+          setReview({ ...review, versions: review.versions.map(v => v.id === versionId ? { ...v, observations: [...(v.observations || []), { notes }] } : v) }); setNotes('')
+        })}>保存复核记录</button>
       </details>}
       <button type="button" disabled={busy} onClick={() => { setReview(null); setCandidate(null) }}>关闭复核</button>
     </div>}

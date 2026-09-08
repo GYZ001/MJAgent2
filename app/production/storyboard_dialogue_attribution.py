@@ -1,18 +1,8 @@
-"""台词说话人的确定性归属 + 画外音的可追溯性 + 结尾段台词剥除（2026-09-05 两条成片根因）。
+"""原文发声归属与可追溯性检查。
 
-根因复盘（B 库 7 天）：① 15 秒段里同句台词说两遍——提示词把台词写进「镜头N」又在结尾
-「全片贯穿」段里重抄一遍（「台词：…」「对话清晰可闻：…」「音频为 X 说出的…」「画外音（X）：…」），
-09-03 晚方言规则后归零，但代码里没有守卫；② 内心独白绑错说话人——小说体引号台词的台账
-``speaker`` 留空、必保台词不传说话人，第二阶段模型只能猜；方言又鼓励把叙述句改成某个角色的
-画外音（132 条画外音 35 条原文找不到，可定位的 97 条里 14 条说话人与引号旁的人名矛盾）。
-
-三条修法都是机械规则：
-- ``attribute_prose_speaker``：引号后 30 字内第一个人物谱正名/别名，其次引号前 40 字内最后一个；
-  只用人物谱名字与位置，不做动词名单。
-- ``strip_tail_dialogue``：结尾「全片贯穿」段里的引号台词（含其标签）直接剥掉并留痕。
-- ``dialogue_speaker_errors``：必保台词带说话人时第二阶段必须一致（改提示词要模型重写，报精确错误）；
-  画外音必须能追溯到本段原文句（逐字或二元组 ≥0.8），追溯不到报错；来自叙述句（原文不在引号里）的
-  画外音说话人一律「旁白」，不是就确定性改成旁白并改写提示词里对应的「画外音（X）」标签。
+明确角色行与台账证据优先，连续引句后的听者不能成为说话人。
+身份冲突要求共同重写台词与提示词，不再单独改成旁白。
+无来源且非必保的可选画外音仍会被删除，提交边界通过副本检查识别这类旧稿。
 """
 from __future__ import annotations
 
@@ -22,7 +12,7 @@ from typing import Any
 
 from app import textmatch
 from app.production.storyboard_identity_scope import scoped_name_map
-from app.production.storyboard_speaker_context import dialogue_listeners
+from app.production.storyboard_speaker_context import dialogue_listeners, explicit_script_speaker
 
 _LOGGER = logging.getLogger(__name__)
 NARRATOR = "旁白"
@@ -193,7 +183,10 @@ def dialogue_speaker_errors(
             _LOGGER.info("[STORYBOARD_OFFSCREEN_DROPPED] dialogue[%s]『%s』追溯不到原文，已删除", index, line.line[:24])
             continue
         explicit = any(textmatch.condense(str(item.get("text") or "")) == textmatch.condense(line.line) and (item.get("speaker") or item.get("speaker_identity_id")) for item in required_dialogue)
-        if not in_quotes and not explicit and line.speaker_identity_id != NARRATOR:
+        named = explicit_script_speaker(line.line, segment_source_text, list(name_to_identity))
+        if named and name_to_identity[named] != line.speaker_identity_id:
+            errors.append(f"dialogue[{index}] 原文角色行明确由「{named}」发声，请核对台词与提示词")
+        if not in_quotes and not explicit and not named and line.speaker_identity_id != NARRATOR:
             old = identity_to_name.get(line.speaker_identity_id, line.speaker_identity_id)
             errors.append(f"dialogue[{index}]『{line.line[:20]}』缺少人物发声证据；若是叙述者讲述，请将 speaker_identity_id 和提示词共同改为旁白；若为人物自述，请提供原文发声依据。当前归属「{old}」未被自动改写")
     if dropped:

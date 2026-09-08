@@ -216,7 +216,8 @@ Rules:
   toward her hands"), not a stack of tags at the end of the sentence. One
   dominant camera move per shot.
 - Each dialogue entry declares utterance_id, speaker_identity_id, delivery,
-  and delivery_kind. Place {{{{speech:U01}}}} once inside its specific [Shot N]
+  and delivery_kind. Off-screen lines use delivery=offscreen_voice;
+  on-screen speech uses delivery=spoken_dialogue. Place {{{{speech:U01}}}} once inside its specific [Shot N]
   integrated_multimodal_description at the intended speaking time.
   Keep the original words only in dialogue[].line. The system renders stable
   (S1) speaker IDs, says: <d>[Chinese] original words</d> blocks, and mouth

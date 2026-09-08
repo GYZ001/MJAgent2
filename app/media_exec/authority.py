@@ -161,7 +161,7 @@ def _assert_video_provider_submission_authority(
         )
 
         selected, _snapshot = assert_video_provider_submission_authority(
-            shot_id=str(row["shot_id"] if row else ""),
+            shot_id=str(job["shot_id"]),
             shot_plan_id=shot_plan_id,
             actual_mode=actual_mode,
             expected_capability_snapshot_id=(

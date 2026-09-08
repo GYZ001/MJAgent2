@@ -50,4 +50,8 @@ def final_identity_prompt_errors(segment: dict) -> list[str]:
         errors.append("视频提示词不能为空")
     if len(prompt) > config.PROMPT_CHAR_LIMIT:
         errors.append(f"台词展开后提示词长度 {len(prompt)} 超过上限 {config.PROMPT_CHAR_LIMIT}，请缩短镜头描述并保留台词")
+    if segment.get("speech_dialect") == "minimax_h3_native_fields":
+        for field in ("integrated_multimodal_description:", "overall_soundscape:", "non_diegetic_music:"):
+            if field not in prompt:
+                errors.append(f"视频提示词缺少 H3 必需字段 {field}")
     return errors

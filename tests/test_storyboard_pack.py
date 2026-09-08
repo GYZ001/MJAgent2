@@ -1040,7 +1040,8 @@ def test_dialect_instructions_carry_the_real_spoken_capacity_number():
         ("seedance", SEEDANCE_DIALECT_INSTRUCTIONS),
         ("minimax_h3", MINIMAX_H3_DIALECT_INSTRUCTIONS),
     ):
-        assert "{" not in text and "}" not in text, f"{name} 有未插值的占位符"
+        assert "{config." not in text, f"{name} 有未插值的配置占位符"
+        assert "{{speech:U01}}" in text, f"{name} 未说明发声占位符合同"
         assert limit in text, f"{name} 没把口播上限 {limit} 写给模型"
 
 

@@ -175,13 +175,14 @@ def test_regenerate_calls_model_only_for_selected_segment(fixture,monkeypatch):
         requests.append(request)
         candidate = candidate_of(segment)
         candidate["prompt_text"] = candidate.pop("speech_template")
+        candidate["continuity_memo"] = {"time_of_day":"白天"}
         draft = _AiStoryboardSegmentDraft.model_validate(candidate)
         assert kwargs["validate"](draft) == []
         return draft
     monkeypatch.setattr(storyboard_pack.model_gateway,"chat_structured",chat)
     before = read_independent("SELECT * FROM shots")
     episode = dict(conn.execute("SELECT * FROM episodes WHERE id='ep'").fetchone())
-    result = asyncio.run(regenerate_identity_candidate(conn,episode=episode,shot_id="s1",payload=payload,bible=Bible.model_validate({"world":{},"characters":[],"scenes":[]})))
+    result = asyncio.run(regenerate_identity_candidate(conn,episode=episode,shot_id="s1",payload=payload,bible=Bible.model_validate({"world":{"visual_style_canonical":"测试画风"},"characters":[],"scenes":[]})))
     assert len(requests) == 1 and requests[0]["segment_no"] == 1
     assert "内心独白（孟浩）" in result["prompt_text"]
     assert read_independent("SELECT * FROM shots") == before

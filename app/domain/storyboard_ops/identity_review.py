@@ -1,4 +1,5 @@
 """片段发声与群演复核 API：候选生成、人工修订和原子保存。"""
+import json
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -28,7 +29,21 @@ def identity_review(shot_id: str):
         raise HTTPException(409, str(exc)) from exc
     for version in result["versions"]:
         version["video_url"] = _media_url(version.pop("video_path", ""))
+        version["observations"] = [json.loads(row["content_json"]) for row in get_conn().execute(
+            "SELECT content_json FROM artifacts WHERE type='segment_identity_observation' AND scope_type='shot_version' AND scope_id=? ORDER BY created_at", (version["id"],))]
+        meta = json.loads(version.pop("image_inputs", "") or "{}")
+        version["reference_images"] = _review_reference_images(meta)
     return result
+
+
+def _review_reference_images(meta: dict) -> list[dict]:
+    """展示该视频版本保存的实际引用，避免错用当前片段的新图。"""
+    images = []
+    for index, entry in enumerate(meta.get("reference_images") or []):
+        if isinstance(entry, dict):
+            path = entry.get("image_path") or entry.get("path") or entry.get("url")
+            images.append({"label":entry.get("name") or entry.get("label") or f"参考图 {index + 1}","url":_media_url(path) if path else None})
+    return images
 
 
 @router.post("/shots/{shot_id}/identity-review/regenerate")
