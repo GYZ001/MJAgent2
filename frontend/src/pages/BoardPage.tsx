@@ -16,6 +16,7 @@ import { useRefsSettledRefresh } from '../hooks/useRefsSettledRefresh'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { storyboardTaskNotice } from '../lib/productionNotices'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
+import { needsCharacterImage } from '../lib/segmentIdentity'
 import { refsBusyPollInterval } from '../lib/bibleAssets'
 import StageTextModelPicker from '../components/StageTextModelPicker'
 import "../styles/BoardPage.css";
@@ -101,6 +102,7 @@ export function storyboardPackResourceGapSummary(shots: Shot[]): StoryboardPackR
     const resources = shot.storyboard_pack_segment?.resources
     if (!resources) continue
     for (const character of resources.characters ?? []) {
+      if (!needsCharacterImage(character)) continue
       charactersTotal += 1
       if (character.current_portrait_id) charactersLinked += 1
     }
@@ -1141,4 +1143,3 @@ export default function BoardPage() {
     </>
   )
 }
-

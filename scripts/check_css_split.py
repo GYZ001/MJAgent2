@@ -11,12 +11,16 @@ Usage:
     py scripts/check_css_split.py
 """
 import re, sys, pathlib, collections
-sys.path.insert(0, '/root/MJAgent2/scripts')
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'scripts'))
 import check_dark_theme as C
 
-SRC = pathlib.Path('/root/MJAgent2/frontend/src')
+SRC = ROOT / 'frontend' / 'src'
 PAGES = {
-    'BiblePage': ['pages/BiblePage.tsx'], 'BoardPage': ['pages/BoardPage.tsx'],
+    'BiblePage': ['pages/BiblePage.tsx'], 'BoardPage': [
+        'pages/BoardPage.tsx', 'components/StoryboardPackSegmentView.tsx',
+        'components/SegmentIdentityReview.tsx',
+    ],
     'WallPage': [
         'pages/WallPage.tsx',
         # 2026-08-31「传入素材」展示重做：生成台实际参考图画廊拆到

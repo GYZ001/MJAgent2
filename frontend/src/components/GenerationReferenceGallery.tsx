@@ -1,4 +1,5 @@
 import { useState } from 'react'
+export { needsCharacterImage } from '../lib/segmentIdentity'
 import type { ReferenceImage } from '../api'
 import { referenceImageLabel } from '../lib/bibleAssets'
 import ImageCompareModal from './ImageCompareModal'

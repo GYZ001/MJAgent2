@@ -42,7 +42,7 @@ def _review_reference_images(meta: dict) -> list[dict]:
     for index, entry in enumerate(meta.get("reference_images") or []):
         if isinstance(entry, dict):
             path = entry.get("image_path") or entry.get("path") or entry.get("url")
-            images.append({"label":entry.get("name") or entry.get("label") or f"参考图 {index + 1}","url":_media_url(path) if path else None})
+            images.append({"label":entry.get("entity_name") or entry.get("name") or entry.get("label") or f"参考图 {index + 1}","url":_media_url(path) if path else None})
     return images
 
 

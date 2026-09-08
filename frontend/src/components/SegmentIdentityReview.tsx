@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import { api, type StoryboardPackSegment } from '../api'
-import '../styles/SegmentIdentityReview.css'
 
 type Review = { baseline: string; segment: StoryboardPackSegment; issues: string[]; versions: { id: string; version_no: number; status: string; prompt_text: string; video_url?: string; observations?: { notes: string }[]; reference_images?: { label: string; url?: string }[] }[] }
 type Props = { shotId: string; onSaved: () => void; notify: (message: string, error?: boolean) => void }
@@ -42,7 +41,7 @@ export default function SegmentIdentityReview({ shotId, onSaved, notify }: Props
   async function save() {
     if (!review || !candidate || !previewed) return
     await api.post(`${base}/apply`, { baseline: review.baseline, candidate })
-    notify('本段修订已保存，旧视频保留为历史版本；请确认分镜后生成本段视频')
+    notify('本段修订已保存，旧视频保留为历史版本；可前往生成台生成本段视频')
     setReview(null); setCandidate(null); onSaved()
   }
   const editable = Boolean(candidate?.identity_contract_version)

@@ -17,7 +17,7 @@ import { compactShotStage } from '../shotStatus'
 import { refsBusyPollInterval, type ImageGenTaskLike } from '../lib/bibleAssets'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
 import { extractReferenceImagesByVersion, shotVersionSignature } from '../lib/wallReferences'
-import GenerationReferenceGallery from '../components/GenerationReferenceGallery'
+import GenerationReferenceGallery, { needsCharacterImage } from '../components/GenerationReferenceGallery'
 import SegmentResourcePanel from '../components/SegmentResourcePanel'
 import '../styles/WallPage.css'
 
@@ -760,7 +760,7 @@ function GenerationPanel({ shot, context, referenceImages, detailLoading, detail
               refs={refs}
               loading={detailLoading || !refsKnown}
               hasAttempt={hasAttempt}
-              hasDeclaredResources={Boolean(segment?.resources.characters?.length || segment?.resources.scenes?.length)}
+              hasDeclaredResources={Boolean(segment?.resources.characters?.some(needsCharacterImage) || segment?.resources.scenes?.length)}
             />
           )}
           {selected?.provider_task_id && <p className="wall-empty-hint">供应商任务：{selected.provider_task_id}</p>}

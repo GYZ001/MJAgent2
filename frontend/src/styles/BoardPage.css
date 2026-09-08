@@ -761,3 +761,14 @@ details.pack-meta-details > :not(summary) {
 :where(:root[data-theme="dark"]) .storyboard-pack-dialogue-list li {
   background: var(--surface-sunken);
 }
+
+.segment-identity-review { margin: 12px 0; }
+.segment-identity-review > div { display: grid; gap: 12px; padding: 16px 0; }
+.segment-identity-review fieldset { display: grid; gap: 12px; border: 1px solid var(--hairline); border-radius: 8px; padding: 12px; }
+.segment-identity-review label { display: block; margin: 8px 0; }
+.segment-identity-review select { margin: 0 8px; max-width: 100%; }
+.segment-identity-review textarea { display: block; width: 100%; resize: vertical; margin-top: 8px; }
+.segment-identity-review pre { max-height: 440px; overflow: auto; }
+.segment-identity-review button { width: fit-content; }
+.segment-identity-review figure { display: inline-block; margin: 8px; }
+.segment-identity-review img { width: 110px; height: 140px; object-fit: contain; }

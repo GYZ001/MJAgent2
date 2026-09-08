@@ -6,6 +6,7 @@ import type {
   StoryboardPackResources,
 } from '../api'
 import { characterPortraitDisplay, type ImageGenTaskLike } from '../lib/bibleAssets'
+import { needsCharacterImage } from '../lib/segmentIdentity'
 import ImageCompareModal from './ImageCompareModal'
 import PortraitPlaceholder from './PortraitPlaceholder'
 import SceneReferencePlaceholder from './SceneReferencePlaceholder'
@@ -94,7 +95,8 @@ function CharacterGroup({ characters, project, onPreview }: {
       <b>人物 · {characters.length}</b>
       <div className="segres-list">
         {characters.map((character, index) => {
-          const { imageUrl, updated } = characterPortraitDisplay(character)
+          const requiresImage = needsCharacterImage(character)
+          const { imageUrl, updated } = requiresImage ? characterPortraitDisplay(character) : { imageUrl: null, updated: false }
           const label = resourceLabel(character.display_name, character.identity_id, '未具名群演')
           return (
             <div className="segres-item" key={`c-${index}`}>
@@ -105,7 +107,8 @@ function CharacterGroup({ characters, project, onPreview }: {
                     {updated && <span className="segres-thumb-updated" title="定妆照已更新，与本段素材记录当时依据的那张不同">已更新</span>}
                   </button>
                 )
-                : <PortraitPlaceholder identityId={character.identity_id} project={project} className="segres-thumb-empty" />}
+                : requiresImage ? <PortraitPlaceholder identityId={character.identity_id} project={project} className="segres-thumb-empty" />
+                  : <div className="segres-thumb-empty">{character.visibility === 'voice_only' ? '仅声音' : '独立群演'}</div>}
               <div className="segres-body">
                 <span className="segres-name" title={character.identity_id}>{label}</span>
                 <span className="segres-desc">{character.description || (imageUrl ? '' : '暂无文字描述')}</span>

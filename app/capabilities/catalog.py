@@ -270,6 +270,12 @@ def _register_ui(registry) -> None:
 def _register_human_only(registry) -> None:
     for spec in [
         HumanOnlySpec(
+            "human.segment_identity_review", "复核片段发声与群演", "查看候选并保存单段身份修订、记录按视频版本区分的视听证据",
+            reason="页面复核工作区：候选不自动发布，视听记录由用户核对后填写；不向 Agent/MCP 开放为自动质检或自动重抽能力",
+            rest_routes=tuple(f"POST /api/shots/{{shot_id}}/identity-review/{action}" for action in ("regenerate", "preview", "apply", "observation")),
+            tags=("human", "storyboard"),
+        ),
+        HumanOnlySpec(
             "human.select_upload_file",
             "选择上传小说文件",
             "用户在系统文件选择器中挑选 TXT 或 EPUB；前端换发短时效 attachment_token",
@@ -351,5 +357,4 @@ def _register_commands(registry) -> None:
     for domain in _COMMAND_DOMAINS:
         for spec in domain.commands():
             registry.register_command(spec)
-
 

@@ -60,6 +60,7 @@ it('旧片段只请求当前片段的候选，不直接保存', async () => {
   expect(view.root.findAllByType('select')).toHaveLength(0)
   vi.mocked(api.post).mockResolvedValue({ candidate: segment })
   await click(view, '仅重新编写本段（调用文本模型）')
-  expect(api.post).toHaveBeenCalledExactlyOnceWith('/shots/old-shot/identity-review/regenerate', { baseline: 'old' })
+  expect(api.post).toHaveBeenCalledOnce()
+  expect(api.post).toHaveBeenCalledWith('/shots/old-shot/identity-review/regenerate', { baseline: 'old' })
   view.unmount()
 })
