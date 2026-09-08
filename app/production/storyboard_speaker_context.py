@@ -1,5 +1,18 @@
 """从完整原文保留对话块听者证据，避免阶段二裁剪后丢失归属。"""
 import re
+from app import textmatch
+
+
+def explicit_script_speaker(line: str, source_text: str, names: list[str]) -> str:
+    """旧台账未保留 OS/VO 时，仍直接尊重原文明确的角色行标签。"""
+    needle = textmatch.condense(line)
+    speakers = set()
+    for name in names:
+        pattern = r"(?:^|\n)\s*" + re.escape(name) + r"\s*(?:[（(][^）)\n]*[）)])?\s*[：:]\s*([^\n]+)"
+        for match in re.finditer(pattern, source_text):
+            if needle and needle in textmatch.condense(match.group(1)):
+                speakers.add(name)
+    return next(iter(speakers)) if len(speakers) == 1 else ""
 
 QUOTES = re.compile(r'[「“『"]([^」”』"]{2,})[」”』"]')
 SOURCE_TAG = re.compile(r"\[段\d+(?:·S\d+)?\]")
