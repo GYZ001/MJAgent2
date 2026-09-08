@@ -186,3 +186,23 @@ def test_regenerate_calls_model_only_for_selected_segment(fixture,monkeypatch):
     assert len(requests) == 1 and requests[0]["segment_no"] == 1
     assert "内心独白（孟浩）" in result["prompt_text"]
     assert read_independent("SELECT * FROM shots") == before
+
+
+def test_regenerate_http_uses_project_stage_provider(fixture,monkeypatch):
+    conn,_,_,_ = fixture
+    from app.domain.storyboard_ops import identity_review as routes
+    from app.harness.text_provider_scope import current_stage_text_provider
+    conn.execute("UPDATE projects SET bible_json='', board_text_provider='chosen' WHERE id='p'")
+    conn.commit()
+    selected = []
+    monkeypatch.setattr(routes,"resolve_stage_text_provider",lambda provider: selected.append(provider) or "chosen")
+    async def candidate(*args,**kwargs):
+        assert current_stage_text_provider() == "chosen"
+        return {"checked":True}
+    monkeypatch.setattr(routes,"regenerate_identity_candidate",candidate)
+    client = SessionTestClient(TestClient(app))
+    baseline = client.get("/api/shots/s1/identity-review").json()["baseline"]
+    result = client.post("/api/shots/s1/identity-review/regenerate",json={"baseline":baseline})
+    assert result.status_code == 200, result.text
+    assert result.json()["candidate"]["checked"]
+    assert selected == ["chosen"]

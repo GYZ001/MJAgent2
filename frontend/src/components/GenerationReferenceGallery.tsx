@@ -1,6 +1,6 @@
 import { useState } from 'react'
-export { needsCharacterImage } from '../lib/segmentIdentity'
-import type { ReferenceImage } from '../api'
+import { needsCharacterImage } from '../lib/segmentIdentity'
+import type { ReferenceImage, StoryboardPackResources } from '../api'
 import { referenceImageLabel } from '../lib/bibleAssets'
 import ImageCompareModal from './ImageCompareModal'
 
@@ -34,13 +34,14 @@ import ImageCompareModal from './ImageCompareModal'
  * scripts/check_css_split.py 的 PAGES['WallPage']，可以直接复用 WallPage 既有的
  * .wall-attempt-issue / .wall-empty-hint 告警与提示样式，不再造第二套。
  */
-export default function GenerationReferenceGallery({ refs, loading, hasAttempt, hasDeclaredResources }: {
+export default function GenerationReferenceGallery({ refs, loading, hasAttempt, declaredResources }: {
   refs: ReferenceImage[]
   loading: boolean
   hasAttempt: boolean
-  hasDeclaredResources: boolean
+  declaredResources?: StoryboardPackResources
 }) {
   const [preview, setPreview] = useState<{ title: string; images: { src: string; label: string }[] } | null>(null)
+  const hasDeclaredResources = Boolean(declaredResources?.characters.some(needsCharacterImage) || declaredResources?.scenes.length)
   const showMissingWarning = hasAttempt && !loading && !refs.length && hasDeclaredResources
 
   return (

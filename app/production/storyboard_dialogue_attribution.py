@@ -28,7 +28,7 @@ def _sorted_names(names: list[str] | set[str]) -> list[str]:
     return sorted({n.strip() for n in names if n and n.strip()}, key=len, reverse=True)
 
 
-#: 归属证据：名字后面紧跟的「发声/反应」动词。这是正面证据（说话人行为的语言学信号），不是名单式
+#: 归属证据：名字后面紧跟的发声或内心表达动词。单纯听闻、点头等反应不构成发声证据。
 #: 拦截——没有证据就留空交给第二阶段，绝不按「离引号最近的名字」猜（2026-09-05 第 3 集：
 #: 『……觉得虎爷声音大？』孟浩翻了个白眼——按最近名字归给孟浩，实际是虎爷在说）。
 _UTTERANCE_VERB_RE = (
@@ -44,6 +44,13 @@ def attribute_prose_speaker(segment_text: str, quote_start: int, quote_end: int,
     ordered = _sorted_names(names)
     if not ordered:
         return ""
+    before = segment_text[max(0, quote_start - PRE_WINDOW):quote_start]
+    last_quote = max((m.end() for m in _QUOTE_RE.finditer(before)), default=0)
+    before = before[last_quote:]
+    # 明确的「角色说：引句」先于引句后的动作，后者可能属于下一位说话人。
+    for name in ordered:
+        if re.search(re.escape(name) + r".{0,12}[：:]\s*[「“『\"]?$", before):
+            return name
     after = segment_text[quote_end:quote_end + POST_WINDOW]
     cut = _QUOTE_RE.search(after)
     if cut:
@@ -61,12 +68,7 @@ def attribute_prose_speaker(segment_text: str, quote_start: int, quote_end: int,
             rest = rest[:min(others)]
         if re.search(_UTTERANCE_VERB_RE, rest):
             return _explicitly_named(after[m.end():], ordered, name) or name
-    before = segment_text[max(0, quote_start - PRE_WINDOW):quote_start]
-    last_quote = max((m.end() for m in _QUOTE_RE.finditer(before)), default=0)
-    before = before[last_quote:]
     for name in ordered:
-        if re.search(re.escape(name) + r".{0,12}[：:]\s*[「“『\"]?$", before):
-            return name
         if re.search(re.escape(name) + r".{0,4}?" + _UTTERANCE_VERB_RE + r".{0,4}[「“『\"]?$", before):
             return name
     return ""

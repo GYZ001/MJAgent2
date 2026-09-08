@@ -8,6 +8,7 @@ from app.production.storyboard_identity_generation import generated_identity_err
 from app.production.storyboard_identity_submission import segment_submission_errors
 from app.production.storyboard_pack import _AiStoryboardSegmentDraft
 from app.production.storyboard_speech_render import render_segment_speech
+from app.production.storyboard_dialogue_attribution import attribute_prose_speaker
 
 
 def draft_and_payload():
@@ -69,3 +70,10 @@ def test_old_os_source_label_does_not_require_a_new_ledger_to_stay_correct():
     value["dialogue"][0].update(delivery="offscreen_voice",delivery_kind="inner_monologue")
     render_segment_speech(value,dialect="seedance")
     assert segment_submission_errors(value,source_text="孟浩（OS）：回来吧。") == []
+
+
+@pytest.mark.parametrize("following",['李四笑了。','李四说：“等等。”'])
+def test_explicit_speaker_before_quote_precedes_following_action(following):
+    text = '张三说：“走吧。”' + following
+    start = text.index('走吧')
+    assert attribute_prose_speaker(text,start,start+3,["张三","李四"]) == "张三"

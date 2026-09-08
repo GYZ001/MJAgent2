@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 from app.db import get_conn
 from app.evidence import repository
 from app.harness.types import EvidenceArtifact
+from app.harness.text_provider_scope import stage_text_provider
+from app.model_registry import resolve_stage_text_provider
 from app.domain.common import _media_url, _project_bible_or_placeholder
 from app.production.storyboard_identity_regenerate import regenerate_identity_candidate
 from .identity_workspace import (
@@ -55,7 +57,8 @@ async def regenerate_identity(shot_id: str, body: IdentityRevisionBody):
             raise ValueError("片段已更新，请重新打开复核")
         _row, episode, payload, _segment = load_identity_workspace(conn, shot_id)
         project = conn.execute("SELECT * FROM projects WHERE id=?", (episode["project_id"],)).fetchone()
-        candidate = await regenerate_identity_candidate(conn, episode=episode, shot_id=shot_id, payload=payload, bible=_project_bible_or_placeholder(project))
+        with stage_text_provider(resolve_stage_text_provider(dict(project).get("board_text_provider"))):
+            candidate = await regenerate_identity_candidate(conn, episode=episode, shot_id=shot_id, payload=payload, bible=_project_bible_or_placeholder(project))
         return {"baseline":body.baseline,"candidate":candidate}
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc

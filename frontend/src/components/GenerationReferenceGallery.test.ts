@@ -18,7 +18,7 @@ describe('GenerationReferenceGallery', () => {
 
   it('有参考图正常展示：大图 + 带身份的标签', () => {
     const html = renderToStaticMarkup(createElement(GenerationReferenceGallery, {
-      refs: [ref()], loading: false, hasAttempt: true, hasDeclaredResources: true,
+      refs: [ref()], loading: false, hasAttempt: true, declaredResources: { characters: [{ identity_id: '孟浩' }], scenes: [], props: [] },
     }))
     expect(html).toContain('src="https://x/ref.png"')
     expect(html).toContain('人物 · 孟浩')
@@ -26,7 +26,7 @@ describe('GenerationReferenceGallery', () => {
 
   it('参考图详情正在加载时提示加载中，不是空白也不是缺失告警', () => {
     const html = renderToStaticMarkup(createElement(GenerationReferenceGallery, {
-      refs: [], loading: true, hasAttempt: true, hasDeclaredResources: true,
+      refs: [], loading: true, hasAttempt: true, declaredResources: { characters: [{ identity_id: '孟浩' }], scenes: [], props: [] },
     }))
     expect(html).toContain('正在加载参考图')
     expect(html).not.toContain('参考图缺失')
@@ -34,7 +34,7 @@ describe('GenerationReferenceGallery', () => {
 
   it('该有却没有必须显眼：已提交过生成、本段声明了素材，但这次一张参考图都没带 -> 红色告警', () => {
     const html = renderToStaticMarkup(createElement(GenerationReferenceGallery, {
-      refs: [], loading: false, hasAttempt: true, hasDeclaredResources: true,
+      refs: [], loading: false, hasAttempt: true, declaredResources: { characters: [{ identity_id: '孟浩' }], scenes: [], props: [] },
     }))
     expect(html).toContain('参考图缺失')
     expect(html).toMatch(/role="alert"/)
@@ -42,14 +42,14 @@ describe('GenerationReferenceGallery', () => {
 
   it('尚未提交过生成时不误报缺失（还没到该有参考图的时候）', () => {
     const html = renderToStaticMarkup(createElement(GenerationReferenceGallery, {
-      refs: [], loading: false, hasAttempt: false, hasDeclaredResources: true,
+      refs: [], loading: false, hasAttempt: false, declaredResources: { characters: [{ identity_id: '孟浩' }], scenes: [], props: [] },
     }))
     expect(html).not.toContain('参考图缺失')
   })
 
   it('本段本来就没有声明人物/场景素材时不误报缺失', () => {
     const html = renderToStaticMarkup(createElement(GenerationReferenceGallery, {
-      refs: [], loading: false, hasAttempt: true, hasDeclaredResources: false,
+      refs: [], loading: false, hasAttempt: true, declaredResources: { characters: [], scenes: [], props: [] },
     }))
     expect(html).not.toContain('参考图缺失')
     expect(html).toContain('本次生成未使用参考图')
@@ -57,9 +57,22 @@ describe('GenerationReferenceGallery', () => {
 
   it('参考图记录没有图片地址时展示"无图"占位，不是破图', () => {
     const html = renderToStaticMarkup(createElement(GenerationReferenceGallery, {
-      refs: [ref({ image_url: null })], loading: false, hasAttempt: true, hasDeclaredResources: true,
+      refs: [ref({ image_url: null })], loading: false, hasAttempt: true, declaredResources: { characters: [{ identity_id: '孟浩' }], scenes: [], props: [] },
     }))
     expect(html).toContain('无图')
     expect(html).not.toContain('<img')
   })
+})
+
+
+it('纯声音与独立群演不被误报缺少参考图', () => {
+  const html = renderToStaticMarkup(createElement(GenerationReferenceGallery, {
+    refs: [], loading: false, hasAttempt: true,
+    declaredResources: { characters: [
+      { identity_id: '孟浩', visibility: 'voice_only', subject_kind: 'character' },
+      { identity_id: '同门', visibility: 'visible', subject_kind: 'extra' },
+    ], scenes: [], props: [] },
+  }))
+  expect(html).not.toContain('参考图缺失')
+  expect(html).toContain('本次生成未使用参考图')
 })
