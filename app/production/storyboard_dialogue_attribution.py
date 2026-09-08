@@ -153,16 +153,6 @@ def _trace_to_source(line: str, source_text: str) -> tuple[bool, bool]:
     return False, False
 
 
-def _rewrite_offscreen_label(prompt_text: str, old_name: str, line: str) -> str:
-    """把「画外音（旧名）：『台词』」这一条标签改成旁白；找不到精确形态就不动提示词。"""
-    if not old_name:
-        return prompt_text
-    pattern = re.compile(
-        r"画外音（" + re.escape(old_name) + r"）(\s*[：:]\s*[「“『\"])" + re.escape(line[:6])
-    )
-    return pattern.sub("画外音（" + NARRATOR + "）\\1" + line[:6], prompt_text, count=1)
-
-
 def _scrub_offscreen_line(prompt_text: str, line: str) -> str:
     """把被删掉的画外音从提示词里一并抹掉：带标签的整条（画外音（X）：「…」）、只剩引号的、裸文本。"""
     quoted = r"[「“『\"]" + re.escape(line) + r"[」”』\"]"
@@ -175,37 +165,12 @@ def _scrub_offscreen_line(prompt_text: str, line: str) -> str:
 def dialogue_speaker_errors(
     draft: Any, required_dialogue: list[dict[str, Any]], name_to_identity: dict[str, str], segment_source_text: str,
 ) -> list[str]:
-    """必保台词说话人一致性（报错）、画外音可追溯性（报错）、叙述句画外音改旁白（就地修补）。"""
+    """原文归属与发声方式冲突明确报错；只删除无来源的可选画外音。"""
     errors: list[str] = []
     identity_to_name: dict[str, str] = {}
     for name, identity in name_to_identity.items():
         identity_to_name.setdefault(identity, identity.split(":", 1)[-1] if identity.startswith("bible:") else name)
-    condensed = [textmatch.condense(line.line) for line in draft.dialogue]
-    needles = [textmatch.condense(str(item.get("text") or "")) for item in required_dialogue]
-    # 账本项与草稿台词先按逐字相等配对；只有没有精确命中的才退到包含匹配，且不再抢别人精确命中的那句。
-    # 第 29 集实测：『认输……』是『上去就立刻认输。』的子串，包含匹配把两句的说话人交叉判错，三次重试整集失败。
-    exact_claimed = {index for index, text in enumerate(condensed) if text in needles}
-    for item, needle in zip(required_dialogue, needles):
-        expected = item.get("speaker_identity_id") or name_to_identity.get(str(item.get("speaker") or "").strip())
-        if not needle:
-            continue
-        exact = [index for index, text in enumerate(condensed) if text == needle]
-        matched = exact or [
-            index for index, text in enumerate(condensed)
-            if index not in exact_claimed and (needle in text or text in needle)
-        ]
-        for index in matched:
-            line = draft.dialogue[index]
-            if line.speaker_identity_id in (item.get("excluded_speaker_identity_ids") or []):
-                errors.append(f"dialogue[{index}]『{line.line[:20]}』的「{line.speaker_identity_id}」是原文对话块的听者，不是说话人，请改为有原文依据的独立发声主体")
-            if item.get("delivery_kind") and getattr(line, "delivery_kind", "") and item["delivery_kind"] != line.delivery_kind:
-                errors.append(f"dialogue[{index}] 的发声类型应保持原文的 {item['delivery_kind']}")
-            if expected and line.speaker_identity_id != expected:
-                errors.append(
-                    f"dialogue[{index}]『{line.line[:20]}』的说话人按原文归属应为「{item.get('speaker')}」"
-                    f"（identity_id={expected}），当前写成「{line.speaker_identity_id}」；请把 dialogue[] 与 "
-                    "prompt_text 里这句的说话人都改成原文归属的人"
-                )
+    errors.extend(_required_speaker_errors(draft, required_dialogue, name_to_identity))
     if not segment_source_text:
         return errors
     errors.extend(unattributed_quote_speaker_errors(draft, required_dialogue, identity_to_name, segment_source_text))
@@ -290,3 +255,37 @@ def repair_draft_tail(draft: Any) -> None:
     draft.prompt_text, removed = strip_tail_dialogue(draft.prompt_text)
     if removed:
         _LOGGER.info("[STORYBOARD_PROMPT_TAIL_REPAIR] 剥掉结尾段台词 %s", removed)
+
+
+def _required_speaker_errors(draft: Any, required_dialogue: list[dict], name_to_identity: dict) -> list[str]:
+    """按原文引用核对发声主体，重复原话优先匹配 source_quote_id。"""
+    errors: list[str] = []
+    condensed = [textmatch.condense(line.line) for line in draft.dialogue]
+    needles = [textmatch.condense(str(item.get("text") or "")) for item in required_dialogue]
+    # 账本项与草稿台词先按逐字相等配对；只有没有精确命中的才退到包含匹配，且不再抢别人精确命中的那句。
+    # 第 29 集实测：『认输……』是『上去就立刻认输。』的子串，包含匹配把两句的说话人交叉判错，三次重试整集失败。
+    exact_claimed = {index for index, text in enumerate(condensed) if text in needles}
+    for item, needle in zip(required_dialogue, needles):
+        expected = item.get("speaker_identity_id") or name_to_identity.get(str(item.get("speaker") or "").strip())
+        if not needle:
+            continue
+        exact = [index for index, text in enumerate(condensed) if text == needle]
+        matched = exact or [
+            index for index, text in enumerate(condensed)
+            if index not in exact_claimed and (needle in text or text in needle)
+        ]
+        for index in matched:
+            line = draft.dialogue[index]
+            if getattr(line, "source_quote_id", "") and line.source_quote_id != item.get("quote_id"):
+                continue
+            if line.speaker_identity_id in (item.get("excluded_speaker_identity_ids") or []):
+                errors.append(f"dialogue[{index}]『{line.line[:20]}』的「{line.speaker_identity_id}」是原文对话块的听者，不是说话人，请改为有原文依据的独立发声主体")
+            if item.get("delivery_kind") and getattr(line, "delivery_kind", "") and item["delivery_kind"] != line.delivery_kind:
+                errors.append(f"dialogue[{index}] 的发声类型应保持原文的 {item['delivery_kind']}")
+            if expected and line.speaker_identity_id != expected:
+                errors.append(
+                    f"dialogue[{index}]『{line.line[:20]}』的说话人按原文归属应为「{item.get('speaker')}」"
+                    f"（identity_id={expected}），当前写成「{line.speaker_identity_id}」；请把 dialogue[] 与 "
+                    "prompt_text 里这句的说话人都改成原文归属的人"
+                )
+    return errors

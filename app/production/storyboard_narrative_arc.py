@@ -265,7 +265,7 @@ def _segment_shared_rules() -> list[str]:
         "一致，只需按本段的画面据实描述。",
         "dialogue[] 保存全部台词与发声身份；prompt_text 在对应时机使用一一对应的 "
         "{{speech:utterance_id}}，系统从台词合同展开标签与原话，每句只发声一次。",
-        "本段 prompt_text 里出场或说话的角色都必须同时列进 "
+        "本段 prompt_text 里出场或说话的人物（叙述者旁白除外）都必须同时列进 "
         "resources.characters。resources.characters[].identity_id 的合法取值"
         "只有两处、必须逐字整串复制（含冒号与前缀，一个字符都不能改写、"
         "简化或模仿）：relevant_assets.characters[] 每一项自带的 "

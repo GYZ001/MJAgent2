@@ -352,18 +352,6 @@ def _assert_review_dependency_fence(job, version_id: str, write_point: str) -> N
     # provider result from becoming a candidate.
     target_shot_id = row["shot_id"] if row else None
 
-    def asset_contract(items):
-        # 契约只看「哪个镜头用了哪个素材版本、门禁结果」：version_id/ref_id 是每次任务新生成的
-        # 行 id，同一素材再入队就换一个。EP1 串接实测：链上相邻镜头先后重建参考图行，彼此把
-        # 对方快照里的旧 ref_id 判成消失 → REVIEW_DEPENDENCY_STALE → 重入队 → 再互相打死。
-        return {
-            json.dumps(
-                {key: value for key, value in item.items() if key not in {"version_id", "ref_id"}},
-                ensure_ascii=False, sort_keys=True,
-            )
-            for item in items
-            if item.get("shot_id") != target_shot_id
-        }
     # Modern narrative jobs bind exact asset revisions in the validated video
     # plan and recheck them again at provider submission. Shot galleries are
     # downstream outputs: parallel sibling jobs naturally add images and must
@@ -383,7 +371,7 @@ def _assert_review_dependency_fence(job, version_id: str, write_point: str) -> N
     # still fail closed; a snapshot merely gaining unrelated entries must not.
     assets_equal = bool(
         not expected_assets
-        or asset_contract(expected_assets) <= asset_contract(current_assets)
+        or _review_asset_contract(expected_assets, target_shot_id) <= _review_asset_contract(current_assets, target_shot_id)
     )
     if (
         current.get("eligible_for_production")
@@ -430,3 +418,18 @@ def _assert_job_lease(job_id: str, owner: str, *, lease_seconds: float = 180.0) 
         raise LeaseLost(f"job lease lost: {job_id} / {owner}")
 
 __all__ = [name for name in globals() if not name.startswith("__")]
+
+
+def _review_asset_contract(items, target_shot_id):
+    """比较其他镜头的素材身份，忽略每次重建产生的引用行编号。"""
+    # 契约只看「哪个镜头用了哪个素材版本、门禁结果」：version_id/ref_id 是每次任务新生成的
+    # 行 id，同一素材再入队就换一个。EP1 串接实测：链上相邻镜头先后重建参考图行，彼此把
+    # 对方快照里的旧 ref_id 判成消失 → REVIEW_DEPENDENCY_STALE → 重入队 → 再互相打死。
+    return {
+        json.dumps(
+            {key: value for key, value in item.items() if key not in {"version_id", "ref_id"}},
+            ensure_ascii=False, sort_keys=True,
+        )
+        for item in items
+        if item.get("shot_id") != target_shot_id
+    }

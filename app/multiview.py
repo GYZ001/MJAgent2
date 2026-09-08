@@ -457,19 +457,10 @@ def _storyboard_pack_asset_dependencies(
     *, project_id: str, episode_no: int, shot_id: str, segment: dict[str, Any],
     conn: Any, bible: Any,
 ) -> dict[str, Any]:
-    """分镜台 2.0.0 段的资源依赖：要不要参考图挂人物谱/场景库的卡（现查
-    ``resolve_card_owner`` / ``match_scene_name``，不认前缀字符串），图本身
-    按集号现查（``current_portrait_ref`` / 本文件 ``scene_row_for_episode``，
-    与展示侧同源）——都不读段落自己固化的 ``portrait_id`` /
-    ``scene_reference_id`` 快照。旧版 ``asset_required=bool(portrait_id)``：
-    出图解耦到后台后映射那一刻新角色/场景多半还没出图，快照恒 null，于是被
-    判"不需要参考图"，视频生成拿不到脸、人物每镜漂移（EP2 实证：小胖子定妆
-    照生成前 1 分钟就已落库，只因快照是 null 被判不需要）。``entity:`` 前缀
-    的群演查无此人，天然 ``asset_required=False``；已建卡但图还没出来时
-    ``missing_required`` 现在会真正非空，``manifest_production_blockers``
-    拦得住。下面 name-based 分支给旧架构按名字重挑视角，这类行没有那些
-    契约字段不适用，这里仍不经过视角选择，直接信任分镜台已做的资源归属。
-    ``bible`` 必填：判断"有没有卡"是所有权问题，猜不得。
+    """按可见主体选择当前参考图。已确认角色按卡的所有者查图；独立群演与
+    纯声音主体不借用角色卡。旧记录未声明可见性时保留兼容行为。
+    分镜中的 portrait_id 只是生成时快照，不能替代当前素材可用性。
+    bible 与连接由调用方提供；缺卡可描述，已有卡缺图仍走素材阻断。
     """
     if bible is None:
         raise ValueError("分镜包资产依赖解析缺少 Bible")

@@ -5,11 +5,18 @@ from types import SimpleNamespace
 from app.production.storyboard_dialogue_attribution import dialogue_speaker_errors
 from app.production.storyboard_identity_contract import identity_contract_errors
 from app.production.storyboard_speech_render import explicit_prompt_speaker_errors, speaker_names
+from app.production.storyboard_identity_validation import final_identity_prompt_errors, identity_schema_errors, quote_provenance_errors
 
 
 def segment_submission_errors(segment: dict, *, source_text: str) -> list[str]:
+    schema_errors = identity_schema_errors(segment)
+    if schema_errors:
+        return schema_errors
     errors = identity_contract_errors(segment, require_explicit=bool(segment.get("identity_contract_version")))
     errors.extend(explicit_prompt_speaker_errors(segment))
+    if segment.get("identity_contract_version"):
+        errors.extend(final_identity_prompt_errors(segment))
+        errors.extend(quote_provenance_errors(segment))
     lines = [SimpleNamespace(**dict(line, delivery=line.get("delivery") or "spoken_dialogue")) for line in deepcopy(segment.get("dialogue") or [])]
     draft = SimpleNamespace(dialogue=lines, prompt_text=str(segment.get("prompt_text") or ""))
     names = {name: identity for identity, name in speaker_names(segment).items()}

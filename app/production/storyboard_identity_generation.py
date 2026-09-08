@@ -5,6 +5,7 @@ from app.production.storyboard_identity_contract import (
 from app.production.storyboard_speech_render import (
     attach_quote_provenance, render_segment_speech, speech_template_errors,
 )
+from app.production.storyboard_identity_validation import final_identity_prompt_errors, quote_provenance_errors
 
 IDENTITY_GENERATION_RULES = [
     "每个出场或发声主体单独列入 resources.characters；visibility=visible 表示实际出镜，voice_only 表示本段仅有声音。内心独白的人也可能可见，按实际画面填写。旁白只有声音，不列入人物资源。",
@@ -16,16 +17,21 @@ IDENTITY_GENERATION_RULES = [
 ]
 
 
-def generated_identity_errors(draft, *, payload: dict, source_indexes: list[int], required_dialogue: list[dict]) -> list[str]:
+def generated_identity_errors(draft, *, payload: dict, source_indexes: list[int], required_dialogue: list[dict], dialect: str = "") -> list[str]:
     segment = draft.model_dump(mode="json")
     segment.update(source_segment_indexes=source_indexes, required_dialogue=required_dialogue)
     normalized = canonical_segment_identities(segment, payload)
-    return [*identity_contract_errors(normalized, require_explicit=True), *speech_template_errors(normalized, require_tokens=True)]
+    errors = [*identity_contract_errors(segment), *identity_contract_errors(normalized, require_explicit=True),
+              *speech_template_errors(normalized, require_tokens=True), *quote_provenance_errors(normalized)]
+    if not errors:
+        render_segment_speech(normalized, dialect=dialect)
+        errors.extend(final_identity_prompt_errors(normalized))
+    return list(dict.fromkeys(errors))
 
 
 def finalize_generated_identity(draft, *, payload: dict, source_indexes: list[int], required_dialogue: list[dict], dialect: str):
     """完整候选先验证后展开；不存在只改台词数据、不改提示词的半次修补。"""
-    errors = generated_identity_errors(draft, payload=payload, source_indexes=source_indexes, required_dialogue=required_dialogue)
+    errors = generated_identity_errors(draft, payload=payload, source_indexes=source_indexes, required_dialogue=required_dialogue, dialect=dialect)
     if errors:
         raise ValueError("；".join(errors))
     segment = draft.model_dump(mode="json")

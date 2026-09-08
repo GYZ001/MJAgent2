@@ -20,11 +20,19 @@ def rendered_utterance(line: dict, names: dict[str, str], *, dialect: str) -> st
     speaker = names.get(str(line.get("speaker_identity_id") or ""), str(line.get("speaker_identity_id") or ""))
     kind = effective_delivery_kind(line)
     label = {"spoken_dialogue": "画内对白", "offscreen_dialogue": "人物画外对白", "inner_monologue": "内心独白", "narration": "旁白"}[kind]
-    # H3 的外层字段保持原方言，音频标签同样确定性生成，避免英文标签被漏改。
     if dialect == "minimax_h3_native_fields":
-        label = {"spoken_dialogue": "on-screen dialogue", "offscreen_dialogue": "off-screen voiceover", "inner_monologue": "inner monologue", "narration": "narration"}[kind]
+        return _h3_utterance(line, names, speaker=speaker, kind=kind)
     mouth = "发声者开口，其他可见人物不跟随口型" if kind == "spoken_dialogue" else "画面人物不随此句张嘴"
     return f"{label}（{speaker}）：“{line.get('line') or ''}”（{mouth}）"
+
+
+def _h3_utterance(line: dict, names: dict, *, speaker: str, kind: str) -> str:
+    """保留 H3 既有稳定 S 编号、<d> 原话块和英语描述合同。"""
+    number = sorted(names).index(str(line["speaker_identity_id"])) + 1
+    delivery = {"spoken_dialogue": "says", "offscreen_dialogue": "says in an off-screen voiceover",
+                "inner_monologue": "says in an inner-monologue voiceover", "narration": "narrates in an off-screen voiceover"}[kind]
+    mouth = "Only the speaker's lips move" if kind == "spoken_dialogue" else "All on-screen lips remain fully closed with no movement"
+    return f"(S{number}, {speaker}) {delivery}: <d>[Chinese] {line.get('line') or ''}</d>. {mouth}."
 
 
 def speech_template_errors(segment: dict, *, require_tokens: bool) -> list[str]:
@@ -70,6 +78,9 @@ def explicit_prompt_speaker_errors(segment: dict) -> list[str]:
                 errors.append(f"台词『{spoken[:20]}』的提示词发声者「{actual}」与台词合同「{expected}」不同，请修订该片段")
     if segment.get("speech_template"):
         candidate: dict[str, Any] = dict(segment)
+        template_errors = speech_template_errors(dict(segment, prompt_text=segment["speech_template"]), require_tokens=True)
+        if template_errors:
+            return [*errors, *template_errors]
         render_segment_speech(candidate, dialect=str(segment.get("speech_dialect") or ""))
         if candidate["prompt_text"] != prompt:
             errors.append("提示词与已保存的发声模板/台词合同不同，请重新生成该片段的提示词")

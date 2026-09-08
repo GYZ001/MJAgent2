@@ -16,6 +16,7 @@ from app.production.storyboard_identity_scope import bind_quote_identities
 from app.production.storyboard_identity_submission import segment_submission_errors
 from app.production.storyboard_pack import _load_indexed_source_segments, _manifest_speaker_names, _paratext_segment_indexes
 from app.production.storyboard_speech_render import render_segment_speech, speech_template_errors
+from app.production.storyboard_identity_validation import identity_schema_errors
 from .mutation_primitives import _board_from_shot_rows
 
 
@@ -59,6 +60,11 @@ def prepare_identity_candidate(conn, *, shot_id: str, candidate: dict) -> dict:
     for key in ("dialogue", "resources", "speech_template", "speech_dialect", "prompt_text"):
         if key in candidate:
             result[key] = deepcopy(candidate[key])
+    errors = identity_schema_errors(result)
+    if not errors:
+        errors = identity_contract_errors(result)
+    if errors:
+        raise ValueError("；".join(errors))
     result["resources"]["scenes"] = (original.get("resources") or {}).get("scenes") or []
     result["resources"]["props"] = (original.get("resources") or {}).get("props") or []
     result["required_dialogue"] = _source_requirements(conn, episode, payload, original)

@@ -55,6 +55,7 @@ from app.harness.types import EvidenceArtifact
 from app.production.storyboard_capacity_normalize import normalize_and_assert_capacity
 from app.production.storyboard_identity_contract import canonical_segment_identities, visible_character_ids
 from app.production.storyboard_identity_scope import bind_quote_identities
+from app.production.storyboard_segment_output import segment_output_contract
 from app.production.storyboard_identity_generation import (
     IDENTITY_GENERATION_RULES, generated_identity_errors, finalize_generated_identity,
 )
@@ -78,7 +79,6 @@ from app.production.storyboard_continuity_memo import (
     _AiContinuityMemo,
     continuity_memo_character_advisories,
     continuity_memo_errors,
-    continuity_memo_output_contract_text,
     continuity_memo_payload,
 )
 from app.production.storyboard_dialogue_extract import extract_dialogue_targets
@@ -1102,22 +1102,7 @@ async def _generate_all_segment_prompts(
             # 带上作为强化重申，避免两处描述同一模型方言、其中一处不再被任何调用方
             # 读取而悄悄漂移。
             "profile_generation_rules": list(profile.generation_rules),
-            "output_contract": {
-                "prompt_text": "完整可复制的提示词整块文本，按上面的方言约束写",
-                "shot_count": f"{MIN_SHOTS_PER_SEGMENT}-{MAX_SHOTS_PER_SEGMENT} 之间的整数，须与 prompt_text 里实际写的镜头数一致",
-                "dialogue": (
-                    "本段实际出现的台词；required_dialogue 里的每一条必须逐句出现（主干"
-                    "逐字保留，允许衔接性微调），除此之外可以是原文其它对话的压缩/改写，"
-                    "不要求逐字，但不得偏离本段剧情；每条必须给 speaker_identity_id（引用"
-                    "relevant_assets.characters 的 identity_id）与 source_segment_index"
-                    f"（这句话对应原文的哪一段，必须在 {plan.source_segment_indexes} 范围内）"
-                ),
-                "resources": "本段实际用到的人物/场景/道具，identity_id/scene_id 必须来自 relevant_assets；素材库没有对应图的（scene_reference_id 或 portrait_id 为空）如实留空，不得编造",
-                "degraded_capabilities": "本段因模型能力缺失而做的降级处理清单（例如 Seedance 侧的屏上文字改「无字」+ 后期合成说明）；没有降级则留空数组，不得留空字符串占位",
-                "camera_digest": "本段实际选用的开场景别（opening_shot_size）、开场运镜（opening_camera_move），以及本段与上一段之间的转场类型（transition_from_previous，本集第一段留空）；只用于给接下来几段做参考，不进入分镜产出契约",
-                "camera_repetition_rationale": "只在本段开场确实沿用了 recent_camera_language 里出现过的机位时才写理由；没有重复就留空，不得编造理由",
-                "continuity_memo": continuity_memo_output_contract_text(),
-            },
+            "output_contract": segment_output_contract(plan.source_segment_indexes, min_shots=MIN_SHOTS_PER_SEGMENT, max_shots=MAX_SHOTS_PER_SEGMENT),
             "output_schema": _AiStoryboardSegmentDraft.model_json_schema(),
         }
         fingerprint = hashlib.sha256(
@@ -1142,7 +1127,7 @@ async def _generate_all_segment_prompts(
             _no=plan.segment_no, _n2i=manifest_name_to_identity(payload, plan.source_segment_indexes), _sx=plan.source_segment_indexes: [*_validate_segment_draft(
                 value, dialect_render_format=profile.render_format, required_dialogue=_req, name_to_identity=_n2i,
                 previous_memo=_pm, segment_source_text=_st, delivered_lines=_dl, reserved_lines=_rv, current_segment_no=_no,
-            ), *generated_identity_errors(value, payload=payload, source_indexes=_sx, required_dialogue=_req)],
+            ), *generated_identity_errors(value, payload=payload, source_indexes=_sx, required_dialogue=_req, dialect=profile.render_format)],
             operation_id=f"storyboard_pack_segment_{episode_id}_{plan.segment_no}_{fingerprint}",
             max_tokens=SEGMENT_PROMPT_ANSWER_TOKENS,
             format_retry_limit=1,

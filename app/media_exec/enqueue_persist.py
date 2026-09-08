@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+from app.media_exec.enqueue_prompt import segment_identity_fingerprint
+
 import json
 from typing import Any
 
@@ -35,6 +37,7 @@ def build_base_image_meta(
     from app.video_prompt_ai import AI_VIDEO_PROMPT_CONTRACT_VERSION
 
     return {
+        "segment_identity_fingerprint": segment_identity_fingerprint(shot),
         "mode": decision.mode,
         "mode_decision": video_modes.decision_to_dict(decision),
         "after_shot_id": chain_after_shot_id,

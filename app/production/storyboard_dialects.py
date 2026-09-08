@@ -131,37 +131,14 @@ JSON 字段或分点罗列）。
   光带以极高速度横穿画面并留下拖影」）。
 - 若这是全片收尾段，最后一镜必须是大远景或缓慢升起拉远的格局镜，不能停在
   人物中近景上。
-- 台词分「画内说话」与「画外音」两种，对应结构化产出 dialogue[] 每一条的
-  delivery 字段：角色在画面里张嘴说出的台词填 spoken_dialogue（默认值，不用
-  特意声明）；不需要本人张嘴、由角色声音外化说出的内容（内心独白外化、
-  因果/动机/关键设定的旁白性交代）填 offscreen_voice。写画外音时，在它
-  发生的那个「镜头N」动作链里单独标注「画外音（角色名）：『……』」——不要
-  写进结尾「全片贯穿」段，那一段不再出现任何台词原话（见后文）；如果这一镜
-  画面里同时出现这个角色，这个角色的口型必须固定写成「嘴唇闭合无张合动作」，
-  禁止写「嘴唇微动」「嘴唇轻轻开合」这类措辞——这类措辞会被理解成他正在
-  小声开口，让观众以为他在自言自语；同一集里画内画外的口型写法必须统一成
-  这一句，不要一处写「嘴唇没有张合动作」、另一处又写「嘴唇微动」。
-- 台词不是先攒在一起最后再分配镜头，而是每一句台词在写「镜头N」的动作链
-  时就直接嵌进去，作为这一镜的具体动作出现，例如「镜头3：中近景，@王有材
-  嘴唇开合喊出：『……』」；画外音同理，写进它对应画面所在的那个「镜头N」。
-  不要把本段所有台词都堆到结尾「全片贯穿」段再让模型自己回头分配到镜头
-  ——实测段 11 三人三句、段 17 三句台词全部堆在「全片贯穿」，模型自行分配
-  台词到镜头，口型和内容对不上的概率很高。每一句台词只写在它发生的那个
-  「镜头N」这一处，「全片贯穿」段不再重复这些台词——结尾段汇总重申的只是
-  环境音、配乐、风格与约束（见下一条），不包含任何台词原话。逐镜动作链
-  里出现的台词文本与 dialogue[] 两处必须逐字一致——这是在既有『dialogue[]
-  与音频描述互相印证』规则之上的收窄：两处说的必须是同一份清单，不是
-  各自独立的两份内容，也不要在「全片贯穿」段里再抄一份第三份。
-- 一个引号里只放一句话：引号内的内容以一个句号/问号/感叹号收尾。原文一句
-  台词如果本身用逗号、顿号连接但语义上是一句连贯的陈述（例如「我自己都
-  快养不活了，还碰上个祖宗。」——中间带一个逗号，整体仍是一句话），保持
-  一个引号整句写出；如果原文一句台词其实是两个或更多独立的陈述/疑问/
-  感叹句连在一起，就按句号/问号/感叹号拆成多个引号连续写在一起（例如
-  『你来做什么？』『我不是说过别再来了。』），仍然归同一个说话人、写进
-  同一条 dialogue[]——dialogue[].text 保留这句台词的完整原文，只有
-  prompt_text 正文里的引号按句子拆开写。
+- dialogue[] 每句明确声明说话人、delivery 与 delivery_kind，区分画内对白、
+  人物画外对白、内心独白和旁白。本人出镜与是否开口分别由 visibility 与发声方式决定。
+- 在每句发生的「镜头N」动作链准确位置写 {{{{speech:U01}}}} 等占位符，每句一次。
+  原话只写在 dialogue[].line，系统从同一合同展开中文声道标签、原话和口型要求。
+  画外音展开后人物嘴唇闭合无张合动作；画内对白只有发声主体开口。
+  全片贯穿段只汇总环境音、配乐、风格和约束，台词占位符留在对应的镜头中。
 - 本段 required_dialogue 给出的台词是上一阶段已经按 15 秒容量分配好的必保
-  台词，必须逐句全部说出、写进 dialogue[] 与 prompt_text，不得因为篇幅紧张
+  台词，原话完整写入 dialogue[]，每句占位符写进 prompt_text，不得因为篇幅紧张
   自行取舍或省略；只有当你还想在这些必保台词之外再补充原文里的其它对话、
   而本段容量确实装不下全部时，才需要自己取舍——优先保留一到两句最要紧的，
   其余改用画面交代（张嘴又闭上、摇头、把东西递过去、转身就走），留给后面的
@@ -170,8 +147,7 @@ JSON 字段或分点罗列）。
   与配乐不能留空，约束里必须包含「面部一致、手指正确、人数锁定、无字幕
   水印、人物与家具不穿插」。这一段只负责环境音、配乐、风格与约束这四类信息，不写任何台词
   原话——每一句台词已经写在它发生的那个「镜头N」动作链里，这里不用引号
-  重复台词，也不必写「XX说话声」这类概括去代替它；dialogue[] 与逐镜动作链
-  两处台词逐字一致的要求见上一条，这一段不构成第三处、也不必对照。
+  重复台词，也不必写「XX说话声」这类概括去代替它；系统展开 dialogue[] 与逐镜占位符后，逐镜原话与台词合同完全一致。
 - 本段所有台词加起来不超过 {config.MAX_SPOKEN_CHARS_PER_SHOT} 个字（只数
   汉字与字母数字，不数标点和说话人名）。这是 15 秒能说完的物理容量
   （约 {config.SPOKEN_CHARS_PER_5_SECONDS / 5:.1f} 字/秒），不是风格偏好：
@@ -239,32 +215,17 @@ Rules:
   speed (e.g. "The camera pushes in with small amplitude at slow speed
   toward her hands"), not a stack of tags at the end of the sentence. One
   dominant camera move per shot.
-- Speaking characters get a stable ID: (S1), (S2)... reused across shots for
-  the same character. Put age/voice/accent context outside the <d> block;
-  dialogue text goes verbatim inside: (S1) says: <d>[Chinese] 原话</d>.
-  Off-screen voice uses "says in an off-screen voiceover" and must state the
-  on-screen character's lips remain fully closed with no movement at all --
-  never write anything like "lips move slightly" or "lips faintly part",
-  which reads as the character quietly speaking and defeats the point of
-  marking the line off-screen. Set that dialogue line's ``delivery`` to
-  ``offscreen_voice`` in the structured output (dialogue[].delivery);
-  on-screen spoken lines use the default ``spoken_dialogue``.
-- Do not gather every line of dialogue up front and leave shot placement as
-  an afterthought: each line belongs inside the specific [Shot N] where
-  that character is shown speaking it (or, for an off-screen line, the shot
-  depicting whatever it narrates over), written as
-  "(S1) says: <d>...</d>" inside that shot's own sentence -- never bundled
-  into one shot's description just because the segment is short on events.
-  This project has seen lines get lumped together with shots assigned to
-  them arbitrarily afterward, which raises the odds that the lip movement
-  visible in a shot does not match the words attached to it.
-- required_dialogue lists the lines already budget-allocated to this segment
-  in the previous stage; every one of them must be spoken verbatim in full
-  and appear in both dialogue[] and integrated_multimodal_description -- do
-  not drop or trim any of them for space. Only when you want to add lines
-  beyond required_dialogue, and this segment's capacity genuinely cannot fit
-  everything, pick the one or two additional lines that carry the scene and
-  let the picture do the rest; leave the remainder to later segments.
+- Each dialogue entry declares utterance_id, speaker_identity_id, delivery,
+  and delivery_kind. Place {{{{speech:U01}}}} once inside its specific [Shot N]
+  integrated_multimodal_description at the intended speaking time.
+  Keep the original words only in dialogue[].line. The system renders stable
+  (S1) speaker IDs, says: <d>[Chinese] original words</d> blocks, and mouth
+  instructions from this same contract. An off-screen voiceover states that
+  all on-screen lips remain fully closed with no movement.
+- Every required_dialogue line appears verbatim in dialogue[] and has one
+  placeholder in integrated_multimodal_description. The system inserts each
+  exact line there after validation. Additional dialogue stays within the
+  segment's spoken-word budget and refers to this segment's source text.
 - All dialogue in this segment adds up to at most
   {config.MAX_SPOKEN_CHARS_PER_SHOT} characters (count CJK characters and
   alphanumerics only, not punctuation or speaker names). That is how much

@@ -1485,7 +1485,6 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
             previous_prompt_text=previous_prompt_text,
         )
 
-    # 参考图是分镜级素材。重抽、改词或带评语只创建新视频版本，不能重新跑参考图生成。
     reference_gallery, current_reference_manifest = enqueue_prompt.resolve_reference_gallery(
         conn, shot_id, shot_row, ep, shot, screenplay, bible,
     )
@@ -1529,7 +1528,6 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         boundary_start_state=boundary_start_state,
     )
     enqueue_persist.apply_shot_plan_meta(image_meta, shot_plan)
-    image_meta["segment_identity_fingerprint"] = enqueue_prompt.segment_identity_fingerprint(shot)
     enqueue_persist.apply_optional_meta(
         image_meta, preflight_repair=preflight_repair, dependency_snapshot=dependency_snapshot,
         critique_sources=critique_sources, reference_gallery=reference_gallery,
