@@ -992,6 +992,7 @@ async def _generate_all_segment_prompts(
     required_dialogue_by_segment_no: dict[int, list[dict[str, Any]]],
     conn: Any,
     project_id: str,
+    reuse_segments: dict[int, _AiStoryboardSegmentDraft] | None = None,
 ) -> dict[int, _AiStoryboardSegmentDraft]:
     """逐段独立调用产出全部段落的 prompt_text（2.0.8 起，替代整集批量调用）。
 
@@ -1027,6 +1028,12 @@ async def _generate_all_segment_prompts(
         _ensure_segment_prompt_budget()
         relevant_assets = _segment_relevant_assets(payload, plan.source_segment_indexes)
         relevant_assets_by_segment_no[plan.segment_no] = relevant_assets
+        if reuse_segments and plan.segment_no in reuse_segments:
+            draft = reuse_segments[plan.segment_no]
+            by_segment_no[plan.segment_no] = draft
+            camera_digest_by_segment_no[plan.segment_no] = draft.camera_digest
+            delivered_lines.extend((plan.segment_no, line.speaker_identity_id, line.line) for line in draft.dialogue)
+            continue
         previous_draft = by_segment_no.get(plan.segment_no - 1)
         previous_segment_no = plan.segment_no - 1 if previous_draft is not None else None
         previous_memo = previous_draft.continuity_memo if previous_draft is not None else None
