@@ -67,6 +67,10 @@ class DialogueQuote(BaseModel):
     note: str = ""
     start_offset: int = -1  # 相对 segment.text 的偏移，-1 表示未知
     end_offset: int = -1
+    speaker_identity_id: str = ""
+    listener_names: list[str] = Field(default_factory=list)
+    excluded_speaker_identity_ids: list[str] = Field(default_factory=list)
+    delivery_kind: str = ""
 
 
 class _AiKeptLine(BaseModel):
@@ -360,6 +364,12 @@ def required_dialogue_for_segments(
             "text": quote.text,
             "source_segment_index": quote.source_segment_index,
             **({"speaker": quote.speaker} if quote.speaker else {}),
+            "speaker_identity_id": quote.speaker_identity_id,
+            "note": quote.note,
+            "delivery_kind": quote.delivery_kind,
+            "source_start": quote.start_offset,
+            "source_end": quote.end_offset,
+            "excluded_speaker_identity_ids": quote.excluded_speaker_identity_ids,
         })
     return result
 

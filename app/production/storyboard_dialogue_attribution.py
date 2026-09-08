@@ -21,6 +21,8 @@ import re
 from typing import Any
 
 from app import textmatch
+from app.production.storyboard_identity_scope import scoped_name_map
+from app.production.storyboard_speaker_context import dialogue_listeners
 
 _LOGGER = logging.getLogger(__name__)
 NARRATOR = "旁白"
@@ -41,7 +43,7 @@ def _sorted_names(names: list[str] | set[str]) -> list[str]:
 #: 『……觉得虎爷声音大？』孟浩翻了个白眼——按最近名字归给孟浩，实际是虎爷在说）。
 _UTTERANCE_VERB_RE = (
     r"(?:说|道|问|喊|叫|笑|哼|骂|吼|叹|答|应|念|呼|嚷|喃|想|心|暗|沉声|冷声|轻声|低声|大声|淡淡|开口"
-    r"|沉吟|嘀咕|自语|嘲|喝|呢喃|咕哝|嘟囔|思忖|疑惑|惊|摇头|摇了摇头|点头|点了点头|皱眉|皱了皱眉|眯|瞪|冷冷|怒|急)"
+    r"|沉吟|嘀咕|自语|嘲|喝|呢喃|咕哝|嘟囔|思忖)"
 )
 
 
@@ -118,17 +120,9 @@ def strip_tail_dialogue(prompt_text: str) -> tuple[str, list[str]]:
     return head + cleaned, removed
 
 
-def manifest_name_to_identity(payload: dict[str, Any]) -> dict[str, str]:
+def manifest_name_to_identity(payload: dict[str, Any], segment_source_indexes: list[int] | None = None) -> dict[str, str]:
     """人物谱正名/别名 → identity_id（阶段二 dialogue[].speaker_identity_id 的取值域）。"""
-    mapping: dict[str, str] = {}
-    for character in (payload.get("asset_manifest") or {}).get("characters") or []:
-        identity = str(character.get("identity_id") or "")
-        if not identity:
-            continue
-        for name in [character.get("display_name"), *(character.get("aliases") or [])]:
-            if name:
-                mapping.setdefault(str(name).strip(), identity)
-    return mapping
+    return scoped_name_map(payload, segment_source_indexes)
 
 
 def _source_sentences(source_text: str) -> list[str]:
@@ -183,14 +177,16 @@ def dialogue_speaker_errors(
 ) -> list[str]:
     """必保台词说话人一致性（报错）、画外音可追溯性（报错）、叙述句画外音改旁白（就地修补）。"""
     errors: list[str] = []
-    identity_to_name = {v: k for k, v in name_to_identity.items()}
+    identity_to_name: dict[str, str] = {}
+    for name, identity in name_to_identity.items():
+        identity_to_name.setdefault(identity, identity.split(":", 1)[-1] if identity.startswith("bible:") else name)
     condensed = [textmatch.condense(line.line) for line in draft.dialogue]
     needles = [textmatch.condense(str(item.get("text") or "")) for item in required_dialogue]
     # 账本项与草稿台词先按逐字相等配对；只有没有精确命中的才退到包含匹配，且不再抢别人精确命中的那句。
     # 第 29 集实测：『认输……』是『上去就立刻认输。』的子串，包含匹配把两句的说话人交叉判错，三次重试整集失败。
     exact_claimed = {index for index, text in enumerate(condensed) if text in needles}
     for item, needle in zip(required_dialogue, needles):
-        expected = name_to_identity.get(str(item.get("speaker") or "").strip())
+        expected = item.get("speaker_identity_id") or name_to_identity.get(str(item.get("speaker") or "").strip())
         if not expected or not needle:
             continue
         exact = [index for index, text in enumerate(condensed) if text == needle]
@@ -200,7 +196,7 @@ def dialogue_speaker_errors(
         ]
         for index in matched:
             line = draft.dialogue[index]
-            if line.speaker_identity_id != expected and line.speaker_identity_id != NARRATOR:
+            if line.speaker_identity_id != expected:
                 errors.append(
                     f"dialogue[{index}]『{line.line[:20]}』的说话人按原文归属应为「{item.get('speaker')}」"
                     f"（identity_id={expected}），当前写成「{line.speaker_identity_id}」；请把 dialogue[] 与 "
@@ -222,11 +218,10 @@ def dialogue_speaker_errors(
             draft.prompt_text = _scrub_offscreen_line(draft.prompt_text, line.line)
             _LOGGER.info("[STORYBOARD_OFFSCREEN_DROPPED] dialogue[%s]『%s』追溯不到原文，已删除", index, line.line[:24])
             continue
-        if not in_quotes and line.speaker_identity_id != NARRATOR:
+        explicit = any(textmatch.condense(str(item.get("text") or "")) == textmatch.condense(line.line) and (item.get("speaker") or item.get("speaker_identity_id")) for item in required_dialogue)
+        if not in_quotes and not explicit and line.speaker_identity_id != NARRATOR:
             old = identity_to_name.get(line.speaker_identity_id, line.speaker_identity_id)
-            draft.prompt_text = _rewrite_offscreen_label(draft.prompt_text, old, line.line)
-            _LOGGER.info("[STORYBOARD_SPEAKER_REPAIR] 画外音『%s』来自叙述句，说话人「%s」改为旁白", line.line[:20], old)
-            line.speaker_identity_id = NARRATOR
+            errors.append(f"dialogue[{index}]『{line.line[:20]}』缺少人物发声证据；若是叙述者讲述，请将 speaker_identity_id 和提示词共同改为旁白；若为人物自述，请提供原文发声依据。当前归属「{old}」未被自动改写")
     if dropped:
         draft.dialogue = [line for i, line in enumerate(draft.dialogue) if i not in dropped]
     return errors
@@ -259,7 +254,7 @@ def unattributed_quote_speaker_errors(
     for index, line in enumerate(draft.dialogue):
         speaker = str(line.speaker_identity_id or "")
         name = identity_to_name.get(speaker, "")
-        if not speaker.startswith("bible:") or not name:
+        if not speaker or not name:
             continue
         needle = textmatch.condense(line.line)
         if not any(needle in u or u in needle for u in unattributed if u):
@@ -268,15 +263,15 @@ def unattributed_quote_speaker_errors(
         if span is None:
             continue
         start, end = span
-        after = source_text[end:end + POST_WINDOW]
         # 只认「引号后紧跟 X听/闻」这一条正向证据：X 不在窗口里不算错——对话轮替、自称（「为兄」）
         # 都能合法推断出说话人（第 4 集实测按缺席打回是误伤，整集分镜台失败）。
-        listener = re.match(r"^[」”』\"，。！？…、\s]{0,3}" + re.escape(name) + _LISTENER_CUE_RE, after)
+        listener = name in dialogue_listeners(source_text, start, end, list(identity_to_name.values()))
+        listener = listener or any(speaker in (item.get("excluded_speaker_identity_ids") or []) and textmatch.condense(str(item.get("text") or "")) == needle for item in required_dialogue)
         if listener:
             errors.append(
                 f"dialogue[{index}]『{line.line[:20]}』原文没有点名说话人，引号后原文是「{name}听/闻……」，"
                 f"{name} 是听者不是说话人，不得安给具名角色；speaker 改用本段 relevant_assets.characters 里的"
-                "无名人物（entity），没有无名人物就写旁白按画外音处理，prompt_text 里这句也不得让具名角色张嘴说"
+                "无名人物（entity）或 functional_extras 的 visual_entity_id；缺失时保留原文无名说话人的独立称谓并提供来源，prompt_text 与台词归属一起修正"
             )
     return errors
 

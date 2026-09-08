@@ -31,6 +31,7 @@ import re
 
 from app import config, spoken_contract
 from app.production.storyboard_dialogue_attribution import attribute_prose_speaker
+from app.production.storyboard_speaker_context import dialogue_listeners, note_delivery_kind
 from app.production.storyboard_dialogue_ledger import (
     _QUOTE_PATTERNS,
     DialogueQuote,
@@ -167,7 +168,11 @@ def extract_dialogue_targets(
     names = {name.strip() for name in speaker_names if name and name.strip()}
     quotes: list[DialogueQuote] = []
     counter = 0
+    full_text = "\n\n".join(s.text if i not in paratext_indexes else "\n---\n" for i, s in enumerate(segments, 1))
+    source_cursor = 0
     for index, segment in enumerate(segments, start=1):
+        segment_start = source_cursor
+        source_cursor += len(segment.text if index not in paratext_indexes else "\n---\n") + 2
         if index in paratext_indexes:
             continue
         if names and _segment_has_speaker_line(segment.text, names):
@@ -185,5 +190,7 @@ def extract_dialogue_targets(
                 note=note,
                 start_offset=start,
                 end_offset=end,
+                delivery_kind=note_delivery_kind(speaker, note),
+                listener_names=dialogue_listeners(full_text, segment_start + start, segment_start + end, sorted(names)),
             ))
     return quotes
