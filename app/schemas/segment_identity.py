@@ -8,6 +8,7 @@ DeliveryKind = Literal["spoken_dialogue", "offscreen_dialogue", "inner_monologue
 
 
 class SegmentDialogue(BaseModel):
+    utterance_id: str = ""
     speaker_identity_id: str
     line: str
     source_segment_index: int

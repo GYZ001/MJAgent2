@@ -26,6 +26,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.production.storyboard_extras_reconcile import reconcile_persisted_extra_ids
+from app.production.storyboard_identity_scope import scoped_identity_candidates
 from app.schemas import is_narrator_label
 
 
@@ -57,31 +58,32 @@ def resolve_persisted_character_ids(
         str(c.get("identity_id") or "")
         for c in (payload.get("asset_manifest") or {}).get("characters") or []
     }
-    appellation_by_raw = {
-        str(row.get("raw_mention") or ""): str(row.get("identity_id") or "")
-        for row in payload.get("appellation_map") or []
-        if row.get("raw_mention") and row.get("identity_id")
-    }
     functional_extras = (payload.get("asset_manifest") or {}).get("functional_extras") or []
+    manifest_ids.update(str(e.get("visual_entity_id") or "") for e in functional_extras)
 
     # resolved[i] is None until settled; None never survives to the return
     # value (every non-narrator branch below assigns a str, including the
     # WS12 fallback which — worst case — echoes the raw id back unchanged).
     resolved: list[str | None] = []
     pending: list[tuple[int, str]] = []
+    notes: list[str] = []
     for raw_id in identity_ids:
         if is_narrator_label(raw_id):
             resolved.append(None)
             continue
         if raw_id in manifest_ids:
             resolved.append(raw_id)
-        elif raw_id in appellation_by_raw:
-            resolved.append(appellation_by_raw[raw_id])
         else:
-            pending.append((len(resolved), raw_id))
-            resolved.append(None)
+            candidates = scoped_identity_candidates(payload, raw_id, segment_source_indexes)
+            if len(candidates) == 1:
+                resolved.append(next(iter(candidates)))
+            elif candidates:
+                resolved.append(raw_id)
+                notes.append(f"[STORYBOARD_IDENTITY_AMBIGUOUS] 称谓「{raw_id}」在本段对应多个身份，已保留原称谓，请核对该段映射")
+            else:
+                pending.append((len(resolved), raw_id))
+                resolved.append(None)
 
-    notes: list[str] = []
     if pending:
         merged_ids, merge_notes = reconcile_persisted_extra_ids(
             [raw_id for _, raw_id in pending], segment_source_indexes, functional_extras,

@@ -53,7 +53,14 @@ from app.evidence import repository as evidence_repository
 from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
 from app.production.storyboard_capacity_normalize import normalize_and_assert_capacity
-from app.production.storyboard_pack_identity import resolve_persisted_character_ids
+from app.production.storyboard_identity_contract import canonical_segment_identities, visible_character_ids
+from app.production.storyboard_identity_scope import bind_quote_identities
+from app.production.storyboard_identity_generation import (
+    IDENTITY_GENERATION_RULES, generated_identity_errors, finalize_generated_identity,
+)
+from app.schemas.segment_identity import (
+    SegmentDialogue as _AiDialogueLine, SegmentCharacter as _AiResourceCharacter,
+)
 from app.production.storyboard_pack_montage import fill_montage_beat_time_anchors
 from app.production.storyboard_prop_assets import enrich_prop_manifest_entries
 from app.production.storyboard_dialects import (
@@ -674,21 +681,6 @@ def _enrich_asset_manifest_canonical_visuals(
 # 阶段二：逐段提示词
 # ---------------------------------------------------------------------------
 
-class _AiDialogueLine(BaseModel):
-    speaker_identity_id: str
-    line: str
-    source_segment_index: int
-    #: 2.1.0 受控画外音：默认画内说话；因果/动机/关键设定的旁白性交代填
-    #: offscreen_voice。旧数据行没有这个键时按 spoken_dialogue 处理。
-    delivery: Literal["spoken_dialogue", "offscreen_voice"] = "spoken_dialogue"
-
-
-class _AiResourceCharacter(BaseModel):
-    identity_id: str
-    portrait_id: str | None = None
-    description: str = ""
-
-
 class _AiResourceScene(BaseModel):
     scene_id: str
     scene_reference_id: str | None = None
@@ -722,6 +714,10 @@ class _AiCameraDigest(BaseModel):
 
 
 class _AiStoryboardSegmentDraft(BaseModel):
+    identity_contract_version: str = ""
+    identity_contract_fingerprint: str = ""
+    speech_template: str = ""
+    speech_dialect: str = ""
     prompt_text: str = Field(min_length=1)
     shot_count: int = Field(ge=MIN_SHOTS_PER_SEGMENT, le=MAX_SHOTS_PER_SEGMENT)
     dialogue: list[_AiDialogueLine] = Field(default_factory=list)
@@ -1019,7 +1015,7 @@ async def _generate_all_segment_prompts(
     beats_by_id = {beat.beat_id: beat for beat in beat_draft.beat_sheet}
     paratext_indexes = _paratext_segment_indexes(payload)
     visual_style = bible.world.visual_style_canonical if bible is not None and bible.world is not None else ""
-    shared_rules = _segment_shared_rules()
+    shared_rules = [*_segment_shared_rules(), *IDENTITY_GENERATION_RULES]
 
     by_segment_no: dict[int, _AiStoryboardSegmentDraft] = {}
     camera_digest_by_segment_no: dict[int, _AiCameraDigest] = {}
@@ -1051,7 +1047,7 @@ async def _generate_all_segment_prompts(
             "task": (
                 "为下面这一段原文和节拍写一整段可直接投喂视频生成模型的提示词（prompt_text）。"
                 "prompt_text 必须是完整、可直接复制使用的一整块文本，不要拆成多个片段或只写关键词"
-                "——你产出的字符串会被原样保存并原样提交给视频生成接口，不会再被代码拼接、改写或补充任何后缀。"
+                "——镜头正文保持你的安排，speech 占位符由已校验的台词合同展开，参考图由主体身份精确绑定。"
             ),
             "rules": [
                 *phase2_segment_rules(
@@ -1136,10 +1132,10 @@ async def _generate_all_segment_prompts(
             model_type=_AiStoryboardSegmentDraft,
             validate=lambda value, _req=required_dialogue, _pm=previous_memo,
             _st=source_payload["source_text_by_segment"], _dl=list(delivered_lines), _rv=reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no),
-            _no=plan.segment_no, _n2i=manifest_name_to_identity(payload): _validate_segment_draft(
+            _no=plan.segment_no, _n2i=manifest_name_to_identity(payload, plan.source_segment_indexes), _sx=plan.source_segment_indexes: [*_validate_segment_draft(
                 value, dialect_render_format=profile.render_format, required_dialogue=_req, name_to_identity=_n2i,
                 previous_memo=_pm, segment_source_text=_st, delivered_lines=_dl, reserved_lines=_rv, current_segment_no=_no,
-            ),
+            ), *generated_identity_errors(value, payload=payload, source_indexes=_sx, required_dialogue=_req)],
             operation_id=f"storyboard_pack_segment_{episode_id}_{plan.segment_no}_{fingerprint}",
             max_tokens=SEGMENT_PROMPT_ANSWER_TOKENS,
             format_retry_limit=1,
@@ -1157,6 +1153,8 @@ async def _generate_all_segment_prompts(
             },
             repair_context=f"第 {plan.segment_no} 段（本集共 {len(beat_draft.segments)} 段）",
         )
+        draft = finalize_generated_identity(draft, payload=payload, source_indexes=plan.source_segment_indexes,
+                                            required_dialogue=required_dialogue, dialect=profile.render_format)
         camera_digest_by_segment_no[plan.segment_no] = draft.camera_digest
         by_segment_no[plan.segment_no] = draft
         delivered_lines.extend(
@@ -1213,6 +1211,10 @@ class StoryboardPackSegment(BaseModel):
     # segment_indexes happens to overlap this segment's source range without
     # the model having assigned it here, or vice versa).
     beat_ids: list[str] = Field(default_factory=list)
+    identity_contract_version: str = ""
+    identity_contract_fingerprint: str = ""
+    speech_template: str = ""
+    speech_dialect: str = ""
     prompt_text: str
     shot_count: int
     dialogue: list[dict[str, Any]]
@@ -1265,7 +1267,8 @@ def _manifest_speaker_names(payload: dict[str, Any]) -> list[str]:
     ——与 ``_manifest_brief_for_prompt``（storyboard_beat_sheet.py）读的是同一
     份数据，取值域来自映射台已经解析好的人物谱，不新造一套判定逻辑。
     """
-    names: list[str] = []
+    names: list[str] = ["旁白"]
+    names.extend(str(e["label"]) for e in (payload.get("asset_manifest") or {}).get("functional_extras") or [] if e.get("label"))
     for character in (payload.get("asset_manifest") or {}).get("characters") or []:
         display_name = character.get("display_name")
         if display_name:
@@ -1316,6 +1319,7 @@ async def generate_storyboard_pack(
     dialogue_quotes = extract_dialogue_targets(
         segments, paratext_indexes, speaker_names=_manifest_speaker_names(payload),
     )
+    bind_quote_identities(dialogue_quotes, payload)
 
     beat_draft = await _generate_beat_sheet(
         episode_id=episode_id, episode_no=episode_no, segments=segments, payload=payload,
@@ -1361,6 +1365,10 @@ async def generate_storyboard_pack(
             beat_ids=list(plan.beat_ids),
             prompt_text=segment_drafts[plan.segment_no].prompt_text.strip(),
             shot_count=segment_drafts[plan.segment_no].shot_count,
+            identity_contract_version=segment_drafts[plan.segment_no].identity_contract_version,
+            identity_contract_fingerprint=segment_drafts[plan.segment_no].identity_contract_fingerprint,
+            speech_template=segment_drafts[plan.segment_no].speech_template,
+            speech_dialect=segment_drafts[plan.segment_no].speech_dialect,
             dialogue=[
                 line.model_dump(mode="json")
                 for line in segment_drafts[plan.segment_no].dialogue
@@ -1614,9 +1622,8 @@ def persist_storyboard_pack(
     }
     shot_ids: list[str] = []
     for segment in pack.segments:
-        character_ids, extra_reconcile_notes = resolve_persisted_character_ids(
-            payload, [str(c.get("identity_id") or "") for c in (segment.resources.get("characters") or [])],
-            segment_source_indexes=segment.source_segment_indexes)
+        segment_record = canonical_segment_identities(segment.model_dump(mode="json"), payload)
+        character_ids = visible_character_ids(segment_record)
         scene_entries = segment.resources.get("scenes") or []
         scene_display_name = (
             _resource_scene_display_name(payload, scene_entries[0].get("scene_id"))
@@ -1635,11 +1642,6 @@ def persist_storyboard_pack(
         scene_time = _timeline_anchor_scene_time(segment_timeline_anchors)
         shot_id = new_id("shot")
         shot_uid = new_id("shotuid")
-        segment_record = segment.model_dump(mode="json")
-        # WS12：归并歧义提示并入 degraded_capabilities（见 app.production.
-        # storyboard_extras_reconcile 模块 docstring）。
-        if extra_reconcile_notes:
-            segment_record["degraded_capabilities"] += extra_reconcile_notes
         # WS9：附加键，不覆盖既有 "beats"；供 resource_forecast 等读锚点详情。
         segment_record["timeline_anchors"] = segment_timeline_anchors
         # WS11：montage_beats 真源在这——不得再被下面 beat_ids 摘要重写覆盖
@@ -1678,7 +1680,7 @@ def persist_storyboard_pack(
                 emotion="平静",
                 delivery=str(line.get("delivery") or "spoken_dialogue"),  # 2.1.0：旧行无此键按前者处理
             ).model_dump()
-            for line in segment.dialogue
+            for line in segment_record["dialogue"]
         ]
         # continuity_mode/transition/first_frame_desc/last_frame_desc describe a
         # single continuous camera setup and are not meaningful once one row
