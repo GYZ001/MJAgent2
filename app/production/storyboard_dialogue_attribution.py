@@ -187,7 +187,7 @@ def dialogue_speaker_errors(
     exact_claimed = {index for index, text in enumerate(condensed) if text in needles}
     for item, needle in zip(required_dialogue, needles):
         expected = item.get("speaker_identity_id") or name_to_identity.get(str(item.get("speaker") or "").strip())
-        if not expected or not needle:
+        if not needle:
             continue
         exact = [index for index, text in enumerate(condensed) if text == needle]
         matched = exact or [
@@ -196,7 +196,11 @@ def dialogue_speaker_errors(
         ]
         for index in matched:
             line = draft.dialogue[index]
-            if line.speaker_identity_id != expected:
+            if line.speaker_identity_id in (item.get("excluded_speaker_identity_ids") or []):
+                errors.append(f"dialogue[{index}]『{line.line[:20]}』的「{line.speaker_identity_id}」是原文对话块的听者，不是说话人，请改为有原文依据的独立发声主体")
+            if item.get("delivery_kind") and getattr(line, "delivery_kind", "") and item["delivery_kind"] != line.delivery_kind:
+                errors.append(f"dialogue[{index}] 的发声类型应保持原文的 {item['delivery_kind']}")
+            if expected and line.speaker_identity_id != expected:
                 errors.append(
                     f"dialogue[{index}]『{line.line[:20]}』的说话人按原文归属应为「{item.get('speaker')}」"
                     f"（identity_id={expected}），当前写成「{line.speaker_identity_id}」；请把 dialogue[] 与 "
@@ -210,10 +214,15 @@ def dialogue_speaker_errors(
         if line.delivery != "offscreen_voice":
             continue
         traceable, in_quotes = _trace_to_source(line.line, segment_source_text)
+        if in_quotes and line.speaker_identity_id == NARRATOR and not any(item.get("speaker") == NARRATOR and textmatch.condense(str(item.get("text") or "")) == textmatch.condense(line.line) for item in required_dialogue):
+            errors.append(f"dialogue[{index}]『{line.line[:20]}』是原文人物引语，不能因说话人未知就改为旁白，请保留独立发声主体")
         if not traceable:
             # 模型把原文转述成画外音（「小胖子有家财万贯，我却一穷二白欠着债」）时，打回让它改成原文句
             # 三次仍如此、整集失败（2026-09-05 第 2 集）。画外音是可选的旁白性交代，追溯不到就删掉
             # 这一条（对白与提示词里都删），画面照常——空着诚实，转述是编造。
+            if any(textmatch.condense(str(item.get("text") or "")) == textmatch.condense(line.line) for item in required_dialogue):
+                errors.append(f"dialogue[{index}] 必保台词无法追溯，请核对原文来源后重写此片段")
+                continue
             dropped.append(index)
             draft.prompt_text = _scrub_offscreen_line(draft.prompt_text, line.line)
             _LOGGER.info("[STORYBOARD_OFFSCREEN_DROPPED] dialogue[%s]『%s』追溯不到原文，已删除", index, line.line[:24])

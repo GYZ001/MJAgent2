@@ -364,12 +364,11 @@ def required_dialogue_for_segments(
             "text": quote.text,
             "source_segment_index": quote.source_segment_index,
             **({"speaker": quote.speaker} if quote.speaker else {}),
-            "speaker_identity_id": quote.speaker_identity_id,
-            "note": quote.note,
-            "delivery_kind": quote.delivery_kind,
-            "source_start": quote.start_offset,
-            "source_end": quote.end_offset,
-            "excluded_speaker_identity_ids": quote.excluded_speaker_identity_ids,
+            **({"speaker_identity_id": quote.speaker_identity_id} if quote.speaker_identity_id else {}),
+            **({"note": quote.note} if quote.note else {}),
+            **({"delivery_kind": quote.delivery_kind} if quote.delivery_kind else {}),
+            **({"source_start": quote.start_offset, "source_end": quote.end_offset} if quote.start_offset >= 0 else {}),
+            **({"excluded_speaker_identity_ids": quote.excluded_speaker_identity_ids} if quote.excluded_speaker_identity_ids else {}),
         })
     return result
 

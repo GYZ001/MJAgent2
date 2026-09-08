@@ -19,6 +19,14 @@ import json
 from typing import Any
 
 from app.compiler import ensure_source_excerpt_in_prompt
+from app.production.storyboard_identity_submission import assert_segment_submission
+from app.production.storyboard_identity_contract import identity_contract_fingerprint
+
+
+def segment_identity_fingerprint(shot) -> str:
+    """旧式镜头不受新合同影响；分镜包复用键包含片段的实际身份数据。"""
+    segment = getattr(shot, "storyboard_pack_segment", None)
+    return identity_contract_fingerprint(segment) if segment else ""
 
 
 def storyboard_pack_prompt_text(shot) -> str:
@@ -32,6 +40,7 @@ def storyboard_pack_prompt_text(shot) -> str:
             "[STORYBOARD_PACK_PROMPT_MISSING] 该分镜台 2.0.0 段没有已产出的 "
             "prompt_text，请先在分镜台重新生成本段"
         )
+    assert_segment_submission(shot.storyboard_pack_segment, source_text=str(getattr(shot, "source_excerpt", "") or ""))
     return prompt_text
 
 
@@ -185,7 +194,7 @@ def build_idem_key(
     target_prompt_fingerprint: str, prompt_override, previous_prompt_fingerprint: str,
     current_reference_manifest: dict, reference_gallery, reroll: bool,
     operation_idempotency_key, supervisor_run_id, auto_retake_count: int,
-    critique, critique_sources,
+    critique, critique_sources, identity_fingerprint: str = "",
 ) -> str:
     """构建幂等键：普通重复点击复用历史成功版；reroll 显式打破幂等。"""
     from app import video_modes
@@ -205,6 +214,7 @@ def build_idem_key(
         + f"|previous_prompt:{previous_prompt_fingerprint}"
         + f"|reference_input_policy:{video_modes.REFERENCE_INPUT_POLICY_VERSION}"
         + f"|reference_dependencies:{current_reference_manifest.get('input_fingerprint') or ''}"
+        + (f"|segment_identity:{identity_fingerprint}" if identity_fingerprint else "")
     )
     # 只有人工编辑会改变视频输入并打破原幂等键；未编辑画廊沿用历史幂等行为。
     if reference_gallery and reference_gallery["revision"] is not None:

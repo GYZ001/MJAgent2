@@ -20,7 +20,8 @@ def following_dialogue_block(text: str, quote_end: int) -> str:
 
 def dialogue_listeners(text: str, quote_start: int, quote_end: int, names: list[str]) -> list[str]:
     """紧随整个对话块的具名听者。返回否定归属证据，不据此猜测发声者。"""
-    after = following_dialogue_block(text, quote_end).lstrip('」”』"，。！？…、 \n\t')
+    enclosing = next((m for m in QUOTES.finditer(text) if m.start() <= quote_start < m.end()), None)
+    after = following_dialogue_block(text, enclosing.end() if enclosing else quote_end).lstrip('」”』"，。！？…、 \n\t')
     return [name for name in names if name and re.match(re.escape(name) + r".{0,6}(?:听|闻)", after)]
 
 

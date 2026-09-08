@@ -484,7 +484,8 @@ def _storyboard_pack_asset_dependencies(
         if entry.get("visibility") == "voice_only" or identity_id == "旁白":
             continue
         name = str(entry.get("display_name") or _display_name(identity_id) or identity_id)
-        owner_kind, owner = resolve_card_owner(bible, name)
+        card_label = name if identity_id.startswith("entity:") else _display_name(identity_id)
+        owner_kind, owner = resolve_card_owner(bible, card_label)
         has_card = owner_kind == "owner" and entry.get("subject_kind") not in {"extra", "crowd"}
         current = current_portrait_ref(
             project_id, str(owner), episode_no, visual_entity_id=identity_id, conn=conn,

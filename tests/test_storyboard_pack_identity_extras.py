@@ -103,7 +103,7 @@ def test_named_character_appellation_and_ws12_extra_merge_coexist_in_one_call():
                 "visual_entity_id": "entity:f76c5058c82ed3a7",
             }],
         },
-        "appellation_map": [{"raw_mention": "少年", "identity_id": "bible:里奥"}],
+        "appellation_map": [{"raw_mention": "少年", "identity_id": "bible:里奥", "segment_index": 9}],
     }
     resolved, notes = resolve_persisted_character_ids(
         payload, ["少年", "身着藏青色官袍的督邮", "旁白"], segment_source_indexes=[9],

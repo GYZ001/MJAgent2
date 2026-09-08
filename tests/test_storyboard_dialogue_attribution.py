@@ -119,15 +119,15 @@ def test_untraceable_offscreen_line_is_dropped_from_dialogue_and_prompt():
     assert "镜头1：孟浩盘膝而坐。" in draft.prompt_text and "夕阳暖金色光影" in draft.prompt_text
 
 
-def test_narration_derived_offscreen_line_is_reassigned_to_narrator_and_label_rewritten():
+def test_narration_derived_offscreen_line_requires_atomic_rewrite():
     src = "[段1·S01]他们不知道，有些难过是没有表情的。[段1·S02]2014 年，巴西。"
     prompt = "镜头1：里奥站在场边。画外音（里奥）：“有些难过是没有表情的。”\n全片贯穿：环境音；配乐；风格；约束。"
     payload = {"asset_manifest": {"characters": [{"identity_id": "bible:里奥", "display_name": "里奥", "aliases": []}]}}
     line = _Line("bible:里奥", "有些难过是没有表情的。", "offscreen_voice")
     draft = _draft([line], prompt)
-    assert dialogue_speaker_errors(draft, [], manifest_name_to_identity(payload), src) == []
-    assert line.speaker_identity_id == NARRATOR
-    assert "画外音（旁白）：“有些难过是没有表情的。”" in draft.prompt_text
+    assert dialogue_speaker_errors(draft, [], manifest_name_to_identity(payload), src)
+    assert line.speaker_identity_id == "bible:里奥"
+    assert draft.prompt_text == prompt
 
 
 def test_quoted_source_offscreen_line_keeps_character_speaker():

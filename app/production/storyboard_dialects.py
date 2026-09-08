@@ -192,16 +192,10 @@ JSON 字段或分点罗列）。
 - required_dialogue 里带 speaker 的台词，说话人就是它（原文里引号前后的归属，程序已核对），
   dialogue[] 的 speaker_identity_id 用 relevant_assets.characters 里这个正名对应的 identity_id，
   prompt_text 里这句也由同一个人说；画外音只能用本段原文里的句子，不得改写或另造。
-- required_dialogue 里没有 speaker 的引号台词，是原文没有点名说话人的话（群众议论、
-  无名同门的对话）：speaker 用本段 relevant_assets.characters 里的无名人物（identity_id
-  为 entity: 的那种），没有无名人物就写旁白按画外音处理；绝不安给在场的具名角色。
-  引号后紧跟「X听着……」「X闻言……」说明 X 是听者不是说话人（实测：「以王腾飞师兄的
-  资质……」是无名同门的议论，原文写「孟浩听着身边同门的议论」，成片却让孟浩张嘴说这句）。
-- 台词的人称决定 speaker：原文用第三人称叙述这个人物（「他跑得不算快」「他
-  跳得不算高」）时，这是叙述者的画外音，speaker 必须写旁白，不能写成这个
-  人物自己在说第三人称的自己；原文用第一人称自述（「我八岁的时候……」）时，
-  才由这个人物本人配音，speaker 写这个人物在人物谱里的正名。这两种画外音都
-  是 offscreen_voice，区别只在 speaker 是谁。
+- required_dialogue 没有明确 speaker 的引号台词，依据原文确认独立发声主体，
+  可使用 relevant_assets.functional_extras 的 visual_entity_id。原文听者证据已随
+  台词账本保留；听者只负责听。未知说话人保留独立称谓与 attribution_evidence。
+  旁白对应叙述者；人物 OS/VO 与是否使用引号无关，按原文显式声道保留。
 - speaker 与画面里出场的人物一律使用 relevant_assets.characters 给出的正名，
   逐字取用；原文只有称谓、relevant_assets.characters 查不到的人才用称谓本身
   （前面「没有参考图」那条已经讲过怎么处理这类人）。旁白是叙述声音、不是
@@ -346,25 +340,10 @@ Rules:
   monologue delivered while stationary (even if entirely off-screen-voice)
   is still one time and one place; keep it a single consistent scene, do not
   split it into a multi-time summary just because the line is off-screen.
-- Grammatical person decides the speaker tag: a third-person narrating
-  sentence about this character (e.g. "He never ran fast. He never jumped
-  high.") is the narrator's voice -- tag it as the narrator, never as this
-  character speaking about himself in third person. A first-person
-  self-narrating line (e.g. "At eight I was diagnosed...") is this character's
-  own voice-over. Both are off-screen voice; only the speaker tag differs.
-- A quoted line in required_dialogue that carries no speaker is one the source
-  never attributes (crowd chatter, unnamed disciples talking): tag it with an
-  unnamed person from relevant_assets.characters (an entity: identity), or the
-  narrator as off-screen voice when no unnamed person exists; never hand it to
-  a named character who is present. "X listened to..." right after the closing
-  quote marks X as the listener, not the speaker.
-- Every speaker and every on-screen character must use the canonical name
-  given in relevant_assets.characters, copied verbatim; only a person with a
-  mere honorific in the source text that relevant_assets.characters cannot
-  resolve gets referred to by that honorific (see the earlier rule on people
-  with no reference image). The narrator is a voice-over, not a person in the
-  picture -- never list the narrator as an on-screen subject or give the
-  narrator its own establishing shot.
+- Preserve explicit OS/VO source attribution and source speaker evidence.
+  Unnamed speakers use their own functional_extras visual_entity_id or source
+  label with attribution_evidence. Narration is a narrator, never an unknown
+  character fallback. Follow the shared speech-token contract for every line.
 """
 
 
@@ -447,6 +426,8 @@ def reference_mention_errors(prompt_text: str, resources: Any) -> list[str]:
     """
     missing: list[str] = []
     for character in getattr(resources, "characters", []) or []:
+        if getattr(character, "visibility", "unknown") == "voice_only":
+            continue
         identity_id = str(getattr(character, "identity_id", "") or "")
         if not getattr(character, "portrait_id", None) or not identity_id.startswith("bible:"):
             continue

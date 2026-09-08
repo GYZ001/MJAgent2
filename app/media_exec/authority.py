@@ -303,6 +303,8 @@ def _assert_review_dependency_fence(job, version_id: str, write_point: str) -> N
         meta = json.loads(row["image_inputs"] or "{}") if row else {}
     except (TypeError, ValueError, json.JSONDecodeError):
         meta = {}
+    from app.media_exec.identity_fence import assert_identity_revision  # 该围栏依赖本模块初始化后的 fences，由写入边界加载。
+    assert_identity_revision(conn, shot_id=str(job["shot_id"]), meta=meta, write_point=write_point)
     captured = meta.get("review_dependency_snapshot") or {}
     expected = captured.get("qualification_version")
     if not expected:

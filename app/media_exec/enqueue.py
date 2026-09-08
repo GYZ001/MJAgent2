@@ -1498,6 +1498,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         reroll=reroll, operation_idempotency_key=operation_idempotency_key,
         supervisor_run_id=supervisor_run_id, auto_retake_count=auto_retake_count,
         critique=critique, critique_sources=critique_sources,
+        identity_fingerprint=enqueue_prompt.segment_identity_fingerprint(shot),
     )
 
     reused = enqueue_prompt.find_reusable_version(
@@ -1528,6 +1529,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         boundary_start_state=boundary_start_state,
     )
     enqueue_persist.apply_shot_plan_meta(image_meta, shot_plan)
+    image_meta["segment_identity_fingerprint"] = enqueue_prompt.segment_identity_fingerprint(shot)
     enqueue_persist.apply_optional_meta(
         image_meta, preflight_repair=preflight_repair, dependency_snapshot=dependency_snapshot,
         critique_sources=critique_sources, reference_gallery=reference_gallery,

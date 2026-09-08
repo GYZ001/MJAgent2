@@ -263,10 +263,8 @@ def _segment_shared_rules() -> list[str]:
         "内容是「没有标准外观/场景……」这类说明文字时，才由你自行确定"
         "特征——这种情况下你看不到本集其它段落写了什么，无法强制跨段"
         "一致，只需按本段的画面据实描述。",
-        "dialogue[] 与 prompt_text 两处的台词必须互相覆盖、逐句一致："
-        "dialogue[] 列出的每一句台词都必须能在本段 prompt_text 里找到"
-        "对应原话，prompt_text 里写出的台词原话也必须同时登记进本段的 "
-        "dialogue[]，不得只在一处出现。",
+        "dialogue[] 保存全部台词与发声身份；prompt_text 在对应时机使用一一对应的 "
+        "{{speech:utterance_id}}，系统从台词合同展开标签与原话，每句只发声一次。",
         "本段 prompt_text 里出场或说话的角色都必须同时列进 "
         "resources.characters。resources.characters[].identity_id 的合法取值"
         "只有两处、必须逐字整串复制（含冒号与前缀，一个字符都不能改写、"
