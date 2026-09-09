@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -84,6 +85,8 @@ def _backend_processes() -> list[tuple[int, float]]:
 
     /proc/<pid> 的 mtime 就是进程启动时刻。
     """
+    if sys.platform == "darwin":
+        return _mac_backend_processes()
     me = os.getpid()
     found: list[tuple[int, float]] = []
     for entry in Path("/proc").iterdir():
@@ -95,6 +98,36 @@ def _backend_processes() -> list[tuple[int, float]]:
                 found.append((int(entry.name), entry.stat().st_mtime))
         except (OSError, ValueError, UnicodeDecodeError):
             continue
+    return sorted(found, key=lambda item: item[1])
+
+
+def _mac_backend_processes() -> list[tuple[int, float]]:
+    """macOS 无 /proc；读取完整命令行和启动时间，排除 shell 与 python -c。"""
+    result = subprocess.run(
+        ["ps", "-ww", "-axo", "pid=,lstart=,command="], check=True,
+        capture_output=True, text=True, env={**os.environ, "LC_ALL": "C"},
+    )
+    found = []
+    for row in result.stdout.splitlines():
+        parts = row.split(maxsplit=6)
+        if len(parts) != 7:
+            continue
+        pid, *started, command = parts
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            continue
+        if not argv or int(pid) == os.getpid():
+            continue
+        executable = Path(argv[0]).name.lower()
+        # ps 的 command 不是 NUL 分隔 argv，先限制真实启动器，避免 shell 文本自匹配。
+        if executable.startswith("python"):
+            if "-c" in argv or not _is_backend_argv(argv):
+                continue
+        elif not executable.startswith("uvicorn") or not _is_backend_argv(argv):
+            continue
+        epoch = time.mktime(time.strptime(" ".join(started), "%a %b %d %H:%M:%S %Y"))
+        found.append((int(pid), epoch))
     return sorted(found, key=lambda item: item[1])
 
 

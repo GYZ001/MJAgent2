@@ -399,8 +399,8 @@ def test_resolve_persisted_character_ids_replaces_via_appellation_map():
     payload = {
         "asset_manifest": {"characters": [{"identity_id": "bible:里奥"}]},
         "appellation_map": [
-            {"raw_mention": "少年", "identity_id": "bible:里奥"},
-            {"raw_mention": "球员", "identity_id": "bible:里奥"},
+            {"raw_mention": "少年", "identity_id": "bible:里奥", "segment_index": 1},
+            {"raw_mention": "球员", "identity_id": "bible:里奥", "segment_index": 1},
         ],
     }
     resolved, notes = resolve_persisted_character_ids(

@@ -22,8 +22,10 @@ def rendered_utterance(line: dict, names: dict[str, str], *, dialect: str) -> st
     label = {"spoken_dialogue": "画内对白", "offscreen_dialogue": "人物画外对白", "inner_monologue": "内心独白", "narration": "旁白"}[kind]
     if dialect == "minimax_h3_native_fields":
         return _h3_utterance(line, names, speaker=speaker, kind=kind)
-    mouth = "发声者开口，其他可见人物不跟随口型" if kind == "spoken_dialogue" else "画面人物不随此句张嘴"
-    return f"{label}（{speaker}）：“{line.get('line') or ''}”（{mouth}）"
+    mouth = "发声者开口，其他可见人物不跟随口型" if kind == "spoken_dialogue" else "画面人物嘴唇闭合无张合动作"
+    sentences = re.findall(r".*?(?:[。！？!?]+|[.]+(?=\s|$)|$)", str(line.get("line") or ""), re.S)
+    quoted = "".join(f"“{sentence}”" for sentence in sentences if sentence)
+    return f"{label}（{speaker}）：{quoted}（{mouth}）"
 
 
 def _h3_utterance(line: dict, names: dict, *, speaker: str, kind: str) -> str:
