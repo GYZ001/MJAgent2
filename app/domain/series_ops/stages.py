@@ -93,6 +93,7 @@ async def _run_screenplay(episode_id: str) -> None:
         await start_screenplay(episode_id, body={})
     while task_registry.active("screenplay", episode_id):
         await asyncio.sleep(5)
+    _raise_stage_error(episode_id, "screenplay_error")
 
 
 # ----------------------------------------------------------------- storyboard
@@ -116,6 +117,16 @@ async def _run_storyboard(episode_id: str) -> None:
         await start_storyboard(episode_id, body={"preflight_token": token})
     while task_registry.active("storyboard", episode_id):
         await asyncio.sleep(5)
+    _raise_stage_error(episode_id, "script_error")
+
+
+def _raise_stage_error(episode_id: str, error_column: str) -> None:
+    """后台任务退出后把实际原因带回连播台；只读取本步骤的错误列。"""
+    row = get_conn().execute(
+        "SELECT screenplay_error, script_error FROM episodes WHERE id=?", (episode_id,),
+    ).fetchone()
+    if row and row[error_column]:
+        raise RuntimeError(str(row[error_column]))
 
 
 # --------------------------------------------------------------------- confirm

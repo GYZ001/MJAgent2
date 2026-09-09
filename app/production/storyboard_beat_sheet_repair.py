@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.production.storyboard_segment_ranges import split_source_units
+from app.production.storyboard_segment_ranges import _AiSourceUnitRange, split_source_units
 
 
 def repair_beat_sheet_draft(
@@ -24,10 +24,30 @@ def repair_beat_sheet_draft(
     }
     notes: list[str] = []
     notes.extend(unify_scene_palettes(draft.segments))
+    notes.extend(fill_single_owner_ranges(draft.segments, unit_counts, paratext_indexes))
     for plan in draft.segments:
         notes.extend(merge_duplicate_ranges(plan))
         notes.extend(clamp_unit_ranges(plan, unit_counts, paratext_indexes))
     notes.extend(fix_order_and_fill_holes(draft.segments, unit_counts))
+    return notes
+
+
+def fill_single_owner_ranges(segments: list[Any], unit_counts: dict[int, int], paratext_indexes: set[int]) -> list[str]:
+    """原文段仅被一个分镜引用时，缺失范围唯一等于整段；多人认领时留给原校验。"""
+    owners: dict[int, list[Any]] = {}
+    for plan in segments:
+        for index in set(plan.source_segment_indexes):
+            owners.setdefault(index, []).append(plan)
+    notes = []
+    for index, plans in owners.items():
+        total = unit_counts.get(index, 0)
+        if len(plans) != 1 or index in paratext_indexes or not total:
+            continue
+        if any(r.source_segment_index == index for plan in segments for r in plan.source_unit_ranges):
+            continue
+        plan = plans[0]
+        plan.source_unit_ranges.append(_AiSourceUnitRange(source_segment_index=index, from_unit=1, to_unit=total))
+        notes.append(f"原文段 {index} 仅由第 {plan.segment_no} 段引用，补齐其唯一完整范围 S01-S{total:02d}")
     return notes
 
 

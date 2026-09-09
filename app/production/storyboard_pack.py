@@ -56,6 +56,7 @@ from app.production.storyboard_capacity_normalize import normalize_and_assert_ca
 from app.production.storyboard_identity_contract import canonical_segment_identities, visible_character_ids
 from app.production.storyboard_identity_scope import bind_quote_identities
 from app.production.storyboard_repair_context import known_character_identities, storyboard_repair_context
+from app.production.storyboard_source_spans import segment_source_bindings
 from app.production.storyboard_segment_output import segment_output_contract
 from app.production.storyboard_identity_generation import (
     IDENTITY_GENERATION_RULES, generated_identity_errors, finalize_generated_identity,
@@ -1618,6 +1619,9 @@ def persist_storyboard_pack(
     shot_ids: list[str] = []
     for segment in pack.segments:
         segment_record = canonical_segment_identities(segment.model_dump(mode="json"), payload)
+        segment_record["source_bindings"] = segment_source_bindings(
+            segment_record, segments=segments, full_source_text=full_source_text, authorized_sources=authorized_sources,
+        )
         character_ids = visible_character_ids(segment_record)
         scene_entries = segment.resources.get("scenes") or []
         scene_display_name = (

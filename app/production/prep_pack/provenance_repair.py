@@ -94,9 +94,27 @@ def verify_manifest_provenance_with_repair(
     """自校验前的确定性修补入口：先补 anchor_phrase 能补的场景绑定并留痕，
     再跑原有自校验；修不了的仍由原校验拦截（原有 scene_degrade 降级路径
     不变）。"""
-    for note in repair_scene_anchor_phrases(segments, asset_manifest):
+    for note in [*repair_scene_anchor_phrases(segments, asset_manifest), *repair_local_anchor_segments(segments, asset_manifest)]:
         _LOGGER.info("[PROVENANCE_REPAIR] %s", note)
     return _prep_pack_verify_manifest_provenance(segments, asset_manifest, source_text)
+
+
+def repair_local_anchor_segments(segments: list[SourceSegment], asset_manifest: dict[str, Any]) -> list[str]:
+    """证据原句在本集唯一逐字命中时重定位段号；不改原句、身份或前瞻证据。"""
+    notes = []
+    for entries in (asset_manifest.get(key) or [] for key in ("characters", "scenes", "props", "functional_extras")):
+        for entry in entries:
+            provenance = entry.get("provenance") or {}
+            phrase = str(provenance.get("anchor_phrase") or "")
+            if not phrase or provenance.get("method") == "resolution_forward":
+                continue
+            hits = [i for i, segment in enumerate(segments, 1) for _ in range(segment.text.count(phrase))]
+            if len(hits) != 1 or hits == provenance.get("anchor_segments"):
+                continue
+            label = entry.get("display_name") or entry.get("label") or entry.get("identity_id")
+            notes.append(f"「{label}」来源原句唯一命中本集第 {hits[0]} 段，证据段号由 {provenance.get('anchor_segments')} 重定位为 {hits}")
+            provenance["anchor_segments"] = hits
+    return notes
 
 
 __all__ = ["repair_scene_anchor_phrases", "verify_manifest_provenance_with_repair"]

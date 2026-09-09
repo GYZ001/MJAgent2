@@ -1,0 +1,2850 @@
+[
+  {
+    "episode_no": 1,
+    "call_id": 65942,
+    "context": {
+      "segment_no": 2,
+      "source_segment_indexes": [
+        5,
+        6
+      ],
+      "source_text_by_segment": "[段5·S02] 少年叹了口气，他叫孟浩，是这大青山下云杰县一个普通书生，早年双亲突然失踪，留下家财本就不殷，这几年读书不菲，到了如今已贫贫如洗。\n[段6·S01] “考了三年，这三年来整日看那些贤者书籍，已看的几yu作呕，莫非科举真的不是我孟浩未来的路？”\n[段6·S02] 孟浩自嘲，低头看了一眼手中的葫芦，神色有些黯淡。",
+      "required_dialogue": [
+        {
+          "quote_id": "Q02",
+          "text": "考了三年，这三年来整日看那些贤者书籍，已看的几yu作呕，莫非科举真的不是我孟浩未来的路？",
+          "source_segment_index": 6,
+          "speaker": "孟浩",
+          "speaker_identity_id": "bible:孟浩",
+          "source_start": 1,
+          "source_end": 45
+        }
+      ],
+      "relevant_assets": {
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "display_name": "孟浩",
+            "portrait_id": null,
+            "segment_indexes": [
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              14,
+              15,
+              16,
+              17,
+              18,
+              20,
+              22,
+              24,
+              25,
+              28,
+              29,
+              30,
+              32,
+              34,
+              35,
+              39,
+              40,
+              42,
+              43,
+              44,
+              45,
+              46,
+              47,
+              48,
+              49,
+              50,
+              54,
+              55
+            ],
+            "aliases": [
+              "文生少年",
+              "少年"
+            ],
+            "visual_entity_id": "bible:孟浩",
+            "display_appellation": "孟浩",
+            "provenance": {
+              "method": "direct",
+              "anchor_segments": [
+                1
+              ],
+              "anchor_phrase": "孟浩"
+            },
+            "appearance": "身着灰蓝色修士短袍，身形偏瘦，腰间系有基础储物袋"
+          }
+        ],
+        "scenes": [
+          {
+            "scene_id": "scene:赵国大青山山顶",
+            "display_name": "赵国大青山山顶",
+            "scene_reference_id": null,
+            "segment_indexes": [
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              14,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              23,
+              24,
+              25,
+              26,
+              27,
+              28,
+              29,
+              30,
+              31,
+              32,
+              33,
+              34,
+              35,
+              36,
+              37,
+              38,
+              39
+            ],
+            "provenance": {
+              "method": "discovery",
+              "anchor_segments": [
+                3
+              ],
+              "anchor_phrase": "卷在南域边缘赵国的大青山，落在了此刻于这青山顶端，坐在那里的一个文生少年身上。"
+            },
+            "scene_canonical": "国漫3D虚构室外场景，赵国大青山山顶，黄昏暖调夕阳光线铺洒，周边分布林木石坡，下方可见蜿蜒河流，精致光影，氛围清寂安静，非真人统一电影画面"
+          }
+        ],
+        "props": [
+          {
+            "label": "葫芦",
+            "description": "普通的葫芦，孟浩将写有自己理想的纸条放入其中后扔下大青山",
+            "segment_indexes": [
+              4,
+              6,
+              7,
+              12,
+              14
+            ],
+            "provenance": {
+              "method": "direct",
+              "anchor_segments": [
+                4
+              ],
+              "anchor_phrase": "葫芦"
+            },
+            "appearance": "采用天然亚光黄褐葫芦皮质，表面带自然浅褐纹理无额外纹饰；整体为上小下大双圆肚结构，中间收细腰，顶部留1cm左右截断的平整短蒂口，整体尺寸约成年人单掌可握。",
+            "ref_image_path": "/Users/bytedance/Desktop/漫剧Agent2.0/projects/proj_92f1d900df2a/prop_refs/葫芦.png"
+          }
+        ],
+        "functional_extras": [],
+        "appellation_map": [
+          {
+            "raw_mention": "孟浩",
+            "segment_index": 5,
+            "identity_id": "bible:孟浩",
+            "canonical_appellation": "孟浩"
+          },
+          {
+            "raw_mention": "孟浩",
+            "segment_index": 6,
+            "identity_id": "bible:孟浩",
+            "canonical_appellation": "孟浩"
+          },
+          {
+            "raw_mention": "少年",
+            "segment_index": 5,
+            "identity_id": "bible:孟浩",
+            "canonical_appellation": "孟浩"
+          }
+        ]
+      }
+    },
+    "draft": {
+      "prompt_text": "电影级预告片质感，多镜头叙事，镜头之间硬切。\n镜头1：中景固定 @孟浩 坐在赵国大青山顶的青石板上，身着灰蓝色修士短袍，身形偏瘦，腰间系有基础储物袋，黄昏暖金夕阳光线铺洒，他微微垂头，喉结滚动，嘴唇微张\n镜头2：推近 @孟浩 手中的亚光黄褐葫芦，葫芦位于画面中心清晰可见，他手指摩挲过葫芦表面的浅褐纹理，神色黯淡 {{speech:U01}}\n镜头3：固定 @孟浩 眉头皱得更紧，眼眶微微泛红，视线从葫芦移向山下蜿蜒的河流，风拂动他的袍角\n全片贯穿：环境音为山顶微风轻拂的风声，混着远处山林的沙沙声；配乐为低沉舒缓的抒情弦乐，带淡淡怅然感；风格为国漫3D动画电影质感，明确虚构数字角色、非真人照片，精致光影，统一电影画面；约束：面部一致、手指正确、人数锁定、无字幕水印、人物与家具不穿插",
+      "shot_count": 3,
+      "dialogue": [
+        {
+          "utterance_id": "U01",
+          "speaker_identity_id": "bible:孟浩",
+          "line": "考了三年，这三年来整日看那些贤者书籍，已看的几欲作呕，莫非科举真的不是我孟浩未来的路？",
+          "source_segment_index": 6,
+          "delivery": "spoken_dialogue",
+          "delivery_kind": "spoken_dialogue",
+          "source_quote_id": "Q02",
+          "source_start": 1,
+          "source_end": 45,
+          "attribution_evidence": ""
+        }
+      ],
+      "resources": {
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "portrait_id": null,
+            "description": "落榜书生，因科举失利对未来感到迷茫",
+            "display_name": "孟浩",
+            "visibility": "visible",
+            "subject_kind": "character"
+          }
+        ],
+        "scenes": [
+          {
+            "scene_id": "scene:赵国大青山山顶",
+            "scene_reference_id": null,
+            "description": "国漫3D虚构室外场景，赵国大青山山顶，黄昏暖调夕阳光线铺洒，周边分布林木石坡，下方可见蜿蜒河流，精致光影，氛围清寂安静，非真人统一电影画面"
+          }
+        ],
+        "props": [
+          {
+            "label": "葫芦",
+            "description": "天然亚光黄褐葫芦皮质，表面带自然浅褐纹理无额外纹饰；整体为上小下大双圆肚结构，中间收细腰，顶部留1cm左右截断的平整短蒂口，整体尺寸约成年人单掌可握"
+          }
+        ]
+      },
+      "degraded_capabilities": [],
+      "camera_repetition_rationale": "",
+      "camera_digest": {
+        "opening_shot_size": "中景",
+        "opening_camera_move": "固定",
+        "transition_from_previous": "硬切，承接上一段孟浩坐在青石板上的状态"
+      },
+      "continuity_memo": {
+        "time_of_day": "黄昏",
+        "time_of_day_basis": "inherited",
+        "time_of_day_source_quote": "",
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "location": "赵国大青山顶的青石板上",
+            "wardrobe": "身着灰蓝色修士短袍，身形偏瘦，腰间系有基础储物袋",
+            "emotion": "眉头紧皱，神色黯淡，情绪低落，对未来感到迷茫"
+          }
+        ],
+        "props": [
+          {
+            "name": "葫芦",
+            "form": "天然亚光黄褐葫芦皮质，表面带自然浅褐纹理无额外纹饰，上小下大双圆肚结构，中间收细腰，顶部留1cm左右截断的平整短蒂口，尺寸约成年人单掌可握",
+            "location": "孟浩手中",
+            "state": "完好闭合"
+          }
+        ],
+        "layout": "孟浩独自坐在大青山顶的青石板上，面向山下的河流，周边无其他人物",
+        "layout_change_source_quote": ""
+      },
+      "form": "scene",
+      "beats": [
+        {
+          "time_anchor": "",
+          "scene_name": "赵国大青山山顶",
+          "visual": "孟浩坐在青石板上，摩挲手中葫芦，面露迷茫说出自嘲台词",
+          "source_span": "段6·S01至段6·S02"
+        }
+      ]
+    }
+  },
+  {
+    "episode_no": 2,
+    "call_id": 65871,
+    "context": {
+      "segment_no": 1,
+      "source_segment_indexes": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "source_text_by_segment": "[段2·S01] 靠山宗，位于南赡大地南域边缘的赵国境内，曾是赵国四大宗门之首，就算是整个南域也都颇有其名，可如今没落，地位不比从前，也没有了曾经的辉煌，现今于赵国，只能算是末流。\n[段3·S01] 实际上靠山宗原本也不是叫这个名字，只不过在千年前出了一位轰动整个南域的修士，此人自号靠山老祖，更是强行将宗门之名改为靠山宗，横行霸道，几乎搜刮了赵国所有宗门之宝，风光一时无两。\n[段4·S01] 可如今千年岁月，物是人非，靠山老祖已失踪四百余年，若非生死未知，恐有后患，怕是早已被其他宗门吞并，现在的靠山宗已日落西山，再加上赵国资源有限，被其他三宗排挤的就算是要招收杂役，也都需弟子外出绑来，更不用说光明正大的开宗广收门徒了。\n[段5·S01] 随着绿袍男子身后，孟浩行走在靠山宗的山峦小路，四周的一切如桃园之境，奇石怪树比比皆是，青山绿水间，一处处云雾内的奢华阁楼，仿佛瓦片都是用玉石铺成，看的孟浩感叹连连，只是身边那小胖子哭丧了一路，让孟浩觉得有些坏了此地的意境。",
+      "required_dialogue": [],
+      "relevant_assets": {
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "display_name": "孟浩",
+            "portrait_id": null,
+            "segment_indexes": [
+              5,
+              12,
+              13,
+              14,
+              16,
+              19,
+              20,
+              24,
+              26,
+              27,
+              30,
+              32,
+              33,
+              34,
+              35,
+              37,
+              38,
+              39,
+              40,
+              41,
+              42,
+              44,
+              45
+            ],
+            "aliases": [
+              "他",
+              "我"
+            ],
+            "visual_entity_id": "bible:孟浩",
+            "display_appellation": "孟浩",
+            "provenance": {
+              "method": "direct",
+              "anchor_segments": [
+                5
+              ],
+              "anchor_phrase": "孟浩"
+            },
+            "appearance": "身着灰蓝色修士短袍，身形偏瘦，腰间系有基础储物袋"
+          },
+          {
+            "identity_id": "bible:小胖子",
+            "display_name": "小胖子",
+            "portrait_id": null,
+            "segment_indexes": [
+              5,
+              6,
+              7,
+              8,
+              11,
+              16,
+              17,
+              19,
+              20,
+              26,
+              27,
+              28,
+              29,
+              30,
+              31,
+              40,
+              42,
+              43,
+              44
+            ],
+            "aliases": [],
+            "visual_entity_id": "bible:小胖子",
+            "display_appellation": "小胖子",
+            "provenance": {
+              "method": "discovery",
+              "anchor_segments": [
+                5
+              ],
+              "anchor_phrase": "小胖子"
+            },
+            "appearance": "十二三岁男性少年，常穿灰蓝色粗麻杂役长衫"
+          }
+        ],
+        "scenes": [
+          {
+            "scene_id": "scene:靠山宗山峦小路",
+            "display_name": "靠山宗山峦小路",
+            "scene_reference_id": null,
+            "segment_indexes": [
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12
+            ],
+            "provenance": {
+              "method": "discovery",
+              "anchor_segments": [
+                5
+              ],
+              "anchor_phrase": "随着绿袍男子身后，孟浩行走在靠山宗的山峦小路，四周的一切如桃园之境，奇石怪树比比皆是"
+            },
+            "scene_canonical": "国漫3D动画电影质感虚构室外场景，靠山宗山峦小路周边遍布奇石怪树，青山绿水间可见云雾中覆玉瓦的奢华阁楼，光影精致，氛围清灵秀美"
+          }
+        ],
+        "props": [],
+        "functional_extras": [
+          {
+            "label": "绿袍男子",
+            "segment_indexes": [
+              5,
+              9,
+              10,
+              14,
+              15,
+              16,
+              23,
+              24
+            ],
+            "visual_entity_id": "entity:fdd28fea634a6cdc",
+            "provenance": {
+              "method": "discovery",
+              "anchor_segments": [
+                5
+              ],
+              "anchor_phrase": "绿袍男子",
+              "candidate_verdict_attempted": true
+            },
+            "appearance": "素材库没有为这个角色建立标准外观定妆照（群演/一次性人物，没有定妆照）：由你在本集第一次出现这个角色时自行确定其外观特征（年龄体型、发型头饰、服装颜色材质、随身物等可视信息），并在本集所有涉及这个角色的段落里原样沿用同一套自定特征，不得每段重新编写。"
+          },
+          {
+            "label": "一位轰动整个南域的修士",
+            "segment_indexes": [
+              3
+            ],
+            "visual_entity_id": "entity:9728a6fb9fdc7f8e",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                3
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            },
+            "appearance": "素材库没有为这个角色建立标准外观定妆照（群演/一次性人物，没有定妆照）：由你在本集第一次出现这个角色时自行确定其外观特征（年龄体型、发型头饰、服装颜色材质、随身物等可视信息），并在本集所有涉及这个角色的段落里原样沿用同一套自定特征，不得每段重新编写。"
+          },
+          {
+            "label": "靠山老祖",
+            "segment_indexes": [
+              3,
+              4,
+              36,
+              37
+            ],
+            "visual_entity_id": "entity:33a056019e381cd8",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                3,
+                4,
+                36,
+                37
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            },
+            "appearance": "素材库没有为这个角色建立标准外观定妆照（群演/一次性人物，没有定妆照）：由你在本集第一次出现这个角色时自行确定其外观特征（年龄体型、发型头饰、服装颜色材质、随身物等可视信息），并在本集所有涉及这个角色的段落里原样沿用同一套自定特征，不得每段重新编写。"
+          }
+        ],
+        "appellation_map": [
+          {
+            "raw_mention": "孟浩",
+            "segment_index": 5,
+            "identity_id": "bible:孟浩",
+            "canonical_appellation": "孟浩"
+          },
+          {
+            "raw_mention": "小胖子",
+            "segment_index": 5,
+            "identity_id": "bible:小胖子",
+            "canonical_appellation": "小胖子"
+          }
+        ]
+      }
+    },
+    "draft": {
+      "identity_contract_version": "",
+      "identity_contract_fingerprint": "",
+      "speech_template": "",
+      "speech_dialect": "",
+      "prompt_text": "电影级预告片质感，多镜头叙事，镜头之间硬切。\n镜头1：横摇 靠山宗整体全景，山峦间云雾缭绕，覆玉瓦的阁楼隐在林间，原本暖调的日光在两秒内逐渐变冷，整体色调向冷青色过渡 国漫3D动画电影质感虚构室外场景，靠山宗山峦小路周边遍布奇石怪树，青山绿水间可见云雾中覆玉瓦的奢华阁楼，光影精致，氛围清灵秀美 晴日柔光。{{speech:U01}}{{speech:U02}}\n镜头2：固定 身着灰蓝色修士短袍，身形偏瘦，腰间系有基础储物袋的@孟浩 走在铺着碎石的山路上，抬眼打量四周景色 靠山宗山峦小路 冷青色柔光。\n镜头3：固定 十二三岁男性少年，常穿灰蓝色粗麻杂役长衫的@小胖子 走在@孟浩身侧，嘴角下撇，眼眶泛红 靠山宗山峦小路 冷青色柔光。\n镜头4：跟随 身着深绿色宽袖长袍、腰系墨色玉带、头发梳成高冠的绿袍男子 走在两人前方引路，衣袍随走动轻晃 靠山宗山峦小路 冷青色柔光。\n全片贯穿：环境音为山间风声、鸟鸣；配乐为悠远古朴的仙侠风格旋律，带一丝苍凉感；风格为国漫3D动画电影质感，精致光影，统一电影画面；约束：面部一致、手指正确、人数锁定、无字幕水印、人物与家具不穿插。",
+      "shot_count": 4,
+      "dialogue": [
+        {
+          "utterance_id": "U01",
+          "speaker_identity_id": "narration",
+          "line": "靠山宗曾是赵国四大宗门之首，如今却已没落。",
+          "source_segment_index": 2,
+          "delivery": "offscreen_voice",
+          "delivery_kind": "narration",
+          "source_quote_id": "",
+          "source_start": -1,
+          "source_end": -1,
+          "attribution_evidence": ""
+        },
+        {
+          "utterance_id": "U02",
+          "speaker_identity_id": "narration",
+          "line": "绿袍男子将新收的杂役带上了山。",
+          "source_segment_index": 5,
+          "delivery": "offscreen_voice",
+          "delivery_kind": "narration",
+          "source_quote_id": "",
+          "source_start": -1,
+          "source_end": -1,
+          "attribution_evidence": ""
+        }
+      ],
+      "resources": {
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "portrait_id": null,
+            "description": "身着灰蓝色修士短袍，身形偏瘦，腰间系有基础储物袋",
+            "display_name": "孟浩",
+            "visibility": "visible",
+            "subject_kind": "character"
+          },
+          {
+            "identity_id": "bible:小胖子",
+            "portrait_id": null,
+            "description": "十二三岁男性少年，常穿灰蓝色粗麻杂役长衫",
+            "display_name": "小胖子",
+            "visibility": "visible",
+            "subject_kind": "character"
+          },
+          {
+            "identity_id": "entity:fdd28fea634a6cdc",
+            "portrait_id": null,
+            "description": "身着深绿色宽袖长袍、腰系墨色玉带、头发梳成高冠的成年男性",
+            "display_name": "绿袍男子",
+            "visibility": "visible",
+            "subject_kind": "extra"
+          }
+        ],
+        "scenes": [
+          {
+            "scene_id": "scene:靠山宗山峦小路",
+            "scene_reference_id": null,
+            "description": "国漫3D动画电影质感虚构室外场景，靠山宗山峦小路周边遍布奇石怪树，青山绿水间可见云雾中覆玉瓦的奢华阁楼，光影精致，氛围清灵秀美"
+          }
+        ],
+        "props": []
+      },
+      "degraded_capabilities": [],
+      "camera_repetition_rationale": "",
+      "camera_digest": {
+        "opening_shot_size": "全景",
+        "opening_camera_move": "横摇",
+        "transition_from_previous": ""
+      },
+      "continuity_memo": {
+        "time_of_day": "正午",
+        "time_of_day_basis": "inferred",
+        "time_of_day_source_quote": "",
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "location": "靠山宗山峦小路的碎石路面上",
+            "wardrobe": "身着灰蓝色修士短袍，腰间系有基础储物袋",
+            "emotion": "神情平静，眼带好奇"
+          },
+          {
+            "identity_id": "bible:小胖子",
+            "location": "孟浩身侧的靠山宗山峦小路碎石路面上",
+            "wardrobe": "身着灰蓝色粗麻杂役长衫",
+            "emotion": "嘴角下撇，眼眶泛红"
+          },
+          {
+            "identity_id": "entity:fdd28fea634a6cdc",
+            "location": "孟浩与小胖子前方的靠山宗山峦小路碎石路面上",
+            "wardrobe": "身着深绿色宽袖长袍、腰系墨色玉带",
+            "emotion": "神情淡漠"
+          }
+        ],
+        "props": [],
+        "layout": "绿袍男子走在前方引路，孟浩与小胖子并排跟在后方，三人沿靠山宗山峦小路向上行走",
+        "layout_change_source_quote": "随着绿袍男子身后，孟浩行走在靠山宗的山峦小路"
+      },
+      "form": "scene",
+      "beats": [
+        {
+          "time_anchor": "",
+          "scene_name": "靠山宗全景",
+          "visual": "横摇全景展示靠山宗风貌，色调从暖向冷青渐变",
+          "source_span": "段2·S01、段3·S01、段4·S01"
+        },
+        {
+          "time_anchor": "",
+          "scene_name": "靠山宗山峦小路",
+          "visual": "孟浩打量沿途景色，小胖子哭丧着脸，绿袍男子在前引路",
+          "source_span": "段5·S01"
+        }
+      ]
+    }
+  },
+  {
+    "episode_no": 4,
+    "call_id": 65827,
+    "context": {
+      "segment_no": 1,
+      "source_segment_indexes": [
+        2,
+        3
+      ],
+      "source_text_by_segment": "[段2·S01] 宝阁内珠光宝气，映入眼帘五彩霞光，一排排玉格林立，每个格子内都有光芒耀眼，宝瓶、小剑、玉佩、宝珠比比皆是，让孟浩呼吸瞬间急促，心脏快跳，仿佛鲜血刹那涌入大脑，愣在了那里。\n[段3·S01] 孟浩这小半辈子，也都没见过如此多的财宝，此刻他已经完全被这些珠光宝气淹没，脑海嗡鸣间，不知觉有了一股要将所有宝贝都抢走的念头。",
+      "required_dialogue": [],
+      "relevant_assets": {
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "display_name": "孟浩",
+            "portrait_id": null,
+            "segment_indexes": [
+              2,
+              3,
+              4,
+              5,
+              7,
+              10,
+              13,
+              14,
+              19,
+              23,
+              24,
+              25,
+              26,
+              28,
+              29,
+              30,
+              31,
+              34,
+              36,
+              37,
+              38,
+              39,
+              40,
+              41,
+              43,
+              44,
+              45,
+              48,
+              50
+            ],
+            "aliases": [
+              "我"
+            ],
+            "visual_entity_id": "bible:孟浩",
+            "display_appellation": "孟浩",
+            "provenance": {
+              "method": "direct",
+              "anchor_segments": [
+                2
+              ],
+              "anchor_phrase": "孟浩"
+            },
+            "appearance": "身着灰蓝色修士短袍，身形偏瘦，腰间系有基础储物袋"
+          }
+        ],
+        "scenes": [
+          {
+            "scene_id": "scene:宝阁内部区域",
+            "display_name": "宝阁内部区域",
+            "scene_reference_id": null,
+            "segment_indexes": [
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              14,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              23
+            ],
+            "provenance": {
+              "method": "discovery",
+              "anchor_segments": [
+                2
+              ],
+              "anchor_phrase": "宝阁"
+            },
+            "scene_canonical": "国漫3D虚构室内场景，宝阁内部由各类宝物透出五彩霞光，林立玉格摆满宝瓶、宝剑等仙物，光影精致，氛围华美瑰丽"
+          }
+        ],
+        "props": [],
+        "functional_extras": [],
+        "appellation_map": [
+          {
+            "raw_mention": "孟浩",
+            "segment_index": 2,
+            "identity_id": "bible:孟浩",
+            "canonical_appellation": "孟浩"
+          },
+          {
+            "raw_mention": "孟浩",
+            "segment_index": 3,
+            "identity_id": "bible:孟浩",
+            "canonical_appellation": "孟浩"
+          }
+        ]
+      }
+    },
+    "draft": {
+      "prompt_text": "电影级预告片质感，多镜头叙事，镜头之间硬切。\n镜头1：固定 全景 国漫3D虚构室内场景，宝阁内部由各类宝物透出五彩霞光，林立玉格摆满宝瓶、宝剑等仙物，光影精致，氛围华美瑰丽，画面最初光线偏冷，2秒内逐渐过渡为暖金珠光色调，玉格上的宝瓶、小剑、玉佩、宝珠在暖光下更显耀眼。\n镜头2：横摇 @孟浩 身着灰蓝色修士短袍，身形偏瘦，腰间系有基础储物袋，站在宝阁入口的石质地面上，视线扫过满室宝物，眼睛缓缓睁大，呼吸变得急促。\n镜头3：推近 @孟浩 灰蓝色短袍衣角微动，喉结滚动，面部肌肉微微绷紧，站在原地愣着不动，眼中满是贪婪的光{{speech:U01}}\n全片贯穿：环境音为宝物光晕流动的细碎嗡鸣、轻微的衣物摩擦声；配乐为舒缓又带着冲击感的东方仙韵管弦乐，旋律从平淡逐渐走向激昂；风格为国漫3D动画电影质感，明确虚构数字角色、非真人照片，精致光影，统一电影画面；约束：面部一致、手指正确、人数锁定、无字幕水印、人物与家具不穿插。",
+      "shot_count": 3,
+      "dialogue": [
+        {
+          "utterance_id": "U01",
+          "speaker_identity_id": "bible:孟浩",
+          "line": "这么多宝贝……要是都能拿走就好了。",
+          "source_segment_index": 3,
+          "delivery": "offscreen_voice",
+          "delivery_kind": "inner_monologue",
+          "attribution_evidence": "原文段3描述孟浩内心产生抢走所有宝贝的念头，为内心独白"
+        }
+      ],
+      "resources": {
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "portrait_id": null,
+            "description": "身着灰蓝色修士短袍，身形偏瘦，腰间系有基础储物袋",
+            "display_name": "孟浩",
+            "visibility": "visible",
+            "subject_kind": "character"
+          }
+        ],
+        "scenes": [
+          {
+            "scene_id": "scene:宝阁内部区域",
+            "scene_reference_id": null,
+            "description": "国漫3D虚构室内场景，宝阁内部由各类宝物透出五彩霞光，林立玉格摆满宝瓶、宝剑等仙物，光影精致，氛围华美瑰丽"
+          }
+        ],
+        "props": [
+          {
+            "label": "宝瓶",
+            "description": "仙家宝器，散发莹润光泽，摆放在玉格上"
+          },
+          {
+            "label": "小剑",
+            "description": "小型仙剑，剑锋带光，摆放在玉格上"
+          },
+          {
+            "label": "玉佩",
+            "description": "温润玉质佩饰，泛着柔光，摆放在玉格上"
+          },
+          {
+            "label": "宝珠",
+            "description": "圆润宝珠，光芒耀眼，摆放在玉格上"
+          }
+        ]
+      },
+      "degraded_capabilities": [],
+      "camera_repetition_rationale": "",
+      "camera_digest": {
+        "opening_shot_size": "全景",
+        "opening_camera_move": "固定",
+        "transition_from_previous": ""
+      },
+      "continuity_memo": {
+        "time_of_day": "室内无自然光，以宝物暖金珠光为主要光源",
+        "time_of_day_basis": "inferred",
+        "time_of_day_source_quote": "",
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "location": "宝阁内部入口的石质地面上",
+            "wardrobe": "身着灰蓝色修士短袍，身形偏瘦，腰间系有基础储物袋",
+            "emotion": "震惊，眼神贪婪，身体愣在原地"
+          }
+        ],
+        "props": [
+          {
+            "name": "宝瓶",
+            "form": "莹润仙家宝器，带光泽",
+            "location": "宝阁林立的玉格上",
+            "state": "完好，散发着暖金色光晕"
+          },
+          {
+            "name": "小剑",
+            "form": "小型仙剑，剑锋带光",
+            "location": "宝阁林立的玉格上",
+            "state": "完好，散发着暖金色光晕"
+          },
+          {
+            "name": "玉佩",
+            "form": "温润玉质佩饰，泛着柔光",
+            "location": "宝阁林立的玉格上",
+            "state": "完好，散发着暖金色光晕"
+          },
+          {
+            "name": "宝珠",
+            "form": "圆润宝珠，光芒耀眼",
+            "location": "宝阁林立的玉格上",
+            "state": "完好，散发着暖金色光晕"
+          }
+        ],
+        "layout": "孟浩站在宝阁入口处，面朝摆满宝物的林立玉格，玉格分布在孟浩正前方及两侧的空间内",
+        "layout_change_source_quote": ""
+      },
+      "form": "scene",
+      "beats": [
+        {
+          "time_anchor": "0-5s",
+          "scene_name": "宝阁内部区域",
+          "visual": "全景展示宝阁内林立的玉格与满室宝物，色调从冷过渡为暖金珠光",
+          "source_span": "[段2·S01] 宝阁内珠光宝气，映入眼帘五彩霞光，一排排玉格林立，每个格子内都有光芒耀眼，宝瓶、小剑、玉佩、宝珠比比皆是"
+        },
+        {
+          "time_anchor": "5-10s",
+          "scene_name": "宝阁内部区域",
+          "visual": "孟浩站在入口，视线扫过宝物，眼睛睁大，呼吸急促",
+          "source_span": "[段2·S01] 让孟浩呼吸瞬间急促，心脏快跳，仿佛鲜血刹那涌入大脑，愣在了那里"
+        },
+        {
+          "time_anchor": "10-15s",
+          "scene_name": "宝阁内部区域",
+          "visual": "孟浩愣在原地，喉结滚动，眼中满是贪婪，内心产生抢走宝物的念头",
+          "source_span": "[段3·S01] 孟浩这小半辈子，也都没见过如此多的财宝，此刻他已经完全被这些珠光宝气淹没，脑海嗡鸣间，不知觉有了一股要将所有宝贝都抢走的念头"
+        }
+      ]
+    }
+  },
+  {
+    "episode_no": 5,
+    "call_id": 65778,
+    "context": {
+      "segment_no": 1,
+      "source_segment_indexes": [
+        2
+      ],
+      "source_text_by_segment": "[段2·S01] “竟然是上官师叔亲自来发丹，而且许师姐与陈师兄是内门弟子，以往很少看到，这次居然也都来了，莫非这次有单独丹药发放不成？”",
+      "required_dialogue": [
+        {
+          "quote_id": "Q01",
+          "text": "竟然是上官师叔亲自来发丹，而且许师姐与陈师兄是内门弟子，以往很少看到，这次居然也都来了，莫非这次有单独丹药发放不成？",
+          "source_segment_index": 2,
+          "source_start": 1,
+          "source_end": 59,
+          "excluded_speaker_identity_ids": [
+            "bible:孟浩"
+          ]
+        }
+      ],
+      "relevant_assets": {
+        "characters": [
+          {
+            "identity_id": "bible:上官修",
+            "display_name": "上官修",
+            "portrait_id": null,
+            "segment_indexes": [
+              2,
+              9,
+              10,
+              13,
+              18,
+              19,
+              36,
+              38
+            ],
+            "aliases": [
+              "上官师叔",
+              "金袍老者",
+              "老夫"
+            ],
+            "visual_entity_id": "bible:上官修",
+            "display_appellation": "上官修",
+            "provenance": {
+              "method": "discovery",
+              "anchor_segments": [
+                10
+              ],
+              "anchor_phrase": "上官修"
+            },
+            "appearance": "老年男性"
+          }
+        ],
+        "scenes": [
+          {
+            "scene_id": "scene:外宗广场",
+            "display_name": "外宗广场",
+            "scene_reference_id": null,
+            "segment_indexes": [
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              14,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              23,
+              24,
+              25,
+              26,
+              27,
+              31,
+              32,
+              33,
+              34,
+              35,
+              36,
+              37,
+              38,
+              39,
+              40,
+              41,
+              42,
+              43,
+              44,
+              45,
+              46,
+              47,
+              48,
+              49,
+              50,
+              51,
+              52
+            ],
+            "provenance": {
+              "method": "discovery",
+              "anchor_segments": [
+                28
+              ],
+              "anchor_phrase": "外宗广场"
+            },
+            "scene_canonical": "国漫3D动画电影质感虚构室外场景，靠山宗山下的开阔广场，精致光影，修仙宗门公共区域质感，氛围规整开阔，为非真人统一电影画面"
+          }
+        ],
+        "props": [],
+        "functional_extras": [],
+        "appellation_map": [
+          {
+            "raw_mention": "上官师叔",
+            "segment_index": 2,
+            "identity_id": "bible:上官修",
+            "canonical_appellation": "上官修"
+          }
+        ]
+      }
+    },
+    "draft": {
+      "prompt_text": "电影级预告片质感，多镜头叙事，镜头之间硬切。\n镜头1：固定，国漫3D动画电影质感虚构室外场景，靠山宗山下的开阔广场，精致光影，修仙宗门公共区域质感，氛围规整开阔，为非真人统一电影画面，前2秒光线从明亮暖调逐渐变为冷灰白日色调，数名身着灰布外宗弟子服饰的年轻男女站在广场青石板地面上，交头接耳，表情好奇带着期待。\n镜头2：推近，站在弟子群最前方的男性外宗弟子眉头微抬，嘴唇张开，视线望向广场前方高台方向，{{speech:U01}}\n镜头3：横摇，老年男性@上官修身着金色绣纹道袍，站在前方高台的台阶上，身旁立着一男一女两名身着蓝白内门弟子服饰的年轻修士，三人神色平静看向下方弟子群，冷灰色日光落在三人衣袍上。\n全片贯穿：环境音是修仙广场上弟子细碎的议论声、风掠过道袍的轻响；配乐是低缓的仙侠风格弦乐，带一丝期待的氛围感；风格是国漫3D动画电影质感，明确虚构数字角色、非真人照片，精致光影，统一电影画面；约束：面部一致、手指正确、人数锁定、无字幕水印、人物与家具不穿插。",
+      "shot_count": 3,
+      "dialogue": [
+        {
+          "utterance_id": "U01",
+          "speaker_identity_id": "外宗弟子",
+          "line": "竟然是上官师叔亲自来发丹，而且许师姐与陈师兄是内门弟子，以往很少看到，这次居然也都来了，莫非这次有单独丹药发放不成？",
+          "source_segment_index": 2,
+          "delivery": "spoken_dialogue",
+          "delivery_kind": "spoken_dialogue",
+          "source_quote_id": "Q01",
+          "source_start": 1,
+          "source_end": 59,
+          "attribution_evidence": "原文为外宗弟子的公开议论台词，无明确单个指定说话人，归属外宗弟子群体"
+        }
+      ],
+      "resources": {
+        "characters": [
+          {
+            "identity_id": "bible:上官修",
+            "portrait_id": null,
+            "description": "老年男性，身着金色绣纹道袍",
+            "display_name": "上官修",
+            "visibility": "visible",
+            "subject_kind": "character"
+          },
+          {
+            "identity_id": "外宗弟子",
+            "portrait_id": null,
+            "description": "数名身着灰布外宗弟子服饰的年轻男女",
+            "display_name": "外宗弟子",
+            "visibility": "visible",
+            "subject_kind": "crowd"
+          },
+          {
+            "identity_id": "许师姐",
+            "portrait_id": null,
+            "description": "身着蓝白内门弟子服饰的年轻女修",
+            "display_name": "许师姐",
+            "visibility": "visible",
+            "subject_kind": "extra"
+          },
+          {
+            "identity_id": "陈师兄",
+            "portrait_id": null,
+            "description": "身着蓝白内门弟子服饰的年轻男修",
+            "display_name": "陈师兄",
+            "visibility": "visible",
+            "subject_kind": "extra"
+          }
+        ],
+        "scenes": [
+          {
+            "scene_id": "scene:外宗广场",
+            "scene_reference_id": null,
+            "description": "国漫3D动画电影质感虚构室外场景，靠山宗山下的开阔广场，精致光影，修仙宗门公共区域质感，氛围规整开阔，为非真人统一电影画面"
+          }
+        ],
+        "props": []
+      },
+      "degraded_capabilities": [],
+      "camera_repetition_rationale": "",
+      "camera_digest": {
+        "opening_shot_size": "全景",
+        "opening_camera_move": "固定",
+        "transition_from_previous": ""
+      },
+      "continuity_memo": {
+        "time_of_day": "白日",
+        "time_of_day_basis": "inferred",
+        "time_of_day_source_quote": "",
+        "characters": [
+          {
+            "identity_id": "bible:上官修",
+            "location": "外宗广场高台台阶上",
+            "wardrobe": "金色绣纹道袍",
+            "emotion": "神色平静"
+          },
+          {
+            "identity_id": "外宗弟子",
+            "location": "外宗广场青石板地面上",
+            "wardrobe": "灰布外宗弟子服饰",
+            "emotion": "好奇、期待"
+          },
+          {
+            "identity_id": "许师姐",
+            "location": "外宗广场高台台阶上，上官修身侧",
+            "wardrobe": "蓝白内门弟子服饰",
+            "emotion": "神色平静"
+          },
+          {
+            "identity_id": "陈师兄",
+            "location": "外宗广场高台台阶上，上官修身侧",
+            "wardrobe": "蓝白内门弟子服饰",
+            "emotion": "神色平静"
+          }
+        ],
+        "props": [],
+        "layout": "外宗弟子聚集在广场低处，上官修与两名内门弟子站在前方高台台阶上，双方呈上下对望的位置关系",
+        "layout_change_source_quote": ""
+      },
+      "beats": [
+        {
+          "time_anchor": "B01",
+          "scene_name": "外宗广场",
+          "visual": "外宗弟子议论上官修等人亲临，猜测有单独丹药发放",
+          "source_span": "[段2·S01]"
+        }
+      ]
+    },
+    "identity_payload": {
+      "asset_manifest": {
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "display_name": "孟浩",
+            "portrait_id": null,
+            "segment_indexes": [
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              14,
+              19,
+              20,
+              21,
+              25,
+              32,
+              33,
+              34,
+              35,
+              36,
+              37,
+              40,
+              45,
+              46,
+              47,
+              49,
+              54
+            ],
+            "aliases": [],
+            "visual_entity_id": "bible:孟浩",
+            "display_appellation": "孟浩",
+            "provenance": {
+              "method": "direct",
+              "anchor_segments": [
+                6
+              ],
+              "anchor_phrase": "孟浩"
+            }
+          },
+          {
+            "identity_id": "bible:上官修",
+            "display_name": "上官修",
+            "portrait_id": null,
+            "segment_indexes": [
+              2,
+              9,
+              10,
+              13,
+              18,
+              19,
+              36,
+              38
+            ],
+            "aliases": [
+              "上官师叔",
+              "金袍老者",
+              "老夫"
+            ],
+            "visual_entity_id": "bible:上官修",
+            "display_appellation": "上官修",
+            "provenance": {
+              "method": "discovery",
+              "anchor_segments": [
+                10
+              ],
+              "anchor_phrase": "上官修"
+            }
+          },
+          {
+            "identity_id": "bible:许师姐",
+            "display_name": "许师姐",
+            "portrait_id": null,
+            "segment_indexes": [
+              21,
+              37,
+              38,
+              47,
+              48,
+              49
+            ],
+            "aliases": [],
+            "visual_entity_id": "bible:许师姐",
+            "display_appellation": "许师姐",
+            "provenance": {
+              "method": "discovery",
+              "anchor_segments": [
+                2
+              ],
+              "anchor_phrase": "许师姐"
+            }
+          },
+          {
+            "identity_id": "bible:陈师兄",
+            "display_name": "陈师兄",
+            "portrait_id": null,
+            "segment_indexes": [
+              39
+            ],
+            "aliases": [],
+            "visual_entity_id": "bible:陈师兄",
+            "display_appellation": "陈师兄",
+            "provenance": {
+              "method": "direct",
+              "anchor_segments": [
+                2
+              ],
+              "anchor_phrase": "陈师兄"
+            }
+          },
+          {
+            "identity_id": "bible:赵武刚（赵师兄）",
+            "display_name": "赵武刚（赵师兄）",
+            "portrait_id": null,
+            "segment_indexes": [
+              23
+            ],
+            "aliases": [
+              "赵武刚师兄"
+            ],
+            "visual_entity_id": "bible:赵武刚（赵师兄）",
+            "display_appellation": "赵武刚师兄",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                23
+              ],
+              "anchor_phrase": "被没抢到丹药的赵武刚师兄泄愤生生拽入公开区内砍了脑袋。"
+            }
+          }
+        ],
+        "scenes": [
+          {
+            "scene_id": "scene:外宗广场",
+            "display_name": "外宗广场",
+            "scene_reference_id": null,
+            "segment_indexes": [
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              14,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              23,
+              24,
+              25,
+              26,
+              27,
+              31,
+              32,
+              33,
+              34,
+              35,
+              36,
+              37,
+              38,
+              39,
+              40,
+              41,
+              42,
+              43,
+              44,
+              45,
+              46,
+              47,
+              48,
+              49,
+              50,
+              51,
+              52
+            ],
+            "provenance": {
+              "method": "discovery",
+              "anchor_segments": [
+                28
+              ],
+              "anchor_phrase": "外宗广场"
+            }
+          },
+          {
+            "scene_id": "scene:靠山宗周边山峰",
+            "display_name": "靠山宗周边山峰",
+            "scene_reference_id": null,
+            "segment_indexes": [
+              28,
+              29,
+              30,
+              53,
+              54
+            ],
+            "provenance": {
+              "method": "discovery",
+              "anchor_segments": [
+                28
+              ],
+              "anchor_phrase": "靠山宗四周的山峰"
+            }
+          }
+        ],
+        "props": [
+          {
+            "label": "灵石",
+            "description": "指甲盖大小，晶莹剔透",
+            "segment_indexes": [
+              10,
+              11,
+              12
+            ],
+            "provenance": {
+              "method": "direct",
+              "anchor_segments": [
+                10
+              ],
+              "anchor_phrase": "灵石"
+            }
+          },
+          {
+            "label": "旱灵丹",
+            "description": "紫色丹药，药香浓郁，可让凝气五层以上修士受益，发放时有封印，十二个时辰内无法服用，会散发丹光",
+            "segment_indexes": [
+              13,
+              15
+            ],
+            "provenance": {
+              "method": "direct",
+              "anchor_segments": [
+                13
+              ],
+              "anchor_phrase": "旱灵丹"
+            }
+          }
+        ],
+        "functional_extras": [
+          {
+            "label": "灰袍老者",
+            "segment_indexes": [
+              28,
+              29,
+              30,
+              53,
+              54
+            ],
+            "visual_entity_id": "entity:e5f9eff89066f7ac",
+            "provenance": {
+              "method": "discovery",
+              "anchor_segments": [],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": true
+            }
+          },
+          {
+            "label": "山顶老者",
+            "segment_indexes": [
+              28,
+              29,
+              30
+            ],
+            "visual_entity_id": "entity:e23318affd825af7",
+            "provenance": {
+              "method": "discovery",
+              "anchor_segments": [],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": true
+            }
+          },
+          {
+            "label": "同门",
+            "segment_indexes": [
+              6
+            ],
+            "visual_entity_id": "entity:60bce4838e18cde1",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                6
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": true,
+              "collective": true
+            }
+          },
+          {
+            "label": "此人",
+            "segment_indexes": [
+              18
+            ],
+            "visual_entity_id": "entity:b3aa101ecac0a302",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                18
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          },
+          {
+            "label": "女子",
+            "segment_indexes": [
+              21
+            ],
+            "visual_entity_id": "entity:1a28b732c20101cf",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                21
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          },
+          {
+            "label": "男女修士",
+            "segment_indexes": [
+              21
+            ],
+            "visual_entity_id": "entity:2ee3fb059f7432c5",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                21
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": true,
+              "collective": true
+            }
+          },
+          {
+            "label": "凝气一层的弟子",
+            "segment_indexes": [
+              22
+            ],
+            "visual_entity_id": "entity:991af2675e966384",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                22
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          },
+          {
+            "label": "那人",
+            "segment_indexes": [
+              23
+            ],
+            "visual_entity_id": "entity:2b133dffc20e1964",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                23
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          },
+          {
+            "label": "两个老者",
+            "segment_indexes": [
+              28
+            ],
+            "visual_entity_id": "entity:cecfd451a1b065b2",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                28
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": true,
+              "collective": true
+            }
+          },
+          {
+            "label": "上官师侄",
+            "segment_indexes": [
+              29
+            ],
+            "visual_entity_id": "entity:c55ec1abf9f0a37b",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                29
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          },
+          {
+            "label": "刚入门的小娃",
+            "segment_indexes": [
+              29
+            ],
+            "visual_entity_id": "entity:6ce4d723d113a6a5",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                29
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          },
+          {
+            "label": "小娃",
+            "segment_indexes": [
+              30
+            ],
+            "visual_entity_id": "entity:70848eb82905892f",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                30
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          },
+          {
+            "label": "弟子",
+            "segment_indexes": [
+              34,
+              35,
+              36,
+              37
+            ],
+            "visual_entity_id": "entity:1734a68dcc9259f9",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                34,
+                35,
+                36,
+                37
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          },
+          {
+            "label": "师弟",
+            "segment_indexes": [
+              26,
+              37
+            ],
+            "visual_entity_id": "entity:e464edb93d844185",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                26,
+                37
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          },
+          {
+            "label": "许姓女子",
+            "segment_indexes": [
+              38
+            ],
+            "visual_entity_id": "entity:e3f5dad61859dfe1",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                38
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          },
+          {
+            "label": "男子",
+            "segment_indexes": [
+              38,
+              39
+            ],
+            "visual_entity_id": "entity:528cfb50f02fc639",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                38,
+                39
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          },
+          {
+            "label": "众人",
+            "segment_indexes": [
+              17,
+              45
+            ],
+            "visual_entity_id": "entity:c769cee4515533d0",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                17,
+                45
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": true,
+              "collective": true
+            }
+          },
+          {
+            "label": "我",
+            "segment_indexes": [
+              33,
+              35,
+              36,
+              49,
+              55,
+              56
+            ],
+            "visual_entity_id": "entity:d6ced9ccec60b128",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                33,
+                35,
+                36
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          },
+          {
+            "label": "穿着灰色长袍的高大老者",
+            "segment_indexes": [
+              53
+            ],
+            "visual_entity_id": "entity:c5fba8f2fc523d6f",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                53
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          },
+          {
+            "label": "小家伙",
+            "segment_indexes": [
+              54
+            ],
+            "visual_entity_id": "entity:e2a77b4c0867dade",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                54
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          },
+          {
+            "label": "此子",
+            "segment_indexes": [
+              1,
+              54
+            ],
+            "visual_entity_id": "entity:020e645ad7b9708d",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                1,
+                54
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          },
+          {
+            "label": "道友",
+            "segment_indexes": [
+              55,
+              56
+            ],
+            "visual_entity_id": "entity:073b3ae72f82a91d",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                55,
+                56
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": true,
+              "collective": true
+            }
+          },
+          {
+            "label": "你",
+            "segment_indexes": [
+              26,
+              27
+            ],
+            "visual_entity_id": "entity:f5d560bcdb638ffe",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                26,
+                27
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          },
+          {
+            "label": "外宗第二人",
+            "segment_indexes": [
+              3
+            ],
+            "visual_entity_id": "entity:e21669dbf253e7f6",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                3
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          },
+          {
+            "label": "王师兄",
+            "segment_indexes": [
+              4
+            ],
+            "visual_entity_id": "entity:1e9a4a56eb485234",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                4
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          },
+          {
+            "label": "掌门长老等人",
+            "segment_indexes": [
+              4
+            ],
+            "visual_entity_id": "entity:a68a7b75502356de",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                4
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": true,
+              "collective": true
+            }
+          },
+          {
+            "label": "他",
+            "segment_indexes": [
+              3,
+              4,
+              6,
+              8,
+              12,
+              19,
+              20
+            ],
+            "visual_entity_id": "entity:e2504b462bba7154",
+            "provenance": {
+              "method": "appellation_resolution",
+              "anchor_segments": [
+                3,
+                4
+              ],
+              "anchor_phrase": "",
+              "candidate_verdict_attempted": false
+            }
+          }
+        ]
+      },
+      "appellation_map": [
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 6,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 7,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 8,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 9,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 10,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 11,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 12,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 13,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 14,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 19,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 20,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 21,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 25,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 32,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 33,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 34,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 35,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 36,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 37,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 40,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 45,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 46,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 47,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 49,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "孟浩",
+          "segment_index": 54,
+          "identity_id": "bible:孟浩",
+          "canonical_appellation": "孟浩"
+        },
+        {
+          "raw_mention": "上官修",
+          "segment_index": 9,
+          "identity_id": "bible:上官修",
+          "canonical_appellation": "上官修"
+        },
+        {
+          "raw_mention": "上官修",
+          "segment_index": 10,
+          "identity_id": "bible:上官修",
+          "canonical_appellation": "上官修"
+        },
+        {
+          "raw_mention": "上官修",
+          "segment_index": 13,
+          "identity_id": "bible:上官修",
+          "canonical_appellation": "上官修"
+        },
+        {
+          "raw_mention": "上官修",
+          "segment_index": 18,
+          "identity_id": "bible:上官修",
+          "canonical_appellation": "上官修"
+        },
+        {
+          "raw_mention": "上官修",
+          "segment_index": 19,
+          "identity_id": "bible:上官修",
+          "canonical_appellation": "上官修"
+        },
+        {
+          "raw_mention": "上官修",
+          "segment_index": 36,
+          "identity_id": "bible:上官修",
+          "canonical_appellation": "上官修"
+        },
+        {
+          "raw_mention": "上官修",
+          "segment_index": 38,
+          "identity_id": "bible:上官修",
+          "canonical_appellation": "上官修"
+        },
+        {
+          "raw_mention": "许师姐",
+          "segment_index": 21,
+          "identity_id": "bible:许师姐",
+          "canonical_appellation": "许师姐"
+        },
+        {
+          "raw_mention": "许师姐",
+          "segment_index": 37,
+          "identity_id": "bible:许师姐",
+          "canonical_appellation": "许师姐"
+        },
+        {
+          "raw_mention": "许师姐",
+          "segment_index": 38,
+          "identity_id": "bible:许师姐",
+          "canonical_appellation": "许师姐"
+        },
+        {
+          "raw_mention": "许师姐",
+          "segment_index": 47,
+          "identity_id": "bible:许师姐",
+          "canonical_appellation": "许师姐"
+        },
+        {
+          "raw_mention": "许师姐",
+          "segment_index": 48,
+          "identity_id": "bible:许师姐",
+          "canonical_appellation": "许师姐"
+        },
+        {
+          "raw_mention": "许师姐",
+          "segment_index": 49,
+          "identity_id": "bible:许师姐",
+          "canonical_appellation": "许师姐"
+        },
+        {
+          "raw_mention": "陈师兄",
+          "segment_index": 39,
+          "identity_id": "bible:陈师兄",
+          "canonical_appellation": "陈师兄"
+        },
+        {
+          "raw_mention": "上官师叔",
+          "segment_index": 2,
+          "identity_id": "bible:上官修",
+          "canonical_appellation": "上官修"
+        },
+        {
+          "raw_mention": "金袍老者",
+          "segment_index": 9,
+          "identity_id": "bible:上官修",
+          "canonical_appellation": "上官修"
+        },
+        {
+          "raw_mention": "老夫",
+          "segment_index": 10,
+          "identity_id": "bible:上官修",
+          "canonical_appellation": "上官修"
+        },
+        {
+          "raw_mention": "老夫",
+          "segment_index": 18,
+          "identity_id": "bible:上官修",
+          "canonical_appellation": "上官修"
+        },
+        {
+          "raw_mention": "赵武刚师兄",
+          "segment_index": 23,
+          "identity_id": "bible:赵武刚（赵师兄）",
+          "canonical_appellation": "赵武刚（赵师兄）"
+        }
+      ]
+    }
+  },
+  {
+    "episode_no": 6,
+    "call_id": 65978,
+    "context": {
+      "segment_no": 11,
+      "source_segment_indexes": [
+        23,
+        24
+      ],
+      "source_text_by_segment": "[段23·S01] 想着仙术，孟浩退出石室后视若珍宝般将石门关闭，等待其内灵气积累，他已决定采用许师姐曾经的方法，不是时刻守在灵泉旁，而是等其积攒足够。\n[段24·S01] 坐在洞府内，孟浩摸了摸肚子，琢磨着有些日子没有看到小胖子，就连野味也都有大半个月没吃，尽是一些野果，暗道成为外宗弟子后，反倒不如杂役处吃的饱，除非是有足够的灵石去宗门的养丹坊换些辟谷丹或是御食丹等据说吃一粒数日不饿的灵药，否则的话，大都要自己去想办法解决温饱。",
+      "required_dialogue": [],
+      "relevant_assets": {
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "display_name": "孟浩",
+            "portrait_id": "portrait_d15e2d2c02ae",
+            "segment_indexes": [
+              4,
+              5,
+              6,
+              7,
+              9,
+              10,
+              11,
+              12,
+              13,
+              14,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              23,
+              24,
+              25,
+              26,
+              27,
+              28,
+              29,
+              30,
+              31,
+              32,
+              33,
+              35,
+              36,
+              37,
+              38,
+              39,
+              40,
+              41,
+              43,
+              44,
+              45
+            ],
+            "aliases": [
+              "他"
+            ],
+            "visual_entity_id": "bible:孟浩",
+            "display_appellation": "孟浩",
+            "provenance": {
+              "method": "direct",
+              "anchor_segments": [
+                4
+              ],
+              "anchor_phrase": "孟浩"
+            },
+            "appearance": "身着灰蓝色修士短袍，身形偏瘦，腰间系有基础储物袋"
+          }
+        ],
+        "scenes": [
+          {
+            "scene_id": "scene:山间修行洞府",
+            "display_name": "山间修行洞府",
+            "scene_reference_id": "scene_95f8ea0d714a",
+            "segment_indexes": [
+              11,
+              12,
+              13,
+              14,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              23,
+              24
+            ],
+            "provenance": {
+              "method": "resolution",
+              "anchor_segments": [
+                11
+              ],
+              "anchor_phrase": "孟浩踏入洞府时，青石门缓缓闭合，直至砰的一声完全关闭后，白色玉简飞来，落入孟浩手中"
+            },
+            "scene_canonical": "国漫3D虚构室内场景，山间修行洞府，天光从洞口斜照入内，陈设简单质朴，光影精致细腻，氛围安静清寂，无真人元素"
+          }
+        ],
+        "props": [],
+        "functional_extras": [],
+        "appellation_map": [
+          {
+            "raw_mention": "孟浩",
+            "segment_index": 23,
+            "identity_id": "bible:孟浩",
+            "canonical_appellation": "孟浩"
+          },
+          {
+            "raw_mention": "孟浩",
+            "segment_index": 24,
+            "identity_id": "bible:孟浩",
+            "canonical_appellation": "孟浩"
+          }
+        ]
+      }
+    },
+    "draft": {
+      "prompt_text": "电影级预告片质感，多镜头叙事，镜头之间硬切。\n镜头1：拉远 @孟浩 身着灰蓝色修士短袍，身形偏瘦，腰间系有基础储物袋，从灵泉旁的青石板地面起身，转身走向石室出口，国漫3D虚构室内场景，山间修行洞府，天光从洞口斜照入内，陈设简单质朴，晨辉暖金光线笼罩，光影精致细腻，氛围安静清寂，无真人元素。\n镜头2：固定 @孟浩 双手按在厚重的青石门内侧，缓缓将石门闭合，动作谨慎郑重。\n镜头3：中景 @孟浩 站在洞府内的空地上，抬手摸了摸自己的肚子，眉头微蹙，眼神飘向洞府外的山林方向，{{speech:U01}}，画面人物嘴唇闭合无张合动作。\n全片贯穿：环境音是石门闭合的沉闷闷响、山间微风拂过洞口的轻响；配乐是轻快中带点松弛的笛音；风格是国漫3D动画电影质感，明确虚构数字角色、非真人照片，精致光影，统一电影画面；约束：面部一致、手指正确、人数锁定、无字幕水印、人物与家具不穿插。",
+      "shot_count": 3,
+      "dialogue": [
+        {
+          "utterance_id": "U01",
+          "speaker_identity_id": "bible:孟浩",
+          "line": "好久没吃野味了，进山找找去，顺道看看小胖子怎么样了。",
+          "source_segment_index": 24,
+          "delivery": "offscreen_voice",
+          "delivery_kind": "inner_monologue",
+          "attribution_evidence": "原文段24孟浩的内心活动"
+        }
+      ],
+      "resources": {
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "portrait_id": "portrait_d15e2d2c02ae",
+            "display_name": "孟浩",
+            "visibility": "visible",
+            "subject_kind": "character"
+          }
+        ],
+        "scenes": [
+          {
+            "scene_id": "scene:山间修行洞府",
+            "scene_reference_id": "scene_95f8ea0d714a",
+            "description": "国漫3D虚构室内场景，山间修行洞府，天光从洞口斜照入内，陈设简单质朴，光影精致细腻，氛围安静清寂，无真人元素"
+          }
+        ],
+        "props": []
+      },
+      "degraded_capabilities": [],
+      "camera_repetition_rationale": "",
+      "camera_digest": {
+        "opening_shot_size": "全景",
+        "opening_camera_move": "拉远",
+        "transition_from_previous": "硬切，承接上一段孟浩在石室灵泉旁打坐完起身的动作"
+      },
+      "continuity_memo": {
+        "time_of_day": "白日",
+        "time_of_day_basis": "inherited",
+        "time_of_day_source_quote": "",
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "location": "山间修行洞府内石室门外的空地上",
+            "wardrobe": "身着灰蓝色修士短袍，身形偏瘦，腰间系有基础储物袋",
+            "emotion": "眉头微蹙，神色自然，看向洞外"
+          }
+        ],
+        "props": [
+          {
+            "name": "灵泉",
+            "form": "泉眼基底为深灰色粗糙天然花岗岩，边缘附着暗绿色陈旧苔藓；整体呈不规则椭圆形，直径约1.2米，内壁有浅白色干涸灵质结垢；内部残留三分之一高度半透明白色灵液，液面浮淡蓝白色稀薄灵气雾",
+            "location": "石室中心的地面上",
+            "state": "灵气正缓慢积累，雾层逐渐变浓"
+          },
+          {
+            "name": "灵石",
+            "form": "整体为掌心大小的半块扁状不规则形态，断口粗糙无打磨；材质为莹润半透的青玉质地，表面分布细碎银白星点絮状纹理，泛淡青色柔光",
+            "location": "孟浩的储物袋内",
+            "state": "完好"
+          },
+          {
+            "name": "凝灵丹",
+            "form": "鸽蛋大小浑圆丹丸，莹润淡青色半透明玉石质感，表面有银白星点荧光，外层米白色蜡封装有朱红色云纹印戳",
+            "location": "孟浩的储物袋内",
+            "state": "蜡封完好"
+          },
+          {
+            "name": "白色玉简",
+            "form": "通体为无杂质的乳白羊脂玉质地，细腻莹润带天然玉质纹理；为长12cm、宽3cm、厚0.8cm的扁平长条形，边缘打磨圆润；正面浅刻淡金色流云纹暗记，无其余附加装饰",
+            "location": "孟浩的储物袋内",
+            "state": "非激活状态"
+          },
+          {
+            "name": "岩壁灵纹",
+            "form": "淡金色细密刻印纹路，隐于石壁表层",
+            "location": "石室岩壁上",
+            "state": "恢复吸附灵气功能，微弱亮光"
+          },
+          {
+            "name": "青石门",
+            "form": "厚重整块青灰色花岗岩材质，表面有自然石纹，边缘与岩壁贴合处有陈旧磨损痕迹",
+            "location": "石室入口处",
+            "state": "完全闭合"
+          }
+        ],
+        "layout": "孟浩站在洞府内石室门外的空地上，面向洞口方向，晨辉暖金色光线从洞口斜照进来落在他身上，身后关闭的青石门与石室隔开",
+        "layout_change_source_quote": "想着仙术，孟浩退出石室后视若珍宝般将石门关闭"
+      },
+      "beats": [
+        {
+          "beat_id": "B08",
+          "scene_name": "山间修行洞府",
+          "visual": "孟浩关闭石室石门，摸肚子打算进山找野味",
+          "source_span": "段23-段24"
+        }
+      ]
+    }
+  },
+  {
+    "episode_no": 7,
+    "call_id": 66006,
+    "context": {
+      "segment_no": 9,
+      "source_segment_indexes": [
+        24,
+        25,
+        26
+      ],
+      "source_text_by_segment": "[段24·S01] 收起妖丹，孟浩再次赶路，可惜此地荒山妖兽并非常见，直至回到了洞府，他也没遇到第二只，内心有些遗憾。\n[段25·S01] 回到洞府时已是深夜，孟浩盘膝坐在地上，看着手中的妖丹与铜镜，双眼光芒闪动。\n[段26·S01] “这妖丹可以服下，不过宗门发的凝灵丹还在，先吃凝灵丹，再次这妖丹。”\n[段26·S02] 孟浩打定主意，将妖丹与铜镜放在身旁，又取出那半块灵石也放在那里，有此灵石在身边，可让灵气吸收更多一些。",
+      "required_dialogue": [
+        {
+          "quote_id": "Q09",
+          "text": "这妖丹可以服下，不过宗门发的凝灵丹还在，先吃凝灵丹，再次这妖丹。",
+          "source_segment_index": 26,
+          "source_start": 1,
+          "source_end": 33
+        }
+      ],
+      "relevant_assets": {
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "display_name": "孟浩",
+            "portrait_id": null,
+            "segment_indexes": [
+              2,
+              4,
+              6,
+              7,
+              9,
+              10,
+              11,
+              14,
+              15,
+              17,
+              19,
+              21,
+              22,
+              23,
+              24,
+              25,
+              26,
+              27,
+              28,
+              29,
+              30,
+              31,
+              32,
+              33,
+              35,
+              36,
+              37,
+              38,
+              39,
+              40,
+              41,
+              43,
+              44
+            ],
+            "aliases": [
+              "他",
+              "自己",
+              "少年",
+              "我"
+            ],
+            "visual_entity_id": "bible:孟浩",
+            "display_appellation": "孟浩",
+            "provenance": {
+              "method": "discovery",
+              "anchor_segments": [
+                2
+              ],
+              "anchor_phrase": "孟浩"
+            },
+            "appearance": "身着灰蓝色修士短袍，身形偏瘦，腰间系有基础储物袋"
+          }
+        ],
+        "scenes": [
+          {
+            "scene_id": "scene:荒山山林区域",
+            "display_name": "荒山山林区域",
+            "scene_reference_id": null,
+            "segment_indexes": [
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              14,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              23,
+              24
+            ],
+            "provenance": {
+              "method": "discovery",
+              "anchor_segments": [
+                8
+              ],
+              "anchor_phrase": "好在这里荒山众多，否则的话若是都集中在一座山上，必定会让此山血气冲天。"
+            },
+            "scene_canonical": "室外荒山山林区域，皓月当空的夜晚，连绵荒山石坡搭配丛生林木，冷调月光铺洒，氛围萧索荒寂，为精致光影的国漫3D虚构场景。"
+          }
+        ],
+        "props": [
+          {
+            "label": "铜镜",
+            "description": "表面有锈迹，拿在手中可爆掉毛发生物的屁股，疑似能吸收灵石复制妖丹的古镜",
+            "segment_indexes": [
+              7,
+              9,
+              17,
+              19,
+              21,
+              22,
+              25,
+              26,
+              33,
+              34,
+              35,
+              43
+            ],
+            "provenance": {
+              "method": "direct",
+              "anchor_segments": [
+                7
+              ],
+              "anchor_phrase": "铜镜"
+            },
+            "appearance": "青铜质地圆形古镜，直径约12cm，镜面呈亚光暗铜色且布满青褐色斑驳锈迹，镜背铸有缠枝云纹浮雕，边缘分布三处半指宽的凹陷磨损痕迹",
+            "ref_image_path": "/Users/bytedance/Desktop/漫剧Agent2.0/projects/proj_92f1d900df2a/prop_refs/铜镜.png"
+          },
+          {
+            "label": "妖丹",
+            "description": "指甲盖大小，晶莹剔透，泌出阵阵清香，蕴含天地灵气可直接服下的妖兽内丹",
+            "segment_indexes": [
+              23,
+              25,
+              26,
+              28,
+              34,
+              35,
+              36,
+              37,
+              38
+            ],
+            "provenance": {
+              "method": "direct",
+              "anchor_segments": [
+                23
+              ],
+              "anchor_phrase": "妖丹"
+            },
+            "appearance": "尺寸为成人指甲盖大小的类球形实体，整体呈晶莹剔透的半透莹润质感无杂质，表层分布细碎淡金色灵气絮状纹路，光影下透出柔和暖白色光晕",
+            "ref_image_path": "/Users/bytedance/Desktop/漫剧Agent2.0/projects/proj_92f1d900df2a/prop_refs/妖丹.png"
+          },
+          {
+            "label": "灵石",
+            "description": "半块，放在身边可提升灵气吸收效率，后疑似被铜镜吸收",
+            "segment_indexes": [
+              26,
+              34,
+              35,
+              39,
+              40,
+              41,
+              42,
+              44
+            ],
+            "provenance": {
+              "method": "direct",
+              "anchor_segments": [
+                26
+              ],
+              "anchor_phrase": "灵石"
+            },
+            "appearance": "整体为掌心大小的半块扁状不规则形态，断口粗糙无打磨；材质为莹润半透的青玉质地，表面分布细碎银白星点絮状纹理，常态下泛淡青色柔光，光影细腻符合3D国漫电影质感",
+            "ref_image_path": "/Users/bytedance/Desktop/漫剧Agent2.0/projects/proj_92f1d900df2a/prop_refs/灵石.png"
+          },
+          {
+            "label": "凝灵丹",
+            "description": "宗门发放的丹药，服下可转化为灵气辅助修行，入体即化",
+            "segment_indexes": [
+              26,
+              27,
+              28
+            ],
+            "provenance": {
+              "method": "direct",
+              "anchor_segments": [
+                26
+              ],
+              "anchor_phrase": "凝灵丹"
+            },
+            "appearance": "整体为鸽蛋大小的浑圆丹丸，通体呈莹润淡青色半透明玉石质感，表面浮有细碎银白星点荧光，外层包裹薄如蝉翼的米白色蜡封，蜡封表面盖有朱红色云纹印戳",
+            "ref_image_path": "/Users/bytedance/Desktop/漫剧Agent2.0/projects/proj_92f1d900df2a/prop_refs/凝灵丹.png"
+          }
+        ],
+        "functional_extras": [],
+        "appellation_map": [
+          {
+            "raw_mention": "孟浩",
+            "segment_index": 24,
+            "identity_id": "bible:孟浩",
+            "canonical_appellation": "孟浩"
+          },
+          {
+            "raw_mention": "孟浩",
+            "segment_index": 25,
+            "identity_id": "bible:孟浩",
+            "canonical_appellation": "孟浩"
+          },
+          {
+            "raw_mention": "孟浩",
+            "segment_index": 26,
+            "identity_id": "bible:孟浩",
+            "canonical_appellation": "孟浩"
+          },
+          {
+            "raw_mention": "他",
+            "segment_index": 24,
+            "identity_id": "bible:孟浩",
+            "canonical_appellation": "孟浩"
+          }
+        ]
+      }
+    },
+    "draft": {
+      "prompt_text": "电影级预告片质感，多镜头叙事，镜头之间硬切。\n镜头1：跟随 中景，@孟浩 身着灰蓝色修士短袍，身形偏瘦，腰间系有基础储物袋，手中握着那颗尺寸为成人指甲盖大小的类球形实体，整体呈晶莹剔透的半透莹润质感无杂质，表层分布细碎淡金色灵气絮状纹路，光影下透出柔和暖白色光晕的妖丹，在室外荒山山林区域的荒山石坡上快步前行，冷调月光随着他的脚步逐渐被暖黄色的光线取代，周身色调从深夜冷蓝向洞府暖黄平缓过渡，衣袍被风拂动。\n镜头2：固定 全景，孟浩推开古朴的洞府石门走入室内，暖黄色的油灯光线铺满整个石室空间，石室地面铺着粗糙的青石板，角落摆着简易的石桌石凳，他反手关上石门，将外界的冷月光隔绝在外。\n镜头3：固定 中景，@孟浩 盘膝坐在洞府的青石板地面上，将手中的妖丹放在身侧，又从储物袋里取出青铜质地圆形古镜，直径约12cm，镜面呈亚光暗铜色且布满青褐色斑驳锈迹，镜背铸有缠枝云纹浮雕，边缘分布三处半指宽的凹陷磨损痕迹的铜镜、整体为掌心大小的半块扁状不规则形态，断口粗糙无打磨；材质为莹润半透的青玉质地，表面分布细碎银白星点絮状纹理，常态下泛淡青色柔光的灵石依次放在身旁，他目光落在这些物件上，双眼微微发亮，内心独白：{{speech:U01}}。\n全片贯穿：环境音为山林风声、洞府石门开合的闷响、衣料摩擦声；配乐为节奏平缓带着期待感的国风修行乐；风格为国漫3D动画电影质感，明确虚构数字角色、非真人照片，精致光影，统一电影画面；约束：面部一致、手指正确、人数锁定、无字幕水印、人物与家具不穿插。",
+      "shot_count": 3,
+      "dialogue": [
+        {
+          "utterance_id": "U01",
+          "speaker_identity_id": "bible:孟浩",
+          "line": "这妖丹可以服下，不过宗门发的凝灵丹还在，先吃凝灵丹，再吃这妖丹。",
+          "source_segment_index": 26,
+          "delivery": "offscreen_voice",
+          "delivery_kind": "inner_monologue",
+          "source_quote_id": "Q09",
+          "source_start": 1,
+          "source_end": 33,
+          "attribution_evidence": ""
+        }
+      ],
+      "resources": {
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "portrait_id": null,
+            "description": "",
+            "display_name": "孟浩",
+            "visibility": "visible",
+            "subject_kind": "character"
+          }
+        ],
+        "scenes": [
+          {
+            "scene_id": "scene:荒山山林区域",
+            "scene_reference_id": null,
+            "description": "室外荒山山林区域，皓月当空的夜晚，连绵荒山石坡搭配丛生林木，冷调月光铺洒，氛围萧索荒寂，为精致光影的国漫3D虚构场景"
+          }
+        ],
+        "props": [
+          {
+            "label": "铜镜",
+            "description": "青铜质地圆形古镜，直径约12cm，镜面呈亚光暗铜色且布满青褐色斑驳锈迹，镜背铸有缠枝云纹浮雕，边缘分布三处半指宽的凹陷磨损痕迹"
+          },
+          {
+            "label": "妖丹",
+            "description": "尺寸为成人指甲盖大小的类球形实体，整体呈晶莹剔透的半透莹润质感无杂质，表层分布细碎淡金色灵气絮状纹路，光影下透出柔和暖白色光晕"
+          },
+          {
+            "label": "灵石",
+            "description": "整体为掌心大小的半块扁状不规则形态，断口粗糙无打磨；材质为莹润半透的青玉质地，表面分布细碎银白星点絮状纹理，常态下泛淡青色柔光，光影细腻符合3D国漫电影质感"
+          }
+        ]
+      },
+      "degraded_capabilities": [],
+      "camera_repetition_rationale": "",
+      "camera_digest": {
+        "opening_shot_size": "中景",
+        "opening_camera_move": "跟随",
+        "transition_from_previous": "色温渐变转场，从冷蓝荒山过渡到暖黄洞府"
+      },
+      "continuity_memo": {
+        "time_of_day": "夜晚",
+        "time_of_day_basis": "inherited",
+        "time_of_day_source_quote": "",
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "location": "洞府内青石板地面上",
+            "wardrobe": "身着灰蓝色修士短袍，身形偏瘦，腰间系有基础储物袋",
+            "emotion": "眼神发亮，满是期待"
+          }
+        ],
+        "props": [
+          {
+            "name": "铜镜",
+            "form": "青铜质地圆形古镜，直径约12cm，镜面呈亚光暗铜色且布满青褐色斑驳锈迹，镜背铸有缠枝云纹浮雕，边缘分布三处半指宽的凹陷磨损痕迹",
+            "location": "孟浩身侧的地面上",
+            "state": "完好"
+          },
+          {
+            "name": "妖丹",
+            "form": "尺寸为成人指甲盖大小的类球形实体，整体呈晶莹剔透的半透莹润质感无杂质，表层分布细碎淡金色灵气絮状纹路，光影下透出柔和暖白色光晕",
+            "location": "孟浩身侧的地面上",
+            "state": "完好"
+          },
+          {
+            "name": "灵石",
+            "form": "整体为掌心大小的半块扁状不规则形态，断口粗糙无打磨；材质为莹润半透的青玉质地，表面分布细碎银白星点絮状纹理，常态下泛淡青色柔光",
+            "location": "孟浩身侧的地面上",
+            "state": "完好"
+          }
+        ],
+        "layout": "孟浩盘膝坐在洞府青石板地面上，妖丹、铜镜、灵石依次摆放在他身旁的地面，暖黄色油灯光线照亮整个石室",
+        "layout_change_source_quote": "回到洞府时已是深夜，孟浩盘膝坐在地上，看着手中的妖丹与铜镜，双眼光芒闪动。将妖丹与铜镜放在身旁，又取出那半块灵石也放在那里"
+      }
+    }
+  },
+  {
+    "episode_no": 8,
+    "call_id": 65960,
+    "context": {
+      "segment_no": 3,
+      "source_segment_indexes": [
+        5,
+        6
+      ],
+      "source_text_by_segment": "[段5·S01] “到了凝气二层，就可以施展仙术，再就是凝气五层时，可以學习风行术法，那是可以让人近似飞起的仙法。”\n[段5·S02] 孟浩闭上眼，对凝气五层的飞行满是期待，半晌之后猛地睁开，右手抬起时向上虚握。\n[段6·S01] 在这一刹那，他立刻感受到洞府内的温度瞬间高了不少，甚至还有丝丝火花在他右手上出现，对于心态还保持凡人的孟浩而言，这一幕让他内心立刻激动，但心绪的变化，却使得那些火花消散。",
+      "required_dialogue": [
+        {
+          "quote_id": "Q02",
+          "text": "到了凝气二层，就可以施展仙术，再就是凝气五层时，可以學习风行术法，那是可以让人近似飞起的仙法。",
+          "source_segment_index": 5,
+          "source_start": 1,
+          "source_end": 48
+        }
+      ],
+      "relevant_assets": {
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "display_name": "孟浩",
+            "portrait_id": "portrait_d15e2d2c02ae",
+            "segment_indexes": [
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              14,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              23,
+              24,
+              25,
+              26,
+              27,
+              28,
+              29,
+              30,
+              31,
+              32,
+              34,
+              35,
+              36,
+              37,
+              38,
+              39,
+              40,
+              41,
+              42,
+              43,
+              44,
+              45,
+              46,
+              47,
+              48,
+              49,
+              50,
+              51,
+              52,
+              53,
+              54,
+              55,
+              56,
+              60
+            ],
+            "aliases": [
+              "蝼蚁",
+              "小杂种"
+            ],
+            "visual_entity_id": "bible:孟浩",
+            "display_appellation": "孟浩",
+            "provenance": {
+              "method": "direct",
+              "anchor_segments": [
+                2
+              ],
+              "anchor_phrase": "孟浩"
+            },
+            "appearance": "身着灰蓝色修士短袍，身形偏瘦，腰间系有基础储物袋"
+          }
+        ],
+        "scenes": [
+          {
+            "scene_id": "scene:山间修行洞府",
+            "display_name": "山间修行洞府",
+            "scene_reference_id": "scene_95f8ea0d714a",
+            "segment_indexes": [
+              2,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              14,
+              15
+            ],
+            "provenance": {
+              "method": "resolution",
+              "anchor_segments": [
+                4
+              ],
+              "anchor_phrase": "回到洞府时，天空已蒙蒙亮，孟浩拿出凝气卷，仔细的看了许久。"
+            },
+            "scene_canonical": "国漫3D虚构室内场景，山间修行洞府，天光从洞口斜照入内，陈设简单质朴，光影精致细腻，氛围安静清寂，无真人元素"
+          }
+        ],
+        "props": [],
+        "functional_extras": [],
+        "appellation_map": [
+          {
+            "raw_mention": "孟浩",
+            "segment_index": 5,
+            "identity_id": "bible:孟浩",
+            "canonical_appellation": "孟浩"
+          },
+          {
+            "raw_mention": "孟浩",
+            "segment_index": 6,
+            "identity_id": "bible:孟浩",
+            "canonical_appellation": "孟浩"
+          }
+        ]
+      }
+    },
+    "draft": {
+      "prompt_text": "电影级预告片质感，多镜头叙事，镜头之间硬切。\n镜头1：推近，@孟浩 身着灰蓝色修士短袍，身形偏瘦，腰间系有基础储物袋，坐在洞府内的石凳上，目光盯着面前石桌上的凝气卷，嘴角微扬，眼神带着憧憬，{{speech:U01}}；国漫3D虚构室内场景，山间修行洞府，天光从洞口斜照入内，陈设简单质朴，光影精致细腻，氛围安静清寂，无真人元素，冷青蓝色清晨天光均匀铺满空间。\n镜头2：特写，@孟浩 缓缓闭上眼，眼睫轻颤，片刻后猛地睁大眼睛，右手抬起向上虚握，细碎的橘红色火花在他指尖闪现又快速消散。\n镜头3：近景，@孟浩 看着自己空无一物的右手，眉头微蹙，指尖还残留着微弱的温度余感。\n全片贯穿：环境音为洞府内清寂的风动声、术法能量微弱的嗡鸣消散声；配乐为带有期待感又带一丝怅然的轻缓修行主题弦乐；风格为国漫3D动画电影质感，明确虚构数字角色、非真人照片，精致光影，统一电影画面；约束：面部一致、手指正确、人数锁定、无字幕水印、人物与家具不穿插。",
+      "shot_count": 3,
+      "dialogue": [
+        {
+          "utterance_id": "U01",
+          "speaker_identity_id": "bible:孟浩",
+          "line": "到了凝气二层，就可以施展仙术，再就是凝气五层时，可以学习风行术法，那是可以让人近似飞起的仙法。",
+          "source_segment_index": 5,
+          "delivery": "offscreen_voice",
+          "delivery_kind": "inner_monologue",
+          "source_quote_id": "Q02",
+          "source_start": 1,
+          "source_end": 48,
+          "attribution_evidence": ""
+        }
+      ],
+      "resources": {
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "portrait_id": "portrait_d15e2d2c02ae",
+            "display_name": "孟浩",
+            "visibility": "visible",
+            "subject_kind": "character"
+          }
+        ],
+        "scenes": [
+          {
+            "scene_id": "scene:山间修行洞府",
+            "scene_reference_id": "scene_95f8ea0d714a",
+            "description": "国漫3D虚构室内场景，山间修行洞府，天光从洞口斜照入内，陈设简单质朴，光影精致细腻，氛围安静清寂，无真人元素"
+          }
+        ],
+        "props": [
+          {
+            "label": "凝气卷",
+            "description": "粗麻纸线装的古朴小册子，整体尺寸略小于成人手掌；米黄色封面正中印有墨色古体\"凝气卷\"三字；内页开卷位置有墨书落款\"靠山老祖\"字样，书页边缘带轻微磨损旧感"
+          },
+          {
+            "label": "储物袋",
+            "description": "藏青粗麻混纺加厚面料，表面带自然亚麻纹理；袋口穿棕黄粗棉绳，正面有暗金色云纹底篆体\"储\"字绣标；约18cm高、12cm宽的软质扁袋，边角同色系粗线包边"
+          }
+        ]
+      },
+      "degraded_capabilities": [],
+      "camera_repetition_rationale": "",
+      "camera_digest": {
+        "opening_shot_size": "近景",
+        "opening_camera_move": "推近",
+        "transition_from_previous": "同场景硬切，承接上一段孟浩在洞府内看凝气卷的状态"
+      },
+      "continuity_memo": {
+        "time_of_day": "白天",
+        "time_of_day_basis": "inherited",
+        "time_of_day_source_quote": "",
+        "characters": [
+          {
+            "identity_id": "bible:孟浩",
+            "location": "山间修行洞府内的石凳上",
+            "wardrobe": "身着灰蓝色修士短袍，腰间系有基础储物袋",
+            "emotion": "眉头微蹙，略带讶异"
+          }
+        ],
+        "props": [
+          {
+            "name": "铜镜",
+            "form": "青铜质地圆形古镜，直径约12cm，镜面呈亚光暗铜色且布满青褐色斑驳锈迹，镜背铸有缠枝云纹浮雕，边缘分布三处半指宽的凹陷磨损痕迹",
+            "location": "孟浩腰间的储物袋内",
+            "state": "被妥善收纳"
+          },
+          {
+            "name": "储物袋",
+            "form": "藏青粗麻混纺加厚面料，表面带自然亚麻纹理；袋口穿棕黄粗棉绳，正面有暗金色云纹底篆体\"储\"字绣标；约18cm高、12cm宽的软质扁袋，边角同色系粗线包边",
+            "location": "孟浩腰间",
+            "state": "袋口束紧，内装铜镜"
+          },
+          {
+            "name": "凝气卷",
+            "form": "粗麻纸线装的古朴小册子，整体尺寸略小于成人手掌；米黄色封面正中印有墨色古体\"凝气卷\"三字；内页开卷位置有墨书落款\"靠山老祖\"字样，书页边缘带轻微磨损旧感",
+            "location": "洞府内石桌上",
+            "state": "摊开"
+          }
+        ],
+        "layout": "孟浩坐在洞府内的石凳上，石桌位于他面前，凝气卷摊放在石桌中央，冷青色天光从洞口斜照在桌面与孟浩身上，他的右手抬起悬空在身前",
+        "layout_change_source_quote": "孟浩闭上眼，对凝气五层的飞行满是期待，半晌之后猛地睁开，右手抬起时向上虚握。"
+      },
+      "beats": [
+        {
+          "time_anchor": "",
+          "scene_name": "山间修行洞府",
+          "visual": "孟浩坐在石凳上看着凝气卷，眼神带憧憬，内心默念关于凝气层与风行术的内容",
+          "source_span": "段5·S01"
+        },
+        {
+          "time_anchor": "",
+          "scene_name": "山间修行洞府",
+          "visual": "孟浩闭眼再睁眼，抬手虚握，指尖闪现火花又消散",
+          "source_span": "段5·S02、段6·S01"
+        }
+      ]
+    }
+  }
+]

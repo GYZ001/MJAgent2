@@ -31,6 +31,7 @@ import re
 
 from app.source_excerpt import chapter_title_segment_ids, index_source_segments
 from app.source_paratext import cached_chapter_paratext_offsets
+from .source_binding_spans import complete_pack_bindings
 
 Interval = tuple[int, int]
 
@@ -173,7 +174,7 @@ def storyboard_source_coverage_gap(conn, episode_id: str) -> str | None:
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
     bindings = conn.execute(
-        """SELECT b.chapter_idx, b.start_offset, b.end_offset
+        """SELECT b.*, s.shot_contract_json
              FROM storyboard_source_bindings b
              JOIN shots s ON s.id=b.shot_id
             WHERE s.episode_id=?""",
@@ -181,6 +182,7 @@ def storyboard_source_coverage_gap(conn, episode_id: str) -> str | None:
     ).fetchall()
     if not bindings:
         return None
+    bindings = complete_pack_bindings(conn, row, bindings)
     uncovered = 0
     source_total = 0
     samples: list[str] = []
