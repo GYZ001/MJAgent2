@@ -16,7 +16,6 @@ import { SINGLE_ROW_ASSET_PAGE, useFillPageSize } from '../hooks/useFillPageSize
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { usePrepListState } from '../hooks/usePrepListState'
 import { formatBookTitle } from '../lib/bookTitle'
-import { sceneStepStatus } from '../lib/prepSteps'
 import { retryBibleGenerationAction } from '../lib/retryBibleGeneration'
 import { sceneUsability } from '../lib/sceneUsability'
 import { statusLabel } from '../lib/statusLabels'
@@ -181,13 +180,12 @@ export default function ScenesPage() {
   const detailScene = detailSceneName ? scenes.find(scene => scene.name === detailSceneName) ?? null : null
   const paramsScene = paramsSceneName ? scenes.find(scene => scene.name === paramsSceneName) ?? null : null
   const hasUnavailable = scenes.some(scene => sceneUsability(scene, false) === 'unavailable')
-  const sceneStatus = sceneStepStatus(p)
 
   return (
     <>
       <header className="desk-head">
         <div className="crumb">书房 / {formatBookTitle(p.name)}</div>
-        <PrepSubnav current="scenes" statuses={{ scenes: sceneStatus }} />
+        <PrepSubnav current="scenes" />
         <h1>场景库 <span className="sub">管理视频生成所需的场景参考图</span></h1>
         <hr className="rule" />
       </header>

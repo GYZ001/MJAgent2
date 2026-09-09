@@ -296,6 +296,9 @@ body {
 /* 世界书四步导航：桌面一行四等分；≤980px 两两一行（四步始终全部可见，
    不横向滑动、不出现 3+1 的孤行）；≤720px 再压扁一档。列数与步数绑定，
    不用 auto-fit——它在中等宽度会重新掉回 3+1。 */
+html:has(.prep-subnav) {
+  scrollbar-gutter: stable;
+}
 .prep-subnav {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -304,7 +307,7 @@ body {
 }
 .prep-subnav-tab {
   position: relative;
-  min-height: 60px;
+  height: 64px;
   display: flex;
   align-items: center;
   gap: 11px;
@@ -400,7 +403,7 @@ body {
     margin: 12px 0 18px;
   }
   .prep-subnav-tab {
-    min-height: 54px;
+    height: 56px;
     gap: 9px;
     padding: 8px 11px;
     border-radius: 10px;
@@ -7769,25 +7772,6 @@ label.f {
   font-size: 11px;
 }
 
-/* PRD prep/status affordances */
-.prep-step-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: 4px;
-  font-style: normal;
-  font-size: 11px;
-  color: var(--ink-faint);
-}
-.prep-status-problem .prep-step-status {
-  color: var(--cinnabar);
-}
-.prep-status-running .prep-step-status {
-  color: var(--gold, #b8860b);
-}
-.prep-status-done .prep-step-status {
-  color: var(--moss);
-}
 .character-filters {
   position: relative;
   display: inline-flex;

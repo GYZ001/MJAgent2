@@ -1,16 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import type { Bible, Scene } from '../api'
-import { sceneStepStatus } from '../lib/prepSteps'
 import { sceneUsability } from '../lib/sceneUsability'
 import { handoffGapSelectionToGenerate } from './ScenesPage'
-
-const bibleWithScenes = (scenes: Scene[]) => ({
-  world: { era: '', genre: '', visual_style_canonical: '国风' },
-  characters: [],
-  scenes,
-} as Bible)
 
 const source = readFileSync(fileURLToPath(new URL('./ScenesPage.tsx', import.meta.url)), 'utf-8')
 
@@ -61,23 +53,6 @@ describe('人物谱世界观写入失败时的场景库出路', () => {
     expect(source).toContain('重新生成人物谱')
     expect(source).toContain('retryBibleGenerationAction')
     expect(source).toMatch(/guidance="[^"]*映射台[^"]*(手动添加|手动新增)/)
-  })
-})
-
-describe('场景库步骤状态', () => {
-  it('生成期间优先显示进行中，不把待生成缺口误报为有问题', () => {
-    expect(sceneStepStatus({ scene_refs_status: 'running', bible: bibleWithScenes([]) })).toBe('running')
-    expect(sceneStepStatus({
-      scene_refs_status: 'ready',
-      bible: bibleWithScenes([{ name: '甲家广场', scene_canonical: '', ref_image_url: null } as Scene]),
-    })).toBe('problem')
-  })
-
-  it('架构转向后场景步骤独立于人物谱/定妆照：二者运行中不再借用成场景库的进行中', () => {
-    // generate_scene_bible 退出首版流程后，场景清单/场景图不再随人物谱谱写
-    // 自动级联；场景库自己没有信号时就是未开始，不能借用人物谱的运行状态。
-    expect(sceneStepStatus({ bible_status: 'running', scene_refs_status: undefined })).toBe('idle')
-    expect(sceneStepStatus({ bible_status: 'ready', refs_status: 'running' })).toBe('idle')
   })
 })
 
@@ -142,4 +117,3 @@ describe('场景主图与附加视角状态', () => {
     expect(sceneUsability(scene, false)).toBe('unavailable')
   })
 })
-

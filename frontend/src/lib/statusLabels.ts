@@ -86,14 +86,3 @@ export function artifactTypeTitle(raw: string | null | undefined): string | unde
   if (!raw) return undefined
   return `系统产物类型：${raw}`
 }
-
-export type PrepStepStatus = 'idle' | 'running' | 'problem' | 'done'
-
-export function prepStepLabel(status: PrepStepStatus): string {
-  switch (status) {
-    case 'running': return '进行中'
-    case 'problem': return '有问题'
-    case 'done': return '已完成'
-    default: return '未开始'
-  }
-}

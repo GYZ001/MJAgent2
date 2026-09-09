@@ -4,7 +4,6 @@ import { describe, expect, it } from 'vitest'
 import type { Bible, Character } from '../api'
 import {
   bibleConflictFieldLabel,
-  bibleStepStatus,
   characterCompareImages,
   characterIsFitting,
   currentPortrait,
@@ -66,23 +65,7 @@ const bible = (characters: Character[], style = '国风') => ({
   characters,
 } as Bible)
 
-describe('人物谱步骤状态', () => {
-  it('定妆生成中不会把尚未产出的图片误报为有问题', () => {
-    expect(bibleStepStatus({
-      bible: bible([character('甲一')]),
-      bible_status: 'ready',
-      refs_status: 'running',
-    })).toBe('running')
-  })
-
-  it('任务明确失败时仍优先显示有问题', () => {
-    expect(bibleStepStatus({
-      bible: bible([character('甲一')]),
-      bible_status: 'ready',
-      refs_status: 'failed',
-    })).toBe('problem')
-  })
-
+describe('人物定妆素材可用性', () => {
   it('结构完整的定妆包直接判为通过，不再依赖质检分数', () => {
     const structurallyCompleteCharacter = {
       name: '甲一',
@@ -101,14 +84,9 @@ describe('人物谱步骤状态', () => {
     } as Character
 
     expect(portraitAvailability(structurallyCompleteCharacter, false)).toBe('passed')
-    expect(bibleStepStatus({
-      bible: bible([structurallyCompleteCharacter]),
-      bible_status: 'ready',
-      refs_status: 'ready',
-    })).toBe('done')
   })
 
-  it('仅提及角色不定妆，不把人物谱步骤标成有问题', () => {
+  it('仅提及角色保持暂缓定妆，已完成角色仍然可用', () => {
     const mentioned = {
       name: '王腾飞',
       presence_status: 'mentioned_only',
@@ -132,14 +110,10 @@ describe('人物谱步骤状态', () => {
       }],
     } as Character
     expect(portraitAvailability(mentioned, false)).toBe('deferred')
-    expect(bibleStepStatus({
-      bible: bible([passed, mentioned]),
-      bible_status: 'ready',
-      refs_status: 'ready',
-    })).toBe('done')
+    expect(portraitAvailability(passed, false)).toBe('passed')
   })
 
-  it('出场角色外观未通过时标成有问题，而不是定妆缺失', () => {
+  it('出场角色外观未通过时判为受阻，而不是定妆缺失', () => {
     const blocked = {
       name: '孟浩',
       presence_status: 'onstage',
@@ -147,11 +121,6 @@ describe('人物谱步骤状态', () => {
       appearance_status: 'insufficient_evidence',
     } as Character
     expect(portraitAvailability(blocked, false)).toBe('blocked')
-    expect(bibleStepStatus({
-      bible: bible([blocked]),
-      bible_status: 'ready',
-      refs_status: 'ready',
-    })).toBe('problem')
   })
 })
 

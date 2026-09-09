@@ -13,9 +13,7 @@ import { useFocusTrap } from '../hooks/useFocusTrap'
 import { usePrepListState } from '../hooks/usePrepListState'
 import { characterIsFitting, characterPortraitStatusDetail } from '../lib/bibleAssets'
 import { formatBookTitle } from '../lib/bookTitle'
-import { sceneStepStatus } from '../lib/prepSteps'
 import { retryBibleGenerationAction } from '../lib/retryBibleGeneration'
-import type { PrepStepStatus } from '../lib/statusLabels'
 import CharacterFilters, {
   characterFilterActiveCount,
   EMPTY_CHARACTER_FILTERS,
@@ -201,30 +199,6 @@ function characterAvailabilityForFilter(
   character: Character,
 ): PortraitAvailability {
   return portraitAvailability(character, !!project && characterIsFitting(project, character))
-}
-
-export function bibleStepStatus(project: {
-  bible?: Bible | null
-  bible_status?: string
-  refs_status?: string
-}): PrepStepStatus {
-  const states = (project.bible?.characters ?? []).map(character => portraitAvailability(character, false))
-  const hasTaskProblem = ['failed', 'warning'].includes(project.bible_status || '')
-    || ['failed', 'warning'].includes(project.refs_status || '')
-  const isRunning = project.bible_status === 'running' || project.refs_status === 'running'
-  if (hasTaskProblem) return 'problem'
-  if (isRunning) return 'running'
-  if (states.some(state => state === 'failed' || state === 'missing' || state === 'blocked')) return 'problem'
-  if (states.length > 0 && states.every(state => state === 'passed' || state === 'warning' || state === 'deferred')) return 'done'
-  if (project.bible_status === 'ready' && project.refs_status === 'ready') return 'done'
-  return 'idle'
-}
-
-function episodeStepStatus(project: { episodes?: unknown[]; episodes_total?: number; episode_count?: number }): PrepStepStatus {
-  if (Array.isArray(project.episodes)) return project.episodes.length > 0 ? 'done' : 'idle'
-  if (typeof project.episodes_total === 'number') return project.episodes_total > 0 ? 'done' : 'idle'
-  if (typeof project.episode_count === 'number') return project.episode_count > 0 ? 'done' : 'idle'
-  return 'idle'
 }
 
 export function characterCompareImages(character: Character): { src: string; label: string }[] {
@@ -606,11 +580,6 @@ export default function BiblePage() {
   const paramsCharacter = paramsCharacterName
     ? bible?.characters.find(character => character.name === paramsCharacterName) ?? null
     : null
-  const prepStatuses: Partial<Record<'bible' | 'scenes' | 'episodes', PrepStepStatus>> = {
-    bible: bibleStepStatus(p),
-    scenes: sceneStepStatus(p),
-    episodes: episodeStepStatus(p),
-  }
   const characterRoles = Array.from(new Set((bible?.characters ?? []).map(character => character.role).filter(Boolean)))
   const timelineQuery = timelineCharacter.trim()
   const timelineNames = (bible?.characters ?? []).map(character => character.name).filter(Boolean)
@@ -908,16 +877,7 @@ export default function BiblePage() {
     <>
       <header className="desk-head">
         <div className="crumb">书房 / {formatBookTitle(p.name)}</div>
-        <PrepSubnav
-          current="bible"
-          statuses={prepStatuses}
-          onProblemClick={(key) => {
-            if (key === 'bible') {
-              setCharFilters({ ...EMPTY_CHARACTER_FILTERS, missing: 'yes' })
-              setCharPage(0)
-            }
-          }}
-        />
+        <PrepSubnav current="bible" />
         <h1>人物谱 <span className="sub">角色资产与定妆版本中心 · 保持跨镜头、跨分集一致</span></h1>
         <hr className="rule" />
       </header>
