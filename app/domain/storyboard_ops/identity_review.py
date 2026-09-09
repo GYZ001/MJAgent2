@@ -39,13 +39,34 @@ def identity_review(shot_id: str):
 
 
 def _review_reference_images(meta: dict) -> list[dict]:
-    """展示该视频版本保存的实际引用，避免错用当前片段的新图。"""
+    """优先按提交时标签排序；素材候选顺序不能冒充供应商图片编号。"""
+    refs = [r for r in meta.get("reference_images") or [] if isinstance(r, dict)]
+    labels = meta.get("_seedance_image_input_labels")
+    if isinstance(labels, list):
+        return [_submitted_reference(refs, label, i + 1) for i, label in enumerate(labels) if isinstance(label, dict)]
     images = []
-    for index, entry in enumerate(meta.get("reference_images") or []):
-        if isinstance(entry, dict):
-            path = entry.get("image_path") or entry.get("path") or entry.get("url")
-            images.append({"label":entry.get("entity_name") or entry.get("name") or entry.get("label") or f"参考图 {index + 1}","url":_media_url(path) if path else None})
+    for entry in refs:
+        if entry.get("deleted") or entry.get("selectedForSeedance") is False:
+            continue
+        path = entry.get("image_path") or entry.get("path") or entry.get("url")
+        name = entry.get("entity_name") or entry.get("name") or entry.get("label") or "未命名"
+        images.append({"label":f"留存素材 · {name}（提交顺序未记录）", "url":_media_url(path) if path else None})
     return images
+
+
+def _submitted_reference(refs: list[dict], label: dict, position: int) -> dict:
+    """引用须由唯一槽位或身份匹配；无法唯一定位时保留编号并说明缺失。"""
+    matches = [r for r in refs if r.get("slot_key") == label["slot_key"]] if label.get("slot_key") else [
+        r for r in refs if label.get("entity_name") and r.get("entity_name") == label["entity_name"]
+        and (not label.get("type") or r.get("type") == label["type"])
+    ]
+    name = label.get("label") or label.get("entity_name") or "未命名"
+    path = None
+    if len(matches) == 1:
+        entry = matches[0]
+        path = entry.get("image_path") or entry.get("path") or entry.get("url")
+    return {"label":f"参考图 {position} · {name}" + ("（原图记录无法唯一定位）" if not path else ""),
+            "url":_media_url(path) if path else None}
 
 
 @router.post("/shots/{shot_id}/identity-review/regenerate")
