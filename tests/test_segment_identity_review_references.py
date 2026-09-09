@@ -1,18 +1,25 @@
 """复核证据以提交顺序为准；素材候选顺序与供应商编号可能不同。"""
+from urllib.parse import urlparse
+
+from app import config
 from app.domain.storyboard_ops.identity_review import _review_reference_images
 
 
-def test_review_references_follow_submitted_order_and_exclude_unused_candidates():
+def test_review_references_follow_submitted_order_and_exclude_unused_candidates(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "PROJECTS_DIR", tmp_path)
+    (tmp_path / "p").mkdir()
+    for name in ("meng", "mountain", "unused"):
+        (tmp_path / "p" / f"{name}.png").write_bytes(b"local-test-image")
     refs = [
-        {"slot_key": "character:meng", "entity_name": "孟浩", "type": "character", "path": "https://example.com/meng.png"},
-        {"slot_key": "scene:mountain", "entity_name": "山顶", "type": "scene", "path": "https://example.com/mountain.png"},
-        {"slot_key": "character:unused", "entity_name": "未使用角色", "type": "character", "path": "https://example.com/unused.png"},
+        {"slot_key": "character:meng", "entity_name": "孟浩", "type": "character", "path": str(tmp_path / "p/meng.png")},
+        {"slot_key": "scene:mountain", "entity_name": "山顶", "type": "scene", "path": str(tmp_path / "p/mountain.png")},
+        {"slot_key": "character:unused", "entity_name": "未使用角色", "type": "character", "path": str(tmp_path / "p/unused.png")},
     ]
     result = _review_reference_images({"reference_images": refs, "_seedance_image_input_labels": [
         {"slot_key": "scene:mountain", "entity_name": "山顶"}, {"slot_key": "character:meng", "entity_name": "孟浩"},
     ]})
     assert [r["label"] for r in result] == ["参考图 1 · 山顶", "参考图 2 · 孟浩"]
-    assert [r["url"] for r in result] == [refs[1]["path"], refs[0]["path"]]
+    assert [urlparse(r["url"]).path for r in result] == ["/media/p/mountain.png", "/media/p/meng.png"]
 
 
 def test_ambiguous_history_does_not_guess_a_reference_image():

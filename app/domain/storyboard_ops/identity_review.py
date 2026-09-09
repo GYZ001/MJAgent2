@@ -65,8 +65,9 @@ def _submitted_reference(refs: list[dict], label: dict, position: int) -> dict:
     if len(matches) == 1:
         entry = matches[0]
         path = entry.get("image_path") or entry.get("path") or entry.get("url")
-    return {"label":f"参考图 {position} · {name}" + ("（原图记录无法唯一定位）" if not path else ""),
-            "url":_media_url(path) if path else None}
+    url = _media_url(path) if path else None
+    missing = "（原图记录无法唯一定位）" if len(matches) != 1 else "（本地原图不可用）"
+    return {"label":f"参考图 {position} · {name}" + (missing if not url else ""), "url":url}
 
 
 @router.post("/shots/{shot_id}/identity-review/regenerate")
