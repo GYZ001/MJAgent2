@@ -184,3 +184,61 @@ def test_atomic_swap_leaves_the_old_build_untouched_when_promotion_fails(tmp_pat
     assert (live / "index.html").read_text() == "旧版"
     leftovers = [p.name for p in tmp_path.iterdir() if p.name.startswith("dist.superseded-")]
     assert leftovers == [], f"回滚后不应留下留档目录：{leftovers}"
+
+
+def test_macos_process_scan_preserves_oldest_backend_and_excludes_shells(monkeypatch):
+    from types import SimpleNamespace
+
+    module = _load_publish_module()
+    rows = "\n".join([
+        "999991 Tue Sep 8 23:08:15 2026 /opt/bin/Python ./.venv/bin/uvicorn app.main:app --port 8230",
+        "999992 Tue Sep 8 20:00:00 2026 /opt/bin/python3 -m uvicorn app.main:app --port 8231",
+        "999993 Tue Sep 8 19:00:00 2026 /bin/bash -c uvicorn app.main:app",
+        "999994 Tue Sep 8 19:00:00 2026 /opt/bin/python3 -c 'print(1)' uvicorn app.main:app",
+        "999995 Tue Sep 8 19:00:00 2026 /opt/bin/uvicorn another.app:app",
+        "999996 Tue Sep 8 19:00:00 2026 /other/python3 -m uvicorn app.main:app",
+    ])
+
+    def run(argv, **kwargs):
+        if argv[0] == "lsof":
+            path = "/another/project" if argv[3] == "999996" else str(module.ROOT)
+            return SimpleNamespace(returncode=0, stdout=f"p{argv[3]}\nfcwd\nn{path}\n")
+        assert argv == ["ps", "-ww", "-axo", "pid=,lstart=,command="]
+        assert kwargs["check"] is True and kwargs["env"]["LC_ALL"] == "C"
+        return SimpleNamespace(stdout=rows)
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    monkeypatch.setattr(module.sys, "platform", "darwin")
+    processes = module._backend_processes()
+    assert [pid for pid, _ in processes] == [999992, 999991]
+    assert module.time.localtime(processes[0][1])[:6] == (2026, 9, 8, 20, 0, 0)
+
+
+def test_macos_scan_failure_does_not_claim_backend_is_stopped(monkeypatch):
+    import subprocess
+
+    module = _load_publish_module()
+
+    def failed(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, "ps")
+
+    monkeypatch.setattr(module.subprocess, "run", failed)
+    monkeypatch.setattr(module.sys, "platform", "darwin")
+    with pytest.raises(subprocess.CalledProcessError):
+        module._skew_gate()
+
+
+def test_macos_cwd_read_failure_blocks_publish_but_exited_process_is_ignored(monkeypatch):
+    from types import SimpleNamespace
+
+    module = _load_publish_module()
+    monkeypatch.setattr(module.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=1, stdout=""))
+    monkeypatch.setattr(module.os, "kill", lambda *a: None)
+    with pytest.raises(RuntimeError, match="工作目录"):
+        module._mac_process_in_workspace(999999)
+
+    def gone(*args):
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(module.os, "kill", gone)
+    assert module._mac_process_in_workspace(999999) is False

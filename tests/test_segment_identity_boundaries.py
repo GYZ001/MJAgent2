@@ -77,3 +77,21 @@ def test_explicit_speaker_before_quote_precedes_following_action(following):
     text = '张三说：“走吧。”' + following
     start = text.index('走吧')
     assert attribute_prose_speaker(text,start,start+3,["张三","李四"]) == "张三"
+
+
+def test_self_declared_character_cannot_borrow_an_out_of_scope_alias():
+    value, payload = draft_and_payload()
+    payload["appellation_map"][0]["segment_index"] = 2
+    value["resources"]["characters"][0].update(identity_id="同门", display_name="同门")
+    value["dialogue"][0]["speaker_identity_id"] = "同门"
+    value["prompt_text"] = value["prompt_text"].replace("@孟浩", "@同门")
+    assert any("不在已确认角色身份清单" in e for e in generation_errors(value, payload))
+
+
+def test_formal_entity_id_cannot_be_declared_as_an_independent_extra():
+    value, payload = draft_and_payload()
+    payload["asset_manifest"]["characters"][0]["identity_id"] = "entity:menghao"
+    payload["appellation_map"] = []
+    value["resources"]["characters"][0].update(identity_id="entity:menghao", subject_kind="extra")
+    value["dialogue"][0]["speaker_identity_id"] = "entity:menghao"
+    assert any("使用了正式角色身份" in e for e in generation_errors(value, payload))

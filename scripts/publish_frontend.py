@@ -94,7 +94,7 @@ def _backend_processes() -> list[tuple[int, float]]:
             continue
         try:
             argv = [a for a in (entry / "cmdline").read_bytes().decode().split("\0") if a]
-            if _is_backend_argv(argv):
+            if _is_backend_argv(argv) and (entry / "cwd").resolve() == ROOT:
                 found.append((int(entry.name), entry.stat().st_mtime))
         except (OSError, ValueError, UnicodeDecodeError):
             continue
@@ -126,9 +126,27 @@ def _mac_backend_processes() -> list[tuple[int, float]]:
                 continue
         elif not executable.startswith("uvicorn") or not _is_backend_argv(argv):
             continue
+        if not _mac_process_in_workspace(int(pid)):
+            continue
         epoch = time.mktime(time.strptime(" ".join(started), "%a %b %d %H:%M:%S %Y"))
         found.append((int(pid), epoch))
     return sorted(found, key=lambda item: item[1])
+
+
+def _mac_process_in_workspace(pid: int) -> bool:
+    """其他项目也可能叫 app.main:app；仅比较当前仓库的后端。读取失败不放行。"""
+    result = subprocess.run(
+        ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+        capture_output=True, text=True,
+    )
+    paths = [line[1:] for line in result.stdout.splitlines() if line.startswith("n")]
+    if result.returncode or len(paths) != 1:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        raise RuntimeError(f"无法核对进程 {pid} 的工作目录，请检查本地 lsof 权限后重试发布")
+    return Path(paths[0]).resolve() == ROOT
 
 
 def _newest_backend_code() -> tuple[float, Path] | None:

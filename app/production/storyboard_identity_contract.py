@@ -50,6 +50,20 @@ def visible_character_ids(segment: dict) -> list[str]:
     ))
 
 
+def registered_subject_errors(segment: dict, payload: dict) -> list[str]:
+    """正式角色资格来自当前素材身份清单，模型自报 character 不能借用同名角色卡。"""
+    known = {str(c.get("identity_id") or "") for c in (payload.get("asset_manifest") or {}).get("characters") or []}
+    errors = []
+    for character in (segment.get("resources") or {}).get("characters") or []:
+        identity = str(character.get("identity_id") or "")
+        kind = character.get("subject_kind")
+        if kind == "character" and identity not in known:
+            errors.append(f"人物「{identity}」不在已确认角色身份清单中，请核对本段映射或声明为独立群演")
+        elif kind in {"extra", "crowd"} and identity in known:
+            errors.append(f"群演「{identity}」使用了正式角色身份，请保留其独立原文称谓")
+    return errors
+
+
 def effective_delivery_kind(line: dict) -> str:
     if line.get("delivery_kind"):
         return str(line["delivery_kind"])

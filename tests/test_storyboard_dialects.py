@@ -19,11 +19,15 @@ Seedance（中文自由散文）与 H3（英文固定字段语法）两个方言
 from __future__ import annotations
 
 import re
+from copy import deepcopy
+
+import pytest
 
 from app.production.storyboard_dialects import (
     MINIMAX_H3_DIALECT_INSTRUCTIONS,
     SEEDANCE_DIALECT_INSTRUCTIONS,
 )
+from app.production.storyboard_speech_render import render_segment_speech, speech_template_errors
 
 
 def _nospace(text: str) -> str:
@@ -43,21 +47,18 @@ H3_FLAT = _flat(MINIMAX_H3_DIALECT_INSTRUCTIONS)
 # 规则 1：画外音口型统一（修自相矛盾）
 # ---------------------------------------------------------------------------
 
-def test_seedance_offscreen_lip_wording_is_locked_and_forbids_slight_movement():
-    """实测段 1/5/7 出现「画外音+嘴唇微动」，观众会以为角色在自言自语；
-    同一集里还混着「嘴唇没有张合动作」两种写法。文案必须钉死唯一措辞，并
-    正面禁止会被理解成开口的替代写法。"""
-    assert "嘴唇闭合无张合动作" in SEEDANCE_FLAT, "没有把画外音口型写法钉成唯一措辞"
-    assert "嘴唇微动" in SEEDANCE_FLAT and "禁止" in SEEDANCE_FLAT, (
-        "没有正面禁止「嘴唇微动」这类会被理解成开口的措辞"
-    )
-
-
-def test_h3_offscreen_lip_wording_forbids_slight_movement():
-    """H3 已有 lips-closed 规则，本次只是补上「禁止哪些替代写法」，口径要
-    和 Seedance 一致（同一处规则，两种语言各写一份）。"""
-    assert "lips remain fully closed" in H3_FLAT
-    assert "lips move slightly" in H3_FLAT, "没有正面禁止「lips move slightly」这类会被理解成开口的措辞"
+@pytest.mark.parametrize("dialect,closed", [("seedance", "嘴唇闭合无张合动作"),
+                                         ("minimax_h3_native_fields", "lips remain fully closed with no movement")])
+@pytest.mark.parametrize("kind", ["offscreen_dialogue", "inner_monologue", "narration"])
+def test_offscreen_lips_are_locked_in_actual_rendered_prompt(dialect, closed, kind):
+    """画外音口型由合同生成，验证交给视频模型的文字，而非要求文本模型记住禁词。"""
+    segment = _speech_segment("镜头1：{{speech:U01}}", "回去吧。")
+    segment["dialogue"][0].update(delivery="offscreen_voice", delivery_kind=kind)
+    if kind == "narration":
+        segment["dialogue"][0]["speaker_identity_id"] = "旁白"
+    prompt = render_segment_speech(segment, dialect=dialect)["prompt_text"]
+    assert closed in prompt
+    assert "嘴唇微动" not in prompt and "lips move slightly" not in prompt
 
 
 def test_offscreen_lip_rule_still_wired_to_delivery_field_in_both_dialects():
@@ -72,18 +73,33 @@ def test_offscreen_lip_rule_still_wired_to_delivery_field_in_both_dialects():
 # 规则 2：台词锚到镜头
 # ---------------------------------------------------------------------------
 
-def test_seedance_dialogue_line_must_be_embedded_in_its_own_shot():
-    """实测段 11 三人三句、段 17 三句台词全部堆在「全片贯穿」，模型自行
-    分配台词到镜头，口型和内容错位概率高。文案必须要求台词写进它发生的
-    那个「镜头N」动作链里，而不是先攒着最后再分配。"""
-    assert "「镜头N」的动作链" in SEEDANCE_FLAT
-    assert "不要把本段所有台词都堆到结尾" in SEEDANCE_FLAT, "没有正面禁止把台词全堆在全片贯穿段"
-    assert "段11" in SEEDANCE_FLAT and "段17" in SEEDANCE_FLAT, "没有引用真实故障案例"
+def _speech_segment(template, line):
+    return {"prompt_text": template, "resources": {"characters": [
+        {"identity_id": "bible:孟浩", "display_name": "孟浩"}]}, "dialogue": [
+        {"utterance_id": "U01", "speaker_identity_id": "bible:孟浩", "line": line,
+         "delivery": "spoken_dialogue", "delivery_kind": "spoken_dialogue"}]}
 
 
-def test_h3_dialogue_line_must_be_embedded_in_its_own_shot():
-    assert "the specific [Shot N] where" in H3_FLAT
-    assert "never bundled into one shot's description" in H3_FLAT
+@pytest.mark.parametrize("dialect,first,second,recap", [
+    ("seedance", "镜头1：", "镜头2：", "全片贯穿：环境音风声；配乐笛声。"),
+    ("minimax_h3_native_fields", "integrated_multimodal_description: [Shot 1] ",
+     "[Shot 2] ", "overall_soundscape: Wind.\nnon_diegetic_music: Flute."),
+])
+def test_dialogue_stays_in_its_own_shot_and_is_not_repeated_in_recap(dialect, first, second, recap):
+    """实测段 11/17 台词堆在结尾。验证占位符展开后时机不移动、不在结尾重复。"""
+    segment = _speech_segment(f"{first}孟浩转身。{{{{speech:U01}}}}\n{second}停步。\n{recap}", "回去吧。")
+    assert speech_template_errors(segment, require_tokens=True) == []
+    prompt = render_segment_speech(deepcopy(segment), dialect=dialect)["prompt_text"]
+    assert prompt.index(first) < prompt.index("回去吧。") < prompt.index(second)
+    assert prompt.count("回去吧。") == 1
+    assert prompt.endswith(recap)
+    if dialect == "minimax_h3_native_fields":
+        assert "<d>[Chinese] 回去吧。</d>" in prompt
+    else:
+        assert "画内对白（孟浩）：“回去吧。”" in prompt
+    for duplicate in ("{{speech:U01}}", "回去吧。"):
+        bad = dict(segment, prompt_text=segment["prompt_text"] + duplicate)
+        assert speech_template_errors(bad, require_tokens=True)
 
 
 def test_seedance_recap_section_no_longer_repeats_dialogue_verbatim():
@@ -91,9 +107,9 @@ def test_seedance_recap_section_no_longer_repeats_dialogue_verbatim():
     贯穿」段保留，但只汇总环境音、配乐、风格与约束，不再逐句重申台词——
     旧版「逐镜文本/结尾汇总/dialogue[] 三处逐字一致」收窄成「逐镜动作链
     与 dialogue[] 两处逐字一致」，全片贯穿段不构成第三处。"""
-    assert "不再重复这些台词" in SEEDANCE_FLAT
-    assert "两处必须逐字一致" in SEEDANCE_FLAT
-    assert "不构成第三处" in SEEDANCE_FLAT
+    assert "台词占位符留在对应的镜头中" in SEEDANCE_FLAT
+    assert "不写任何台词原话" in SEEDANCE_FLAT
+    assert "逐镜原话与台词合同完全一致" in SEEDANCE_FLAT
 
 
 def test_dialogue_ledger_cross_check_language_untouched_in_both_dialects():
@@ -114,12 +130,21 @@ def test_seedance_shot_labels_no_longer_carry_a_second_range():
     assert "2-4" in SEEDANCE_DIALECT_INSTRUCTIONS
 
 
-def test_seedance_quote_holds_exactly_one_sentence():
+@pytest.mark.parametrize("line,expected", [
+    ("快走。怎么了？危险！", ["快走。", "怎么了？", "危险！"]),
+    ("Stop. Run!", ["Stop.", " Run!"]),
+    ("他身高1.8米。等等……", ["他身高1.8米。", "等等……"]),
+])
+def test_seedance_quote_holds_exactly_one_sentence(line, expected):
     """一个引号里只放一句话；原文一句台词若含多个独立句子，按标点拆成多个
     连续引号，仍归同一说话人、同一条 dialogue[]。"""
-    assert "一个引号里只放一句话" in SEEDANCE_FLAT
-    assert "按句号/问号/感叹号拆成多个引号" in SEEDANCE_FLAT
-    assert "同一条dialogue[]" in SEEDANCE_FLAT
+    segment = _speech_segment("镜头1：{{speech:U01}}", line)
+    rendered = render_segment_speech(deepcopy(segment), dialect="seedance")
+    quotes = re.findall("“([^”]*)”", rendered["prompt_text"])
+    assert quotes == expected
+    assert "".join(quotes) == line
+    assert rendered["dialogue"] == segment["dialogue"]
+    assert rendered["prompt_text"].count("画内对白（孟浩）") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +271,7 @@ def test_all_six_rules_present_symmetrically_in_both_dialects():
     人肉审阅——每条规则给一对中英文标志短语，必须同时出现在各自方言块里。"""
     rule_markers = [
         ("画外音口型统一", "嘴唇闭合无张合动作", "lips remain fully closed"),
-        ("台词锚到镜头", "「镜头N」的动作链", "the specific [Shot N] where"),
+        ("台词锚到镜头", "「镜头N」动作链准确位置", "once inside its specific [Shot N]"),
         ("道具建立镜头", "建立镜头", "an establishing shot the first time it appears"),
         ("道具构图锁", "构图约束", "framing constraint"),
         ("同框人数上限", "超过4人", "Cap any single frame at 4 people"),

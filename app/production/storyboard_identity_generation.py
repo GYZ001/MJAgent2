@@ -1,6 +1,6 @@
 """身份合同在分镜模型调用边界的装配与验证，不参与数据库写入。"""
 from app.production.storyboard_identity_contract import (
-    canonical_segment_identities, identity_contract_errors, stamp_identity_contract,
+    canonical_segment_identities, identity_contract_errors, registered_subject_errors, stamp_identity_contract,
 )
 from app.production.storyboard_speech_render import (
     attach_quote_provenance, render_segment_speech, speech_template_errors,
@@ -22,6 +22,7 @@ def generated_identity_errors(draft, *, payload: dict, source_indexes: list[int]
     segment.update(source_segment_indexes=source_indexes, required_dialogue=required_dialogue)
     normalized = canonical_segment_identities(segment, payload)
     errors = [*identity_contract_errors(segment), *identity_contract_errors(normalized, require_explicit=True),
+              *registered_subject_errors(normalized, payload),
               *speech_template_errors(normalized, require_tokens=True), *quote_provenance_errors(normalized)]
     if not errors:
         render_segment_speech(normalized, dialect=dialect)

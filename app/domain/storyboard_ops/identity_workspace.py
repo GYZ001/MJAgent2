@@ -9,7 +9,7 @@ from app.harness.types import Evaluation, EvidenceArtifact
 from app.production.storyboard_dialogue_extract import extract_dialogue_targets
 from app.production.storyboard_identity_contract import (
     canonical_segment_identities, identity_contract_errors, identity_contract_fingerprint,
-    stamp_identity_contract, visible_character_ids,
+    registered_subject_errors, stamp_identity_contract, visible_character_ids,
 )
 from app.production.storyboard_identity_regenerate import refreshed_required_dialogue
 from app.production.storyboard_identity_scope import bind_quote_identities
@@ -72,7 +72,7 @@ def prepare_identity_candidate(conn, *, shot_id: str, candidate: dict) -> dict:
     result["degraded_capabilities"] = [n for n in result.get("degraded_capabilities") or [] if "STORYBOARD_IDENTITY_" not in n]
     result = canonical_segment_identities(result, payload)
     result["prompt_text"] = result.get("speech_template") or result.get("prompt_text") or ""
-    errors = [*identity_contract_errors(result, require_explicit=True), *speech_template_errors(result, require_tokens=True)]
+    errors = [*identity_contract_errors(result, require_explicit=True), *registered_subject_errors(result, payload), *speech_template_errors(result, require_tokens=True)]
     if errors:
         raise ValueError("；".join(errors))
     attach_quote_provenance(result)
