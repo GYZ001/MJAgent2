@@ -30,9 +30,22 @@ def quote_provenance_errors(segment: dict) -> list[str]:
         if quote_id:
             candidates = [q for q in candidates if q.get("quote_id") == quote_id]
             if len(candidates) != 1:
-                errors.append(f"台词『{str(line.get('line') or '')[:20]}』的原文引用与原话、段号不一致")
+                expected = [q for q in required if q.get("quote_id") == quote_id]
+                detail = (
+                    f"；{quote_id} 的原文段号是 {expected[0]['source_segment_index']}，原话为『{expected[0]['text']}』"
+                    if len(expected) == 1 else f"；本段合法 quote_id 为 {[q.get('quote_id') for q in required]}"
+                )
+                errors.append(f"台词『{str(line.get('line') or '')[:20]}』的原文引用与原话、段号不一致{detail}")
         elif len(candidates) > 1:
             errors.append("重复原话需要 source_quote_id 指向唯一来源，不能按台词顺序猜测")
+    for quote in required:
+        if not any(
+            line.get("source_segment_index") == quote.get("source_segment_index")
+            and textmatch.condense(str(line.get("line") or "")) == textmatch.condense(str(quote.get("text") or ""))
+            and (not line.get("source_quote_id") or line["source_quote_id"] == quote.get("quote_id"))
+            for line in segment.get("dialogue") or []
+        ):
+            errors.append(f"必保引用 {quote.get('quote_id')} 须保留原文段 {quote.get('source_segment_index')} 的完整原话『{quote.get('text')}』，照录原文字形并保持来源编号")
     return errors
 
 

@@ -25,6 +25,7 @@ from app.production.storyboard_dialogue_repeat import (
     _preempts,
     repeated_delivery_errors,
 )
+from app.production.storyboard_speech_render import remove_draft_utterance
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ def repair_preempted_dialogue(
             kept.append(line)
             continue
         segment_no, text = hit
+        remove_draft_utterance(draft, line)
         notes.append(
             f"第 {current_segment_no} 段 {line.speaker_identity_id} 的台词「{line.line}」是第 "
             f"{segment_no} 段必保台词「{text}」的提前版或改写版，已从本段删除，留给第 {segment_no} 段原样说出"

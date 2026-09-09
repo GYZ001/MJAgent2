@@ -55,6 +55,7 @@ from app.harness.types import EvidenceArtifact
 from app.production.storyboard_capacity_normalize import normalize_and_assert_capacity
 from app.production.storyboard_identity_contract import canonical_segment_identities, visible_character_ids
 from app.production.storyboard_identity_scope import bind_quote_identities
+from app.production.storyboard_repair_context import known_character_identities, storyboard_repair_context
 from app.production.storyboard_segment_output import segment_output_contract
 from app.production.storyboard_identity_generation import (
     IDENTITY_GENERATION_RULES, generated_identity_errors, finalize_generated_identity,
@@ -1086,6 +1087,7 @@ async def _generate_all_segment_prompts(
             "source_segment_indexes": plan.source_segment_indexes,
             **source_payload,
             "relevant_assets": relevant_assets,
+            "known_character_identities": known_character_identities(payload),
             "required_dialogue": required_dialogue,
             "already_delivered_dialogue": already_delivered_payload(delivered_lines),
             "reserved_dialogue": reserved_dialogue_payload(reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no)),
@@ -1143,7 +1145,8 @@ async def _generate_all_segment_prompts(
                 "target_video_model": target_video_model,
                 "contract_version": STORYBOARD_PACK_VERSION,
             },
-            repair_context=f"第 {plan.segment_no} 段（本集共 {len(beat_draft.segments)} 段）",
+            repair_context=storyboard_repair_context(task_payload),
+            format_repair_context=storyboard_repair_context(task_payload),
         )
         draft = finalize_generated_identity(draft, payload=payload, source_indexes=plan.source_segment_indexes,
                                             required_dialogue=required_dialogue, dialect=profile.render_format)

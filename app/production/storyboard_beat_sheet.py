@@ -64,6 +64,7 @@ from app.production.storyboard_segment_ranges import (
     segment_unit_range_errors,
 )
 from app.source_excerpt import SourceSegment
+from app.production.storyboard_repair_context import storyboard_repair_context
 
 
 class _AiBeat(BaseModel):
@@ -371,7 +372,8 @@ async def _generate_beat_sheet(
             "episode_id": episode_id,
             "contract_version": contract_version,
         },
-        repair_context=f"原文共 {len(segments)} 段，段号范围 1..{len(segments)}",
+        repair_context=storyboard_repair_context(task_payload),
+        format_repair_context=storyboard_repair_context(task_payload),
     )
 
 

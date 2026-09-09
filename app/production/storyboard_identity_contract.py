@@ -60,7 +60,7 @@ def registered_subject_errors(segment: dict, payload: dict) -> list[str]:
         if kind == "character" and identity not in known:
             errors.append(f"人物「{identity}」不在已确认角色身份清单中，请核对本段映射或声明为独立群演")
         elif kind in {"extra", "crowd"} and identity in known:
-            errors.append(f"群演「{identity}」使用了正式角色身份，请保留其独立原文称谓")
+            errors.append(f"群演「{identity}」使用了正式角色身份；若原文指向该角色本人，subject_kind 应为 character；独立群演须使用独立原文身份")
     return errors
 
 

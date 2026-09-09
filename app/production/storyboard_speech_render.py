@@ -8,6 +8,22 @@ from app.production.storyboard_identity_contract import effective_delivery_kind
 SPEECH_TOKEN = re.compile(r"\{\{speech:([A-Za-z0-9_-]+)\}\}")
 
 
+def remove_draft_utterance(draft: Any, line: Any) -> None:
+    """删除一条发声时同步清理其模板位置，保留其它声音和镜头动作。"""
+    token = "{{speech:" + str(getattr(line, "utterance_id", "")) + "}}"
+    for field in ("prompt_text", "speech_template"):
+        prompt = getattr(draft, field, "")
+        if not prompt:
+            continue
+        if token in prompt:
+            setattr(draft, field, prompt.replace(token, ""))
+        elif not SPEECH_TOKEN.search(prompt) and line.line:
+            quoted = r'[「“『"]' + re.escape(line.line) + r'[」”』"]'
+            prompt = re.sub(r"(?:画外音（[^）]*）|旁白)\s*[：:]?\s*" + quoted + r"[。；;，,]?", "", prompt)
+            prompt = re.sub(quoted + r"[。；;，,]?", "", prompt).replace(line.line, "")
+            setattr(draft, field, re.sub(r"(?:[；;]\s*){2,}", "；", prompt))
+
+
 def speaker_names(segment: dict) -> dict[str, str]:
     names = {"旁白": "旁白"}
     for entry in (segment.get("resources") or {}).get("characters") or []:

@@ -13,6 +13,7 @@ from typing import Any
 from app import textmatch
 from app.production.storyboard_identity_scope import scoped_name_map
 from app.production.storyboard_speaker_context import dialogue_listeners, explicit_script_speaker
+from app.production.storyboard_speech_render import remove_draft_utterance
 
 _LOGGER = logging.getLogger(__name__)
 NARRATOR = "旁白"
@@ -145,15 +146,6 @@ def _trace_to_source(line: str, source_text: str) -> tuple[bool, bool]:
     return False, False
 
 
-def _scrub_offscreen_line(prompt_text: str, line: str) -> str:
-    """把被删掉的画外音从提示词里一并抹掉：带标签的整条（画外音（X）：「…」）、只剩引号的、裸文本。"""
-    quoted = r"[「“『\"]" + re.escape(line) + r"[」”』\"]"
-    text = re.sub(r"(?:画外音（[^）]*）|旁白)\s*[：:]?\s*" + quoted + r"[。；;，,]?", "", prompt_text)
-    text = re.sub(quoted + r"[。；;，,]?", "", text)
-    text = text.replace(line, "")
-    return re.sub(r"(?:[；;]\s*){2,}", "；", text)
-
-
 def dialogue_speaker_errors(
     draft: Any, required_dialogue: list[dict[str, Any]], name_to_identity: dict[str, str], segment_source_text: str,
 ) -> list[str]:
@@ -181,7 +173,7 @@ def dialogue_speaker_errors(
                 errors.append(f"dialogue[{index}] 必保台词无法追溯，请核对原文来源后重写此片段")
                 continue
             dropped.append(index)
-            draft.prompt_text = _scrub_offscreen_line(draft.prompt_text, line.line)
+            remove_draft_utterance(draft, line)
             _LOGGER.info("[STORYBOARD_OFFSCREEN_DROPPED] dialogue[%s]『%s』追溯不到原文，已删除", index, line.line[:24])
             continue
         explicit = any(textmatch.condense(str(item.get("text") or "")) == textmatch.condense(line.line) and (item.get("speaker") or item.get("speaker_identity_id")) for item in required_dialogue)
