@@ -33,7 +33,7 @@
 
 ## 验证记录
 
-- 固定本地代码快照 `a641916d8c6a24a19357a1212f644e575d84cd73` 的后端全量回归：运行中，结果见 `logs/identity-pytest-final.log`。
+- 固定本地代码快照 `a641916d8c6a24a19357a1212f644e575d84cd73` 的后端全量回归：5518 项通过、12 项跳过、1 项失败，耗时 705.32 秒。唯一失败为既有中文路径分集重排问题，已在修复前基线 `3813b020` 独立复现，详见下文。结果见 `logs/identity-pytest-final.log`。
 - 全量快照之后仅调整了历史参考图展示，并补充对应测试；最终实现的定向回归 22 项通过，见 `logs/identity-actual-reference-tests.log`。浏览器再次核对显示“参考图 1 · 大青山山顶、参考图 2 · 孟浩”，与实际提交提示词一致。
 - 最后边界回归：204 项通过，覆盖发布检查、生成边界、单段修订及原有分镜包行为，见 `logs/identity-last-boundaries.log`。
 - 前端全量：51 个测试文件、467 项通过；类型检查通过，见 `logs/identity-vitest-final.log`、`logs/identity-tsc-final.log`。
@@ -52,6 +52,8 @@
 | 写事务跨异步等待检查 | 原有 `app/harness/undelivered_replay.py::replay_undelivered` 和 `app/media_exec/run_job.py::_run_job` 被报告；本次未修改这两个函数 |
 
 首轮全量中目录授权测试在 macOS 的 `/private/var` 临时目录被系统敏感目录规则拒绝。最终回归将测试临时目录设在仓库 `logs/identity-test-tmp`，保持真实目录授权检查，不关闭系统目录保护。
+
+该路径包含中文，因而暴露另一个既有问题：`episode_renumber.py` 对包含 JSON 的路径列直接执行字符串替换，中文路径在 JSON 中已被转义，导致删除前一集后 `image_inputs` 内的后续分集路径未更新。`tests/test_core_regressions.py::test_episode_delete_removes_only_target_and_all_downstream_assets` 在本次代码及修复前基线 `3813b020` 均以同样断言失败；该模块与基线无差异。改用本机不含中文的临时目录后，该用例与目录授权用例均通过。证据分别见 `logs/identity-baseline-unicode-path.log`、`logs/identity-path-controls.log`。本次未改动分集删除逻辑，不能把此项报告为已修复。
 
 ## 本地发布
 
