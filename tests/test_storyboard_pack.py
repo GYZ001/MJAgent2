@@ -2771,7 +2771,18 @@ async def test_generate_passes_required_dialogue_into_payload_and_rules(monkeypa
     async def fake_chat_structured(messages, **kwargs):
         payload = json.loads(messages[1]["content"])
         calls.append(payload)
-        return _segment_draft(f"提示词-段{payload['segment_no']}")
+        for key in ("repair_context", "format_repair_context"):
+            context = json.loads(kwargs[key])
+            assert context["required_dialogue"] == payload["required_dialogue"]
+            assert context["source_text_by_segment"] == payload["source_text_by_segment"]
+            assert context["known_character_identities"] == payload["known_character_identities"]
+        draft = _segment_draft(f"提示词-段{payload['segment_no']}").model_dump()
+        if payload["required_dialogue"]:
+            draft.update(prompt_text="少年迈步。{{speech:U01}}", resources={"characters": [{
+                "identity_id": "extra:少年", "display_name": "少年", "subject_kind": "extra", "visibility": "visible",
+            }]}, dialogue=[{"utterance_id": "U01", "speaker_identity_id": "extra:少年", "line": "我们走吧",
+                           "source_segment_index": 1, "source_quote_id": "Q01", "delivery_kind": "spoken_dialogue"}])
+        return _AiStoryboardSegmentDraft.model_validate(draft)
 
     monkeypatch.setattr(storyboard_pack_module.model_gateway, "chat_structured", fake_chat_structured)
     monkeypatch.setattr(storyboard_pack_module, "_ensure_segment_prompt_budget", lambda: None)
@@ -2784,8 +2795,8 @@ async def test_generate_passes_required_dialogue_into_payload_and_rules(monkeypa
         ],
     )
     source = [
-        SourceSegment(segment_id="s1", text="少年站在山顶。", start_offset=0, end_offset=7),
-        SourceSegment(segment_id="s2", text="他扔掉了葫芦。", start_offset=7, end_offset=14),
+        SourceSegment(segment_id="s1", text="少年说：“我们走吧”。", start_offset=0, end_offset=11),
+        SourceSegment(segment_id="s2", text="他扔掉了葫芦。", start_offset=11, end_offset=18),
     ]
     required = {1: [{"quote_id": "Q01", "text": "我们走吧", "source_segment_index": 1}]}
 

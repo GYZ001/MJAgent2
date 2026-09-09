@@ -109,7 +109,7 @@ def repair_local_anchor_segments(segments: list[SourceSegment], asset_manifest: 
             if not phrase or provenance.get("method") == "resolution_forward":
                 continue
             hits = [i for i, segment in enumerate(segments, 1) for _ in range(segment.text.count(phrase))]
-            if len(hits) != 1 or hits == provenance.get("anchor_segments"):
+            if len(hits) != 1 or hits[0] in (provenance.get("anchor_segments") or []):
                 continue
             label = entry.get("display_name") or entry.get("label") or entry.get("identity_id")
             notes.append(f"「{label}」来源原句唯一命中本集第 {hits[0]} 段，证据段号由 {provenance.get('anchor_segments')} 重定位为 {hits}")

@@ -17,7 +17,7 @@ def storyboard_repair_context(payload: dict) -> str:
 
 
 def known_character_identities(payload: dict) -> list[dict]:
-    """全局正名资格与本段可用参考图分开；不把目录人物自动加入画面。"""
+    """本集映射正名资格与本段可用参考图分开；不把目录人物自动加入画面。"""
     return [
         {key: item.get(key) for key in ("identity_id", "display_name", "aliases")}
         for item in (payload.get("asset_manifest") or {}).get("characters") or []

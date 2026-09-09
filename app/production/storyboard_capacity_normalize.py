@@ -21,8 +21,8 @@ changelog）：拆段时必须同步拆 ``_AiSegmentPlan.source_unit_ranges``—
 贪心装箱拆成多箱后，若原样把整段的单元范围复制给每个新段，会让好几个新段
 声明同一批句单元，违反"每段各占一块、不回退、不重叠"的新契约（真实故障与
 完整判据见 storyboard_segment_ranges 模块 docstring）。拆点取"被挪走的第一条
-台词所在单元"——``_split_ranges_at_unit`` 只切开命中这个原文段号的那一条
-范围，与拆分无关的其它原文段号范围整条留在前一箱；因此除首箱外，后续箱的
+台词所在单元"——``_split_ranges_at_unit`` 切开命中的原文段号范围，之前的
+原文段留在前一箱、之后的原文段划入后一箱；后续箱的
 ``source_segment_indexes`` 会被裁剪成"只剩它实际分到范围的那些原文段号"
 （不再照抄原段的完整列表），避免产出"引用了某段号却没有对应范围"的悬空引用。
 定位不到拆分点（``quote_unit_index`` 找不到——只应发生在 DialogueQuote 既无
@@ -83,16 +83,16 @@ def _split_ranges_at_unit(
     ranges: list[_AiSourceUnitRange], split_source_index: int, split_unit: int,
 ) -> tuple[list[_AiSourceUnitRange], list[_AiSourceUnitRange]]:
     """按 (split_source_index, split_unit) 把范围列表切成"留在前一箱"/"划入
-    后一箱"两组：只切开命中 ``split_source_index`` 的那一条范围本身
-    （``[from, split_unit)`` 留前、``[split_unit, to]`` 划后）；其余原文段号
-    的范围与这次拆分无关，整条留在前一箱——因此除首箱外，后续箱只会继承它
-    实际分到范围的那个原文段号，不会带着与它无关的旧引用。
+    后一箱"两组：命中段以句单元切分，其它段按原文先后分配。
+    后文与拆分点一起进入后一箱，避免把后续台词重新挪回已满的前箱、造成叙事倒退。
     """
     before: list[_AiSourceUnitRange] = []
     after: list[_AiSourceUnitRange] = []
     for r in ranges:
-        if r.source_segment_index != split_source_index:
+        if r.source_segment_index < split_source_index:
             before.append(r)
+        elif r.source_segment_index > split_source_index:
+            after.append(r)
         elif split_unit <= r.from_unit:
             after.append(r)
         elif split_unit > r.to_unit:

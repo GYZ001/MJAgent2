@@ -326,7 +326,6 @@ async def _generate_beat_sheet(
     """
     paratext_indexes = _paratext_segment_indexes(payload)
     context_indexes = context_segment_indexes(payload)
-    source_block = _source_block_for_prompt(segments, paratext_indexes)
     task_payload = {
         "task": (
             "通读本章原文，列出节拍表（beat_sheet）：每个节拍是一次情绪或信息的变化，"
@@ -342,7 +341,7 @@ async def _generate_beat_sheet(
         "rules": _beat_sheet_rules(paratext_indexes, context_indexes),
         "episode_no": episode_no,
         "known_assets": _manifest_brief_for_prompt(payload),
-        "source_text_by_segment": source_block,
+        "source_text_by_segment": _source_block_for_prompt(segments, paratext_indexes),
         **_dialogue_targets_payload(dialogue_quotes),
         "output_schema": _AiBeatSheetDraft.model_json_schema(),
     }
