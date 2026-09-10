@@ -23,6 +23,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app import config, spoken_contract, textmatch
+from app.production.storyboard_dialogue_attribution import SPOKEN_SOURCE_RULE
 from app.source_excerpt import SourceSegment
 
 # 覆盖原文台词引用的四种既有引号写法：中文双引号“”、直角引号「」、双直角
@@ -452,17 +453,18 @@ def required_dialogue_rule(required_dialogue: list[dict[str, Any]]) -> str:
     """阶段二必保台词的正面陈述规则（容量已在阶段一分配好，重申"不得再挑拣"）。"""
     if not required_dialogue:
         return (
-            "本段 required_dialogue 为空——上一阶段判定这段没有必须保留的原文"
-            "台词，你可以据情节需要自行决定是否安排台词，本段全部台词加起来"
-            f"仍不能超过 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字。"
+            "本段 required_dialogue 为空——上一阶段判定这段没有必须保留的原文台词。"
+            + SPOKEN_SOURCE_RULE
+            + f"本段全部台词加起来不能超过 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字。"
         )
     return (
         "本段 required_dialogue 列出了上一阶段已经按 15 秒容量分配好、必须"
         "原样体现的原文台词（每条给 quote_id/text/source_segment_index）："
         "这些台词的主干必须逐字保留（允许「说」字之类的衔接性微调，不得整句"
         "改写或省略），每一条都要同时出现在 dialogue[] 与 prompt_text 里，"
-        "不得因为篇幅紧张自行弃置某一条。除了这些之外，你可以补充少量衔接性"
-        f"台词，但本段全部台词加起来仍不能超过 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字。"
+        "不得因为篇幅紧张自行弃置某一条。"
+        + SPOKEN_SOURCE_RULE
+        + f"本段全部台词加起来不能超过 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字。"
     )
 
 

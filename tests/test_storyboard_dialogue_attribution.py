@@ -218,3 +218,90 @@ def test_substring_lines_are_paired_exactly_not_crosswise():
     partial = _draft([_Line("bible:孟浩", "上去就立刻认输。")])
     assert dialogue_speaker_errors(partial, required, n2i, "") == []
 
+
+
+# ---------------------------------------------------------------- 开口台词取值域
+# 2026-09-10 实测「我欲封天」前 10 集分镜产物：259 条 spoken_dialogue 里 15 条（5.8%）
+# 在全书原文里逐字找不到，且原样进了视频提示词。此前「追溯不到就删」只管画外音，
+# spoken_dialogue 没有取值域约束，提示词还明说「可以补充少量衔接性台词」。
+_MASK_SRC = (
+    "[段1·S01]“此去外宗，我要向你交代外宗的规矩，我等所在靠山宗，多年前被称之为赵国魔宗，"
+    "此名可见凶残之处。”[段1·S02]马脸青年神色平静的说道。"
+)
+
+
+def test_compressed_rewrite_of_a_source_line_is_dropped():
+    """第 3 集：原文长台词被压缩改写成一句，而逐字版在同集另外两个镜头照说不误。"""
+    prompt = "镜头1：马脸青年开口。“此去外宗，外宗规矩凶险，有杀人区，好自为之。”\n全片贯穿：环境音。"
+    line = _Line("bible:马脸青年", "此去外宗，外宗规矩凶险，有杀人区，好自为之。")
+    draft = _draft([line], prompt)
+    payload = {"asset_manifest": {"characters": [
+        {"identity_id": "bible:马脸青年", "display_name": "马脸青年", "aliases": []},
+    ]}}
+    assert dialogue_speaker_errors(draft, [], manifest_name_to_identity(payload), _MASK_SRC) == []
+    assert draft.dialogue == []
+    assert "有杀人区" not in draft.prompt_text
+    assert "镜头1：马脸青年开口。" in draft.prompt_text
+
+
+def test_narration_rewritten_into_first_person_speech_is_dropped():
+    """第 4 集：第三人称叙述句「正是三个月前将他……」被改成角色第一人称开口。"""
+    src = "[段1·S01]孟浩看向台上的女子，这女子，正是三个月前将他从大青山抓来之人。"
+    line = _Line("bible:孟浩", "这女子，正是三个月前将我从大青山抓来之人。")
+    draft = _draft([line], "镜头1：孟浩抬头。“这女子，正是三个月前将我从大青山抓来之人。”\n全片贯穿：环境音。")
+    assert dialogue_speaker_errors(draft, [], manifest_name_to_identity(PAYLOAD), src) == []
+    assert draft.dialogue == []
+
+
+def test_verbatim_source_spoken_line_survives():
+    src = "[段1·S01]“早晚有一日，我定要手刃此人！”孟浩咬牙道。"
+    line = _Line("bible:孟浩", "早晚有一日，我定要手刃此人！")
+    draft = _draft([line])
+    assert dialogue_speaker_errors(draft, [], manifest_name_to_identity(PAYLOAD), src) == []
+    assert draft.dialogue == [line]
+
+
+def test_partial_take_of_a_source_line_survives():
+    """容量拆分把一句原文台词拆到相邻两个镜头：各取连续的一截，两截都合法。"""
+    src = "[段1·S01]“考了三年，这三年来整日看那些贤者书籍，已看的几欲作呕。”孟浩自嘲。"
+    head = _Line("bible:孟浩", "考了三年，这三年来整日看那些贤者书籍，")
+    tail = _Line("bible:孟浩", "已看的几欲作呕。")
+    draft = _draft([head, tail])
+    assert dialogue_speaker_errors(draft, [], manifest_name_to_identity(PAYLOAD), src) == []
+    assert draft.dialogue == [head, tail]
+
+
+def test_screenplay_format_line_without_quotes_survives():
+    """剧本格式原文（说话人（备注）：台词）没有引号，判据是逐字子串而不是引号内。"""
+    src = "[段1·S01]孟浩（叹气）：我自己都快养不活了……\n[段1·S02]（孟浩起身走向门口）"
+    line = _Line("bible:孟浩", "我自己都快养不活了……")
+    draft = _draft([line])
+    assert dialogue_speaker_errors(draft, [], manifest_name_to_identity(PAYLOAD), src) == []
+    assert draft.dialogue == [line]
+
+
+def test_required_line_with_connective_edit_survives_even_if_not_verbatim():
+    """必保台词的衔接性微调由 required_dialogue_missing_errors 那条口径管，这里不重复拦。"""
+    src = "[段1·S01]马脸青年交代了外宗的规矩。"
+    required = [{"quote_id": "Q01", "text": "此去外宗，我要向你交代外宗的规矩。", "source_segment_index": 1}]
+    line = _Line("bible:孟浩", "此去外宗，我要向你交代外宗的规矩")
+    draft = _draft([line])
+    assert dialogue_speaker_errors(draft, required, manifest_name_to_identity(PAYLOAD), src) == []
+    assert draft.dialogue == [line]
+
+
+def test_offscreen_voice_is_not_held_to_the_verbatim_spoken_rule():
+    """旁白画外音可以复述叙述句（自己那条可追溯规则管），不受「逐字来自原文」约束。
+
+    同一句话写成 spoken_dialogue 就会被删——判据的差别正是「角色当场开口」与
+    「叙述者讲述」的差别，而不是这句话本身合不合法。
+    """
+    src = "[段1·S01]孟浩心中想着，这铜镜实在诡异。"
+    line = _Line(NARRATOR, "这铜镜实在诡异", "offscreen_voice")
+    draft = _draft([line])
+    assert dialogue_speaker_errors(draft, [], manifest_name_to_identity(PAYLOAD), src) == []
+    assert draft.dialogue == [line]
+    spoken = _Line(NARRATOR, "这铜镜实在诡异")
+    spoken_draft = _draft([spoken])
+    assert dialogue_speaker_errors(spoken_draft, [], manifest_name_to_identity(PAYLOAD), src) == []
+    assert spoken_draft.dialogue == []

@@ -11,6 +11,7 @@ import re
 from typing import Any
 
 from app import textmatch
+from app.source_excerpt import SourceSegment
 from app.production.storyboard_identity_scope import scoped_name_map
 from app.production.storyboard_speaker_context import dialogue_listeners, explicit_script_speaker
 from app.production.storyboard_speech_render import remove_draft_utterance
@@ -146,10 +147,89 @@ def _trace_to_source(line: str, source_text: str) -> tuple[bool, bool]:
     return False, False
 
 
+#: 提示词侧的取值域陈述，与下面 ``_unsourced_spoken_drops`` 是同一条规则的两侧：
+#: 一侧告诉模型合法值从哪里来，一侧按同一判据把越界的句子删掉，两侧的合法值集合
+#: 必须一样宽（CLAUDE.md：任何一侧比另一侧宽，宽的那部分就是必然发生的线上故障）。
+#: 写成完整的正面陈述而不是「不要编造」这类禁令——只堵一种具体写法，模型换个变体
+#: 照样越界。由 app.production.storyboard_dialogue_ledger.required_dialogue_rule 拼进
+#: 阶段二的 rules。
+SPOKEN_SOURCE_RULE = (
+    "dialogue[] 里 delivery=spoken_dialogue 的每一句，都必须是本段原文里已经写出来的话，"
+    "逐字取用——可以只取其中连续的一截，但不得压缩改写、不得换人称、不得把叙述句改成"
+    "角色开口。原文之外的衔接、概括、心理活动一律不要写成 spoken_dialogue；确实需要交代"
+    "时用 delivery=offscreen_voice 的旁白承担，本段原文没有人开口就不写台词。"
+)
+
+
+def _unsourced_spoken_drops(
+    draft: Any, required_dialogue: list[dict[str, Any]], segment_source_text: str,
+    speaker_names: list[str],
+) -> list[int]:
+    """开口台词的取值域 = 本段原文逐字子串 ∪ 必保台词；越出取值域的就地删除，返回被删下标。
+
+    「追溯不到原文就删掉」此前只管 ``offscreen_voice``，``spoken_dialogue`` 一直没有
+    取值域约束——``required_dialogue_rule`` 还明说「除了这些之外，你可以补充少量衔接性
+    台词」，提示词与校验两侧一起放行（CLAUDE.md：宽的那一侧就是必然发生的线上故障）。
+    实测「我欲封天」前 10 集分镜产物：259 条 spoken_dialogue 里 15 条（5.8%）在全书原文
+    里逐字找不到，且原样进了视频提示词，成片里角色会「嘴唇开合说出」原著没有的话——
+    第 3 集「此去外宗，外宗规矩凶险，有杀人区，好自为之。」是把原文长台词压缩改写（原文
+    逐字版在同集另外两个镜头照说不误，等于同一句话说了两遍两个版本），第 4 集「这女子，
+    正是三个月前将我从大青山抓来之人。」是把第三人称叙述句改写成角色第一人称开口。
+
+    取值域直接复用台账自己的抽取器 ``extract_dialogue_targets``——它已经确定性地区分
+    小说体（引号句）与剧本格式（``说话人（备注）：台词`` 行，判据是说话人能否在人物谱
+    正名/别名里逐字命中），三侧（账本 / 提示词 / 本校验）因此同源，不会各自漂移。这里
+    不另写一套引号正则：那会在剧本格式原文上把 13 句真台词全判成自造。
+
+    命中判据是「逐字连续子串」，不用 ``_trace_to_source`` 的二元组模糊匹配：上面两句的
+    模糊覆盖率都能过阈值，正是压缩改写与人称改写的典型形态。取「原文说过的话」而不是
+    「原文出现过的字」也是必要的——「这女子，正是三个月前将他从大青山抓来之人」是叙述
+    句，它的任意一截都不是任何人说出口的话。必保台词按
+    ``required_dialogue_missing_errors`` 的同一口径放行（允许衔接性微调），它们自己的
+    归属/缺失由那条校验负责。
+
+    处置是删除而不是报错：与画外音同一先例（2026-09-05 第 2 集，打回让模型改三次仍不
+    改、整集失败）。空着诚实，自造是编造。
+    """
+    # 延迟导入：storyboard_dialogue_extract 在模块级 import 本模块的
+    # attribute_prose_speaker，模块级反向导入会成环。两者同为 app.production（L4），
+    # 不构成上行边。
+    from app.production.storyboard_dialogue_extract import extract_dialogue_targets
+
+    plain = _TAG_RE.sub("", segment_source_text or "")
+    segment = SourceSegment(segment_id="draft", text=plain, start_offset=0, end_offset=len(plain))
+    spoken = "".join(
+        textmatch.condense(quote.text)
+        for quote in extract_dialogue_targets([segment], set(), speaker_names=speaker_names)
+    )
+    required = [textmatch.condense(str(item.get("text") or "")) for item in required_dialogue]
+    dropped: list[int] = []
+    for index, line in enumerate(draft.dialogue):
+        if line.delivery != "spoken_dialogue":
+            continue
+        needle = textmatch.condense(line.line)
+        if not needle or needle in spoken:
+            continue
+        if any(needle in item or item in needle for item in required if item):
+            continue
+        if any(
+            textmatch.longest_run_ratio(item, line.line) >= textmatch.KEY_LINE_PRESENT_RATIO
+            for item in required if item
+        ):
+            continue
+        dropped.append(index)
+        remove_draft_utterance(draft, line)
+        _LOGGER.info(
+            "[STORYBOARD_SPOKEN_UNSOURCED_DROPPED] dialogue[%s]『%s』不是原文说过的话，已删除",
+            index, line.line[:24],
+        )
+    return dropped
+
+
 def dialogue_speaker_errors(
     draft: Any, required_dialogue: list[dict[str, Any]], name_to_identity: dict[str, str], segment_source_text: str,
 ) -> list[str]:
-    """原文归属与发声方式冲突明确报错；只删除无来源的可选画外音。"""
+    """原文归属与发声方式冲突明确报错；删除无来源的可选画外音与越出原文取值域的开口台词。"""
     errors: list[str] = []
     identity_to_name: dict[str, str] = {}
     for name, identity in name_to_identity.items():
@@ -158,7 +238,9 @@ def dialogue_speaker_errors(
     if not segment_source_text:
         return errors
     errors.extend(unattributed_quote_speaker_errors(draft, required_dialogue, identity_to_name, segment_source_text))
-    dropped: list[int] = []
+    dropped: list[int] = _unsourced_spoken_drops(
+        draft, required_dialogue, segment_source_text, list(name_to_identity),
+    )
     for index, line in enumerate(draft.dialogue):
         if line.delivery != "offscreen_voice":
             continue
