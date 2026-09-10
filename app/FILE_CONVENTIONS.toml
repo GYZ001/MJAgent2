@@ -681,7 +681,6 @@ max_lines_tests = 500
 "tests/test_video_stall_recovery.py" = 785
 "tests/test_prep_pack_coverage.py" = 766
 "tests/test_delivery.py" = 765
-"tests/test_rbac_project_isolation.py" = 761
 "tests/test_narrative_hard_gates.py" = 759
 "tests/test_video_completion_authority.py" = 643
 "tests/test_workspace_payload_views.py" = 748
