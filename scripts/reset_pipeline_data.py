@@ -208,6 +208,17 @@ def main() -> int:
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    # PRAGMA foreign_keys 是每连接开关且默认关，这里**显式关着**，不是忘了写
+    # （tests/test_scripts_sqlite_foreign_keys.py 要求表态）。开着会做两件现在不该
+    # 做的事：① jobs 被删时按 budget_reservations.job_id 的 ON DELETE CASCADE 把
+    # 2118 行审计台账一起删掉，而 app/media_exec/enqueue.py 明写「budget_reservations
+    # 审计台账完整」、金额退场的台账处置又还没拍板；② artifacts 被删时按
+    # gate_decisions.artifact_id 的 NO ACTION 直接拒绝删除，脚本会中途失败。
+    # 代价是留下悬挂引用，让 scripts/backup_manju_db.py 的 foreign_key_check 判不过
+    # ——现存的用 py scripts/repair_dangling_fk_refs.py 清（默认 dry-run）。根治要先
+    # 决定台账是跟着 job 走还是独立存在：独立就把这两处外键改成可空 + SET NULL，
+    # 跟着走就把它们纳入清除清单，两条都定了才能把这一行改成 ON。
+    conn.execute("PRAGMA foreign_keys=OFF")
 
     unknown = _classify(conn)
     if unknown:

@@ -84,6 +84,10 @@ def main() -> int:
     args = parser.parse_args()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    # 本脚本先删 character_portrait_views 再删 character_portraits（子表在前），
+    # 开着 pragma 既符合 schema 声明，也能在将来有人调换顺序时立刻报错而不是
+    # 悄悄留下悬挂引用。
+    conn.execute("PRAGMA foreign_keys=ON")
     if args.project:
         project_ids = args.project
     else:
