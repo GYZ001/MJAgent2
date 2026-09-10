@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -12,6 +12,10 @@ from app.compiler import sanitize_seedance_prompt
 from app.continuity import effective_characters_visible, prompt_source_provenance_errors
 from app.harness import model_gateway
 from app.schemas import Bible, Shot
+from app.video_prompt_payload import (
+    authoritative_dialogue as _expected_dialogue,
+    build_payload,
+)
 from app.video_prompt_profiles import (
     SEEDANCE_2_PROFILE,
     VideoPromptProfile,
@@ -19,7 +23,12 @@ from app.video_prompt_profiles import (
 )
 
 
-AI_VIDEO_PROMPT_CONTRACT_VERSION = "ai_model_adaptive_prompt_v2"
+#: v3（2026-09-10）：权威声轨从 shot.audio_timeline 裸字段改为
+#: app.spoken_contract.effective_spoken_segments，payload 键随之从
+#: audio_timeline 改成 authoritative_dialogue + ambient_sound。旧版本产出的
+#: 草稿是在「权威恒空」下生成的，必须重算而不是命中缓存——
+#: app/media_exec/input_video_mode.py 按这个常量判定要不要复用。
+AI_VIDEO_PROMPT_CONTRACT_VERSION = "ai_model_adaptive_prompt_v3"
 _TIME_EPSILON = 0.02
 
 
@@ -91,27 +100,6 @@ class AIVideoPromptDraft(BaseModel):
     negative_constraints: list[str] = Field(min_length=1, max_length=6)
 
 
-def _audio_value(item: object, field: str, default: object = "") -> object:
-    if isinstance(item, dict):
-        return item.get(field, default)
-    return getattr(item, field, default)
-
-
-def _expected_dialogue(shot: Shot) -> list[dict[str, Any]]:
-    return [
-        {
-            "start_s": float(_audio_value(item, "start_s", 0.0) or 0.0),
-            "end_s": float(_audio_value(item, "end_s", 0.0) or 0.0),
-            "delivery": str(_audio_value(item, "type") or ""),
-            "speaker": str(_audio_value(item, "speaker_id") or ""),
-            "text": str(_audio_value(item, "text") or ""),
-        }
-        for item in (shot.audio_timeline or [])
-        if str(_audio_value(item, "type") or "") != "ambient_sound"
-        and str(_audio_value(item, "text") or "").strip()
-    ]
-
-
 def _same_time(left: float, right: float) -> bool:
     return abs(float(left) - float(right)) <= _TIME_EPSILON
 
@@ -164,9 +152,13 @@ def validate_ai_video_prompt(
         if index >= len(draft.dialogue):
             break
         actual = draft.dialogue[index]
+        # 时间码只在权威自己带时才比：从 dialogues 派生的段没有时码（见
+        # _expected_dialogue），拿 0.0 去比会把「原文台词本来就不带时间」变成
+        # 一条模型永远过不了的假判据。说话人/原话/发声方式三项无条件逐字比。
+        timed = expected["start_s"] is not None and expected["end_s"] is not None
         if (
-            not _same_time(actual.start_s, expected["start_s"])
-            or not _same_time(actual.end_s, expected["end_s"])
+            (timed and not _same_time(actual.start_s, expected["start_s"]))
+            or (timed and not _same_time(actual.end_s, expected["end_s"]))
             or actual.delivery != expected["delivery"]
             or actual.speaker != expected["speaker"]
             or actual.text != expected["text"]
@@ -478,72 +470,20 @@ async def generate_ai_video_prompt(
         provider=target_provider,
         model=target_model,
     )
-    payload = {
-        "task": (
-            "将内部 Cinematic Continuity Contract 编译成一条可直接提交"
-            f" {prompt_profile.model_family} 的漫剧视频提示词。先形成共享导演结构化草稿，"
-            "所有创作字段必须重新导演和生成，不要复制长合同的重复约束。重点写清"
-            "可见骨架姿态、重心、手部、视线、呼吸、连续动作力学、动作因果、"
-            "摄影可见范围，以及动作与权威声轨的同一节奏。"
-        ),
-        "hard_rules": [
-            "start_pose/end_pose 只能写可直接看到的身体与环境状态，不能写剧情态度或台词",
-            "motion_beats 必须无缝覆盖完整镜头时长，不能用脸部或口型替代主动作",
-            "权威 dialogue 的说话人、文本、delivery、start_s、end_s 必须逐项原样返回",
-            "有双人肢体接触时必须选择 person_person_contact，保留双方入画并让接触点可见",
-            "camera 必须覆盖主动作真正发生的身体区域；不能同时要求大动作和单人大头特写",
-            "negative_constraints 只写本镜最关键的 1–6 条风险，禁止复述整份长合同",
-            "禁止添加合同外人物、台词、动作结果、道具、文字或下一镜内容",
-            *prompt_profile.generation_rules,
-        ],
-        "target_prompt_profile": {
-            "provider": target_provider,
-            "model": target_model,
-            "profile_id": prompt_profile.profile_id,
-            "profile_version": prompt_profile.version,
-            "model_family": prompt_profile.model_family,
-            "output_language": prompt_profile.output_language,
-            "render_format": prompt_profile.render_format,
-        },
-        "video_generation_mode": video_generation_mode,
-        "duration_s": shot.duration_s,
-        "visible_characters": effective_characters_visible(shot),
-        "character_bible": _visible_character_bible(shot, bible),
-        "visual_style": bible.world.visual_style_canonical,
-        "shot_contract": {
-            "scene_time": shot.scene_time,
-            "scene_name": shot.scene_name,
-            "scene_setting": shot.scene_setting,
-            "action_desc": shot.action_desc,
-            "first_frame_desc": shot.first_frame_desc,
-            "last_frame_desc": shot.last_frame_desc,
-            "state_in": shot.state_in,
-            "primary_action": shot.primary_action,
-            "state_out": shot.state_out,
-            "emotion_beat": shot.emotion_beat,
-            "camera": {
-                "shot_size": shot.shot_size,
-                "angle": shot.camera_angle,
-                "movement": shot.camera_move,
-                "motivation": shot.camera_motivation,
-            },
-            "spatial_anchor": shot.spatial_anchor,
-            "continuity_state_in": shot.continuity_state_in.model_dump(mode="json"),
-            "continuity_state_out": shot.continuity_state_out.model_dump(mode="json"),
-            "audio_timeline": [
-                item.model_dump(mode="json") if hasattr(item, "model_dump") else dict(item)
-                for item in (shot.audio_timeline or [])
-            ],
-            "required_text": (
-                shot.required_text.model_dump(mode="json")
-                if shot.required_text is not None else None
-            ),
-        },
-        "continuity_contract": continuity_contract,
-        "user_instruction": user_instruction,
-        "quality_critique": list(critique or []),
-        "output_schema": AIVideoPromptDraft.model_json_schema(),
-    }
+    payload = build_payload(
+        shot=shot,
+        profile=prompt_profile,
+        visible_characters=effective_characters_visible(shot),
+        character_bible=_visible_character_bible(shot, bible),
+        visual_style=bible.world.visual_style_canonical,
+        video_generation_mode=video_generation_mode,
+        continuity_contract=continuity_contract,
+        user_instruction=user_instruction,
+        critique=critique,
+        output_schema=AIVideoPromptDraft.model_json_schema(),
+        target_provider=target_provider,
+        target_model=target_model,
+    )
     fingerprint = hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()[:24]

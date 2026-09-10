@@ -351,6 +351,7 @@ allowed_exceptions = []
 "app.video_plan" = 4
 "app.video_playback" = 4
 "app.video_prompt_ai" = 4
+"app.video_prompt_payload" = 4
 "app.video_repair_router" = 4
 
 # ---- 新增 L5 编排与入口 ----
