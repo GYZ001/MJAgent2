@@ -78,6 +78,37 @@ def _is_bare_stages_name(node: ast.expr) -> bool:
     return isinstance(node, ast.Name) and node.id == "stages"
 
 
+def _stages_bindings(tree: ast.Module) -> set[str]:
+    """Modules this file actually binds to the local name ``stages``.
+
+    ``stages`` is not a reserved word: ``app/domain/series_ops/stages.py`` is a
+    plain single-file module whose names *are* reachable by patching the module
+    object, and a test importing it as ``stages`` is correct, not a trap. The
+    package-split hazard is specific to ``app.stages``, so resolve the import
+    instead of matching the identifier. Fail closed: a file with no visible
+    binding (rebound at runtime, star-imported, injected by a fixture) is still
+    scanned, because "cannot prove it is something else" must not read as safe.
+    """
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                # ``import app.stages`` binds ``app``; only ``as stages`` binds it.
+                if alias.asname == "stages" or (alias.asname is None and alias.name == "stages"):
+                    bound.add(alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                if (alias.asname or alias.name) == "stages":
+                    bound.add(f"{node.module}.{alias.name}")
+    return bound
+
+
+def _scans_bare_stages_name(tree: ast.Module) -> bool:
+    """Whether the bare-``stages`` checks apply to this file's ``stages``."""
+    bound = _stages_bindings(tree)
+    return not bound or "app.stages" in bound
+
+
 def _is_bare_stages_attr_string(node: ast.expr) -> bool:
     """True for ``"app.stages.<single identifier>"``.
 
@@ -105,6 +136,7 @@ def _violations_in_file(path: Path) -> list[str]:
     exempt_start, exempt_end = (-1, -1)
     if path == CONFTEST_PATH:
         exempt_start, exempt_end = _helper_exempt_span(tree)
+    check_bare_name = _scans_bare_stages_name(tree)
 
     violations: list[str] = []
     for node in ast.walk(tree):
@@ -124,7 +156,7 @@ def _violations_in_file(path: Path) -> list[str]:
                 isinstance(func, ast.Attribute) and func.attr == "patch"
             ) or (isinstance(func, ast.Name) and func.id == "patch")
 
-            if (is_setattr_call or is_patch_object_call) and node.args:
+            if (is_setattr_call or is_patch_object_call) and node.args and check_bare_name:
                 target = node.args[0]
                 if _is_bare_stages_name(target):
                     violations.append(
@@ -156,7 +188,7 @@ def _violations_in_file(path: Path) -> list[str]:
                         "name, value) instead."
                     )
 
-        if isinstance(node, ast.Assign):
+        if isinstance(node, ast.Assign) and check_bare_name:
             for assign_target in node.targets:
                 if (
                     isinstance(assign_target, ast.Attribute)
@@ -189,3 +221,48 @@ def test_no_bare_app_stages_package_monkeypatch() -> None:
         violations.extend(_violations_in_file(path))
 
     assert violations == [], "\n".join(violations)
+
+
+def _scan_source(tmp_path: Path, source: str) -> list[str]:
+    path = tmp_path / "sample_test.py"
+    path.write_text(source, encoding="utf-8")
+    return _violations_in_file(path)
+
+
+def test_bare_name_check_follows_the_import_not_the_identifier(tmp_path: Path) -> None:
+    """Only ``app.stages`` is package-split; another module named ``stages`` is not.
+
+    ``tests/test_series_stage_error_details.py`` imports
+    ``app.domain.series_ops.stages`` -- a single-file module whose module-level
+    ``from app.db import get_conn`` *is* what its own functions resolve at call
+    time, so patching the module object works. Flagging it by identifier alone
+    reported a silent no-op that does not exist, and the suggested "fix"
+    (``patch_stages_everywhere``) would have walked the wrong package.
+    """
+    hazard = "from app import stages\nmonkeypatch.setattr(stages, 'get_conn', fake)\n"
+    assert len(_scan_source(tmp_path, hazard)) == 1
+    aliased = "import app.stages as stages\nstages.get_conn = fake\n"
+    assert len(_scan_source(tmp_path, aliased)) == 1
+    unrelated = (
+        "from app.domain.series_ops import stages\n"
+        "monkeypatch.setattr(stages, 'get_conn', fake)\n"
+        "stages.get_conn = fake\n"
+    )
+    assert _scan_source(tmp_path, unrelated) == []
+
+
+def test_bare_name_check_fails_closed_without_a_visible_import(tmp_path: Path) -> None:
+    """No resolvable binding still gets scanned -- unproven is not innocent."""
+    assert len(_scan_source(tmp_path, "monkeypatch.setattr(stages, 'get_conn', fake)\n")) == 1
+    # ``from app.stages import x`` does not bind ``stages``; the fallback applies.
+    from_package = "from app.stages import common\nmonkeypatch.setattr(stages, 'x', fake)\n"
+    assert len(_scan_source(tmp_path, from_package)) == 1
+
+
+def test_string_form_stays_flagged_whatever_the_local_name_binds(tmp_path: Path) -> None:
+    """The dotted string names ``app.stages`` outright; imports cannot excuse it."""
+    source = (
+        "from app.domain.series_ops import stages\n"
+        "monkeypatch.setattr('app.stages.get_conn', fake)\n"
+    )
+    assert len(_scan_source(tmp_path, source)) == 1
