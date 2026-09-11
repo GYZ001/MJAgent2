@@ -139,7 +139,26 @@ allowed_exceptions = []
 "app.evidence" = 2
 "app.errors" = 2  # 2026-08-30：原 L0，只 import app.db，见文件末尾变更说明
 "app.authz" = 2  # 2026-08-30：原 L1，包内 resolve.py 碰 app.db，见变更说明
+"app.authz.policy" = 1  # 2026-09-10 新增（EP-01 第一阶段）：覆盖 app.authz=2
+                        # 前缀，纯判定（permission_key 集合 in 命令名），零 db、
+                        # 零 app.capabilities 依赖，真 L1
+"app.authz.catalog" = 5  # 2026-09-10 新增：覆盖 app.authz=2 前缀。派单原稿建议
+                          # L2，但 build_permission_catalog() 必须读运行时
+                          # Command Registry（app.capabilities.registry/.catalog
+                          # 整包声明 L5，见下方"app.capabilities"=5），不读它就
+                          # 会维护第二张名单（EP-01 §5 明确禁止）；如实按依赖
+                          # 落层，不按派单原稿的建议值，此处与 PRD 不符，见交付
+                          # 报告
 "app.auth.sessions" = 2  # 2026-08-30：覆盖 app.auth=1 前缀，碰 app.db
+"app.orgs" = 2  # 2026-09-10 新增（EP-01 第一阶段）：组织/团队/角色/项目授权的
+                # 存取与业务动作（store.py/service.py），只 import app.db（同
+                # 层）+ app.authz.policy（L1）+ stdlib
+"app.orgs.bootstrap" = 5  # 2026-09-10 新增：覆盖 app.orgs=2 前缀。内置角色的
+                          # 权限点是从运行时 Command Registry 推导的种子行
+                          # （app.authz.catalog，L5），本文件是唯一需要碰它的
+                          # orgs 子模块，不在 init_db() 的调用链里触发（见
+                          # app/orgs/store.py 顶部文档），由 app.main 在
+                          # ensure_catalog_loaded() 之后显式调用
 "app.orchestration.state_machine" = 2  # 2026-08-30：覆盖 app.orchestration=5
                                         # 前缀，只 import app.db，见变更说明
 "app.monitor_audit_buffer" = 2  # 2026-08-30 新增：monitor_audit 本地可靠投递
@@ -270,6 +289,12 @@ allowed_exceptions = []
                          # 散文件」红线（与 app.novel 同一先例）。
 "app.ingest" = 1
 "app.model_capabilities" = 1
+"app.models_registry.crypto" = 1  # 2026-09-10 新增（EP-05 第一阶段）：AES-256-GCM
+                                   # 凭据加密，纯算法零 db，只 import cryptography +
+                                   # stdlib
+"app.models_registry.keyprovider" = 1  # 2026-09-10 新增：主密钥文件供给
+                                        # （data/master.key，0600），只 import
+                                        # app.config（同层）+ stdlib
 "app.novel" = 1  # 2026-09-02 新增：WS1 从 app.ingest 拆出的章节结构判据包
                  # （app.novel.structure：标题正面定义/小节边界/尺寸拆分合并），
                  # 零 app 内部依赖，只被 app.ingest 单向导入（同层允许）；不放
@@ -288,6 +313,17 @@ allowed_exceptions = []
                           # import，必须同层，见文件末尾变更说明
 "app.media_urls" = 2  # 2026-08-30：原 1，依赖 app.local_session(2)，同上
 "app.model_migration" = 2
+"app.models_registry.schema" = 2  # 2026-09-10 新增：models/model_credentials
+                                   # 两表 lazy 建表（app/db.py 无余量，改用
+                                   # app/audit/store.py 同款 ensure_schema()
+                                   # 手法），只 import app.db（同层）
+"app.models_registry.store" = 2  # 2026-09-10 新增：models/model_credentials
+                                  # 两表读写，import app.db（同层）+
+                                  # app.models_registry.crypto/keyprovider（L1）
+                                  # + app.models_registry.schema（同层）
+"app.models_registry.migration" = 2  # 2026-09-10 新增：settings/.env 三处散落
+                                      # 凭据一次性迁入新表，import app.db、
+                                      # app.audit（同层）+ app.models_registry.store
 "app.observability.metrics" = 2
 "app.rejected_media" = 2
 

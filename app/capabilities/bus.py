@@ -373,21 +373,14 @@ class CommandBus:
         )
 
     def _authorize(self, name: str, spec: CommandSpec) -> CommandResult | None:
-        """Command Bus 层的准入闸门：只回答“系统管理员专属命令，你碰不碰得”。
-
-        账号即项目空间落地后不再有团队角色差异化——任何已登录账号对自己名下的
-        项目天然拥有全部操作 scope（``Principal.all_scopes`` 恒为 ``ALL_SCOPES``，
-        见 app/auth/principal.py），因此按 ``spec.scopes`` 做差集比较已经没有
-        意义，只保留 ``admin_only`` 这一档「仅系统管理员」的硬闸门。
-        “这个具体资源是不是你的项目”不在这里判断——本层看到的是 62 种互不相同的
-        ``input_model``，没有一个统一的“归属资源”字段可供总线可靠地判断目标属于
-        谁；那是 Stage 4 在 HTTP 边缘按 ``projects.owner_user_id`` 校验的职责
-        （``app/authz/resolve.py::require_project_owner_access``）。
+        """准入闸门：admin_only 硬闸门 + EP-01 角色权限（``Principal.can()``）。
+        位置是安全要求，必须留在幂等缓存查询之前，见 ``_run_pipeline`` 里的
+        同一条注释——不要挪走。「这条数据是不是你的」不在这里判断，那是
+        ``app/authz/resolve.py::require_project_owner_access`` 的职责。
         """
         principal = get_current_principal()
         if principal is None:
-            # MCP 路径在 app/mcp/auth.py 里自行做过 scope 校验；后台/内部调用
-            # 以及早于本阶段编写、尚未注入 Principal 的测试，一律放行。
+            # 后台/内部直连调用、尚未注入 Principal 的测试一律放行。
             return None
         if principal.is_system_admin:
             return None
@@ -397,6 +390,13 @@ class CommandBus:
                 summary=f"命令 {name} 仅限系统管理员执行",
                 command=name,
                 error_code="forbidden_admin_only",
+            )
+        if not principal.can(name):
+            return CommandResult(
+                status=CommandStatus.REJECTED,
+                summary=f"命令 {name} 超出当前角色的权限范围",
+                command=name,
+                error_code="forbidden_role_permission",
             )
         return None
 

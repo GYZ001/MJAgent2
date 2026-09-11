@@ -38,11 +38,32 @@ ALL_SCOPES = frozenset(
         "manju:read",
         "manju:project-write",
         "manju:generation-text",
-        "manju:generation-media",
+        "manju:generation-media",  # 2026-09-10 起 CommandSpec 已不再用它，保留
+        "manju:media-generate",    # 仅供旧 token 存量数据合法；expand_legacy_
+        "manju:media-decide",      # scopes() 把它展开为下面两个新 scope 的并集
         "manju:delivery",
         "manju:admin",
     }
 )
+
+#: EP-01 §7 scope 细分：manju:generation-media -> media-generate ∪ media-decide。
+#: 旧 MCP token 的 scopes_json 里仍然只存字面量 "manju:generation-media"（创建
+#: 时写入的原始值不改写，也不做一次性数据迁移——迁移期两条路径都要能读同一份
+#: 存量数据），因此权限判定必须在"比较那一刻"展开，而不是假设存量数据已经是
+#: 新格式。展开后旧 token 能调用的命令集合与拆分前完全一致：拆分前它能调用
+#: 全部要求 manju:generation-media 的命令，拆分后那些命令分别只要 media-
+#: generate 或 media-decide 中的一个，两个都在展开后的集合里，因此一个不多
+#: 一个不少（tests/test_scope_split_compat.py 逐条核对）。
+LEGACY_GENERATION_MEDIA_SCOPE = "manju:generation-media"
+_GENERATION_MEDIA_SPLIT = frozenset({"manju:media-generate", "manju:media-decide"})
+
+
+def expand_legacy_scopes(scopes: frozenset[str]) -> frozenset[str]:
+    """把 token 里字面量的旧 scope 展开成判定用的有效集合（只增不减）。"""
+    if LEGACY_GENERATION_MEDIA_SCOPE in scopes:
+        return frozenset(scopes) | _GENERATION_MEDIA_SPLIT
+    return scopes
+
 
 DEFAULT_SCOPES = frozenset({"manju:read"})
 TOKEN_PREFIX = "mcp"

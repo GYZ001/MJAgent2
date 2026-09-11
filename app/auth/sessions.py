@@ -17,6 +17,7 @@ import threading
 
 from app.auth.principal import Principal
 from app.db import get_conn, new_id, now
+from app.orgs.service import principal_context
 
 # 会话滑动过期窗口：每次有效访问都把 expires_at 续到 now + SESSION_TTL_S。
 #
@@ -110,10 +111,20 @@ def resolve_session(token: str | None) -> Principal | None:
         )
         conn.commit()
     _maybe_purge_expired()
+    # EP-01：真实 HTTP 会话身份接入组织角色模型——role_governed 只在账号已经
+    # 被拉进某个团队或直接授予某个项目时才为 True（见
+    # app/orgs/store.py::user_is_governed 与 app/auth/principal.py 模块文档
+    # 的 "role_governed" 段落；不能对所有会话恒置 True，否则这一阶段创建的、
+    # 还没有机会被加进任何团队的新账号会被 Command Bus 拒绝一切非只读命令）。
+    org_id, team_ids, permission_keys, is_governed = principal_context(str(user_row["id"]))
     return Principal(
         user_id=str(user_row["id"]),
         username=str(user_row["username"]),
         is_system_admin=bool(user_row["is_system_admin"]),
+        org_id=org_id,
+        team_ids=team_ids,
+        permission_keys=permission_keys,
+        role_governed=is_governed,
     )
 
 

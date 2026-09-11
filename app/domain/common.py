@@ -119,7 +119,7 @@ def _scene_assets_task_active(project_id: str) -> bool:
     return _scene_refs_task_active(project_id) or task_registry.active("scene_bible", project_id)
 
 def _principal_access_check(
-    owner_user_id: str | None, *, object_type: str, object_id: str | None,
+    owner_user_id: str | None, *, object_type: str, object_id: str | None, project_id: str | None,
 ) -> bool:
     """账号级隔离的唯一判据——``_assert_principal_owns``（抛 404）与
     ``owned_project_row``/``owned_episode_row``/``owned_shot_row``（返回
@@ -136,34 +136,54 @@ def _principal_access_check(
     不做任何 DB 读写，热路径零额外开销；只有「是管理员」与「owner 不是自己」
     同时成立时才会打一次独立连接的审计写入（见 ``app.db.insert_monitor_audit``
     的 docstring：诊断类写入不得提交调用方尚未提交的事务）。
+
+    EP-01：``owns()`` 落空不再直接拒绝——``app/authz/resolve.py::
+    require_project_owner_access`` 是 HTTP 边界的同一条判据，已经扩展为
+    owner OR project_grants OR 同组织 org_admin（见该函数文档），这里若不
+    跟着扩展，会变成"HTTP 边界放行、domain 层照样拒绝"——组织协作/项目授权
+    功能在真实业务操作里完全不生效（GET 能通过路由依赖，但任何真正读写数据
+    的 domain 函数都会在这里 404）。``project_id`` 是新增的必填参数（不留
+    ``=None`` 默认值，调用方必须显式给出，给不出就传 ``None`` 字面量，逼调用
+    方想清楚"这个对象到底属于哪个项目"而不是漏传）。
     """
     from app.auth.principal import get_current_principal
 
     principal = get_current_principal()
     if principal is None:
         return True
-    if not principal.owns(owner_user_id):
-        return False
-    if principal.is_system_admin and owner_user_id != principal.user_id:
-        from app.db import insert_monitor_audit
+    if principal.owns(owner_user_id):
+        if principal.is_system_admin and owner_user_id != principal.user_id:
+            from app.db import insert_monitor_audit
 
-        insert_monitor_audit(
-            action="admin_cross_account_access",
-            object_type=object_type,
-            object_id=object_id or owner_user_id or "unknown",
-            outcome="ok",
-            detail={
-                "admin_user_id": principal.user_id,
-                "target_owner_user_id": owner_user_id,
-            },
-        )
-    return True
+            insert_monitor_audit(
+                action="admin_cross_account_access",
+                object_type=object_type,
+                object_id=object_id or owner_user_id or "unknown",
+                outcome="ok",
+                detail={
+                    "admin_user_id": principal.user_id,
+                    "target_owner_user_id": owner_user_id,
+                },
+            )
+        return True
+    if project_id is None:
+        return False
+    from app.orgs import store as orgs_store
+
+    conn = get_conn()
+    if orgs_store.project_grant_hit(conn, project_id, principal.user_id, principal.team_ids):
+        return True
+    project_org_id = orgs_store.project_org_id(conn, project_id)
+    if project_org_id is None or project_org_id != principal.org_id:
+        return False
+    return orgs_store.user_has_org_admin(conn, principal.user_id, project_org_id)
 
 
 def _assert_principal_owns(
     owner_user_id: str | None,
     *,
     not_found_detail: str,
+    project_id: str | None,
     object_type: str = "project",
     object_id: str | None = None,
 ) -> None:
@@ -178,13 +198,15 @@ def _assert_principal_owns(
     不依赖每个端点作者记得挂鉴权。
 
     统一 404 而非 403：不让外部区分"对象不存在"与"对象存在但你无权"，与
-    HTTP 边界的既有口径一致。判据本体（含管理员跨账号访问审计）见
-    ``_principal_access_check``；``object_type``/``object_id`` 只影响审计行
-    怎么标注被访问的对象，不影响放行/拒绝结果，默认值保证既有调用方
-    （未传这两个新参数）行为不变。
+    HTTP 边界的既有口径一致。判据本体（含管理员跨账号访问审计、EP-01 的
+    project_grants/org_admin 扩展）见 ``_principal_access_check``；
+    ``project_id`` 是必填参数（EP-01 新增，不留默认值——调用方必须显式给出
+    "这个对象属于哪个项目"，给不出就传 ``None`` 字面量，逼自己想清楚而不是
+    漏传）；``object_type``/``object_id`` 只影响审计行怎么标注被访问的对象，
+    不影响放行/拒绝结果。
     """
     if not _principal_access_check(
-        owner_user_id, object_type=object_type, object_id=object_id,
+        owner_user_id, object_type=object_type, object_id=object_id, project_id=project_id,
     ):
         raise HTTPException(404, not_found_detail)
 
@@ -213,7 +235,7 @@ def owned_project_row(project_id: str) -> dict | None:
     if not row:
         return None
     if not _principal_access_check(
-        row["owner_user_id"], object_type="project", object_id=project_id,
+        row["owner_user_id"], object_type="project", object_id=project_id, project_id=project_id,
     ):
         return None
     # sqlite3.Row supports item access but not Mapping.get().  Project callers
@@ -248,7 +270,7 @@ def owned_episode_row(episode_id: str):
     ).fetchone()
     if not _principal_access_check(
         owner_row["owner_user_id"] if owner_row else None,
-        object_type="episode", object_id=episode_id,
+        object_type="episode", object_id=episode_id, project_id=row["project_id"],
     ):
         return None
     return row
@@ -270,6 +292,7 @@ def owned_shot_row(shot_id: str):
     if not _principal_access_check(
         owner_row["owner_user_id"] if owner_row else None,
         object_type="shot", object_id=shot_id,
+        project_id=ep_row["project_id"] if ep_row else None,
     ):
         return None
     return row

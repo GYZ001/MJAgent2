@@ -45,7 +45,7 @@ def commands() -> list[CommandSpec]:
             risk=RiskLevel.R1_REVERSIBLE,
             confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.RECOMMENDED,
-            scopes={"manju:generation-media"},
+            scopes={"manju:media-generate"},
             side_effect="cancels_media_job",
             handler=h_run.job_cancel,
             rest_routes=("POST /api/jobs/{job_id}/cancel",),

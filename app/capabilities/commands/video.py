@@ -25,7 +25,9 @@ def commands() -> list[CommandSpec]:
             risk=RiskLevel.R2_MATERIAL,
             confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.REQUIRED,
-            scopes={"manju:generation-media"},
+            # EP-01 scope 细分：发起类命令改用 manju:media-generate（见
+            # storyboard.confirm 旁的同类注释）。
+            scopes={"manju:media-generate"},
             side_effect="creates_paid_video_batch",
             handler=h_video.generate_episode,
             rest_routes=(
@@ -46,7 +48,7 @@ def commands() -> list[CommandSpec]:
             # （project.delete / video.clear_* / delivery.review）保持不变。
             confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.REQUIRED,
-            scopes={"manju:generation-media"},
+            scopes={"manju:media-generate"},
             side_effect="creates_paid_video_completion_run",
             handler=h_video.complete_episode,
             rest_routes=("POST /api/episodes/{episode_id}/video-completion",),
@@ -60,7 +62,7 @@ def commands() -> list[CommandSpec]:
             risk=RiskLevel.R2_MATERIAL,
             confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.REQUIRED,
-            scopes={"manju:generation-media"},
+            scopes={"manju:media-generate"},
             side_effect="creates_paid_project_video_completion",
             handler=h_video.complete_project,
             rest_routes=("POST /api/projects/{project_id}/video-completion",),
@@ -74,7 +76,7 @@ def commands() -> list[CommandSpec]:
             risk=RiskLevel.R2_MATERIAL,
             confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.REQUIRED,
-            scopes={"manju:generation-media"},
+            scopes={"manju:media-generate"},
             side_effect="creates_paid_video_job",
             handler=h_video.generate_shot,
             rest_routes=("POST /api/shots/{shot_id}/generate",),
@@ -88,11 +90,11 @@ def commands() -> list[CommandSpec]:
             risk=RiskLevel.R1_REVERSIBLE,
             confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.RECOMMENDED,
-            scopes={"manju:generation-media"},
+            scopes={"manju:media-decide"},
             side_effect="cancels_video_jobs",
             handler=h_video.stop_shot,
             rest_routes=("POST /api/shots/{shot_id}/video/stop",),
-            tags=("video",),
+            tags=("video", "decide"),
         ),
         _cmd(
             "video.stop_episode",
@@ -102,11 +104,11 @@ def commands() -> list[CommandSpec]:
             risk=RiskLevel.R1_REVERSIBLE,
             confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.RECOMMENDED,
-            scopes={"manju:generation-media"},
+            scopes={"manju:media-decide"},
             side_effect="pauses_episode_video_jobs",
             handler=h_video.stop_episode,
             rest_routes=("POST /api/episodes/{episode_id}/video/stop",),
-            tags=("video",),
+            tags=("video", "decide"),
         ),
         _cmd(
             "video.adopt_version",
@@ -120,7 +122,10 @@ def commands() -> list[CommandSpec]:
             side_effect="adopts_version_human_decision",
             handler=h_video.adopt_version,
             rest_routes=("POST /api/shots/{shot_id}/adopt",),
-            tags=("video", "gate"),
+            # scopes 保持 manju:project-write 不变（现状如此，EP-01 §7 仅针对
+            # 原 manju:generation-media 的命令做 scope 拆分）；"decide" 标签
+            # 单独加，供 app/authz/catalog.py 的审校角色权限推导使用。
+            tags=("video", "gate", "decide"),
         ),
         _cmd(
             "video.cancel_adoption",
@@ -228,7 +233,7 @@ def commands() -> list[CommandSpec]:
             risk=RiskLevel.R2_MATERIAL,
             confirmation=ConfirmationPolicy.WHEN_IMPACT,
             idempotency=IdempotencyPolicy.REQUIRED,
-            scopes={"manju:generation-media"},
+            scopes={"manju:media-generate"},
             side_effect="resumes_video_jobs",
             handler=h_video.resume_episode,
             rest_routes=("POST /api/episodes/{episode_id}/resume",),
@@ -242,7 +247,7 @@ def commands() -> list[CommandSpec]:
             risk=RiskLevel.R2_MATERIAL,
             confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.REQUIRED,
-            scopes={"manju:generation-media"},
+            scopes={"manju:media-generate"},
             side_effect="creates_paid_video_jobs_for_stale_shots",
             handler=h_video.repair_stale_assets,
             rest_routes=("POST /api/episodes/{episode_id}/repair-stale-assets",),
@@ -263,6 +268,6 @@ def commands() -> list[CommandSpec]:
                 "DELETE /api/versions/{version_id}/reference-images/{ref_id}",
                 "POST /api/versions/{version_id}/reference-images/{ref_id}/restore",
             ),
-            tags=("reference",),
+            tags=("reference", "decide"),
         ),
     ]

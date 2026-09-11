@@ -76,6 +76,7 @@ import app.artifacts  # noqa: F401,E402
 import app.completion_grant  # noqa: F401,E402
 import app.delivery  # noqa: F401,E402
 import app.model_migration  # noqa: F401,E402
+import app.models_registry.migration  # noqa: F401,E402
 import app.production.certificate  # noqa: F401,E402
 import app.production.grant  # noqa: F401,E402
 import app.production.revision  # noqa: F401,E402
@@ -649,6 +650,7 @@ def patch_quota_everywhere(monkeypatch, name, value, **kwargs):
         if hasattr(module, name):
             monkeypatch.setattr(module, name, value, **kwargs)
 
+from tests.patch_targets import patch_authz_everywhere as patch_authz_everywhere, patch_models_registry_everywhere as patch_models_registry_everywhere, patch_orgs_everywhere as patch_orgs_everywhere  # 搬家：行数基线
 
 def patch_api_everywhere(monkeypatch, name, value, **kwargs):
     """Patch a symbol on ``app.api`` / ``app.domain`` in every submodule that
@@ -919,6 +921,8 @@ def _initialize_database_template(db) -> None:
     connection = db.get_conn()
     try:
         db.init_db()
+        from app.orgs.bootstrap import sync_builtin_role_permissions  # 自带建表+目录加载
+        sync_builtin_role_permissions(connection)
     finally:
         connection.close()
         db._local.conn = None

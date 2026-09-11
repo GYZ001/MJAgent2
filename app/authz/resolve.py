@@ -38,6 +38,10 @@ _DENIED_DETAIL = "对象不存在"
 class ScopeResolution:
     kind: str  # "owner" | "admin_only" | "creator" | "none"
     value: str | None = None
+    # EP-01：kind=="owner" 时额外带上被解析出的 project_id，供 accessible()
+    # 查 project_grants/org_admin 用——value 本身仍是 owner_user_id，语义不
+    # 变（历史上唯一读它的地方 principal.owns(resolution.value) 继续成立）。
+    project_id: str | None = None
 
 
 _UNRESOLVED = ScopeResolution("none")
@@ -50,7 +54,7 @@ def _owner_of_project(conn, project_id: str | None) -> ScopeResolution:
     row = conn.execute("SELECT owner_user_id FROM projects WHERE id=?", (project_id,)).fetchone()
     if not row:
         return _UNRESOLVED
-    return ScopeResolution("owner", row["owner_user_id"])
+    return ScopeResolution("owner", row["owner_user_id"], project_id)
 
 
 def _episode_project(conn, episode_id: str) -> str | None:
@@ -266,10 +270,38 @@ def require_project_owner_access(request: Request) -> None:
     resolution = resolve_request_scope(request.path_params, _request_cache(request))
     if resolution.kind == "none":
         return
-    if resolution.kind == "owner" and principal.owns(resolution.value):
+    if resolution.kind == "owner" and _accessible(principal, resolution):
         return
     if resolution.kind == "creator" and resolution.value == principal.user_id:
         return
     # 统一 404，不用 403：既不能让外部区分「对象不存在」和「对象存在但你无权」，
     # 也匹配现有约定（tests/test_project_observability.py 对跨项目对象一律断言 404）。
     raise HTTPException(404, _DENIED_DETAIL)
+
+
+def _accessible(principal, resolution: ScopeResolution) -> bool:
+    """EP-01 §8：owner_user_id 命中 OR project_grants 命中（个人/所属团队）
+    OR 同组织 org_admin OR 超级管理员（``owns()`` 已经处理超级管理员分支）。
+
+    admin_only/creator/none 三种结果的语义完全不变——本函数只替换原来单一的
+    ``principal.owns(resolution.value)`` 判据，只在 ``kind=="owner"`` 分支
+    使用。``app.orgs.store`` 与本模块同层（都是 L2），但延迟 import：
+    ``app.orgs.store`` 模块级 `from app.authz import policy` 会触发
+    ``app/authz/__init__.py`` 执行，而该文件正是 import 本模块（``resolve.py``）
+    的地方——放在模块顶层会在包初始化尚未完成时形成循环，实测过（同类问题见
+    ``app/auth/principal.py`` 顶部注释），函数内延迟到调用时才 import 可以
+    绕开这条初始化期的环。
+    """
+    if principal.owns(resolution.value):
+        return True
+    if resolution.project_id is None:
+        return False
+    from app.orgs import store as orgs_store
+
+    conn = get_conn()
+    if orgs_store.project_grant_hit(conn, resolution.project_id, principal.user_id, principal.team_ids):
+        return True
+    project_org_id = orgs_store.project_org_id(conn, resolution.project_id)
+    if project_org_id is None or project_org_id != principal.org_id:
+        return False
+    return orgs_store.user_has_org_admin(conn, principal.user_id, project_org_id)

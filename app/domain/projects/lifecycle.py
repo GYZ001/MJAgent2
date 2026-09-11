@@ -34,7 +34,8 @@ def _deleted_project_or_404(project_id: str) -> dict:
     # 静态 SQL 守卫看不见这个洞：它对 ``WHERE id=?`` 按「主键锚定」放行，
     # 前提是「这个 id 进系统时已过归属闸门」，而这条路径上没有。
     _assert_principal_owns(
-        row["owner_user_id"], not_found_detail=f"回收站中不存在该项目：{project_id}"
+        row["owner_user_id"], not_found_detail=f"回收站中不存在该项目：{project_id}",
+        project_id=project_id,
     )
     return dict(row)
 

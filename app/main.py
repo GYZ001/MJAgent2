@@ -29,7 +29,7 @@ from app.auth.principal import set_current_principal
 from app.authz import require_project_owner_access
 from app.domain.storyboard_ops.identity_review import router as identity_review_router
 from app.config import PROJECTS_DIR, ROOT
-from app.db import init_db
+from app.db import get_conn, init_db
 from app.mcp import router as mcp_router
 from app.capabilities.bus import set_request_approval_token
 from app.capabilities.loader import ensure_catalog_loaded
@@ -45,6 +45,9 @@ from app.local_session import (
 )
 from app.mcp.auth import ensure_bootstrap_token
 from app.media_urls import media_ticket_required, verify_media_ticket
+from app.models_registry.schema import ensure_schema as ensure_models_registry_schema
+from app.orgs.bootstrap import sync_builtin_role_permissions
+from app.orgs.schema import ensure_schema as ensure_orgs_schema
 from app.planning import router as planning_router
 from app.recovery import (
     acquire_runtime_recovery_lock,
@@ -71,6 +74,7 @@ import app.artifacts  # noqa: F401
 import app.completion_grant  # noqa: F401
 import app.delivery  # noqa: F401
 import app.model_migration  # noqa: F401
+import app.models_registry.migration  # noqa: F401
 import app.production.certificate  # noqa: F401
 import app.production.grant  # noqa: F401
 import app.production.revision  # noqa: F401
@@ -92,7 +96,14 @@ async def lifespan(_: FastAPI):
     recovery_owner = acquire_runtime_recovery_lock(wait_timeout_s=5.0)
     init_db(reconcile_interrupted=recovery_owner)
     ensure_audit_schema()
+    ensure_models_registry_schema()
+    ensure_orgs_schema()
     ensure_catalog_loaded()
+    # EP-01：内置角色的权限点依赖运行时 Command Registry，必须排在
+    # ensure_catalog_loaded() 之后才能读到完整目录，见 app/orgs/bootstrap.py
+    # 模块文档；org_default/角色元数据行/org_id 回填已在 ensure_orgs_schema()
+    # 里做完（app/orgs/schema.py，app/db.py 基线已用满，不再走 init_db()）。
+    sync_builtin_role_permissions(get_conn())
     ensure_bootstrap_token()
     ensure_session_secret()
     if recovery_owner:

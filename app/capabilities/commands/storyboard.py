@@ -85,10 +85,16 @@ def commands() -> list[CommandSpec]:
             # the page stuck at HTTP 202 after the user has approved the modal.
             confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.REQUIRED,
-            scopes={"manju:generation-media"},
+            # EP-01 scope 细分：决策类命令改用 manju:media-decide（原
+            # manju:generation-media 拆分为 media-generate ∪ media-decide，
+            # 旧 token 在 app/mcp/auth.py::expand_legacy_scopes 处展开为并集，
+            # 调用集合不变）。
+            scopes={"manju:media-decide"},
             side_effect="human_gate_unlocks_paid_video",
             handler=h_storyboard.confirm,
             rest_routes=("POST /api/episodes/{episode_id}/confirm",),
-            tags=("storyboard", "gate"),
+            # "decide" 标签是 EP-01 审校角色权限推导的一等数据（见
+            # app/authz/catalog.py 模块文档），不是又一张按命令名维护的清单。
+            tags=("storyboard", "gate", "decide"),
         ),
     ]

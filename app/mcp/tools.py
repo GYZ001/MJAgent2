@@ -12,6 +12,7 @@ from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.registry import CommandSpec
 from app.capabilities.schemas import CommandStatus, IdempotencyPolicy, RiskLevel
 from app.capabilities.tool_schemas import command_input_schema
+from app.mcp.auth import expand_legacy_scopes
 from app.mcp.errors import ForbiddenError, McpError
 
 if TYPE_CHECKING:
@@ -63,7 +64,7 @@ async def call_tool(name: str, arguments: dict[str, Any], *, claims: "TokenClaim
     if not spec.mcp_exposed or spec.admin_only:
         raise McpError(-32602, f"tool not exposed via mcp: {name}")
 
-    missing_scopes = spec.scopes - claims.scopes
+    missing_scopes = spec.scopes - expand_legacy_scopes(claims.scopes)
     if missing_scopes:
         raise ForbiddenError(
             f"token 缺少调用 {name} 所需 scope：{sorted(missing_scopes)}"
