@@ -209,15 +209,20 @@ def main() -> int:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     # PRAGMA foreign_keys 是每连接开关且默认关，这里**显式关着**，不是忘了写
-    # （tests/test_scripts_sqlite_foreign_keys.py 要求表态）。开着会做两件现在不该
-    # 做的事：① jobs 被删时按 budget_reservations.job_id 的 ON DELETE CASCADE 把
-    # 2118 行审计台账一起删掉，而 app/media_exec/enqueue.py 明写「budget_reservations
-    # 审计台账完整」、金额退场的台账处置又还没拍板；② artifacts 被删时按
-    # gate_decisions.artifact_id 的 NO ACTION 直接拒绝删除，脚本会中途失败。
-    # 代价是留下悬挂引用，让 scripts/backup_manju_db.py 的 foreign_key_check 判不过
-    # ——现存的用 py scripts/repair_dangling_fk_refs.py 清（默认 dry-run）。根治要先
-    # 决定台账是跟着 job 走还是独立存在：独立就把这两处外键改成可空 + SET NULL，
-    # 跟着走就把它们纳入清除清单，两条都定了才能把这一行改成 ON。
+    # （tests/test_scripts_sqlite_foreign_keys.py 要求表态）。
+    #
+    # 姊妹脚本 reset_project_episodes.py 已于 2026-09-11 改成 ON——那边只删一个项目的
+    # 分集产出，两处挡路的外键（budget_reservations.job_id 的 CASCADE、
+    # gate_decisions.artifact_id 的 NO ACTION）都已改成可空 + SET NULL。这一份不同：
+    # 它是**全库整表清空**，按 _classify() 的清空/保留两张清单逐表 DELETE。开着 pragma
+    # 之前必须先把这两张清单与全库外键图逐条对一遍——保留表若引用被清空的表，删除会
+    # 被拒绝（脚本中途失败）或反向级联带走本该保留的行，而这正是这份脚本最不能出错的
+    # 地方。没做这次审计之前不翻，不拿「看起来应该没事」换一次全库操作。
+    #
+    # 关着的代价：级联不触发，留下悬挂引用，scripts/backup_manju_db.py 的
+    # foreign_key_check 判不过、整份备份进隔离区。跑完本脚本后用
+    # py scripts/repair_dangling_fk_refs.py 清一遍（默认 dry-run，按 schema 声明的语义
+    # 修，不删审计行）。
     conn.execute("PRAGMA foreign_keys=OFF")
 
     unknown = _classify(conn)

@@ -501,17 +501,17 @@ def main() -> int:
         problems += clear_episode_via_api(eid, f"EP{idx}")
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
-    # PRAGMA foreign_keys 是每连接开关且默认关，这里**显式关着**，不是忘了写
-    # （tests/test_scripts_sqlite_foreign_keys.py 要求表态）。开着会做两件现在不该
-    # 做的事：① jobs 被删时按 budget_reservations.job_id 的 ON DELETE CASCADE 把
-    # 2118 行审计台账一起删掉，而 app/media_exec/enqueue.py 明写「budget_reservations
-    # 审计台账完整」、金额退场的台账处置又还没拍板；② artifacts 被删时按
-    # gate_decisions.artifact_id 的 NO ACTION 直接拒绝删除，脚本会中途失败。
-    # 代价是留下悬挂引用，让 scripts/backup_manju_db.py 的 foreign_key_check 判不过
-    # ——现存的用 py scripts/repair_dangling_fk_refs.py 清（默认 dry-run）。根治要先
-    # 决定台账是跟着 job 走还是独立存在：独立就把这两处外键改成可空 + SET NULL，
-    # 跟着走就把它们纳入清除清单，两条都定了才能把这一行改成 ON。
-    conn.execute("PRAGMA foreign_keys=OFF")
+    # PRAGMA foreign_keys 是每连接开关且默认关，这里**显式打开**
+    # （tests/test_scripts_sqlite_foreign_keys.py 要求表态）。2026-09-11 之前这一行是
+    # OFF，因为开着会做两件当时不该做的事：① jobs 被删时按 budget_reservations.job_id
+    # 的 ON DELETE CASCADE 把 2118 行审计台账一起删掉；② artifacts 被删时按
+    # gate_decisions.artifact_id 的 NO ACTION 直接拒绝删除、脚本中途失败。用户拍板
+    # 「台账独立于产物存在、一行都不删」之后，两处外键都已改成可空 + SET NULL
+    # （见 scripts/migrate_budget_reservation_job_fk.py），这两个理由随之消失：现在
+    # 开着 pragma，父行被删时台账行留下、引用自动置空，正是想要的语义。
+    # 关着才是有害的——级联从不触发，悬挂引用会让 scripts/backup_manju_db.py 的
+    # foreign_key_check 判不过，整份备份被挪进隔离区（2026-09-06 起连续五晚）。
+    conn.execute("PRAGMA foreign_keys=ON")
     try:
         # 项目级视觉资产（定妆照/场景图）按 project_id 收敛，没有集号维度：
         # 只清一部分集号时清掉它们会越界毁掉范围外分集的资产绑定——实测
