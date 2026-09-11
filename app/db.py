@@ -553,7 +553,7 @@ CREATE TABLE IF NOT EXISTS run_events (
 );
 CREATE TABLE IF NOT EXISTS budget_reservations (
     id TEXT PRIMARY KEY,
-    job_id TEXT NOT NULL UNIQUE,
+    job_id TEXT UNIQUE,  -- 可空 + SET NULL：台账活得比 job 久，见 scripts/migrate_budget_reservation_job_fk.py
     scope_type TEXT NOT NULL,
     scope_id TEXT NOT NULL,
     amount_cny REAL NOT NULL,
@@ -561,7 +561,7 @@ CREATE TABLE IF NOT EXISTS budget_reservations (
     created_at REAL NOT NULL,
     settled_at REAL,
     actual_cost_cny REAL,
-    FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+    FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE SET NULL
 );
 CREATE TABLE IF NOT EXISTS gate_decisions (
     id TEXT PRIMARY KEY,
