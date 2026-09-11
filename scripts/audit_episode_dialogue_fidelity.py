@@ -156,19 +156,27 @@ def check_spoken_provenance(shots: list[sqlite3.Row], domain: str) -> list[str]:
 def check_prompt_fidelity(shots: list[sqlite3.Row], prompts: dict[int, str]) -> list[str]:
     """B 项：分镜台账里的每一句都要逐字出现在最终提示词里。
 
+    比对 ``_condense`` 之后的形态而不是裸串：speech 模板展开时会把一句台词按句读
+    拆成相邻的几段引号——台账的「又扯淡了，会飞？那是传说中的仙人，谁信啊。」在
+    提示词里是「“又扯淡了，会飞？”“那是传说中的仙人，谁信啊。”」，字一个没少、
+    顺序也对，只是中间多了一对引号。裸串比对会把这个判成「整句丢失」（2026-09-11
+    第 1 集重跑实测踩中两条），而误报会让整份复核报告失去可信度。condense 只去标点
+    与引号，改字仍然查得出来：「五人不知」→「无人不敬佩」两侧字面不同，照样报。
+
     已知盲区：在原话**前后**加字查不出来（「你别走。」包含「别走。」）。改成比对
-    提示词里的引号跨度可以覆盖它，但实测会被引号不配对的产物（第 6 集
-    ``说出："…”`` 前英文直引号、后中文右引号）打出误报——误报会让整份复核报告
-    失去可信度。取「不漏掉真实事故形态」：整句丢失与句中改写这两类都能抓，且零误报。
+    提示词里的引号跨度可以覆盖它，但会被引号不配对的产物（第 6 集 ``说出："…”``
+    前英文直引号、后中文右引号）打出另一类误报。取「不漏掉真实事故形态」：整句丢失
+    与句中改写这两类都能抓。
     """
     findings: list[str] = []
     for shot in shots:
         prompt = prompts.get(int(shot["shot_no"]))
         if prompt is None:
             continue
+        condensed_prompt = _condense(prompt)
         for line in _lines_of(shot):
             text = str(line["line"]).strip()
-            if text and text not in prompt:
+            if text and _condense(text) not in condensed_prompt:
                 findings.append(
                     f"镜头{shot['shot_no']} 台词『{text[:40]}』没有逐字出现在视频提示词里"
                     "（整句丢失或被改写，成片里说的不是台账记的）"

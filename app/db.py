@@ -565,7 +565,7 @@ CREATE TABLE IF NOT EXISTS budget_reservations (
 );
 CREATE TABLE IF NOT EXISTS gate_decisions (
     id TEXT PRIMARY KEY,
-    artifact_id TEXT NOT NULL,
+    artifact_id TEXT,  -- 可空 + SET NULL：决议台账活得比产物久，同 budget_reservations
     run_id TEXT,
     gate_key TEXT NOT NULL,
     decision TEXT NOT NULL,
@@ -573,7 +573,7 @@ CREATE TABLE IF NOT EXISTS gate_decisions (
     reason TEXT NOT NULL,
     accepted_risk TEXT,
     created_at REAL NOT NULL,
-    FOREIGN KEY(artifact_id) REFERENCES artifacts(id),
+    FOREIGN KEY(artifact_id) REFERENCES artifacts(id) ON DELETE SET NULL,
     FOREIGN KEY(run_id) REFERENCES workflow_runs(id)
 );
 CREATE TABLE IF NOT EXISTS storyboard_workspace_state (

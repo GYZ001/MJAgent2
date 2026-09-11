@@ -176,13 +176,11 @@ RESIDUE_PROBES: list[tuple[str, str, str]] = [
     ("step_runs", "run_id", "workflow_runs"),
     ("artifacts", "id", "artifacts"),
     ("evaluations", "artifact_id", "artifacts"),
-    # gate_decisions 是「对某个产物的闸门决议」，产物删了它就没有主语，属于流水线
-    # 残留而不是账目——与上面刻意保留的付款责任不是一类。2026-09-10 实测 295 行里
-    # 270 行悬挂（artifact 早被本脚本删掉），把每晚的备份校验打进隔离区。这一列是
-    # NOT NULL + NO ACTION，不能像付款台账那样改成可空+SET NULL：artifact_id 可空
-    # 会让 idx_gate_decisions_storyboard_pack_release（「一个产物只能有一条发布决议」）
-    # 对被置空的行悄悄失效，那是拿一个真实约束换备份通过。
-    ("gate_decisions", "artifact_id", "artifacts"),
+    # 刻意不清 gate_decisions：它是闸门决议台账，与上面的付款责任同类，用户
+    # 2026-09-10 拍板「一行审计都不删」。artifact 被删时由 ON DELETE SET NULL 把
+    # artifact_id 置空、行留下（见 scripts/migrate_budget_reservation_job_fk.py）。
+    # 置空不会削弱 idx_gate_decisions_storyboard_pack_release：那条唯一索引建在
+    # artifact_id 上，SQLite 里 NULL 不与任何值相等，孤儿行不可能和存活产物的行冲突。
     ("episode_video_generation_plans", "episode_id", "episodes"),
     # 刻意不清 episode_video_budget_authorities / provider_video_budget_claims：
     # 那是已经产生的付款责任，属于账目而不是流水线产出（与 reset_pipeline_data

@@ -74,25 +74,40 @@ def test_offscreen_voice_is_exempt_from_the_verbatim_rule() -> None:
     assert check_spoken_provenance(shots, domain) == []
 
 
+LEDGER_LINE = "是啊，王师兄为人一向温和，整个外宗五人不知。"
+
+
 def test_prompt_fidelity_catches_dropped_and_reworded_lines() -> None:
-    shots = [_shot(1, [{"speaker": "甲", "line": "别走。"}, {"speaker": "乙", "line": "我留下。"}])]
-    faithful = {1: "镜头1：甲开口说出：“别走。” 镜头2：乙回答：“我留下。”"}
+    shots = [_shot(1, [{"speaker": "甲", "line": LEDGER_LINE}, {"speaker": "乙", "line": "我留下。"}])]
+    faithful = {1: f"镜头1：甲开口说出：“{LEDGER_LINE}” 镜头2：乙回答：“我留下。”"}
     assert check_prompt_fidelity(shots, faithful) == []
-    dropped = {1: "镜头1：甲开口说出：“别走。” 镜头2：乙沉默。"}
+    dropped = {1: f"镜头1：甲开口说出：“{LEDGER_LINE}” 镜头2：乙沉默。"}
     assert len(check_prompt_fidelity(shots, dropped)) == 1
-    # 句中改写——线上真实形态（把原著自带的错别字「五人不知」改成「无人不敬佩」）
-    reworded = {1: "镜头1：甲开口说出：“别走啊。” 镜头2：乙回答：“我留下。”"}
+    # 句中改写——线上真实形态：原著自带的错别字「五人不知」被"顺手改正"成「无人不敬佩」
+    reworded = {1: "镜头1：甲开口说出：“是啊，王师兄为人一向温和，整个外宗无人不敬佩。” 镜头2：乙回答：“我留下。”"}
     assert len(check_prompt_fidelity(shots, reworded)) == 1
+
+
+def test_line_split_into_adjacent_quote_groups_is_not_a_loss() -> None:
+    """speech 模板会把一句台词按句读拆成相邻两段引号——字一个没少，不是丢失。
+
+    2026-09-11 第 1 集重跑实测：台账「又扯淡了，会飞？那是传说中的仙人，谁信啊。」
+    在提示词里是「“又扯淡了，会飞？”“那是传说中的仙人，谁信啊。”」。裸串比对把它
+    报成整句丢失——误报会让整份复核报告失去可信度。
+    """
+    shots = [_shot(1, [{"speaker": "甲", "line": "又扯淡了，会飞？那是传说中的仙人，谁信啊。"}])]
+    split = {1: '镜头2：甲 嘴唇开合 画内对白（甲）：“又扯淡了，会飞？”“那是传说中的仙人，谁信啊。”'}
+    assert check_prompt_fidelity(shots, split) == []
 
 
 def test_prompt_fidelity_blind_spot_is_prefix_only_additions() -> None:
     """已知盲区，写成断言而不是注释——盲区悄悄扩大比盲区本身危险。
 
-    判据是「台账原话逐字出现在提示词里」，所以在原话**前后**加字（「你别走。」
-    包含「别走。」）查不出来。改成比对提示词里的引号跨度可以覆盖它，但实测会被
-    引号不配对的产物（第 6 集 ``说出："…”`` 前英文直引号后中文右引号）打出误报，
-    误报会让整份复核报告失去可信度。两害相权取「不漏掉真实事故形态」：整句丢失
-    与句中改写这两类都能抓，且零误报。
+    判据是「台账原话（condense 后）出现在提示词里」，所以在原话**前后**加字都查不
+    出来——「你别走。」「别走啊。」都包含「别走」。改成比对提示词里的引号跨度可以
+    覆盖它，但会被引号不配对的产物（第 6 集 ``说出："…”`` 前英文直引号后中文右
+    引号）打出另一类误报。两害相权取「不漏掉真实事故形态」：整句丢失与句中改写
+    这两类都能抓。
     """
     shots = [_shot(1, [{"speaker": "甲", "line": "别走。"}])]
     assert check_prompt_fidelity(shots, {1: "甲说出：“你别走。”"}) == []
