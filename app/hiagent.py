@@ -807,18 +807,15 @@ def active_provider(kind: str) -> str:
 
 
 def _model_connection(provider: str, model: str, fallback_url: str = "", fallback_key: str = "") -> tuple[str, dict[str, str]]:
-    """读取单模型连接信息；旧环境变量仅作为尚未迁移时的兼容兜底。"""
+    """读取单模型连接信息；``saved`` 来自 app.models_registry.store（加密表）。"""
+    from app.models_registry import store as models_registry_store
     try:
         custom = json.loads(get_setting("custom_models") or "[]")
     except (TypeError, json.JSONDecodeError):
         custom = []
     item = next((m for m in custom if m.get("provider") == provider and m.get("model") == model), {})
     item_id = item.get("id") or f"builtin:{provider}:{model}"
-    try:
-        credentials = json.loads(get_setting("model_credentials") or "{}")
-    except (TypeError, json.JSONDecodeError):
-        credentials = {}
-    saved = credentials.get(item_id, {}) if isinstance(credentials, dict) else {}
+    saved = models_registry_store.get_credential(item_id)
     base_url = str(saved.get("base_url") or item.get("base_url") or fallback_url).strip().rstrip("/")
     api_key = str(saved.get("api_key") or item.get("api_key") or fallback_key).strip()
     if not base_url:

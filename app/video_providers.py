@@ -123,10 +123,15 @@ def registered_providers() -> tuple[str, ...]:
 
 
 def _catalog_item(provider: str) -> dict[str, Any] | None:
-    """取自建实例在模型库里的条目（含 base_url / api_key / params）。"""
+    """取自建实例在模型库里的条目（含 base_url / api_key / params）。
+
+    凭据（``saved``）来自 ``app.models_registry.store``（加密表），不是
+    ``settings.model_credentials``——EP-05 第一阶段迁移后那个 setting 恒为空。
+    """
     import json
 
     from app.db import get_setting
+    from app.models_registry import store as models_registry_store
 
     try:
         custom = json.loads(get_setting("custom_models") or "[]")
@@ -143,19 +148,11 @@ def _catalog_item(provider: str) -> dict[str, Any] | None:
     )
     if item is None:
         return None
-    try:
-        credentials = json.loads(get_setting("model_credentials") or "{}")
-    except (TypeError, ValueError):
-        credentials = {}
-    saved = (
-        credentials.get(str(item.get("id") or ""), {})
-        if isinstance(credentials, dict) else {}
-    )
+    saved = models_registry_store.get_credential(str(item.get("id") or ""))
     merged = dict(item)
-    if isinstance(saved, dict):
-        for key in ("base_url", "api_key"):
-            if saved.get(key):
-                merged[key] = saved[key]
+    for key in ("base_url", "api_key"):
+        if saved.get(key):
+            merged[key] = saved[key]
     return merged
 
 

@@ -19,6 +19,7 @@ from app.auth.deps import require_system_admin
 from fastapi.responses import PlainTextResponse
 
 from app import config
+from app.auth.principal import current_actor_name
 from app.db import get_conn, get_setting, new_id, rows_to_dicts, set_setting
 from app.local_session import require_local_session
 from app.model_capabilities import (
@@ -27,6 +28,7 @@ from app.model_capabilities import (
     merge_token_capability_override,
     normalize_token_limits,
 )
+from app.models_registry import store as models_registry_store
 
 router = APIRouter(prefix="/api")
 # 公开探活路由：不挂本机会话依赖（由 main 单独 include）。
@@ -288,23 +290,15 @@ def _model_catalog() -> list[dict]:
 
 def _public_model(item: dict) -> dict:
     from app.system_health import env_key_for_item
-
     public = {key: value for key, value in item.items() if key != "api_key"}
-    try:
-        credentials = json.loads(get_setting("model_credentials") or "{}")
-    except (TypeError, json.JSONDecodeError):
-        credentials = {}
+    saved = models_registry_store.get_credential(str(item.get("id") or ""))  # 加密表，不是明文 setting
     # 按网关归族兜底查环境变量密钥（app.system_health.env_key_for_item，与
     # health() 同一份 family 映射），不再用按 provider 字面量的独立字典。
     provider_key = env_key_for_item(item)
     public["key_configured"] = (
         bool(item.get("base_url"))
         if item.get("requires_api_key") is False
-        else bool(
-            item.get("api_key")
-            or credentials.get(item.get("id"), {}).get("api_key")
-            or provider_key
-        )
+        else bool(item.get("api_key") or saved.get("api_key") or provider_key)
     )
     return public
 
@@ -387,10 +381,12 @@ def add_model(body: dict):
         item["params"] = params
     item.update(normalize_token_limits(body))
     if custom_provider:
-        item.update({"provider_label": provider_label, "base_url": base_url, "api_key": api_key})
+        item.update({"provider_label": provider_label, "base_url": base_url})  # api_key 不落这里，见下方加密表写入
     custom = _custom_models()
     custom.append(item)
     set_setting("custom_models", json.dumps(custom, ensure_ascii=False))
+    if custom_provider:
+        models_registry_store.put_credential(item_id, base_url=base_url, api_key=api_key, rotated_by=current_actor_name(fallback="admin"))
     return _public_model(item)
 
 
@@ -597,8 +593,8 @@ async def update_model_route(model_id: str, body: dict):
     from app.capabilities.dispatch import ui_route
     current = next((item for item in _custom_models() if item.get("id") == model_id), {})
     probe_body = {**current, **body}
-    if not str(body.get("api_key") or "").strip() and current.get("api_key"):
-        probe_body["api_key"] = current["api_key"]
+    if not str(body.get("api_key") or "").strip():  # 加密表才是真源，current 不再带明文
+        probe_body["api_key"] = models_registry_store.get_credential(model_id).get("api_key") or ""
     prepared = await prepare_model_token_capabilities(probe_body)
     patch = {**body, **{
         key: prepared[key]
@@ -629,8 +625,10 @@ def update_model(model_id: str, body: dict):
         if not provider_label or not re.fullmatch(r"https?://[^\s]+", base_url):
             raise HTTPException(422, "自定义服务名称或 Base URL 无效")
         item.update({"provider_label": provider_label, "base_url": base_url})
-        if str(body.get("api_key") or "").strip():
-            item["api_key"] = str(body["api_key"]).strip()
+        legacy_inline_key = str(item.pop("api_key", "") or "").strip()  # 清掉可能残留的旧内联明文
+        effective_key = str(body.get("api_key") or "").strip() or legacy_inline_key or str(models_registry_store.get_credential(model_id).get("api_key") or "")
+        if effective_key:
+            models_registry_store.put_credential(model_id, base_url=base_url, api_key=effective_key, rotated_by=current_actor_name(fallback="admin"))
     set_setting("custom_models", json.dumps(custom, ensure_ascii=False))
     return _public_model(item)
 
@@ -685,11 +683,7 @@ async def test_saved_model(model_id: str, body: dict | None = None):
             )
             response["capability_snapshot_id"] = snapshot.id
         return response
-    try:
-        credentials = json.loads(get_setting("model_credentials") or "{}")
-    except (TypeError, json.JSONDecodeError):
-        credentials = {}
-    saved = credentials.get(model_id, {}) if isinstance(credentials, dict) else {}
+    saved = models_registry_store.get_credential(model_id)
     base_url = str(override.get("base_url") or saved.get("base_url") or item.get("base_url") or "")
     api_key = str(override.get("api_key") or saved.get("api_key") or item.get("api_key") or "")
     model = str(override.get("model") or item.get("model") or "")
@@ -727,28 +721,32 @@ def delete_model(model_id: str):
         set_setting("model_token_capabilities", json.dumps(overrides, ensure_ascii=False))
     return {"ok": True}
 
+async def _probe_model_credential(item: dict, base_url: str, api_key: str) -> None:
+    """凭据轮换前的真实探活，判断标准同「测试连接」；失败抛 HTTPException。"""
+    provider = str(item.get("provider") or "")
+    if provider == "minimax_h3" or (provider.startswith("custom:") and str(item.get("protocol") or "").strip().lower() == "minimax_h3"):
+        from app import hiagent, minimax_h3
+        connection = minimax_h3.connection_from_catalog_item(item, base_url_override=base_url, api_key_override=api_key) if provider != "minimax_h3" else minimax_h3.default_connection()
+        try:
+            await minimax_h3.probe_connection(base_url or str(item.get("base_url") or ""), connection)
+        except hiagent.ProviderError as exc:
+            raise HTTPException(422, f"新密钥探活失败：{exc}") from exc
+        return
+    await _probe_openai_model(base_url, api_key, str(item.get("model") or ""), probe_kind(item.get("kinds")))
 
 @router.put("/models/{model_id}/credentials")
-def put_model_credentials(model_id: str, body: dict, _admin: None = Depends(require_system_admin)):
+async def put_model_credentials(model_id: str, body: dict, _admin: None = Depends(require_system_admin)):
     item = next((m for m in _model_catalog() if m.get("id") == model_id), None)
-    if not item:
-        raise HTTPException(404, "模型不存在")
-    if body.get("confirm") is not True:
-        raise HTTPException(422, "写入模型凭证需 confirm=true 二次确认")
+    if not item: raise HTTPException(404, "模型不存在")
+    if body.get("confirm") is not True: raise HTTPException(422, "写入模型凭证需 confirm=true 二次确认")
     base_url = str(body.get("base_url") or "").strip().rstrip("/")
     api_key = str(body.get("api_key") or "").strip()
-    if not re.fullmatch(r"https?://[^\s]+", base_url):
-        raise HTTPException(422, "Base URL 必须是有效的 http(s) 地址")
-    try:
-        credentials = json.loads(get_setting("model_credentials") or "{}")
-    except (TypeError, json.JSONDecodeError):
-        credentials = {}
-    current_key = str(credentials.get(model_id, {}).get("api_key") or item.get("api_key") or "")
-    if not api_key and not current_key:
-        raise HTTPException(422, "API Key 不能为空")
-    credentials[model_id] = {"base_url": base_url, "api_key": api_key or current_key}
-    set_setting("model_credentials", json.dumps(credentials, ensure_ascii=False))
-    return {"ok": True, "key_configured": True}
+    if not re.fullmatch(r"https?://[^\s]+", base_url): raise HTTPException(422, "Base URL 必须是有效的 http(s) 地址")
+    effective_key = api_key or str(models_registry_store.get_credential(model_id).get("api_key") or item.get("api_key") or "")
+    if not effective_key: raise HTTPException(422, "API Key 不能为空")
+    await _probe_model_credential(item, base_url, effective_key)  # 探活成功才落库；失败即抛出，旧密文不动
+    result = models_registry_store.put_credential(model_id, base_url=base_url, api_key=effective_key, rotated_by=current_actor_name(fallback="admin"))
+    return {"ok": True, "key_configured": True, **result}
 
 @public_router.get("/system/health")
 def health():

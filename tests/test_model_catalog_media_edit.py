@@ -38,7 +38,11 @@ def test_custom_seedance_video_model_can_be_edited(monkeypatch) -> None:
     assert updated["protocol"] == "seedance"
     saved = json.loads(store["custom_models"])[0]
     assert saved["provider_label"] == "火山引擎"
-    assert saved["api_key"] == "secret"
+    # EP-05 第一阶段：api_key 不再落 settings.custom_models，改走加密表。
+    assert "api_key" not in saved
+    assert "secret" not in store["custom_models"]
+    import app.models_registry.store as models_registry_store
+    assert models_registry_store.get_credential(item["id"])["api_key"] == "secret"
 
 
 def test_edit_model_rejects_protocol_that_does_not_support_capability(monkeypatch) -> None:

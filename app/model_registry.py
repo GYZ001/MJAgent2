@@ -8,6 +8,14 @@
 百炼的模型回退、Seedance/MiniMax H3 的异步出片、Seedream 的参考图字段。协议是
 需要有人写代码的能力，实例只是"这套协议 + 这个地址 + 这个 Key + 这个模型 ID"，
 所以实例全部走模型库，新增实例不必改代码。
+
+EP-05 第一阶段（2026-09-10）起，凭据（``_with_credentials``）改为读
+``app.models_registry.store``（加密表），不再读 ``settings.model_credentials``
+——迁移会把那个 setting 置空，继续读旧路径会让所有分环节覆盖静默消失。目录
+本身（``catalog_items()``/``CATALOG_SETTING``）这一阶段仍然读
+``settings.custom_models``：新增/编辑模型的写入路径（``app/system_api.py``）
+本阶段未改造，仍然只写这个 setting，模型库落表（``models`` 表）只是迁移时的
+只读镜像，见 ``app/models_registry/store.py`` 模块文档。
 """
 from __future__ import annotations
 
@@ -15,7 +23,6 @@ import json
 from typing import Any
 
 CATALOG_SETTING = "custom_models"
-CREDENTIALS_SETTING = "model_credentials"
 
 
 def _load(setting: str, fallback: Any) -> Any:
@@ -37,11 +44,14 @@ def _with_credentials(item: dict[str, Any]) -> dict[str, Any]:
     """把单独保存的连接信息合并进条目。
 
     连接与条目分开存是历史设计（改地址/换 Key 不必动模型定义），这里统一合并，
-    调用方不必关心它落在哪张表。
+    调用方不必关心它落在哪张表。凭据来源是 ``app.models_registry.store``（加密
+    表），不是 ``settings.model_credentials``——EP-05 第一阶段迁移后那个 setting
+    恒为空，见本文件模块文档。
     """
-    credentials = _load(CREDENTIALS_SETTING, {})
-    saved = credentials.get(str(item.get("id") or "")) if isinstance(credentials, dict) else None
-    if not isinstance(saved, dict):
+    from app.models_registry import store as models_registry_store
+
+    saved = models_registry_store.get_credential(str(item.get("id") or ""))
+    if not saved:
         return dict(item)
     merged = dict(item)
     for key in ("base_url", "api_key"):

@@ -95,24 +95,6 @@ def test_active_custom_model_cannot_be_deleted(monkeypatch) -> None:
     assert json.loads(store["custom_models"])
 
 
-def test_custom_provider_credentials_are_private_and_model_scoped(monkeypatch) -> None:
-    store = _settings_store(monkeypatch)
-    created = api.add_model({
-        "provider": "custom", "provider_label": "Internal Gateway",
-        "base_url": "https://llm.example.com/v1/", "api_key": "secret-one",
-        "protocol": "openai",
-        "model": "team/model-a", "label": "Model A", "kinds": ["text", "vlm"],
-    })
-
-    assert created["provider"].startswith("custom:model_")
-    assert created["key_configured"] is True
-    assert "api_key" not in created
-    public = api.get_models()["items"][-1]
-    assert "api_key" not in public
-    stored = json.loads(store["custom_models"])[0]
-    assert stored["api_key"] == "secret-one"
-
-
 def test_public_model_key_configured_falls_back_to_env_by_gateway_family(monkeypatch) -> None:
     """2026-08-30 与 health() 同一类缺陷：``_public_model`` 此前按 provider 字面量
     查环境变量兜底密钥，而 model_migration 产物的 provider 是生成的
@@ -155,6 +137,10 @@ def test_public_model_key_configured_false_when_no_key_anywhere(monkeypatch) -> 
 
 
 def test_model_credentials_are_saved_by_model_id(monkeypatch) -> None:
+    """凭据只写不读（EP-05 第一阶段）：新 Key 落进 app.models_registry.store
+    的加密表，不再落 settings.model_credentials；接口响应也不回明文。"""
+    import app.models_registry.store as models_registry_store
+
     store = _settings_store(monkeypatch)
     created = api.add_model({
         "provider": "custom", "provider_label": "Gateway",
@@ -162,14 +148,26 @@ def test_model_credentials_are_saved_by_model_id(monkeypatch) -> None:
         "protocol": "openai", "model": "m", "label": "M", "kinds": ["text"],
     })
 
-    api.put_model_credentials(created["id"], {
+    async def _fake_probe(item, base_url, api_key):
+        return None
+
+    monkeypatch.setattr(api, "_probe_model_credential", _fake_probe)
+
+    response = asyncio.run(api.put_model_credentials(created["id"], {
         "base_url": "https://gateway.example.com/v1",
         "api_key": "model-specific-key",
         "confirm": True,
-    })
+    }))
 
-    credentials = json.loads(store["model_credentials"])
-    assert credentials[created["id"]]["api_key"] == "model-specific-key"
+    assert "api_key" not in response and "key_ciphertext" not in response
+    assert response["key_fingerprint"]
+    assert "model-specific-key" not in json.dumps(response)
+
+    saved = models_registry_store.get_credential(created["id"])
+    assert saved["api_key"] == "model-specific-key"
+    assert saved["base_url"] == "https://gateway.example.com/v1"
+    # settings.model_credentials 不再是凭据来源，本接口也不再写它。
+    assert store.get("model_credentials", "") in ("", "{}")
 
 
 def test_catalog_is_the_only_source_of_models(monkeypatch) -> None:

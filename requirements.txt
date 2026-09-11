@@ -4,3 +4,4 @@ httpx[socks]>=0.27
 pydantic>=2.7
 python-multipart>=0.0.9
 Pillow==11.3.0
+cryptography==45.0.7
