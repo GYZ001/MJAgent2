@@ -89,7 +89,7 @@ def _reserve_storyboard_concurrency_slot(
     同一套惯例（照抄 media_scheduler.reserve_budget 的 owns_transaction 写法，
     不新造第二套事务风格）。通过后才允许 workflow_runs 出现这一行，两个并发
     请求不可能都读到"还没到上限"再各自建一行。"""
-    from app import quota, quota_expiry
+    from app import quota, quota_expiry, quota_project, quota_scope
 
     owner_user_id = quota.owner_of_episode(conn, episode_id)
     owns_transaction = not conn.in_transaction
@@ -104,6 +104,19 @@ def _reserve_storyboard_concurrency_slot(
             quota.check_module_concurrency(
                 conn, owner_user_id, quota.MODULE_STORYBOARD, active_count=active,
             )
+            # 公平调度（EP-04 第二阶段）：项目级上限，理由同 screenplay_ops
+            # 那一处（见 task_body._reserve_screenplay_concurrency_slot）。
+            episode_row = conn.execute(
+                "SELECT project_id FROM episodes WHERE id=?", (episode_id,),
+            ).fetchone()
+            if episode_row is not None:
+                project_active = quota_scope.count_active_workflow_runs_for_project(
+                    conn, episode_row["project_id"], "storyboard", exclude_run_id=None,
+                )
+                quota_project.check_project_concurrency(
+                    conn, owner_user_id, episode_row["project_id"], quota.MODULE_STORYBOARD,
+                    active_count=project_active,
+                )
         recorder = WorkflowRecorder.create(**create_kwargs)
         if owns_transaction and conn.in_transaction:
             conn.commit()

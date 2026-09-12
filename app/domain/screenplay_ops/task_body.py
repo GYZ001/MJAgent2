@@ -254,7 +254,7 @@ def _reserve_screenplay_concurrency_slot(
     这一行，因此准入判定读到的 ``active_count`` 永远不含"正在被别的并发请求
     创建、尚未提交"的幽灵行——同一账号同一模块的两个并发请求不可能都读到
     "还没到上限"再各自建一行，把上限撑破。"""
-    from app import quota, quota_expiry
+    from app import quota, quota_expiry, quota_project, quota_scope
 
     owner_user_id = quota.owner_of_episode(conn, episode_id)
     owns_transaction = not conn.in_transaction
@@ -269,6 +269,14 @@ def _reserve_screenplay_concurrency_slot(
             quota.check_module_concurrency(
                 conn, owner_user_id, quota.MODULE_SCREENPLAY, active_count=active,
             )
+            # 公平调度（EP-04 第二阶段）：项目级上限，防止一个项目的多个集同时提交映射台任务吃满账号并发槽位。
+            episode_row = conn.execute("SELECT project_id FROM episodes WHERE id=?", (episode_id,)).fetchone()
+            if episode_row is not None:
+                pid = episode_row["project_id"]
+                project_active = quota_scope.count_active_workflow_runs_for_project(conn, pid, "screenplay")
+                quota_project.check_project_concurrency(
+                    conn, owner_user_id, pid, quota.MODULE_SCREENPLAY, active_count=project_active,
+                )
         recorder = WorkflowRecorder.create(**create_kwargs)
         if owns_transaction and conn.in_transaction:
             conn.commit()

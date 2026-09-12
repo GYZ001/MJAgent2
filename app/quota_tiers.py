@@ -44,24 +44,29 @@ class TierLimits:
     token: float | None
     video_seconds: float | None
     image: float | None        # 定妆照/场景图成本上限，与 token 同周期滚动重置
-    # EP-04 第一阶段新增，追加在末尾且带默认值：不破坏既有全部位置参数构造点
-    # （TIER_TABLE 五档 + _UNLIMITED + 测试里散落的字面量构造）。空字典＝五个
-    # 维度均由账号自身档位（本文件 TIER_TABLE）决定，是 app.quota.effective_
-    # limits() 从未接入组织/团队级配额分配时的默认状态（迁移零变化）。非空时
-    # ``bound_by[dim]`` 形如 ``"team=内容中心"``/``"org=某某公司"``——最终生效
-    # 值由哪一级组织/团队分配收紧过，供 app.quota 的 QuotaExceeded 消息据此
-    # 写清"是哪一级、哪条策略挡的"（CLAUDE.md「拦住用户时必须给出路」），不
-    # 参与判断本身、纯展示信息。见 app/quota_policy/allocation.py::
-    # resolve_effective_limits。
+    # EP-04 第二阶段新增，同样追加在末尾且带默认值（理由同 bound_by 的既有
+    # 注释）：
+    # - storage_bytes：项目目录实测占用累计到账号/团队/组织的上限，None=不限。
+    #   五档 TIER_TABLE 全部留 None——存储治理是这一阶段新引入的维度，默认不
+    #   限沿用「迁移零变化」的保守原则，管理员需要收紧时通过
+    #   app/quota_policy 的 quota_allocations 显式配置，不在这里悄悄给存量
+    #   五档账号加上一道新拦截。判据见 app.quota.assert_storage_capacity。
+    # - project_concurrency：单个项目在某一模块下的并发上限，None=不限（仅
+    #   系统管理员）。与 storage_bytes 不同，五档全部给出具体默认值（团队/
+    #   账号并发的 1/2，向上取整到至少 1）——这是 CLAUDE.md 记录的公平调度欠
+    #   账本身要解决的问题（一个项目吃满账号全部并发槽位），默认不给上限等
+    #   于没修。判据见 app.quota.check_project_concurrency。
+    storage_bytes: float | None = None
+    project_concurrency: int | None = None
     bound_by: "MappingProxyType[str, str]" = field(default_factory=lambda: MappingProxyType({}))
 
 
 TIER_TABLE: dict[str, TierLimits] = {
-    "free": TierLimits("free", 1, 1, 300_000.0, 1 * 60.0, 3_000_000.0),
-    "starter": TierLimits("starter", 2, 2, 600_000.0, 5 * 60.0, 6_000_000.0),
-    "standard": TierLimits("standard", 3, 3, 900_000.0, 15 * 60.0, 9_000_000.0),
-    "pro": TierLimits("pro", 6, 6, 1_800_000.0, 30 * 60.0, 18_000_000.0),
-    "max": TierLimits("max", 10, 10, 3_000_000.0, 50 * 60.0, 30_000_000.0),
+    "free": TierLimits("free", 1, 1, 300_000.0, 1 * 60.0, 3_000_000.0, project_concurrency=1),
+    "starter": TierLimits("starter", 2, 2, 600_000.0, 5 * 60.0, 6_000_000.0, project_concurrency=1),
+    "standard": TierLimits("standard", 3, 3, 900_000.0, 15 * 60.0, 9_000_000.0, project_concurrency=1),
+    "pro": TierLimits("pro", 6, 6, 1_800_000.0, 30 * 60.0, 18_000_000.0, project_concurrency=3),
+    "max": TierLimits("max", 10, 10, 3_000_000.0, 50 * 60.0, 30_000_000.0, project_concurrency=5),
 }
 VALID_TIERS = frozenset(TIER_TABLE)
 _UNLIMITED = TierLimits("unlimited", None, None, None, None, None)

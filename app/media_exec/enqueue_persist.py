@@ -7,6 +7,11 @@
 「异常处理器第一条语句必须是 rollback」）完整保留在
 ``persist_new_video_version`` 自身，不下放给子 helper（CLAUDE.md「不得在
 调用方的连接上隐式提交」）。命名与循环导入规避手法同 ``.enqueue_context``。
+
+``assert_video_job_admission``（EP-04 第二阶段新增）同一惯例：只用调用方传入
+的 ``conn`` 执行判断/预扣，不自行提交，事务边界留在 ``enqueue.py`` 里"新
+job_id 诞生"的那个 INSERT 语句块。从 ``enqueue.py`` 挪过来是行数棘轮逼的
+（那个文件在这次改造前已经卡在 1566/1566 行数基线零余量）。
 """
 from __future__ import annotations
 
@@ -15,9 +20,30 @@ from app.media_exec.enqueue_prompt import segment_identity_fingerprint
 import json
 from typing import Any
 
+from app import quota, quota_expiry, quota_project, quota_scope
 from app.db import new_id, now
 from app.orchestration import media_scheduler
 from app.orchestration.media_runs import ensure_media_trace
+
+
+def assert_video_job_admission(conn, owner_user_id: str | None, project_id: str, job_id: str) -> None:
+    """新视频 job（这一镜的这一次尝试）真正诞生前的全部准入判断 + 15 秒预
+    扣：会员到期、存储、账号级并发、项目级并发（EP-04 第二阶段公平调度）、
+    视频时长额度。调用方必须在同一个 ``BEGIN IMMEDIATE`` 事务里、紧邻
+    ``INSERT INTO jobs`` 之前调用——任一检查 raise 时事务尚未插入新行，外层
+    ``except`` 统一 rollback（CLAUDE.md：扣减与任务创建必须在同一事务里）。
+    找不到归属账号（legacy-shared 兼容路径）时不拦截，原样跳过全部检查。"""
+    if owner_user_id is None:
+        return
+    quota_expiry.assert_membership_active(conn, owner_user_id)
+    quota_project.assert_storage_capacity(conn, owner_user_id, project_id)
+    active_jobs = quota.count_active_video_jobs(conn, owner_user_id)
+    quota.check_module_concurrency(conn, owner_user_id, quota.MODULE_VIDEO, active_count=active_jobs)
+    project_active_jobs = quota_scope.count_active_video_jobs_for_project(conn, project_id)
+    quota_project.check_project_concurrency(
+        conn, owner_user_id, project_id, quota.MODULE_VIDEO, active_count=project_active_jobs,
+    )
+    quota.reserve_video_seconds(conn, owner_user_id, attempt_key=job_id)
 
 
 def build_base_image_meta(

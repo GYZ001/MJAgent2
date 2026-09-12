@@ -107,9 +107,36 @@ def _record_unexpected_exit(task_id: str, child: asyncio.Task) -> None:
         tasks.mark_failed(conn, task_id, f"连播任务异常退出（{rec.error_id}）：{exc}"[:1000])
 
 
+def _effective_task_concurrency(conn, project_id: str) -> int:
+    """项目级连播任务并行上限：设置台配置值（``queue_concurrency()``）与配额
+    公平调度上限（``quota.effective_limits().project_concurrency``，EP-04 第
+    二阶段）取更紧的一个——不新建第二套独立并发常量，只是把已有的配额判定
+    接进来当封顶（CLAUDE.md「连播队列接入同一套判定，不再自建第二套并发
+    常量」）。
+
+    判据仍然安全用内存态 ``len(children)``（调用方 ``_spawn_children`` 的既
+    有做法，本函数不改）：与 ``check_module_concurrency`` 面对的多连接并发
+    竞态不同，每个项目至多同时存在一个 runner 协程
+    （``_ensure_runner``/``task_registry.active`` 保证），本函数体在单个协程
+    的顺序执行路径里被调用，不存在两个连接同时读到"还没到上限"各自派发的
+    竞态；进程重启会直接杀掉这个协程（连同它的 children），重启后
+    ``resume_after_recovery`` 重新从 DB 状态起步，不依赖这份内存计数"扛住重
+    启"。"""
+    configured = queue_concurrency()
+    from app import quota
+
+    owner_user_id = quota.owner_of_project(conn, project_id)
+    if owner_user_id is None:
+        return configured
+    limits = quota.effective_limits(conn, owner_user_id)
+    if limits.project_concurrency is None:
+        return configured
+    return min(configured, max(1, int(limits.project_concurrency)))
+
+
 def _spawn_children(conn, project_id: str, children: dict[str, asyncio.Task]) -> None:
     """按 queue_seq 补位到并发上限；刚派出但还没把自己改成 running 的任务用 exclude 挡住重复派发。"""
-    while len(children) < queue_concurrency():
+    while len(children) < _effective_task_concurrency(conn, project_id):
         row = tasks.next_queued_task(conn, project_id, exclude=set(children))
         if row is None:
             return
@@ -245,7 +272,10 @@ def _ensure_runner(project_id: str) -> None:
 
 
 def queue_snapshot(conn, project_id: str) -> dict:
-    return {**tasks.queue_snapshot(conn, project_id), "concurrency": queue_concurrency()}
+    # 界面显示的并行数必须是真正生效的那个值（CLAUDE.md「界面承诺必须与实际
+    # 行为一致」）：设置台配了 5 但账号配额只放行 3 时，_spawn_children 实际
+    # 按 3 补位，这里也要报 3，不能让用户以为自己设的 5 在生效。
+    return {**tasks.queue_snapshot(conn, project_id), "concurrency": _effective_task_concurrency(conn, project_id)}
 
 
 # --------------------------------------------------------------------- 路由核心

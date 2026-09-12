@@ -274,6 +274,35 @@ def test_alerts_never_trigger_for_unlimited_resource() -> None:
     assert result == []
 
 
+def test_alerts_endpoint_lists_recent_triggers_for_org_scope_family(client: TestClient) -> None:
+    org_id, admin = _make_org_with_admin()
+    member = _make_plain_member(org_id)
+    plan_resp = client.post(
+        "/api/system/quota/plans", headers=_login(admin),
+        json={"key": "watched2", "name": "被监控策略2", "limits": {"token": 1000}},
+    )
+    plan_id = plan_resp.json()["id"]
+    client.put(
+        f"/api/system/quota/allocations/user/{member}", headers=_login(admin),
+        json={"plan_id": plan_id},
+    )
+    from app import quota
+    conn = get_conn()
+    quota.charge_tokens(conn, member, 850.0, attempt_key="alert-endpoint-1")
+    conn.commit()
+    client.get(f"/api/system/usage/summary?scope=user&id={member}", headers=_login(admin))  # 惰性触发写入
+
+    resp = client.get("/api/system/quota/alerts", headers=_login(admin))
+    assert resp.status_code == 200, resp.text
+    items = resp.json()["items"]
+    assert any(i["scope_id"] == member and i["threshold"] == 0.8 for i in items)
+
+
+def test_alerts_endpoint_requires_login(client: TestClient) -> None:
+    resp = client.get("/api/system/quota/alerts?org_id=whatever")
+    assert resp.status_code == 401
+
+
 def _alert_race_once() -> None:
     scope_id = "race-scope-fixed"
     results: list[list[dict]] = []

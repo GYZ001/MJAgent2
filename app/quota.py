@@ -253,9 +253,10 @@ def check_module_concurrency(
 
 
 # count_active_workflow_runs / count_active_video_jobs / ACTIVE_JOB_STATUSES
-# 实现见 app/quota_scope.py，已 import 进本模块命名空间，见上。
-
-
+# 实现见 app/quota_scope.py，已 import 进本模块命名空间，见上。EP-04 第二阶段
+# 新增的 check_project_concurrency/assert_storage_capacity（app/quota_project.py）
+# 与项目级计数 *_for_project（app/quota_scope.py）不在本模块 re-export（行数
+# 基线零余量），调用方直接 import 那两个模块。
 # ---------------------------------------------------------------------------
 # token 额度（含图像溢出到 token 的那一段）
 # ---------------------------------------------------------------------------

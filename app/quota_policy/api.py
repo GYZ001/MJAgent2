@@ -22,6 +22,7 @@ from app.auth.principal import Principal, current_actor_name, get_current_princi
 from app.db import get_conn
 from app.orgs import store as orgs_store
 from app.quota_policy import plans as quota_plans
+from app.quota_policy import storage as quota_storage
 from app.quota_policy import usage_query
 from app.quota_policy.allocation import set_allocation
 from app.quota_policy.allocation import list_allocations as list_allocations_store
@@ -29,6 +30,7 @@ from app.quota_policy.usage_query import UsageQueryError
 
 router = APIRouter(prefix="/api/system/quota")
 usage_router = APIRouter(prefix="/api/system/usage")
+storage_router = APIRouter(prefix="/api/system/storage")
 
 
 def _principal() -> Principal:
@@ -118,6 +120,28 @@ def list_allocations(org_id: str | None = Query(None)):
         item["usage"] = usage_query.usage_summary(
             conn, scope_type=item["scope_type"], scope_id=item["scope_id"],
         )["usage"]
+    return {"org_id": resolved_org_id, "items": items}
+
+
+def _org_scope_family(conn, org_id: str) -> list[tuple[str, str]]:
+    """本组织自身 + 下属团队 + 下属用户——与 ``allocation.list_allocations`` 的
+    scope 收集口径一致，供 ``/allocations``/``/alerts`` 两个端点共用。"""
+    scopes: list[tuple[str, str]] = [("org", org_id)]
+    scopes += [("team", t["id"]) for t in orgs_store.list_teams(conn, org_id)]
+    scopes += [
+        ("user", r["id"]) for r in conn.execute("SELECT id FROM users WHERE org_id=?", (org_id,)).fetchall()
+    ]
+    return scopes
+
+
+@router.get("/alerts")
+def list_alerts(org_id: str | None = Query(None)):
+    """管理员首页预警横幅数据源：本组织范围内最近触发的 80%/95% 预警
+    （EP-04 §7）。"""
+    principal = _principal()
+    conn = get_conn()
+    resolved_org_id = _resolve_org_id(principal, org_id)
+    items = usage_query.list_recent_alerts(conn, _org_scope_family(conn, resolved_org_id))
     return {"org_id": resolved_org_id, "items": items}
 
 
@@ -211,3 +235,61 @@ def usage_top(dimension: str = Query(...), resource: str = Query(...), limit: in
     except UsageQueryError as exc:
         raise HTTPException(422, str(exc)) from exc
     return {"dimension": dimension, "resource": resource, "items": items}
+
+
+# ---------------------------------------------------------------------------
+# /api/system/storage —— EP-04 第二阶段：采样结果只读、清理候选只读、清理执
+# 行需要用户确认（CLAUDE.md「超限行为：不删任何数据」+「拦住用户时必须给出
+# 路」）。三个端点都要求调用方能管理这个项目（本人项目，或系统管理员，或本
+# 组织 org_admin），不是任意登录用户都能看/删别人项目的存储明细。
+# ---------------------------------------------------------------------------
+
+
+def _assert_can_manage_project_storage(conn, principal: Principal, project_id: str) -> None:
+    if principal.is_system_admin:
+        return
+    row = conn.execute("SELECT owner_user_id FROM projects WHERE id=?", (project_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "项目不存在")
+    owner_user_id = row["owner_user_id"]
+    if owner_user_id == principal.user_id:
+        return
+    owner_org_id = orgs_store.user_org_id(conn, owner_user_id) if owner_user_id else None
+    if (
+        principal.org_id and owner_org_id == principal.org_id
+        and orgs_store.user_has_org_admin(conn, principal.user_id, principal.org_id)
+    ):
+        return
+    raise HTTPException(403, "无权访问该项目的存储信息")
+
+
+@storage_router.get("/sample")
+def storage_sample(project_id: str = Query(...)):
+    principal = _principal()
+    conn = get_conn()
+    _assert_can_manage_project_storage(conn, principal, project_id)
+    sample = quota_storage.latest_sample(conn, project_id)
+    return {"project_id": project_id, "sample": sample}
+
+
+@storage_router.get("/cleanup_candidates")
+def storage_cleanup_candidates(project_id: str = Query(...), limit: int = Query(20)):
+    principal = _principal()
+    conn = get_conn()
+    _assert_can_manage_project_storage(conn, principal, project_id)
+    items = quota_storage.cleanup_candidates(conn, project_id, limit)
+    return {"project_id": project_id, "items": items}
+
+
+@storage_router.post("/cleanup")
+def storage_cleanup(body: dict = Body(...)):
+    principal = _principal()
+    project_id = str(body.get("project_id") or "").strip()
+    if not project_id:
+        raise HTTPException(422, "project_id 不能为空")
+    version_ids = body.get("version_ids") or []
+    if not isinstance(version_ids, list) or not all(isinstance(v, str) for v in version_ids):
+        raise HTTPException(422, "version_ids 必须是字符串数组")
+    conn = get_conn()
+    _assert_can_manage_project_storage(conn, principal, project_id)
+    return quota_storage.execute_cleanup(conn, project_id, version_ids, actor=current_actor_name())

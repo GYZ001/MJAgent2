@@ -1,0 +1,167 @@
+/* 资源治理看板（EP-04 第二阶段）。复用全局 --card/--ink/--hairline 等纸墨主题
+ * token，不引入新配色系统；状态色沿用既有语义：--gold=预警(80%)、
+ * --cinnabar=严重(95%)、--moss=健康。颜色旁必须带图标/文字，不单靠颜色区分
+ * （dataviz 技能的「status colors 必须带 icon+label」硬约束）。 */
+
+.resource-admin-toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.resource-admin-toolbar label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.resource-alert-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  margin-bottom: 16px;
+  border: 1px solid var(--hairline);
+  background: var(--surface-sunken, var(--paper-deep));
+}
+
+.resource-alert-banner.level-critical {
+  border-color: var(--cinnabar);
+  background: rgba(181, 68, 52, 0.08);
+}
+
+.resource-alert-banner.level-warn {
+  border-color: var(--gold);
+  background: rgba(168, 132, 44, 0.1);
+}
+
+.resource-alert-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.resource-alert-icon {
+  font-weight: 700;
+}
+
+.resource-alert-row.critical .resource-alert-icon { color: var(--cinnabar); }
+.resource-alert-row.warn .resource-alert-icon { color: var(--gold); }
+
+.resource-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+  margin: 12px 0 18px;
+}
+
+.resource-stat-tile {
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--card);
+}
+
+.resource-stat-tile .r-label {
+  font-size: 12px;
+  color: var(--ink-soft);
+  margin-bottom: 4px;
+}
+
+.resource-stat-tile .r-value {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.resource-stat-tile .r-limit {
+  font-size: 12px;
+  color: var(--ink-faint);
+  margin-top: 2px;
+}
+
+.resource-meter {
+  margin-top: 8px;
+  height: 6px;
+  border-radius: 4px;
+  background: var(--surface-muted, var(--paper-deep));
+  overflow: hidden;
+}
+
+.resource-meter-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: var(--moss);
+}
+
+.resource-meter-fill.warn { background: var(--gold); }
+.resource-meter-fill.critical { background: var(--cinnabar); }
+
+.resource-top-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.resource-top-row {
+  display: grid;
+  grid-template-columns: 140px 1fr 90px;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.resource-top-key {
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-top-bar {
+  height: 10px;
+  border-radius: 5px;
+  background: var(--surface-muted, var(--paper-deep));
+  overflow: hidden;
+}
+
+.resource-top-bar-fill {
+  height: 100%;
+  border-radius: 5px;
+  background: var(--indigo);
+}
+
+.resource-top-total {
+  text-align: right;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.resource-alloc-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 1fr 120px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 13px;
+}
+
+.resource-alloc-row:last-child {
+  border-bottom: none;
+}
+
+.resource-scope-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-muted, var(--paper-deep));
+  color: var(--ink-soft);
+  font-size: 11px;
+}

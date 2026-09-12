@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from app import config, errors, quota, quota_expiry, video_modes
+from app import config, errors, quota, video_modes
 from app.db import get_conn, new_id, now
 from app.orchestration import media_scheduler
 from app.orchestration.media_runs import mark_media_job_state
@@ -789,18 +789,15 @@ def _begin_video_preflight_job(
                 )
                 acquired = claimed.rowcount == 1
         else:
-            # 每模块并发 + 视频时长额度：这是"这一镜的这一次尝试"真正诞生的
-            # 时刻（新 job_id，video_slot_active 唯一索引保证同一镜同一时间只
-            # 有一个活跃 job）。两项检查 + 15 秒预扣都在这个 INSERT 之前、同一个
-            # BEGIN IMMEDIATE 事务里完成——超额时直接 raise，job 行不会被插入，
-            # 外层 except 统一 rollback（CLAUDE.md：扣减与任务创建必须在同一
-            # 事务里）。找不到归属账号（legacy-shared 兼容路径）时不拦截。
+            # 每模块并发 + 项目级并发 + 存储 + 视频时长额度：这是"这一镜的这
+            # 一次尝试"真正诞生的时刻（新 job_id，video_slot_active 唯一索引
+            # 保证同一镜同一时间只有一个活跃 job）。全部检查 + 15 秒预扣都在
+            # 这个 INSERT 之前、同一个 BEGIN IMMEDIATE 事务里完成——超额时直
+            # 接 raise，job 行不会被插入，外层 except 统一 rollback
+            # （CLAUDE.md：扣减与任务创建必须在同一事务里）。见
+            # enqueue_persist.assert_video_job_admission。
             owner_user_id = quota.owner_of_project(conn, shot["project_id"])
-            if owner_user_id is not None:
-                quota_expiry.assert_membership_active(conn, owner_user_id)
-                active_jobs = quota.count_active_video_jobs(conn, owner_user_id)
-                quota.check_module_concurrency(conn, owner_user_id, quota.MODULE_VIDEO, active_count=active_jobs)
-                quota.reserve_video_seconds(conn, owner_user_id, attempt_key=job_id)
+            enqueue_persist.assert_video_job_admission(conn, owner_user_id, shot["project_id"], job_id)
             conn.execute(
                 """INSERT INTO jobs(
                        id,kind,shot_id,episode_id,project_id,status,

@@ -77,3 +77,45 @@ def count_active_video_jobs(
         ).fetchone()["c"]
         or 0
     )
+
+
+# ---------------------------------------------------------------------------
+# 项目级计数（EP-04 第二阶段：公平调度用，与上面两个账号级计数同一份判据口
+# 径——只是把归属范围从"账号名下全部项目"收窄到"这一个项目"）。
+# ---------------------------------------------------------------------------
+
+def count_active_workflow_runs_for_project(
+    conn: sqlite3.Connection, project_id: str, workflow_type: str,
+    *, exclude_run_id: str | None = None,
+) -> int:
+    """统计某个项目名下、某 workflow_type 当前处于 CREATED/RUNNING 的 run
+    数——``count_active_workflow_runs`` 的项目级版本，见该函数文档。SQL 整条
+    内联在调用点，理由同上（避免变成 ``test_project_ownership_query_guard.py``
+    的静态扫描盲区）。"""
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) AS c FROM workflow_runs wr "
+            "JOIN episodes e ON e.id = wr.scope_id "
+            "WHERE wr.workflow_type=? AND wr.scope_type='episode' "
+            "AND e.project_id=? AND wr.status IN ('CREATED','RUNNING') "
+            "AND (? IS NULL OR wr.id != ?)",
+            (workflow_type, project_id, exclude_run_id, exclude_run_id),
+        ).fetchone()["c"]
+        or 0
+    )
+
+
+def count_active_video_jobs_for_project(
+    conn: sqlite3.Connection, project_id: str, *, exclude_job_id: str | None = None
+) -> int:
+    """``count_active_video_jobs`` 的项目级版本：归属范围从"账号名下全部项目"
+    收窄到"这一个项目"。"""
+    placeholders = ",".join("?" for _ in ACTIVE_JOB_STATUSES)
+    return int(
+        conn.execute(
+            f"SELECT COUNT(*) AS c FROM jobs WHERE kind='video' AND project_id=? "
+            f"AND status IN ({placeholders}) AND (? IS NULL OR id != ?)",
+            (project_id, *ACTIVE_JOB_STATUSES, exclude_job_id, exclude_job_id),
+        ).fetchone()["c"]
+        or 0
+    )

@@ -44,6 +44,7 @@ import json
 import sqlite3
 
 from app import db
+from app import db_schema
 from app import monitor_audit_buffer
 from app import quota_tiers
 
@@ -86,10 +87,37 @@ _CREATE_STATEMENTS: tuple[str, ...] = (
         UNIQUE(scope_type, scope_id, resource, period_index, threshold)
     )""",
     "CREATE INDEX IF NOT EXISTS idx_quota_alerts_scope ON quota_alerts(scope_type, scope_id, period_index)",
+    # EP-04 第二阶段：项目目录实测占用的采样结果，append-only（每次巡检插入
+    # 新行，不 UPDATE 覆盖旧行）——保留历史是 usage_query 支持 storage_bytes
+    # 时间趋势的前提；「最新占用」永远是按 project_id 取 sampled_at 最大的一
+    # 行，见 app/quota_policy/storage.py::latest_sample。独立连接写入（诊断类
+    # 采样不占用调用方事务/写锁，同 quota_alerts 的既有惯例），见该模块
+    # sample_project_storage 的文档。
+    """CREATE TABLE IF NOT EXISTS project_storage_samples (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        owner_user_id TEXT,
+        bytes_total INTEGER NOT NULL,
+        duration_s REAL,
+        status TEXT NOT NULL DEFAULT 'ok',
+        error TEXT,
+        sampled_at REAL NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_project_storage_samples_project "
+    "ON project_storage_samples(project_id, sampled_at)",
+    "CREATE INDEX IF NOT EXISTS idx_project_storage_samples_owner "
+    "ON project_storage_samples(owner_user_id, sampled_at)",
 )
 
 #: 每个维度对应 TierLimits 的同名字段；顺序即 limits_json 的字段写入顺序。
-DIMENSIONS: tuple[str, ...] = ("projects", "concurrency", "token", "video_seconds", "image")
+#: EP-04 第二阶段追加 storage_bytes/project_concurrency 两维——DIMENSIONS 是
+#: plans.py::validate_limits_payload / allocation.py::resolve_effective_limits
+#: 唯一驱动源，两处都按这个元组通用遍历（getattr(TierLimits 实例, dim)），加进
+#: 这里即自动纳入三级取最紧合并与种子写入，不需要在 allocation.py 里另写分支。
+DIMENSIONS: tuple[str, ...] = (
+    "projects", "concurrency", "token", "video_seconds", "image",
+    "storage_bytes", "project_concurrency",
+)
 
 _ensured_paths: set[str] = set()
 
@@ -102,26 +130,39 @@ def ensure_tables_on_connection(conn: sqlite3.Connection) -> None:
 
 
 def ensure_schema() -> None:
-    """幂等建表 + 五档内置 plan 种子；按当前 ``db.DB_PATH`` 记忆已建。独立连
-    接（``db._run_write_transaction_once``），只供不在调用方事务里嵌套的入口
-    使用（``app.main`` 启动时、``app.quota_policy.api``/``plans``/
-    ``allocation`` 的写操作）——读路径见 ``ensure_tables_on_connection``。"""
+    """幂等建表 + 五档内置 plan 种子；按当前 ``db.DB_PATH`` 记忆已建。
+
+    调用方选错入口不再有后果（2026-09-12 原语层修复，见
+    ``app.db_schema.ensure_schema_respecting_caller_transaction`` 文档）：
+    ``app.db.get_conn()`` 这条线程/任务局部连接若已经处在调用方开的事务里，
+    直接改走同连接的 ``ensure_tables_on_connection(那个 conn)``，不开独立
+    连接、不抢锁、不做种子写入；否则保持原有独立连接行为
+    （``db._run_write_transaction_once``），供 ``app.main`` 启动时、
+    ``app.quota_policy.api``/``plans``/``allocation`` 的写操作使用——读路径
+    仍然直接调 ``ensure_tables_on_connection``，本函数的分派对它没有影响。"""
     key = str(db.DB_PATH)
     if key in _ensured_paths:
         return
 
-    def operation(conn: sqlite3.Connection) -> None:
-        ensure_tables_on_connection(conn)
-        _seed_builtin_plans(conn)
+    def _run_independent() -> None:
+        def operation(conn: sqlite3.Connection) -> None:
+            ensure_tables_on_connection(conn)
+            _seed_builtin_plans(conn)
 
-    try:
-        db._run_write_transaction_once(operation)
-    except Exception as exc:  # noqa: BLE001 建表失败留到下一次调用重试，不阻塞
-        # 调用方；不能悄悄吞掉——落一条可观测记录，见 app/orgs/schema.py 同名
-        # except 分支的注释，理由完全一致。
-        monitor_audit_buffer.note_schema_ensure_failure(__name__, exc)
-        return
-    _ensured_paths.add(key)
+        try:
+            db._run_write_transaction_once(operation)
+        except Exception as exc:  # noqa: BLE001 建表失败留到下一次调用重试，不阻塞
+            # 调用方；不能悄悄吞掉——落一条可观测记录，见 app/orgs/schema.py 同名
+            # except 分支的注释，理由完全一致。
+            monitor_audit_buffer.note_schema_ensure_failure(__name__, exc)
+            return
+        _ensured_paths.add(key)
+
+    db_schema.ensure_schema_respecting_caller_transaction(
+        db.get_conn(),
+        on_caller_connection=ensure_tables_on_connection,
+        run_independent=_run_independent,
+    )
 
 
 def _seed_builtin_plans(conn: sqlite3.Connection) -> None:

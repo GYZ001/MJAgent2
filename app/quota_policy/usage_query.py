@@ -5,8 +5,16 @@ image 三个资源——``projects``/``concurrency`` 是实时计数不进 ledge
 查询范围内）+ ``provider_calls``（project/model 两个维度，只覆盖 token/image
 两个资源；``video_seconds`` 的 project 维度改从 ``jobs``/``shot_versions`` 按
 既有的"成功版本每镜 15 秒"口径统计）——**不新建统计表**（PRD 明确要求，慢了
-先加索引，物化表需要单独实测证据）。``storage_bytes`` 本阶段未实现，所有
-resource 参数校验都不接受它。
+先加索引，物化表需要单独实测证据）。
+
+``storage_bytes``（EP-04 第二阶段新增）是例外：它不是事件流水账，是目录实测
+占用的定时快照（``app.quota_policy.storage``，独立的 ``project_storage_samples``
+表——这不是"新建统计表"违反上面那条红线，是判据本身就是快照而不是可累加的
+事件，见该模块文档）。``usage_summary``/``usage_top`` 接入 ``storage_bytes``
+（取各账号名下项目最新一次采样求和/排名）；``usage_timeseries`` 仍拒绝它——
+按天分桶的存储趋势需要更细的采样保留与聚合策略，本阶段未实现，见该函数校验
+分支，与 Phase 1 遗留的 ``test_usage_timeseries_rejects_unimplemented_storage_
+resource`` 保持一致（不是这次改动放松了什么，是维持既有边界）。
 
 token/image 的 ``response_json`` token 提取逻辑与 ``app.quota._extract_total_
 tokens``/``_billing_category`` 刻意重复了一份小实现，而不是 import 它们——
@@ -24,6 +32,10 @@ from app.db import new_id, now
 from app.quota_policy import schema
 
 RESOURCES: tuple[str, ...] = ("token", "video_seconds", "image")
+#: 存储是快照式资源（见模块文档），不进 quota_ledger 的通用聚合循环——单独
+#: 一个常量，usage_summary/usage_top 各自按需分支处理，不并进 RESOURCES（并
+#: 进去会让 _user_ids_for_scope 之后的 ledger SQL 循环误把它当 ledger 资源查）。
+STORAGE_RESOURCE = "storage_bytes"
 ALERT_THRESHOLDS: tuple[float, ...] = (0.8, 0.95)
 _DAY_SECONDS = 86400.0
 _SECONDS_PER_SHOT = 15.0  # 与 app.quota.SECONDS_PER_SHOT 同一产品口径，见模块文档
@@ -65,7 +77,21 @@ def usage_summary(
         sql += " GROUP BY resource"
         for row in conn.execute(sql, params).fetchall():
             usage[row["resource"]] = float(row["total"])
-    return {"scope_type": scope_type, "scope_id": scope_id, "usage": usage}
+    storage_bytes, sampled_at = _storage_usage_for_user_ids(conn, user_ids)
+    usage[STORAGE_RESOURCE] = storage_bytes
+    return {
+        "scope_type": scope_type, "scope_id": scope_id, "usage": usage,
+        "storage_sampled_at": sampled_at,
+    }
+
+
+def _storage_usage_for_user_ids(conn: sqlite3.Connection, user_ids: list[str]) -> tuple[float, float | None]:
+    """延迟 import（不在模块顶层碰 app.quota_policy.storage）：storage.py 与本
+    模块同层同包，模块级互相 import 不会成环，延迟只是避免给一个纯查询模块
+    增加它用不到的启动期依赖面，与本文件其它函数的既有风格一致。"""
+    from app.quota_policy import storage as quota_storage
+
+    return quota_storage.bytes_used_for_user_ids(conn, user_ids)
 
 
 def _append_time_range(
@@ -108,9 +134,17 @@ def usage_timeseries(
 
 
 def usage_top(conn: sqlite3.Connection, *, dimension: str, resource: str, limit: int = 20) -> list[dict]:
+    if resource == STORAGE_RESOURCE:
+        if dimension != "project":
+            raise UsageQueryError(
+                f"resource=storage_bytes 目前只支持 dimension=project（按最新采样排名），收到 {dimension!r}"
+            )
+        from app.quota_policy import storage as quota_storage
+
+        return quota_storage.top_projects_by_storage(conn, limit)
     if resource not in RESOURCES:
         raise UsageQueryError(
-            f"resource 必须是 {'/'.join(RESOURCES)} 之一（storage_bytes 本阶段未实现），收到 {resource!r}"
+            f"resource 必须是 {'/'.join((*RESOURCES, STORAGE_RESOURCE))} 之一，收到 {resource!r}"
         )
     limit = max(1, min(int(limit), 200))
     if dimension == "user":
@@ -226,7 +260,14 @@ def _usage_summary_project(conn: sqlite3.Connection, project_id: str, start, end
     video_sql, video_params = _append_time_range(video_sql, video_params, start, end, column="j.created_at")
     row = conn.execute(video_sql, video_params).fetchone()
     usage["video_seconds"] = float((row["c"] or 0) * _SECONDS_PER_SHOT)
-    return {"scope_type": "project", "scope_id": project_id, "usage": usage}
+    from app.quota_policy import storage as quota_storage
+
+    storage_bytes, sampled_at = quota_storage.bytes_used_for_project(conn, project_id)
+    usage[STORAGE_RESOURCE] = storage_bytes
+    return {
+        "scope_type": "project", "scope_id": project_id, "usage": usage,
+        "storage_sampled_at": sampled_at,
+    }
 
 
 def check_and_record_alerts(
@@ -306,3 +347,20 @@ def record_alerts_from_own_allocation(
             scope_type=scope_type, scope_id=scope_id, resource=resource,
             used=used, limit=limit, period_index=period_index,
         )
+
+
+def list_recent_alerts(conn: sqlite3.Connection, scopes: list[tuple[str, str]], *, limit: int = 50) -> list[dict]:
+    """给定 scope 集合（如某组织自身 + 下属团队 + 下属用户）里最近触发的预警，
+    按 ``triggered_at`` 降序——供管理员首页横幅用（EP-04 §7）。``scopes`` 为空
+    直接返回空列表，不构造恒真 SQL（CLAUDE.md「空集合不等于无需检查」的镜像
+    情形：这里空集合就是真的没有 scope 可查，不是漏传）。"""
+    if not scopes:
+        return []
+    schema.ensure_tables_on_connection(conn)
+    conditions = " OR ".join("(scope_type=? AND scope_id=?)" for _ in scopes)
+    params: list = [v for pair in scopes for v in pair]
+    rows = conn.execute(
+        f"SELECT * FROM quota_alerts WHERE {conditions} ORDER BY triggered_at DESC LIMIT ?",
+        (*params, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]

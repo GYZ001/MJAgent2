@@ -23,22 +23,23 @@ from scripts.arch_graph import DEFAULT_LAYERS_FILE, load_layers_config, resolve_
 ROOT = Path(__file__).resolve().parent.parent
 QUOTA_POLICY_DIR = ROOT / "app" / "quota_policy"
 
-#: api.py 是 L5（REST 路由，需要 app.auth.principal/app.orgs.store），其余四个
-#: 模块（schema/plans/allocation/usage_query）是 L2，与 app.quota 同层。
+#: api.py 是 L5（REST 路由，需要 app.auth.principal/app.orgs.store），其余五个
+#: 模块（schema/plans/allocation/usage_query/storage）是 L2，与 app.quota 同层。
 EXPECTED_LAYERS = {
     "app.quota_policy": 2,
     "app.quota_policy.schema": 2,
     "app.quota_policy.plans": 2,
     "app.quota_policy.allocation": 2,
     "app.quota_policy.usage_query": 2,
+    "app.quota_policy.storage": 2,
     "app.quota_policy.api": 5,
 }
 
 #: 允许反向依赖 app.quota 的唯一例外——api.py 是 L5 路由层，本身不禁止依赖
 #: app.quota（派单红线明确针对"新包"整体，api.py 目前也确实没有这么写，但
-#: 架构上它不像 schema/plans/allocation/usage_query 那样承担"app.quota 的取
-#: 值来源"角色，未来即便真的需要也不构成本次红线要防的那种循环）。
-_FORBIDDEN_REVERSE_DEP_MODULES = ("schema.py", "plans.py", "allocation.py", "usage_query.py")
+#: 架构上它不像 schema/plans/allocation/usage_query/storage 那样承担"app.quota
+#: 的取值来源"角色，未来即便真的需要也不构成本次红线要防的那种循环）。
+_FORBIDDEN_REVERSE_DEP_MODULES = ("schema.py", "plans.py", "allocation.py", "usage_query.py", "storage.py")
 
 
 def test_layers_toml_declares_quota_policy_at_the_documented_layers() -> None:
