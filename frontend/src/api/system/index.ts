@@ -13,6 +13,7 @@ import * as trace from "./trace";
 import * as audit from "./audit";
 import * as orgs from "./orgs";
 import * as provisioning from "./provisioning";
+import * as sso from "./sso";
 
 export * from "./jobs";
 export * from "./calls";
@@ -24,6 +25,7 @@ export * from "./trace";
 export * from "./audit";
 export * from "./orgs";
 export * from "./provisioning";
+export * from "./sso";
 
 export const api_system = {
   // jobs
@@ -90,4 +92,11 @@ export const api_system = {
   importReportBlob: provisioning.importReportBlob,
   getUserAssets: provisioning.getUserAssets,
   handoverUser: provisioning.handoverUser,
+  // sso：IdP 配置 CRUD + 强制 SSO 开关（EP-02 管理面）
+  listIdps: sso.listIdps,
+  createIdp: sso.createIdp,
+  updateIdp: sso.updateIdp,
+  deleteIdp: sso.deleteIdp,
+  getLocalLoginPolicy: sso.getLocalLoginPolicy,
+  setLocalLoginPolicy: sso.setLocalLoginPolicy,
 };

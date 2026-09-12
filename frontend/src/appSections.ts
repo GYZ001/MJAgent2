@@ -21,6 +21,7 @@ export const loadMonitorPage = () => import("./pages/MonitorPage");
 export const loadReaderPage = () => import("./pages/ReaderPage");
 export const loadAccountAdminPage = () => import("./pages/AccountAdminPage");
 export const loadOperationAuditPage = () => import("./pages/OperationAuditPage");
+export const loadSsoAdminPage = () => import("./pages/SsoAdminPage");
 
 export type View =
   | "studio"
@@ -118,10 +119,11 @@ export function visibleSectionsFor(
   return SECTIONS.filter((section) => !section.adminOnly || isSystemAdmin);
 }
 
-export const SYSTEM_SECTIONS: Array<{ key: "overview" | "models" | "accounts" | "audit" | "settings"; label: string; icon: string }> = [
+export const SYSTEM_SECTIONS: Array<{ key: "overview" | "models" | "accounts" | "audit" | "settings" | "sso"; label: string; icon: string }> = [
   { key: "overview", label: "总览", icon: "总" },
   { key: "models", label: "模型中心", icon: "模" },
   { key: "accounts", label: "账号管理", icon: "户" },
+  { key: "sso", label: "身份接入", icon: "钥" },
   { key: "audit", label: "操作审计", icon: "审" },
   { key: "settings", label: "系统设置", icon: "设" },
 ];

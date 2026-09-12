@@ -5,6 +5,8 @@
 //                  只有 get/post/put/del/upload 这几个逃生口作为 `api` 对象
 //                  的方法保留，供确实无法收敛成具名方法的调用点使用）。
 //   auth.ts      — 登录态：login/logout/me/changePassword，onUnauthenticated 信号。
+//   sso.ts       — 企业 SSO 登录（EP-02）：IdP 列表/跳转地址、交换码换会话、
+//                  个人绑定/解绑；管理面 CRUD 在 system/sso.ts。
 //   common.ts    — 跨域共享的叶子类型（ArtifactEvidence/TaskTiming/...）与
 //                  numToCn 工具。
 //   bible/       — 人物谱域（世界书 / 人物与定妆照 / 场景与场景图）。
@@ -36,6 +38,7 @@ export { login, logout, me, changePassword, deleteMyAccount } from "./auth";
 export { onUnauthenticated, ApiError, ApprovalRequiredError };
 export type { ApprovalPreflight } from "./client";
 export { numToCn };
+export * from "./sso";
 export * from "./common";
 export * from "./bible";
 export * from "./screenplay";

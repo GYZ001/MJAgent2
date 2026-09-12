@@ -27,6 +27,7 @@ import { pickerWindowParams, resolveWindowedEpisodeId } from "./episodePicker";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
 import { canSeeSystemSettings } from "./auth/session";
 import ThemeSwitch from "./theme/ThemeSwitch";
+import AccountBindingsMenuItem from "./components/sso/AccountBindingsMenuItem";
 import {
   loadAccountAdminPage,
   loadBiblePage,
@@ -35,6 +36,7 @@ import {
   loadEpisodesPage,
   loadMonitorPage,
   loadOperationAuditPage,
+  loadSsoAdminPage,
   loadReaderPage,
   loadScenesPage,
   loadPropsPage,
@@ -62,6 +64,7 @@ const MonitorPage = lazy(loadMonitorPage);
 const ReaderPage = lazy(loadReaderPage);
 const AccountAdminPage = lazy(loadAccountAdminPage);
 const OperationAuditPage = lazy(loadOperationAuditPage);
+const SsoAdminPage = lazy(loadSsoAdminPage);
 
 /** 项目清单拉取失败后的重试退避区间。 */
 const PROJECTS_RETRY_MIN_MS = 2000;
@@ -1034,7 +1037,9 @@ function AppShell() {
             ? <AccountAdminPage />
             : currentPathname.endsWith("/audit")
               ? <OperationAuditPage />
-              : <MonitorPage mode="system" />
+              : currentPathname.endsWith("/sso")
+                ? <SsoAdminPage />
+                : <MonitorPage mode="system" />
         )}
         </Suspense>
         </ErrorBoundary>
@@ -1102,6 +1107,7 @@ function UserMenu({
         <div className="user-menu-popover">
           <ThemeSwitch />
           <button type="button" onClick={onChangePassword}>修改密码</button>
+          <AccountBindingsMenuItem />
           <button type="button" className="danger" onClick={onLogout}>登出</button>
         </div>
       )}

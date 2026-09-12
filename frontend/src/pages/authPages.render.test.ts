@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 const mockAuth = {
   user: { id: 'u1', username: 'demo2', display_name: '演示账号' },
+  ssoLoginError: null as string | null,
   refresh: vi.fn(async () => {}),
   logout: vi.fn(async () => {}),
 }
@@ -21,6 +22,10 @@ vi.mock('../api', () => ({
   ApiError: class ApiError extends Error { status = 0 },
   login: vi.fn(async () => {}),
   changePassword: vi.fn(async () => {}),
+  // EP-02 SSO 接入：LoginPage 挂载时会拉一次 IdP 列表，这里返回空列表——
+  // 空态是这批渲染测试要验的版式基线，不需要企业登录入口出现。
+  listSsoProviders: vi.fn(async () => ({ items: [] })),
+  ssoStartUrl: vi.fn((idpId: string, redirectTo: string) => `/api/auth/sso/${idpId}/start?redirect_to=${redirectTo}`),
 }))
 
 /** 把渲染树拍平成一个 class 名集合，用来断言版式骨架在。 */

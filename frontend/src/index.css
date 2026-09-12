@@ -8134,6 +8134,37 @@ label.f {
 .card-heading-actions {
   gap: 8px;
 }
+/* EP-02 SSO：登录页企业入口、账号绑定列表、管理面 IdP 行——复用 .login-field/
+   .dialog-actions 的间距节奏，只是按钮改横排。 */
+.sso-provider-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.sso-binding-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sso-binding-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.sso-idp-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(108, 113, 121, 0.14);
+}
 .library-pagination {
   justify-content: center;
   gap: 10px;

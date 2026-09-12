@@ -17,7 +17,7 @@ from app.audit.recorder import note_actor
 from app.auth.passwords import hash_password, verify_password
 from app.auth.principal import Principal, get_current_principal
 from app.auth.sessions import create_session, resolve_session, revoke_all_for_user, revoke_session
-from app.db import get_conn, now
+from app.db import get_conn, get_setting, now
 from app.local_session import assert_session_bootstrap_allowed, require_local_session
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -96,6 +96,15 @@ def _client_ip(request: Request) -> str | None:
     return request.client.host if request.client else None
 
 
+def _local_login_policy() -> str:
+    """EP-02 §6 强制 SSO 开关：``enabled``（默认）/``admin_only``/``disabled``。
+    未落库时 ``get_setting`` 返回空串，按 ``enabled`` 处理——这是本仓库唯一
+    "配错了就没人能登录"的开关，切到 ``disabled`` 前的连通性自检见
+    ``app.sso.admin_api.set_local_login_policy``，本函数只负责读取生效值。
+    """
+    return (get_setting("local_login_policy") or "").strip() or "enabled"
+
+
 @router.post("/login")
 def login(body: dict, request: Request):
     """账号密码登录；成功后签发一枚真实用户会话，替代旧的共享秘密。"""
@@ -107,9 +116,17 @@ def login(body: dict, request: Request):
         raise generic_error
     _check_login_throttle(username)
 
+    policy = _local_login_policy()
+    if policy == "disabled":
+        raise HTTPException(
+            401,
+            "本地口令登录已禁用，请使用企业单点登录；如需紧急访问，"
+            "请联系系统管理员使用服务器侧的应急恢复通道",
+        )
+
     conn = get_conn()
     row = conn.execute(
-        "SELECT id, password_hash, status FROM users WHERE username=?",
+        "SELECT id, password_hash, status, is_system_admin FROM users WHERE username=?",
         (username,),
     ).fetchone()
     active_hash = row["password_hash"] if row is not None and row["status"] == "active" else None
@@ -118,6 +135,10 @@ def login(body: dict, request: Request):
         _record_login_failure(username)
         note_actor(None, username, False)
         raise generic_error
+    if policy == "admin_only" and not row["is_system_admin"]:
+        _record_login_failure(username)
+        note_actor(None, username, False)
+        raise HTTPException(401, "本地口令登录当前仅限系统管理员，请使用企业单点登录")
     _clear_login_failures(username)
 
     user_id = str(row["id"])

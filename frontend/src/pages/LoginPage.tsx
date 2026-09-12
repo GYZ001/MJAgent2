@@ -1,5 +1,5 @@
-import { useId, useState, type FormEvent } from "react";
-import { ApiError, login } from "../api";
+import { useEffect, useId, useState, type FormEvent } from "react";
+import { ApiError, listSsoProviders, login, ssoStartUrl, type SsoProviderOption } from "../api";
 import { useAuth } from "../auth/AuthContext";
 import AuthAside from "../components/AuthAside";
 
@@ -7,13 +7,32 @@ import AuthAside from "../components/AuthAside";
  *  都不挂载，这里是唯一可交互的界面。视觉上复用现有 `.card` / `.btn` / `label.f`
  *  与朱砂配色，不另起一套设计语言。 */
 export default function LoginPage() {
-  const { refresh } = useAuth();
+  const { refresh, ssoLoginError } = useAuth();
   const usernameId = useId();
   const passwordId = useId();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [ssoProviders, setSsoProviders] = useState<SsoProviderOption[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    listSsoProviders()
+      .then((data) => {
+        if (!cancelled) setSsoProviders(data.items);
+      })
+      .catch(() => {
+        // 拉取失败不阻塞本地密码登录；企业登录入口这一轮就不出现了。
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const startSso = (idpId: string) => {
+    window.location.href = ssoStartUrl(idpId, `${window.location.pathname}${window.location.search}`);
+  };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -44,6 +63,25 @@ export default function LoginPage() {
             <h1>登录</h1>
             <p>账号由系统管理员开设，没有自助注册。</p>
           </header>
+          {ssoLoginError && (
+            <p className="field-error" role="alert">{ssoLoginError}</p>
+          )}
+          {ssoProviders.length > 0 && (
+            <div className="sso-provider-list">
+              {ssoProviders.map((provider) => (
+                <button
+                  key={provider.id}
+                  type="button"
+                  className="btn auth-submit"
+                  disabled={submitting}
+                  onClick={() => startSso(provider.id)}
+                >
+                  使用「{provider.name}」登录
+                </button>
+              ))}
+              <p className="hint">或使用账号密码登录</p>
+            </div>
+          )}
           <div className="login-field">
             <label className="f" htmlFor={usernameId}>用户名</label>
             <input

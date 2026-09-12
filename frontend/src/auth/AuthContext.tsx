@@ -7,7 +7,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { logout as apiLogout, me as apiMe, onUnauthenticated } from "../api";
+import { exchangeSsoCode, logout as apiLogout, me as apiMe, onUnauthenticated } from "../api";
+import { runSsoBootExchange } from "./ssoExchange";
 import type { AuthUser } from "./session";
 
 export type AuthStatus = "loading" | "authed" | "anonymous";
@@ -18,6 +19,9 @@ export interface AuthContextValue {
   isSystemAdmin: boolean;
   /** 管理员开户时置位；为 true 时应用壳不挂载，先强制改密。 */
   mustChangePassword: boolean;
+  /** 应用启动时检测到 `?sso_code=` 但交换失败时的可读文案；登录页展示，
+   *  成功交换或走本地密码登录后应保持为 null。 */
+  ssoLoginError: string | null;
   refresh: () => Promise<void>;
   logout: () => Promise<void>;
 }
@@ -32,6 +36,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isSystemAdmin, setIsSystemAdmin] = useState(false);
   const [mustChangePassword, setMustChangePassword] = useState(false);
+  const [ssoLoginError, setSsoLoginError] = useState<string | null>(null);
 
   const goAnonymous = useCallback(() => {
     setUser(null);
@@ -55,7 +60,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [goAnonymous]);
 
   useEffect(() => {
-    void refresh();
+    // 启动时先看地址栏有没有 SSO 回跳留下的一次性交换码：有就先换会话令牌
+    // （成功或失败都会立刻清掉地址栏，见 runSsoBootExchange），再走既有的
+    // `GET /auth/me` 探测；没有就直接探测，行为与改造前一致。
+    void (async () => {
+      const boot = await runSsoBootExchange({
+        search: window.location.search,
+        pathname: window.location.pathname,
+        hash: window.location.hash,
+        replaceUrl: (url) => window.history.replaceState({}, "", url),
+        exchange: exchangeSsoCode,
+      });
+      if (boot.attempted && !boot.ok) setSsoLoginError(boot.errorMessage ?? null);
+      else if (boot.attempted) setSsoLoginError(null);
+      await refresh();
+    })();
   }, [refresh]);
 
   useEffect(() => {
@@ -77,10 +96,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       isSystemAdmin,
       mustChangePassword,
+      ssoLoginError,
       refresh,
       logout,
     }),
-    [status, user, isSystemAdmin, mustChangePassword, refresh, logout],
+    [status, user, isSystemAdmin, mustChangePassword, ssoLoginError, refresh, logout],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
