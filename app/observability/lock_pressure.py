@@ -23,9 +23,24 @@ _lock = threading.Lock()
 
 
 def note_lock_contention() -> None:
-    """一次真实的写锁争用（database is locked / 等锁超时）。"""
+    """一次真实的写锁争用（database is locked / 等锁超时）。
+
+    EP-06 指标（``manju_db_write_lock_wait_seconds``，事件循环冻结事故的直接
+    观测点）在这里顺带记一次等待时长观测：``app.db._run_write_transaction_once``
+    以 ``timeout=WRITE_TXN_BUSY_TIMEOUT_S`` 打开连接，Python sqlite3 的忙等
+    处理器只在拿到锁或等满这个 timeout 之后才返回——本函数被调用这一刻，说明
+    刚刚正是等满了整段 timeout 才失败，所以可以如实把它当作这次等待的耗时，
+    不是凭空估算。局限：只覆盖"等到超时仍失败"的这部分；等待后成功拿到锁的
+    调用不经过这里，没有单独打点（app/db.py 不许碰，见 CLAUDE.md 派单约束），
+    因此这个直方图是"至少这么久的失败等待"，不是全部写事务的排队耗时分布。
+    """
     with _lock:
         _events.append(time.monotonic())
+    # 延迟 import：app.db 反过来在模块级 import 本模块（记录争用事件），模块级
+    # 互相 import 会成环；只取一个只读常量，延迟到函数体内没有任何功能损失。
+    from app.db import WRITE_TXN_BUSY_TIMEOUT_S
+    from app.observability import metrics_registry
+    metrics_registry.record_db_write_lock_wait(WRITE_TXN_BUSY_TIMEOUT_S)
 
 
 def recent_contention_count(now: float | None = None) -> int:

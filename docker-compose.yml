@@ -1,0 +1,76 @@
+# 一键交付物（PRD/enterprise/EP-06 §3）。两个服务：app（本仓库）+ nginx（反代/
+# TLS 终止）。配置全部外置为环境变量（.env，见 .env.example）/ 挂载卷；镜像内
+# 不含任何数据。
+#
+# 首次启动：
+#   cp .env.example .env   # 填真实值，至少一个供应商 Key + MJ_BOOTSTRAP_ADMIN_*
+#   docker compose up -d --build
+#   docker compose exec app python scripts/preflight.py   # 可选，跑一次安装自检
+#
+# 与生产 B 上的 systemd 部署（scripts/deploy_to_b.sh）完全独立、互不影响：
+# 这里的卷、网络、容器名都在 compose 自己的命名空间里，不读也不写 B 上的
+# /root/MJAgent2/data、systemd 单元或隧道配置。
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      # 供应商 Key/终端、首次启动引导、metrics token 等全部来自 .env，见
+      # .env.example 的完整清单与说明；此处不重复列举默认值，避免和
+      # app/config.py 里的真实默认值出现"两处维护、迟早不一致"。
+      - DEPLOYMENT_PROFILE=${DEPLOYMENT_PROFILE:-saas}
+      - HIAGENT_API_KEY=${HIAGENT_API_KEY:-}
+      - HIAGENT_BASE_URL=${HIAGENT_BASE_URL:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-}
+      - BAILIAN_API_KEY=${BAILIAN_API_KEY:-}
+      - BAILIAN_BASE_URL=${BAILIAN_BASE_URL:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-}
+      - ZHIPU_API_KEY=${ZHIPU_API_KEY:-}
+      - ZHIPU_BASE_URL=${ZHIPU_BASE_URL:-}
+      - MINIMAX_H3_API_KEY=${MINIMAX_H3_API_KEY:-}
+      - MINIMAX_H3_BASE_URL=${MINIMAX_H3_BASE_URL:-}
+      - MJ_BOOTSTRAP_ADMIN_USER=${MJ_BOOTSTRAP_ADMIN_USER:-}
+      - MJ_BOOTSTRAP_ADMIN_PASSWORD=${MJ_BOOTSTRAP_ADMIN_PASSWORD:-}
+      - MJ_METRICS_TOKEN=${MJ_METRICS_TOKEN:-}
+      - MJ_MEDIA_REQUIRE_TICKET=${MJ_MEDIA_REQUIRE_TICKET:-1}
+      - MJ_LEGACY_SHARED_SESSION=${MJ_LEGACY_SHARED_SESSION:-0}
+    volumes:
+      - manju_data:/app/data
+      - manju_projects:/app/projects
+      - manju_logs:/app/logs
+    # 不直接对宿主发布端口：只有 nginx 面向公网，app 在 compose 内部网络里
+    # 才能被访问到，和裸机部署里 uvicorn 收口到 127.0.0.1、由 nginx 代理是
+    # 同一个安全姿态（scripts/preflight.py 的端口绑定检查对裸机路径有效，
+    # 容器化路径靠 compose 网络隔离，见该脚本对 /.dockerenv 的判断）。
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8230/api/system/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "${MJ_HTTP_PORT:-8080}:80"
+      # 需要 TLS 时：把真实证书挂到 deploy/nginx/certs/，取消下面两行注释，
+      # 并按 deploy/nginx/https.conf.example 补一个 443 server 块（默认不启用，
+      # 缺证书文件会让 nginx 直接拒绝启动，不能作为开箱默认值）。
+      # - "${MJ_HTTPS_PORT:-8443}:443"
+    volumes:
+      - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      # - ./deploy/nginx/certs:/etc/nginx/certs:ro
+
+volumes:
+  manju_data:
+  manju_projects:
+  manju_logs:

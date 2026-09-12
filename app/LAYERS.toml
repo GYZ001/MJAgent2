@@ -108,6 +108,10 @@ allowed_exceptions = []
 "app.observability.machine_watermark" = 2  # 2026-09-05：/proc 水位采样，只依赖 app.db/app.config；准入点在 L3-L5
 "app.observability.lock_pressure" = 2  # 2026-09-06：写锁争用计数，纯标准库；machine_watermark(2)/write_lock_holders(2) 使用
 "app.observability.provider_call_payload" = 1  # 2026-09-06：落库前载荷压缩，纯标准库；app.db(2)/app.seedance(3) 使用
+"app.observability.metrics_registry" = 1  # 2026-09-12 新增（EP-06）：Prometheus 指标的进程内存原语，
+                                           # 纯标准库，零 app.* 依赖——这样 app.observability.lock_pressure（L2）
+                                           # 才能在不产生新上行边的前提下调用它记写锁等待，app.db 不需要碰
+                                           # （db.py 是本轮改动禁区，见派单）
 "app.auth" = 1  # 前缀：principal/passwords/deps 零 db 依赖，真 L1；
                 # sessions/api/admin_api 碰 db，2026-08-30 用更具体的 key
                 # 覆盖到 2（见下方新增 L2 持久化，及本文件末尾变更说明）
@@ -165,6 +169,17 @@ allowed_exceptions = []
                           # 会维护第二张名单（EP-01 §5 明确禁止）；如实按依赖
                           # 落层，不按派单原稿的建议值，此处与 PRD 不符，见交付
                           # 报告
+"app.capabilities.exemptions" = 2  # 2026-09-12 新增（EP-01 第三阶段）：覆盖
+                          # app.capabilities=5 前缀。豁免路由的 (route ->
+                          # scopes/admin_only) 静态表零 app.* 依赖（NamedTuple
+                          # + frozenset 字面量），是纯数据，和 app.authz.policy
+                          # 的 BUILTIN_ROLE_TEMPLATES 同一处境：既要被 L5 的
+                          # app.capabilities.catalog 读（登记进 registry），也
+                          # 要被 L2 的 app.authz.resolve 读（HTTP 边界判定豁免
+                          # 路由要不要查 route_allowed()），L2/L5 互不能 import
+                          # 对方，只能把这张表放到两者共同的低层。不要因为它在
+                          # app/capabilities/ 目录下就假定它是 L5——按实际 import
+                          # 落层，同一惯例见 app.authz.policy/app.authz.catalog。
 "app.auth.sessions" = 2  # 2026-08-30：覆盖 app.auth=1 前缀，碰 app.db
 "app.orgs" = 2  # 2026-09-10 新增（EP-01 第一阶段）：组织/团队/角色/项目授权的
                 # 存取与业务动作（store.py/service.py），只 import app.db（同
@@ -387,8 +402,19 @@ allowed_exceptions = []
                                    # 状态机，只 import app.db（同层）+
                                    # app.models_registry.schema（同层）；不
                                    # import app.hiagent，避免与它（选路要用
-                                   # 本模块）互相 import 造成真实循环
+                                   # 本模块）互相 import 造成真实循环。
+                                   # 2026-09-12 追加 import app.observability.
+                                   # metrics_registry（L1，同层或更低，不产生
+                                   # 上行边）：record_outcome 是"推/拉"两条
+                                   # 路径的汇合点，EP-06 model_health/
+                                   # model_failures_total 在这里唯一写入
 "app.observability.metrics" = 2
+"app.observability.metrics_collectors" = 2  # 2026-09-12 新增（EP-06）：scrape 时态采集器，
+                                             # 只 import app.db（同层）+ app.quota_policy（同层）+
+                                             # app.observability.metrics_registry（L1）；不碰
+                                             # app.models_registry（模型健康/失败/调用延迟三个指标
+                                             # 改在 app.models_registry.health/routing 的真实调用点
+                                             # 直接写内存注册表，见两文件改动，本文件不重复采集）
 "app.rejected_media" = 2
 
 # ---- 新增 L3 供应商适配 ----
@@ -400,7 +426,12 @@ allowed_exceptions = []
                                     # purpose 的优先级选路 + 故障转移，import
                                     # app.models_registry.bindings/health（L2）+
                                     # 函数内延迟 import app.model_registry（同层，
-                                    # 避免模块级引入这条兄弟包依赖）
+                                    # 避免模块级引入这条兄弟包依赖）。2026-09-12
+                                    # 追加 import app.observability.metrics_registry
+                                    # （L1，不产生上行边）：call_with_failover 是
+                                    # 唯一拿得到 purpose 字符串的地方，EP-06
+                                    # provider_call_latency_seconds{purpose} 在
+                                    # 这里唯一写入
 "app.models_registry.purposes" = 3  # 2026-09-11 新增：purpose 目录/启动自检，
                                      # import app.models_registry.bindings（L2）+
                                      # 函数内延迟 import app.model_registry（同层）
@@ -499,6 +530,10 @@ allowed_exceptions = []
 "app.monitoring" = 5
 "app.observability" = 5  # 前缀：覆盖裸模块与 .api；.tracing/.metrics 已用更
                           # 具体的 key 覆盖，最长前缀匹配优先于这条
+"app.observability.metrics_api" = 5  # 2026-09-12 新增（EP-06）：GET /metrics 路由，挂 APIRouter
+                                      # 只被 app.main 引用，与 app.audit.api/app.quota_policy.api
+                                      # 同一"路由→域"入口角色，同一条理由判 L5（与前缀值相同，
+                                      # 显式列出只为了和同类 .api 文件的记录方式保持一致）
 "app.payments" = 5  # 2026-08-30 新增：微信/支付宝下单+回调+对账+发货，前缀覆盖
                      # 全部子模块（含零依赖的 crypto_asn1/crypto_rsa/crypto_aesgcm——
                      # 它们本身是纯 stdlib、真实层号该是 L1，但零消费方在

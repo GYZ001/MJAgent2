@@ -37,6 +37,7 @@ from app import db
 from app.db import get_conn
 
 from app.models_registry import schema
+from app.observability import metrics_registry
 
 _MIN_SAMPLES = 5
 _FAILURE_RATE_OPEN = 0.5
@@ -183,6 +184,11 @@ def record_outcome(model_id: str, category: str | None, *, latency_ms: int | Non
             win.rate_limited += 1
     _dirty_set().add(model_id)
     _apply_transition(win, success)
+    # EP-06 指标：本函数是"推"（call_with_failover）与"拉"（provider_calls 批量
+    # 重放）两条路径的唯一汇合点，见模块文档；在这里记 model_health/
+    # model_failures_total 能同时覆盖两条路径，不需要在各自调用点分别打点
+    # （那样会有遗漏，也可能重复计数）。纯内存 dict 写入，不碰数据库。
+    metrics_registry.record_model_outcome(model_id, win.state, category)
 
 
 def _model_ids_by_ref(model_refs: set[str]) -> dict[str, str]:

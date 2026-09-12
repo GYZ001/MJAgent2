@@ -1,0 +1,26 @@
+# 构建上下文排除清单——镜像内不含数据（PRD/enterprise/EP-06 §3），这份清单是
+# 那条要求的第一道保险：即使 Dockerfile 以后被改成 COPY . .，真实数据/密钥/
+# 大体积开发产物也不会被打进镜像层。
+data/
+projects/
+logs/
+.env
+.env.*
+!.env.example
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.uploads/
+node_modules/
+frontend/dist/
+frontend/dist-staging/
+frontend/dist.superseded-*/
+tests/
+docs/
+golden/
+tools/
+*.log

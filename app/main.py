@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -63,6 +64,8 @@ from app.recovery import (
 )
 from app.orchestration.api import router as orchestration_router
 from app.observability.api import router as observability_router
+from app.observability.metrics_api import router as metrics_router
+from app.observability import metrics_registry
 from app.payments.routes import public_router as payments_public_router
 from app.payments.routes import router as payments_router
 from app.provider_task_zero_cost_api import router as provider_task_zero_cost_router
@@ -200,11 +203,20 @@ async def _inject_session_and_approval(request: Request, call_next):
     if request.url.path.startswith("/api/"):
         audit_activity.touch(principal, request.url.path)
     response = None
+    request_started = time.monotonic()
     try:
         response = await call_next(request)
         return response
     finally:
-        finish_http_request(request, response.status_code if response is not None else 500)
+        status_code = response.status_code if response is not None else 500
+        finish_http_request(request, status_code)
+        # EP-06 指标：进程内存计数，不写库（见 app.observability.metrics_registry
+        # 模块文档）；/metrics 自身的请求也会被计入，与 Prometheus 抓取自身指标
+        # 端点是常见做法一致，不特殊剔除。
+        metrics_registry.record_http_request(
+            request.method, metrics_registry.normalize_path_group(request.url.path),
+            status_code, time.monotonic() - request_started,
+        )
         set_request_approval_token(None)
         set_request_session_id(None)
         set_current_principal(None)
@@ -354,6 +366,11 @@ app.include_router(agent_conversation_router, prefix="/api", dependencies=[Depen
 # /mcp 必须在 StaticFiles("/") 挂载之前注册，否则会被前端静态资源路由抢先吞掉。
 # MCP 使用 Bearer Token，不叠本机会话闸门。
 app.include_router(mcp_router)
+# /metrics 同理必须在 StaticFiles("/") 挂载前注册；鉴权（系统管理员会话 或
+# 独立 metrics token）由路由自身的 get_metrics() 判定，见 app/observability/
+# metrics_api.py 模块文档——不能像其它路由那样整体挂 Depends(require_system_
+# admin)，否则持有合法 token 但没有用户会话的 Prometheus 抓取请求会被拒。
+app.include_router(metrics_router)
 # /media 曾经是零鉴权的裸 StaticFiles 挂载：/api/* 已经有工作空间隔离，但浏览器的
 # <img>/<video> 标签不会带 X-Manju-Session 头，那套方案在结构上保护不了 /media，
 # 凭据必须放进 URL 里（见 app/media_urls.py 的 build_media_url + mt= 票据）。
