@@ -42,16 +42,16 @@ MIGRATION_FLAG = "models_registry_credentials_migrated_v1"
 # 布尔量就够，且不会跨请求持锁。
 _in_progress = False
 
-# provider 字面量 → app.config 里对应的 env 变量属性名，共 6 家（与
-# app/config.py::MANAGED_KEYS 同一份清单）。
-_ENV_KEY_ATTR = {
-    "hiagent": "HIAGENT_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-    "bailian": "BAILIAN_API_KEY",
-    "deepseek": "DEEPSEEK_API_KEY",
-    "zhipu": "ZHIPU_API_KEY",
-    "minimax_h3": "MINIMAX_H3_API_KEY",
-}
+def _env_key_attr(provider: str) -> str:
+    """provider 字面量 → app.config 里对应的 env 变量属性名，从
+    ``app.config.MANAGED_KEYS`` 机械反推（与 ``app/system_api.py`` 里
+    ``provider_to_key`` 同一手法，EP-05 第三阶段清理）——不再单独维护一份
+    6 家供应商的硬编码拷贝，两份表迟早漂移。"""
+    from app import config
+
+    return {
+        name.replace("_API_KEY", "").lower(): name for name in config.MANAGED_KEYS
+    }.get(provider, "")
 
 
 def _json_setting(get_setting: Any, key: str, fallback: Any) -> Any:
@@ -78,7 +78,7 @@ def _resolve_secret(
         return inline_key, base_url or str(item.get("base_url") or "").strip(), "custom_models(inline)"
 
     provider = str(item.get("provider") or "").strip()
-    env_attr = _ENV_KEY_ATTR.get(provider)
+    env_attr = _env_key_attr(provider)
     if env_attr:
         env_key = str(getattr(config, env_attr, "") or "").strip()
         if env_key:

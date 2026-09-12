@@ -63,6 +63,7 @@ HELPER_NAME = "patch_models_registry_everywhere"
 SUBMODULES = (
     "crypto", "keyprovider", "store", "migration",
     "bindings", "health", "routing", "ratelimit", "purposes", "binding_migration",
+    "video_confirmation",
 )
 FULL_NAMES = {f"app.models_registry.{sub}" for sub in SUBMODULES}
 

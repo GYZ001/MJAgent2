@@ -11,7 +11,8 @@ from pydantic import BaseModel, ValidationError
 from app import config, hiagent
 from app.db import get_conn, now
 from app.evidence import repository
-from app.harness.model_gateway_moderation import attempt_moderation_fallback, provider_envelope_unprocessed, replay_safe_stream_interruption
+from app.harness.model_gateway_failover import content_rejection_failover, rate_limit_candidate, rate_limit_scope
+from app.harness.model_gateway_moderation import provider_envelope_unprocessed, replay_safe_stream_interruption
 from app.harness.structured_key_case import snake_case_keys_for_model
 from app.observability.tracing import current_trace
 from app.orchestration.state_machine import transition_run
@@ -508,6 +509,8 @@ async def chat(
     # disable_provider_retries（身份判定等调用）禁的是"换一次语义答案再摇一次"，网关本来就不重摇送达的答案；
     max_retries = config.TEXT_PROVIDER_MAX_RETRIES  # 未送达的流中断（过载拒绝波）即便禁重试也按退避重放：那不是重摇答案
     stage_key = str(meta.get("stage_key") or "") or None
+    rl_candidate = rate_limit_candidate(provider)
+    request_id = str(meta.get("trace_id") or meta.get("run_id") or meta.get("step_run_id") or "unknown")
     for failure_no in range(max_retries + 1):
         try:
             from app.generation_concurrency import run_with_provider_call_slot
@@ -523,9 +526,10 @@ async def chat(
                 provider_kwargs["usage_callback"] = usage_callback
             if effective_response_format is not None:
                 provider_kwargs["response_format"] = effective_response_format
-            result = await run_with_provider_call_slot(
-                lambda: hiagent.chat(provider_messages, **provider_kwargs)
-            )
+            async with rate_limit_scope(rl_candidate, estimated_tokens=max_tokens):
+                result = await run_with_provider_call_slot(
+                    lambda: hiagent.chat(provider_messages, **provider_kwargs)
+                )
             if meta.get("expected_json") and _is_non_candidate_json_response(result):
                 raise hiagent.ProviderError(
                     "文本模型未返回任务 JSON 候选",
@@ -536,9 +540,9 @@ async def chat(
         except hiagent.ProviderError as exc:
             if exc.requires_explicit_retry:
                 _append_interrupted_event(exc, meta)
-            if exc.failure_category == "model_rejection":  # WS1b 换路，见 model_gateway_moderation
-                fallback_result = await attempt_moderation_fallback(
-                    provider_messages, provider_kwargs, meta,
+            if exc.failure_category == "model_rejection":  # EP-05 第三阶段：收编进 routing.call_with_failover
+                fallback_result = await content_rejection_failover(
+                    provider_messages, provider_kwargs, meta, provider, request_id,
                 )
                 if fallback_result is not None:
                     return fallback_result

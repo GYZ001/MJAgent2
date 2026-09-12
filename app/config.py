@@ -511,8 +511,6 @@ DEFAULT_SETTINGS = {
     "character_multiview_enabled": "true",
     "scene_multiview_enabled": "true",
     "narrative_keyframe_required": "true",
-    # WS1b：文本模型审核拒答换路，格式 "provider:model"；空串=不换路，原样抛错。
-    "text_moderation_fallback_route": "",
 }
 
 PROJECTS_DIR.mkdir(exist_ok=True)

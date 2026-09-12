@@ -11,7 +11,10 @@ import json
 
 from app.db import get_setting, set_setting
 from app.models_registry import bindings, purposes, routing, store
-from app.models_registry.binding_migration import migrate_legacy_bindings
+from app.models_registry.binding_migration import (
+    _resolve_moderation_fallback_route_item,
+    migrate_legacy_bindings,
+)
 
 
 def _custom_item(idx: int, kind: str, *, base_url_suffix: str | None = None) -> dict:
@@ -98,6 +101,121 @@ def test_migration_idempotent_does_not_overwrite_later_manual_rebind() -> None:
     second = migrate_legacy_bindings()
     assert second["skipped"] is True
     assert bindings.get_priority_zero("text:default")["model_id"] == "model_5"
+
+
+def test_moderation_fallback_route_whole_string_is_provider_not_split_on_colon() -> None:
+    """生产真实形状：``custom:model_x`` 整串本身就是 provider（含冒号），裸
+    ``partition(":")`` 会把它劈成 "custom"+"model_x" 两个不存在的值——判据
+    必须先把整串当 provider 查目录，查到就是它。"""
+    _set_catalog([_custom_item(1, "text")])
+    set_setting("text_moderation_fallback_route", "custom:model_1")
+
+    item = _resolve_moderation_fallback_route_item(lambda k: get_setting(k))
+
+    assert item is not None
+    assert item["id"] == "model_1"
+
+
+def test_moderation_fallback_route_falls_back_to_two_segment_form_for_builtin_providers() -> None:
+    """内置协议家族的 provider 字面量不带冒号（如 "myprov"），历史两段式
+    "provider:model" 格式在这种形状下仍然有效——但要求 model 字段逐字匹配，
+    不是只要 provider 存在就认。"""
+    _set_catalog([{
+        "id": "model_builtin", "provider": "myprov", "model": "mymodel",
+        "kinds": ["text"], "builtin": False, "protocol": "openai",
+        "base_url": "https://builtin.example.test/v1",
+    }])
+    set_setting("text_moderation_fallback_route", "myprov:mymodel")
+
+    item = _resolve_moderation_fallback_route_item(lambda k: get_setting(k))
+
+    assert item is not None
+    assert item["id"] == "model_builtin"
+
+
+def test_moderation_fallback_route_unresolvable_value_returns_none_and_setting_untouched() -> None:
+    """整串查不到、两段式也对不上：不猜、不清空——迁移失败必须可见，不能悄悄
+    丢掉运维配置过的值。"""
+    _set_catalog([_custom_item(1, "text")])
+    set_setting("text_moderation_fallback_route", "custom:does-not-exist")
+
+    assert _resolve_moderation_fallback_route_item(lambda k: get_setting(k)) is None
+
+    result = migrate_legacy_bindings(force=True)
+    assert "text_fallback" not in result["migrated"]
+    assert get_setting("text_moderation_fallback_route") == "custom:does-not-exist"
+
+
+def test_moderation_fallback_route_migrates_to_priority_one_even_when_flag_already_done() -> None:
+    """生产真实场景（本次协调方指出的漏洞）：B 上 4 键迁移早已跑过、整体
+    MIGRATION_FLAG 已是 "done"，随后才补的 text_moderation_fallback_route
+    迁移必须仍然生效——不能因为绑定同一个整体闸门而被静默跳过，否则一项
+    正在缓解"供应商内容审核拒绝"的能力会在部署当晚静默消失。"""
+    _set_catalog(_seven_item_catalog())
+    _seed_credentials_realistic_shape()
+    _set_legacy_provider_settings()
+
+    migrate_legacy_bindings(force=True)  # 模拟"第二阶段代码已经在 B 上跑过"
+    assert get_setting("models_registry_bindings_migrated_v1") == "done"
+    assert len(bindings.list_bindings("text:default")) == 1  # 此刻只有 priority=0
+
+    # 之后才发现：运维在旧机制下配过换路目的地，生产真实值形如
+    # "custom:model_07030243d87e"——整串本身就是 provider。
+    set_setting("text_moderation_fallback_route", "custom:model_5")
+
+    result = migrate_legacy_bindings()  # 非 force：闸门已经是 done
+
+    assert result["skipped"] is False
+    assert result["migrated"] == {"text_fallback": "custom:model_5"}
+    rows = {row["priority"]: row["model_id"] for row in bindings.list_bindings("text:default")}
+    assert rows == {0: "model_1", 1: "model_5"}
+    assert get_setting("text_moderation_fallback_route") == ""
+
+    # 幂等：设置已清空，再跑一次是纯粹的 no-op，不产生第二条 priority=1。
+    second = migrate_legacy_bindings()
+    assert second == {"skipped": True, "reason": "already_migrated"}
+    assert len(bindings.list_bindings("text:default")) == 2
+
+
+async def test_moderation_fallback_route_migration_actually_reroutes_content_rejection(monkeypatch) -> None:
+    """端到端：迁移后真的用 priority=1 候选换路成功，且落一条审计——不是
+    只把行插进表里，选路真的会用它（CLAUDE.md「界面承诺必须与实际行为
+    一致」，这里是"迁移承诺必须与实际选路一致"的同一原则）。"""
+    from app import hiagent
+    from app.harness import model_gateway
+    from app.db import get_conn
+
+    _set_catalog(_seven_item_catalog())
+    _seed_credentials_realistic_shape()
+    _set_legacy_provider_settings()  # text:default priority=0 -> custom:model_1
+    set_setting("text_moderation_fallback_route", "custom:model_5")
+
+    migrate_legacy_bindings(force=True)
+    assert bindings.get_priority_zero("text:default")["model_id"] == "model_1"
+
+    calls: list[tuple[list[dict[str, str]], dict]] = []
+
+    async def fake_chat(messages, **kwargs):
+        calls.append((messages, kwargs))
+        if len(calls) == 1:
+            raise hiagent.ProviderError(
+                "供应商内容审核已明确拒绝本次请求",
+                failure=hiagent.ProviderFailure.model_rejection(),
+            )
+        return "换路后正常产出"
+
+    monkeypatch.setattr(model_gateway.hiagent, "chat", fake_chat)
+
+    result = await model_gateway.chat([{"role": "user", "content": "写一段追杀情节"}])
+
+    assert result == "换路后正常产出"
+    assert len(calls) == 2
+    assert calls[1][1]["provider"] == "custom:model_5"
+    audit_rows = get_conn().execute(
+        "SELECT * FROM operation_audit WHERE event='models_registry.route_failover'"
+    ).fetchall()
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["error_code"] == "content_rejected"
 
 
 def test_migration_falls_back_to_first_catalog_item_when_configured_value_invalid() -> None:

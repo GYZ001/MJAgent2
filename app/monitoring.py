@@ -209,17 +209,10 @@ SETTINGS_SCHEMA["provider_media_public_base_url"] = {
     "experimental": False,
 }
 
-# WS1b：文本模型审核拒答换路目的地，格式 "provider:model"；空串=不换路，
-# 原样抛错——换路目的地必须显式声明，不得兜底猜一个供应商。
-SETTINGS_SCHEMA["text_moderation_fallback_route"] = {
-    "label": "文本审核拒答换路目的地",
-    "type": "string",
-    "default": config.DEFAULT_SETTINGS["text_moderation_fallback_route"],
-    "max_length": 500,
-    "allow_empty": True,
-    "immediate": True,
-    "experimental": False,
-}
+# WS1b 原「文本审核拒答换路目的地」设置项（text_moderation_fallback_route）
+# 已在 EP-05 第三阶段删除：换路目的地改由 app.models_registry.routing 按
+# text:default 优先级链推导，不再需要运维手填一个固定 "provider:model"，
+# 不留两套换路机制并存（见 app/harness/model_gateway_moderation.py 模块文档）。
 
 
 def public_settings_schema() -> dict[str, dict[str, Any]]:

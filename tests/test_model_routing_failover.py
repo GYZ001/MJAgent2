@@ -245,13 +245,109 @@ async def test_call_with_failover_video_purpose_switches_after_confirmed_termina
             raise _FakeProviderError(timeout_phase="read")
         return "done"
 
+    async def _confirmed() -> bool:
+        return True
+
     result = await routing.call_with_failover(
-        "video:shot", fn, request_id="req-4", confirm_terminal_failure=lambda: True,
+        "video:shot", fn, request_id="req-4", confirm_terminal_failure=_confirmed,
     )
 
     assert result == "done"
     assert calls == ["vid_a", "vid_b"]
     assert len(_audit_failover_rows()) == 1
+
+
+# ---------------------------------------------------------------------------
+# resolve_explicit：显式 provider 直接构造候选，不经优先级链（EP-05 第三阶段）
+# ---------------------------------------------------------------------------
+
+def test_resolve_explicit_builds_candidate_from_provider_string() -> None:
+    set_setting("custom_models", json.dumps([
+        {"id": "model_x", "provider": "custom:model_x", "model": "text-x", "kinds": ["text"],
+         "builtin": False, "protocol": "openai", "base_url": "https://x.example.test/v1",
+         "rate_limit": {"rpm": 30, "concurrency": 2}},
+    ], ensure_ascii=False))
+
+    resolved = routing.resolve_explicit("custom:model_x", "text")
+
+    assert resolved is not None
+    assert resolved.model_id == "model_x"
+    assert resolved.rate_limit == {"rpm": 30, "concurrency": 2}
+
+
+def test_resolve_explicit_returns_none_when_provider_unknown() -> None:
+    set_setting("custom_models", json.dumps([], ensure_ascii=False))
+    assert routing.resolve_explicit("custom:missing", "text") is None
+
+
+async def test_model_gateway_chat_enforces_configured_rate_limit_concurrency() -> None:
+    """限速真正接入了 ``model_gateway.chat`` 的主路径（不是只在测试里孤立调用
+    ``ratelimit.acquire``）：模型库条目一旦配置了 ``rate_limit.concurrency``，
+    两次并发调用必须被迫串行。生产目前没有任何条目配置这个字段（模型中心
+    还没有配置入口，见 ``app.harness.model_gateway_failover`` 模块文档），
+    所以这条限速对现有部署是 no-op——这个用例正是用显式配置证明"接线接对了，
+    只是还没人拧开关"，不是死代码。"""
+    import asyncio as _asyncio
+    import json as _json
+
+    from app.db import set_setting as _set_setting
+    from app.harness import model_gateway
+    from app.models_registry import bindings as _bindings, ratelimit, store as _store
+
+    ratelimit.reset_for_tests()
+    _set_setting("custom_models", _json.dumps([
+        {"id": "model_rl", "provider": "custom:model_rl", "model": "text-rl", "kinds": ["text"],
+         "builtin": False, "protocol": "openai", "base_url": "https://rl.example.test/v1",
+         "rate_limit": {"concurrency": 1}},
+    ], ensure_ascii=False))
+    _store.put_credential("model_rl", base_url="https://rl.example.test/v1", api_key="sk-rl", rotated_by="t")
+    _bindings.upsert_binding(purpose="text:default", model_id="model_rl", priority=0)
+
+    order: list[str] = []
+
+    async def fake_chat(messages, **kwargs):
+        order.append("start")
+        await _asyncio.sleep(0.05)
+        order.append("end")
+        return "ok"
+
+    orig_chat = model_gateway.hiagent.chat
+    model_gateway.hiagent.chat = fake_chat
+    try:
+        await _asyncio.gather(
+            model_gateway.chat([{"role": "user", "content": "a"}]),
+            model_gateway.chat([{"role": "user", "content": "b"}]),
+        )
+    finally:
+        model_gateway.hiagent.chat = orig_chat
+
+    # concurrency=1：不能出现两个 start 挨在一起的交叉执行痕迹。
+    assert order == ["start", "end", "start", "end"]
+
+
+async def test_call_with_failover_initial_exclude_skips_already_tried_model() -> None:
+    """``initial_exclude`` 供调用方在进入 call_with_failover 之前已经试过某个
+    model_id 时排除它——文本审核拒答换路收编进统一策略后，主用 provider 的
+    失败发生在链路之外，必须能排除它才不会重试同一个刚失败的模型。"""
+    _seed_two_priority_chain()
+    calls: list[str] = []
+
+    async def fn(candidate: routing.ResolvedModel) -> str:
+        calls.append(candidate.model_id)
+        return "ok-from-" + candidate.model_id
+
+    result = await routing.call_with_failover(
+        "text:default", fn, request_id="req-exclude",
+        initial_exclude=frozenset({"model_a"}),
+    )
+
+    assert result == "ok-from-model_b"
+    assert calls == ["model_b"]
+
+
+# 视频费用纪律（confirm_video_terminal_failure 端到端验收）已拆到独立文件
+# tests/test_model_routing_video_cost_discipline.py——避免把本文件顶过测试
+# 文件行数基线，见该文件模块文档。
 
 
 # ---------------------------------------------------------------------------
