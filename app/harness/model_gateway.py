@@ -11,7 +11,7 @@ from pydantic import BaseModel, ValidationError
 from app import config, hiagent
 from app.db import get_conn, now
 from app.evidence import repository
-from app.harness.model_gateway_failover import content_rejection_failover, rate_limit_candidate, rate_limit_scope
+from app.harness.model_gateway_failover import content_rejection_failover, rate_limit_candidate, rate_limit_scope, technical_failure_failover
 from app.harness.model_gateway_moderation import provider_envelope_unprocessed, replay_safe_stream_interruption
 from app.harness.structured_key_case import snake_case_keys_for_model
 from app.observability.tracing import current_trace
@@ -548,7 +548,12 @@ async def chat(
                     return fallback_result
             replayable = exc.replay_safe or replay_safe_stream_interruption(exc) or provider_envelope_unprocessed(exc)
             if not exc.retryable or not replayable or failure_no >= max_retries:
-                raise  # retries_disabled 不再单独拦：能重放的都是未送达/未处理，不是重摇答案（见该标志说明）
+                technical_fallback = await technical_failure_failover(
+                    provider_messages, provider_kwargs, meta, provider, request_id, exc,
+                )
+                if technical_fallback is not None:
+                    return technical_fallback
+                raise  # 换路未配置/链路耗尽（EP-05 第四阶段）：抛出这次同候选重试耗尽的原始异常
 
             retry_no = failure_no + 1
             delay = min(config.TEXT_PROVIDER_RETRY_BASE_DELAY * (2 ** failure_no), config.TEXT_PROVIDER_RETRY_MAX_DELAY)  # 封顶：过载拒绝波要靠次数熬过去，不是靠越等越久

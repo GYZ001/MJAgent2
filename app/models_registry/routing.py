@@ -28,6 +28,17 @@ video_confirmation``；接入 ``app/media_exec/run_job.py`` 的多供应商换�
 ``sync_legacy_binding`` 是旧监制房兼容桥：4 个旧 ``model_*_provider`` 设置项
 在迁移后不再是选路的权威来源（``model_bindings`` 才是），但界面上那个下拉框
 还在，写它必须真的影响选路——否则就是 CLAUDE.md 明确禁止的"界面撒谎"。
+
+EP-05 第四阶段：``model_gateway.chat()`` 现有同候选退避循环即将放弃（不可
+重放/不可重试/重试预算耗尽）之前，改接 ``app.harness.
+model_gateway_failover.technical_failure_failover`` 对 timeout/rate_limited/
+server_error 三类做一次跨模型换路，与第三阶段的 content_rejected 换路是两个
+独立调用点（各自排除的 model_id 集合互不相交），避免同一条候选链被两条路径
+重复消耗。预算纪律：换路只对每个候选调用一次 ``fn``，不在候选内部重试，
+总预算是"现有 N 次同候选退避 + (M-1) 次跨候选各一次尝试"相加而非相乘（M 为
+该 purpose 配置的优先级候选数）；未配置 fallback（M=1）时 exclude 掉唯一
+候选后 ``resolve()`` 立即返回 ``None``，不产生任何多余请求，对现有部署零
+影响。
 """
 from __future__ import annotations
 
@@ -38,6 +49,7 @@ from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 from app.models_registry import bindings, health
+from app.observability import metrics_registry
 
 T = TypeVar("T")
 
@@ -181,12 +193,18 @@ def sync_legacy_bindings(changed: dict[str, Any]) -> None:
             sync_legacy_binding(kind, changed[key])
 
 
-def _classify_exception(exc: BaseException) -> str | None:
+def classify_exception(exc: BaseException) -> str | None:
     """结构化鸭子类型分类，不 import ``app.hiagent.ProviderError``——那会让
     ``app.hiagent``（需要 import 本模块做选路）与本模块互相 import，制造真实
     循环。只认字段形状，不认异常类型或消息文本内容。返回 ``None`` 表示"不换路"
     （对应 contract_invalid：那类失败从不经过这里，见 health.py 模块文档；以及
     任何没有这套字段形状的普通异常，原样抛出更安全）。
+
+    公开函数（EP-05 第四阶段起，不再是 ``call_with_failover`` 私有）：
+    ``app.harness.model_gateway_failover.technical_failure_failover`` 也要用它
+    ——在 ``call_with_failover`` 的循环之外先给"主用候选这次失败"分类，才能
+    决定是否值得为 timeout/rate_limited/server_error 发起跨模型换路，以及落
+    审计时该写哪个 category（不能硬编码，见该函数文档）。
     """
     failure_kind = str(getattr(exc, "failure_kind", "") or "")
     category = str(getattr(exc, "failure_category", "") or "")
@@ -278,7 +296,7 @@ async def call_with_failover(
         try:
             result = await fn(candidate)
         except Exception as exc:  # noqa: BLE001 分类后决定换路还是原样抛出
-            category = _classify_exception(exc)
+            category = classify_exception(exc)
             latency_ms = int((time.monotonic() - started) * 1000)
             if category is None:
                 raise
@@ -286,8 +304,11 @@ async def call_with_failover(
                 if confirm_terminal_failure is None or not await confirm_terminal_failure():
                     raise
             health.record_outcome(candidate.model_id, category, latency_ms=latency_ms)
+            metrics_registry.record_provider_call_latency(purpose, latency_ms / 1000)
             record_route_failure(purpose, candidate.model_id, candidate.priority, category, request_id, len(tried))
             last_exc = exc
             continue
-        health.record_outcome(candidate.model_id, None, latency_ms=int((time.monotonic() - started) * 1000))
+        latency_s = time.monotonic() - started
+        health.record_outcome(candidate.model_id, None, latency_ms=int(latency_s * 1000))
+        metrics_registry.record_provider_call_latency(purpose, latency_s)
         return result

@@ -14,6 +14,13 @@ EP-05 第三阶段把 ``app.models_registry.routing.call_with_failover`` 与
   读 ``settings.text_moderation_fallback_route``）已收编到这里，改按
   ``text:default`` 优先级链换路，两套机制不再并存，见
   ``model_gateway_moderation.py`` 模块文档。
+- :func:`technical_failure_failover`（EP-05 第四阶段）：``model_gateway.chat``
+  现有同候选退避循环即将放弃前调用，对 timeout/rate_limited/server_error 三类
+  结构化失败发起一次跨模型换路；contract_invalid 从不经过 ``chat()`` 的这个
+  异常处理块（``chat_structured`` 才产出它，且发生在 ``chat()`` 成功返回之
+  后），content_rejected 已由 :func:`content_rejection_failover` 单独处理，
+  两者用各自的 exclude 集合调用 ``call_with_failover``，互不知道对方试过谁，
+  避免同一条候选链被重复消耗两遍。
 """
 from __future__ import annotations
 
@@ -113,4 +120,54 @@ async def content_rejection_failover(
             "text:default", _fn, request_id=request_id, initial_exclude=exclude,
         )
     except Exception:  # noqa: BLE001 换路链路耗尽/未配置：交回原始错误，见函数文档
+        return None
+
+
+async def technical_failure_failover(
+    messages: list[dict[str, str]], provider_kwargs: dict[str, Any],
+    meta: dict[str, Any], current_provider: str | None, request_id: str,
+    exc: BaseException,
+) -> str | None:
+    """``model_gateway.chat`` 同候选退避耗尽（EP-05 第四阶段）后的跨模型换路。
+
+    只在 ``routing.classify_exception(exc)`` 落在 timeout/rate_limited/
+    server_error 三类之一时才发起真实换路——``None``（无法分类的普通异常）与
+    ``"content_rejected"``（已由 :func:`content_rejection_failover` 单独处理，
+    这里再打一遍会把同一条候选链消耗两遍）都直接跳过，返回 ``None`` 交回
+    调用方原样抛出捕获到的 ``exc``。``exc`` 不落库、不进请求，只用于分类；
+    真正发给供应商的仍是这次调用点传入的 ``messages``/``provider_kwargs``。
+
+    预算纪律：对每个候选只调用一次 ``hiagent.chat``，不做同候选重试——同候选
+    的退避已经在 ``chat()`` 的外层循环里做完才轮到这里，所以总预算是"现有 N
+    次同候选退避 + (M-1) 次跨候选各一次尝试"相加，不是 N×M 相乘（见模块文档）。
+    """
+    from app import hiagent
+    from app.generation_concurrency import run_with_provider_call_slot
+    from app.models_registry import routing
+
+    category = routing.classify_exception(exc)
+    if category not in ("timeout", "rate_limited", "server_error"):
+        return None
+    primary = (
+        routing.resolve_explicit(current_provider, "text") if current_provider
+        else routing.resolve("text:default")
+    )
+    exclude = frozenset({primary.model_id}) if primary is not None else frozenset()
+    if primary is not None:
+        routing.record_route_failure(
+            "text:default", primary.model_id, primary.priority, category, request_id, 0,
+        )
+
+    async def _fn(candidate: routing.ResolvedModel) -> str:
+        kwargs = {
+            **provider_kwargs, "provider": candidate.provider, "model": candidate.model_ref,
+            "call_meta": {**meta, "technical_failover": True},
+        }
+        return await run_with_provider_call_slot(lambda: hiagent.chat(messages, **kwargs))
+
+    try:
+        return await routing.call_with_failover(
+            "text:default", _fn, request_id=request_id, initial_exclude=exclude,
+        )
+    except Exception:  # noqa: BLE001 换路链路耗尽/未配置：交回原始错误，由调用方抛出 exc
         return None
