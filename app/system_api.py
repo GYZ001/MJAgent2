@@ -2240,7 +2240,7 @@ def put_keys(body: dict, _admin: None = Depends(require_system_admin)):
 # 覆盖扫描豁免见 app/capabilities/catalog.py 的 rest_exemptions。
 
 @router.post("/system/mcp-tokens")
-def create_mcp_token(body: dict):
+def create_mcp_token(body: dict, _admin: None = Depends(require_system_admin)):
     """创建一枚新 MCP token；明文只在这次响应里返回一次。"""
     from app.mcp import auth as mcp_auth
 
@@ -2263,7 +2263,7 @@ def create_mcp_token(body: dict):
 
 
 @router.get("/system/mcp-tokens")
-def list_mcp_tokens():
+def list_mcp_tokens(_admin: None = Depends(require_system_admin)):
     """列出已创建的 MCP token（脱敏：不返回明文/hash）。"""
     from app.mcp import auth as mcp_auth
 
@@ -2271,7 +2271,7 @@ def list_mcp_tokens():
 
 
 @router.delete("/system/mcp-tokens/{token_id}")
-def delete_mcp_token(token_id: str):
+def delete_mcp_token(token_id: str, _admin: None = Depends(require_system_admin)):
     from app.mcp import auth as mcp_auth
 
     if not mcp_auth.revoke_token(token_id):

@@ -7,12 +7,13 @@ from __future__ import annotations
 import asyncio
 import time
 
+from app.auth.deps import require_system_admin
 from app.db import (
     new_id,
     now,
 )
 from app.domain.common import router
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
 
 
 @router.get("/video-capabilities/{provider}/{model:path}")
@@ -28,6 +29,7 @@ async def probe_video_capability(
     provider: str,
     model: str,
     body: dict | None = None,
+    _admin: None = Depends(require_system_admin),
 ):
     from app import hiagent
     from app.video_plan import (
@@ -130,7 +132,10 @@ async def probe_video_capability(
     return snapshot.model_dump(mode="json")
 
 @router.post("/provider-media-publications")
-async def create_provider_media_publication(body: dict | None = None):
+async def create_provider_media_publication(
+    body: dict | None = None,
+    _admin: None = Depends(require_system_admin),
+):
     from app.video_plan import ProviderMediaPublicationService
 
     payload = body or {}
