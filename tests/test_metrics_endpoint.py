@@ -29,6 +29,13 @@ def _mk_user(conn, username: str, *, is_system_admin: bool = False) -> str:
         "is_system_admin, created_at) VALUES(?,?,?,'local','active',?,?)",
         (user_id, username, username, int(is_system_admin), now()),
     )
+    # 提交：否则这个线程局部连接会一直持有未提交的写事务，阻塞任何需要独立
+    # 连接 BEGIN IMMEDIATE 的懒加载建表（例如 app.auth.sessions.create_session
+    # 在 EP-03 第二阶段起会触发 app.provisioning.schema.ensure_schema() 去补
+    # user_sessions.kind 列）——2 秒 WRITE_TXN_BUSY_TIMEOUT_S 超时后失败会被
+    # ensure_schema() 的 except 分支吞掉，看起来"成功"，实际列从未补上，随后
+    # 的 INSERT 才会报 "no such column"，报错位置离真正病因很远。
+    conn.commit()
     return user_id
 
 

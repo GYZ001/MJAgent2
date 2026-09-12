@@ -30,10 +30,12 @@ import json
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.audit.queries import apply_activity_summary
+from app.auth import password_policy, session_policy
 from app.auth.deps import require_system_admin
 from app.auth.passwords import hash_password
 from app.auth.principal import Principal
 from app.db import get_conn, new_id, now
+from app.provisioning import schema as provisioning_schema
 from app.quota import VALID_TIERS
 from app.quota_addon import (
     ADDON_PACKAGE_PRICE_CNY,
@@ -118,12 +120,12 @@ def create_user(body: dict):
     password = str(body.get("password") or "")
     if not username:
         raise HTTPException(422, "用户名不能为空")
-    if len(password) < 8:
-        raise HTTPException(422, "密码至少 8 位")
+    conn = get_conn()
+    # 全新账号（user_id=None）：只做强度校验，没有历史口令可比对。
+    password_policy.enforce_password_change(conn, user_id=None, new_password=password, current_password_hash=None)
     tier = str(body.get("tier") or "free").strip()
     if tier not in VALID_TIERS:
         raise HTTPException(422, f"tier 必须是 {'/'.join(sorted(VALID_TIERS))} 之一")
-    conn = get_conn()
     if conn.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
         raise HTTPException(409, "用户名已存在")
 
@@ -206,30 +208,42 @@ def update_user(user_id: str, body: dict, actor: Principal = Depends(require_sys
         fields.append("is_system_admin=?")
         values.append(1 if want_admin else 0)
 
+    old_password_hash = row["password_hash"]
     if body.get("password"):
-        password = str(body["password"])
-        if len(password) < 8:
-            raise HTTPException(422, "密码至少 8 位")
-        fields.append("password_hash=?")
-        values.append(hash_password(password))
-        fields.append("password_changed_at=?")
-        values.append(now())
-        fields.append("must_change_password=?")
-        values.append(1 if body.get("must_change_password", True) else 0)
-        # 改密强制下线该账号已有会话，含当前这一个——管理员重置别人密码后，
-        # 对方需要用新密码重新登录；重置自己密码同理。
-        conn.execute(
-            "UPDATE user_sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL",
-            (now(), user_id),
-        )
+        extra_fields, extra_values = _apply_password_reset(conn, user_id, row, body)
+        fields.extend(extra_fields)
+        values.extend(extra_values)
 
     if not fields:
         raise HTTPException(422, "没有可更新的字段")
     values.append(user_id)
     conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id=?", values)
     conn.commit()
+    if body.get("password"):
+        # 归档**被替换掉**的旧哈希，必须在新密码真正落库之后（见
+        # app.auth.password_policy.record_password_change 模块文档）。
+        password_policy.record_password_change(conn, user_id=user_id, old_password_hash=old_password_hash)
     row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
     return _user_payload(row)
+
+
+def _apply_password_reset(conn, user_id: str, row, body: dict) -> tuple[list[str], list[object]]:
+    """校验新密码（强度 + 历史重用）、吊销该账号现有会话、返回要拼进
+    ``UPDATE users`` 的 ``(fields, values)`` 片段。"""
+    password = str(body["password"])
+    password_policy.enforce_password_change(
+        conn, user_id=user_id, new_password=password, current_password_hash=row["password_hash"],
+    )
+    # 改密强制下线该账号已有会话，含当前这一个——管理员重置别人密码后，
+    # 对方需要用新密码重新登录；重置自己密码同理。
+    conn.execute(
+        "UPDATE user_sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL",
+        (now(), user_id),
+    )
+    return (
+        ["password_hash=?", "password_changed_at=?", "must_change_password=?"],
+        [hash_password(password), now(), 1 if body.get("must_change_password", True) else 0],
+    )
 
 
 @router.post(
@@ -362,3 +376,53 @@ async def restore_user(user_id: str):
 
     outcome = await admin_restore_account_core(user_id)
     return {"ok": True, **outcome}
+
+
+@router.get("/users/{user_id}/sessions", dependencies=[Depends(require_system_admin)])
+def list_user_sessions(user_id: str):
+    """EP-03 第二阶段会话策略：查看某账号当前的活跃会话，供管理员判断要不要
+    强制下线其中某一个。只返回未撤销且未过期的行，不返回 ``secret_hash``。
+    ``kind`` 与 ``last_seen_at`` 恒存在（第二轮起）：前者供界面单独标出服务
+    会话，后者供管理员判断"这枚服务凭证是不是已经没人用了"。"""
+    conn = get_conn()
+    provisioning_schema.ensure_tables_on_connection(conn)  # kind 补列，同连接不抢锁
+    rows = conn.execute(
+        "SELECT id, created_at, last_seen_at, expires_at, ip, user_agent, kind FROM user_sessions"
+        " WHERE user_id=? AND revoked_at IS NULL AND expires_at>? ORDER BY created_at DESC",
+        (user_id, now()),
+    ).fetchall()
+    return {"items": [dict(r) for r in rows]}
+
+
+@router.post("/users/{user_id}/service-sessions", dependencies=[Depends(require_system_admin)])
+def issue_service_session_route(user_id: str, body: dict):
+    """管理员签发一枚长期服务会话（EP-03 第二阶段第二轮）：供回归/驱动脚本
+    等自动化使用，豁免空闲超时/并发上限，但必须显式给定有限的 ``ttl_days``
+    （见 ``app.auth.session_policy.issue_service_session``）。返回体带明文
+    token，只这一次——前端必须当场展示，供管理员复制去替换
+    ``data/regression_session_token.txt`` 之类的既有凭证文件。"""
+    conn = get_conn()
+    if conn.execute("SELECT 1 FROM users WHERE id=? AND deleted_at IS NULL", (user_id,)).fetchone() is None:
+        raise HTTPException(404, "用户不存在")
+    ttl_days = body.get("ttl_days")
+    if not isinstance(ttl_days, (int, float)) or isinstance(ttl_days, bool):
+        raise HTTPException(422, "ttl_days 必须是数值")
+    token, expires_at = session_policy.issue_service_session(user_id, ttl_days=float(ttl_days))
+    return {"session_token": token, "header": "X-Manju-Session", "expires_at": expires_at}
+
+
+@router.post("/users/{user_id}/sessions/{session_id}/revoke", dependencies=[Depends(require_system_admin)])
+def revoke_user_session(user_id: str, session_id: str):
+    """管理员强制下线单个会话；下一次该 token 发起请求会看到具体原因
+    （"管理员已强制下线此会话"），不是笼统的会话失效（CLAUDE.md「拦住用户时
+    必须给出路」）。"""
+    conn = get_conn()
+    provisioning_schema.ensure_tables_on_connection(conn)  # revoked_reason 补列，同连接不抢锁
+    cur = conn.execute(
+        "UPDATE user_sessions SET revoked_at=?, revoked_reason=? WHERE id=? AND user_id=? AND revoked_at IS NULL",
+        (now(), "admin_revoked", session_id, user_id),
+    )
+    conn.commit()
+    if cur.rowcount == 0:
+        raise HTTPException(404, "会话不存在或已失效")
+    return {"ok": True}

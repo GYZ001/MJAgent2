@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.audit.activity import touch as touch_activity
 from app.audit.recorder import note_actor
+from app.auth import password_policy
 from app.auth.passwords import hash_password, verify_password
 from app.auth.principal import Principal, get_current_principal
 from app.auth.sessions import create_session, resolve_session, revoke_all_for_user, revoke_session
@@ -21,8 +22,6 @@ from app.db import get_conn, get_setting, now
 from app.local_session import assert_session_bootstrap_allowed, require_local_session
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-
-_MIN_NEW_PASSWORD_LEN = 8
 
 # 登录失败节流：同一用户名 5 分钟内失败 5 次即拒绝，直到最早一次失败滑出窗口。
 # 只用一个小 dict + 时间戳，不引入新依赖。
@@ -126,7 +125,8 @@ def login(body: dict, request: Request):
 
     conn = get_conn()
     row = conn.execute(
-        "SELECT id, password_hash, status, is_system_admin FROM users WHERE username=?",
+        "SELECT id, password_hash, status, is_system_admin, password_changed_at, created_at"
+        " FROM users WHERE username=?",
         (username,),
     ).fetchone()
     active_hash = row["password_hash"] if row is not None and row["status"] == "active" else None
@@ -142,6 +142,11 @@ def login(body: dict, request: Request):
     _clear_login_failures(username)
 
     user_id = str(row["id"])
+    # 密码有效期（password_max_age_days=0 时恒为 False）：过期强制下次改密，
+    # 不阻塞本次登录本身——登录后跳改密页是既有 must_change_password 流程。
+    password_policy.flag_expired_password(
+        conn, user_id=user_id, password_changed_at=row["password_changed_at"], created_at=row["created_at"],
+    )
     conn.execute("UPDATE users SET last_login_at=? WHERE id=?", (now(), user_id))
     conn.commit()
     token = create_session(user_id, user_agent=request.headers.get("user-agent"), ip=_client_ip(request))
@@ -216,13 +221,18 @@ def change_password(body: dict, request: Request, token: str = Depends(require_l
         raise HTTPException(403, "共享会话不支持改密，请先用账号登录")
     old_password = str(body.get("old_password") or "")
     new_password = str(body.get("new_password") or "")
-    if len(new_password) < _MIN_NEW_PASSWORD_LEN:
-        raise HTTPException(422, f"新口令至少 {_MIN_NEW_PASSWORD_LEN} 位")
 
     conn = get_conn()
     row = conn.execute("SELECT password_hash FROM users WHERE id=?", (principal.user_id,)).fetchone()
     if row is None or not row["password_hash"] or not verify_password(old_password, row["password_hash"]):
         raise HTTPException(401, "原口令不正确")
+    old_password_hash = row["password_hash"]
+    # 强度 + 与当前口令/历史口令重用双重校验；不满足时逐条列出具体原因
+    # （CLAUDE.md「弱口令被拒时提示具体哪条不满足」），见
+    # app.auth.password_policy 模块文档。
+    password_policy.enforce_password_change(
+        conn, user_id=principal.user_id, new_password=new_password, current_password_hash=old_password_hash,
+    )
 
     ts = now()
     conn.execute(
@@ -230,6 +240,8 @@ def change_password(body: dict, request: Request, token: str = Depends(require_l
         (hash_password(new_password), ts, principal.user_id),
     )
     conn.commit()
+    # 归档被替换掉的旧哈希（必须在新密码真正落库之后）。
+    password_policy.record_password_change(conn, user_id=principal.user_id, old_password_hash=old_password_hash)
     # 改密后原会话全部作废，重新签发一枚，避免调用方把自己挤下线。
     revoke_all_for_user(principal.user_id)
     new_token = create_session(

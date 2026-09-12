@@ -35,6 +35,13 @@ _MAX_SUMMARY_CHARS = 2000
 _BACKTICK_RE = re.compile(r"`+")
 _WHITESPACE_RE = re.compile(r"\s+")
 _TARGET_EXCLUDED_KEYS = frozenset({"idempotency_key", "approval_token", "project_id"})
+# EP-03 第二阶段：邀请链接的 {token} 路径参数是一次性明文凭证（只存 SHA-256，
+# 见 app.provisioning.invitations 模块文档），与 mcp_tokens/user_sessions 同一类
+# "不许落库的明文"——但它走的是 _target_from_path_params（纯 HTTP 级审计行，
+# /api/invite/{token} 与 /api/invite/{token}/accept 都不经 Command Bus），不是
+# _target_from_args 那条已有 _TARGET_EXCLUDED_KEYS 过滤的路径。两个函数共用
+# 同一份排除集合，而不是分别维护一份，避免以后有人只补一边。
+_PATH_PARAM_EXCLUDED_KEYS = _TARGET_EXCLUDED_KEYS | {"token"}
 
 # CommandStatus 是 app.capabilities.schemas 的枚举，本模块不 import 它（见模块
 # 文档"绝不 import app.capabilities.*"）——record_bus_outcome 只读 .value 这个
@@ -230,11 +237,12 @@ def _scalar_str(value: Any) -> str | None:
 
 
 def _target_from_args(args: dict[str, Any]) -> str | None:
-    """从入参顶层标量字段派生（不写字段白名单），排除幂等/批准/项目 id，累计截断。"""
+    """从入参顶层标量字段派生（不写字段白名单），排除幂等/批准/项目 id/一次性
+    令牌，累计截断。"""
     parts: list[str] = []
     total = 0
     for key, value in args.items():
-        if key in _TARGET_EXCLUDED_KEYS or isinstance(value, bool) or not isinstance(value, (str, int)):
+        if key in _PATH_PARAM_EXCLUDED_KEYS or isinstance(value, bool) or not isinstance(value, (str, int)):
             continue
         piece = f"{key}={_truncate(str(value), _MAX_FIELD_CHARS)}"
         if total + len(piece) > _MAX_TARGET_CHARS:
@@ -284,8 +292,11 @@ def _label_from_docstring(doc: str | None) -> str | None:
 def _target_from_path_params(path_params: dict[str, Any]) -> str | None:
     if not path_params:
         return None
-    parts = [f"{k}={_truncate(str(v), _MAX_FIELD_CHARS)}" for k, v in path_params.items()]
-    return _truncate(" · ".join(parts), _MAX_TARGET_CHARS)
+    parts = [
+        f"{k}={_truncate(str(v), _MAX_FIELD_CHARS)}"
+        for k, v in path_params.items() if k not in _PATH_PARAM_EXCLUDED_KEYS
+    ]
+    return _truncate(" · ".join(parts), _MAX_TARGET_CHARS) if parts else None
 
 
 def _http_outcome(status_code: int) -> str:

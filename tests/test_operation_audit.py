@@ -50,7 +50,7 @@ def admin_headers() -> dict[str, str]:
 def _create_user(client: TestClient, admin_headers: dict[str, str], username: str) -> str:
     resp = client.post(
         "/api/system/users", headers=admin_headers,
-        json={"username": username, "password": "initpass1"},
+        json={"username": username, "password": "Initpass-9000"},
     )
     assert resp.status_code == 200, resp.text
     return resp.json()["id"]
@@ -76,7 +76,7 @@ def test_login_success_records_one_row_without_password(client: TestClient, admi
     _create_user(client, admin_headers, "zhangsan")
     resp = client.post(
         "/api/auth/login", headers=_HEADERS,
-        json={"username": "zhangsan", "password": "initpass1"},
+        json={"username": "zhangsan", "password": "Initpass-9000"},
     )
     assert resp.status_code == 200, resp.text
 
@@ -162,7 +162,7 @@ def test_direct_rest_write_records_http_level_row(client: TestClient, admin_head
 def test_get_request_only_touches_activity_not_audit_log(client: TestClient, admin_headers: dict[str, str]):
     user_id = _create_user(client, admin_headers, "active-user")
     login = client.post(
-        "/api/auth/login", headers=_HEADERS, json={"username": "active-user", "password": "initpass1"},
+        "/api/auth/login", headers=_HEADERS, json={"username": "active-user", "password": "Initpass-9000"},
     ).json()
     user_headers = {**_HEADERS, "X-Manju-Session": login["session_token"]}
 
@@ -187,7 +187,7 @@ def test_get_request_only_touches_activity_not_audit_log(client: TestClient, adm
 def test_list_api_requires_system_admin(client: TestClient, admin_headers: dict[str, str]):
     user_id = _create_user(client, admin_headers, "plain-viewer")
     login = client.post(
-        "/api/auth/login", headers=_HEADERS, json={"username": "plain-viewer", "password": "initpass1"},
+        "/api/auth/login", headers=_HEADERS, json={"username": "plain-viewer", "password": "Initpass-9000"},
     ).json()
     plain_headers = {**_HEADERS, "X-Manju-Session": login["session_token"]}
     resp = client.get("/api/system/audit/events", headers=plain_headers)
@@ -197,7 +197,7 @@ def test_list_api_requires_system_admin(client: TestClient, admin_headers: dict[
 
 def test_list_api_filters_by_outcome(client: TestClient, admin_headers: dict[str, str]):
     _create_user(client, admin_headers, "filter-user")
-    client.post("/api/auth/login", headers=_HEADERS, json={"username": "filter-user", "password": "initpass1"})
+    client.post("/api/auth/login", headers=_HEADERS, json={"username": "filter-user", "password": "Initpass-9000"})
     client.post("/api/auth/login", headers=_HEADERS, json={"username": "filter-user", "password": "bad"})
 
     rejected = _events(client, admin_headers, event="POST /api/auth/login", outcome="rejected")["items"]

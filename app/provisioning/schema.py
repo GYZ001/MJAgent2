@@ -1,10 +1,38 @@
-"""EP-03 第一阶段：``user_import_batches`` 表 + ``users`` 补列，lazy 建表（L2）。
+"""EP-03：``user_import_batches``/``user_invitations``/``password_history`` 三
+表 + ``users``/``user_sessions`` 补列，lazy 建表（L2）。
 
 ``app/db.py`` 的 line_count 基线已零余量，新表不走它——照抄
 ``app/orgs/schema.py``/``app/audit/store.py`` 的手法：``ensure_schema()``
 按当前 ``db.DB_PATH`` 幂等记忆；``app.provisioning.importer``/
-``app.provisioning.handover`` 的每个读写函数各自兜底调用一次（多数测试不经
-``app.main`` lifespan，必须靠这条兜底，与 ``app/orgs/store.py`` 同一惯例）。
+``app.provisioning.handover``/``app.provisioning.invitations``/
+``app.auth.password_policy``/``app.auth.session_policy`` 的每个读写函数各自
+兜底调用一次（多数测试不经 ``app.main`` lifespan，必须靠这条兜底，与
+``app/orgs/store.py`` 同一惯例）。
+
+``password_history``（EP-03 第二阶段）DDL 也放在本文件——虽然它服务的是
+``app.auth.password_policy``，但按派单要求不再新起第三个包的 schema 模块，
+复用本文件已有的 lazy 建表基础设施（``ensure_tables_on_connection``/
+``ensure_schema`` 两个入口、``_add_column_if_missing`` helper）；
+``app.auth.password_policy``（L2）import ``app.provisioning.schema``（L2）
+是同层依赖，不构成上行边。``user_invitations``（EP-03 §6 邀请链接）同理，
+虽然领域逻辑在 ``app.provisioning.invitations``，但表结构与本包已有的
+``user_import_batches`` 同源（都是账号生命周期台账），不必拆表结构文件。
+
+``user_sessions`` 补列 ``revoked_reason``：会话策略（``app.auth.
+session_policy``）踢人时（空闲超时/超最长时长/并发超限）落一个人类可读原因，
+供下一次请求携带同一枚 token 时能看到"为什么被登出"而不是笼统的"会话失效"
+（CLAUDE.md「拦住用户时必须给出路」——被动下线也要让用户看得懂）。管理员/
+用户主动登出、改密强制下线等既有路径不写这一列（保持 NULL），沿用现有的
+笼统提示——那些场景操作者本来就知道原因，不需要额外解释。
+
+``user_sessions`` 再补列 ``kind``（EP-03 第二阶段第二轮，协调方裁决"交互式
+会话与服务账号共用同一种凭证"是真缺口）：``'interactive'``（默认）|
+``'service'``。``ALTER TABLE ... ADD COLUMN kind TEXT NOT NULL DEFAULT
+'interactive'`` 由 SQLite 对既有行做常量回填，不需要额外一条 ``UPDATE``——
+回填后所有既有会话行为与上一轮交付逐字一致（``app.auth.session_policy`` 的
+判据全部挂在 ``kind='service'`` 这一具体条件上，不触发就是原样的
+interactive 路径）。``kind`` 是否豁免空闲超时/并发上限、服务会话的显式有效
+期上下限，都是 ``app.auth.session_policy`` 的判定逻辑，本文件只管建列。
 
 ``users`` 新增 ``email``/``employee_no`` 两列：与 ``app/orgs/schema.py`` 给
 ``users``/``projects`` 加 ``org_id`` 列的手法完全一致（``_add_column_if_missing``），
@@ -34,7 +62,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from app import db, monitor_audit_buffer
+from app import db, db_schema, monitor_audit_buffer
 
 _CREATE_STATEMENTS: tuple[str, ...] = (
     """CREATE TABLE IF NOT EXISTS user_import_batches (
@@ -55,6 +83,31 @@ _CREATE_STATEMENTS: tuple[str, ...] = (
         applied_at REAL
     )""",
     "CREATE INDEX IF NOT EXISTS idx_user_import_batches_org ON user_import_batches(org_id)",
+    """CREATE TABLE IF NOT EXISTS user_invitations (
+        id TEXT PRIMARY KEY,
+        org_id TEXT,
+        username TEXT NOT NULL,
+        display_name TEXT,
+        email TEXT,
+        team_id TEXT,
+        role_id TEXT,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at REAL NOT NULL,
+        created_by TEXT,
+        created_at REAL NOT NULL,
+        accepted_at REAL,
+        accepted_user_id TEXT,
+        revoked_at REAL,
+        revoked_by TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_user_invitations_org ON user_invitations(org_id)",
+    """CREATE TABLE IF NOT EXISTS password_history (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        changed_at REAL NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_password_history_user ON password_history(user_id, changed_at)",
 )
 
 _ensured_paths: set[str] = set()
@@ -75,14 +128,21 @@ def ensure_tables_on_connection(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
     _add_column_if_missing(conn, "users", "email", "TEXT")
     _add_column_if_missing(conn, "users", "employee_no", "TEXT")
+    _add_column_if_missing(conn, "user_sessions", "revoked_reason", "TEXT")
+    _add_column_if_missing(conn, "user_sessions", "kind", "TEXT NOT NULL DEFAULT 'interactive'")
 
 
 def ensure_schema() -> None:
-    """幂等建表 + ``users`` 补列；按当前 ``db.DB_PATH`` 记忆已建。独立连接
-    （``db._run_write_transaction_once``），只供不在调用方事务里嵌套的入口
-    使用——``ensure_tables_on_connection`` 见该函数文档。
+    """幂等建表 + ``users`` 补列；按当前 ``db.DB_PATH`` 记忆已建。
 
-    这条独立连接跑在自己的事务里，没有调用方的事务可毁，技术上即使用
+    调用方选错入口不再有后果（2026-09-12 原语层修复，见
+    ``app.db_schema.ensure_schema_respecting_caller_transaction`` 文档）：
+    ``app.db.get_conn()`` 这条线程/任务局部连接若已经处在调用方开的事务里，
+    直接改走同连接的 ``ensure_tables_on_connection(那个 conn)``，不开独立
+    连接、不抢锁；否则保持原有独立连接行为（``db._run_write_transaction_
+    once``），供不在调用方事务里嵌套的入口使用。
+
+    独立连接这条分支跑在自己的事务里，没有调用方的事务可毁，技术上即使用
     ``executescript`` 也不会重演 ``ensure_tables_on_connection`` 那种隐式
     COMMIT 事故；但这里仍然复用 ``ensure_tables_on_connection(conn)`` 而不是
     另起一份 ``executescript`` DDL——两处各维护一份建表语句，日后改表结构
@@ -92,17 +152,24 @@ def ensure_schema() -> None:
     if key in _ensured_paths:
         return
 
-    def operation(conn: sqlite3.Connection) -> None:
-        ensure_tables_on_connection(conn)
+    def _run_independent() -> None:
+        def operation(conn: sqlite3.Connection) -> None:
+            ensure_tables_on_connection(conn)
 
-    try:
-        db._run_write_transaction_once(operation)
-    except Exception as exc:  # noqa: BLE001 建表失败留到下一次调用重试，不阻塞
-        # 调用方；不能悄悄吞掉——落一条可观测记录，见 app/orgs/schema.py 同名
-        # except 分支的注释，理由完全一致。
-        monitor_audit_buffer.note_schema_ensure_failure(__name__, exc)
-        return
-    _ensured_paths.add(key)
+        try:
+            db._run_write_transaction_once(operation)
+        except Exception as exc:  # noqa: BLE001 建表失败留到下一次调用重试，不阻塞
+            # 调用方；不能悄悄吞掉——落一条可观测记录，见 app/orgs/schema.py 同名
+            # except 分支的注释，理由完全一致。
+            monitor_audit_buffer.note_schema_ensure_failure(__name__, exc)
+            return
+        _ensured_paths.add(key)
+
+    db_schema.ensure_schema_respecting_caller_transaction(
+        db.get_conn(),
+        on_caller_connection=ensure_tables_on_connection,
+        run_independent=_run_independent,
+    )
 
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, coltype: str) -> None:

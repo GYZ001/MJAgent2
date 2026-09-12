@@ -167,6 +167,37 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
         "options": ["legacy", "stage_aware"], "immediate": True,
         "experimental": False,
     },
+    # EP-03 第二阶段：密码策略（app.auth.password_policy）+ 会话策略
+    # （app.auth.session_policy）。全新键，B 上 settings 表不可能有旧值——
+    # 首次读取一律走这里的 default（CLAUDE.md「新增策略键必须同时改 schema」）。
+    "password_min_length": _number(
+        "密码最小长度", "12", 6, 64, unit="位",
+        description="低于此长度的新口令一律拒绝（管理员开户/重置、自助改密、邀请接受首次设密均适用）。",
+    ),
+    "password_classes": _number(
+        "密码字符类别数", "3", 1, 4, unit="类",
+        description="大写字母/小写字母/数字/符号四类中至少要包含几类，弱口令拒绝时会逐条报出还缺哪几类。",
+    ),
+    "password_max_age_days": _number(
+        "密码有效期", "0", 0, 365, unit="天",
+        description="0=不过期；超过此天数未改密，下次登录成功后会被强制要求改密（must_change_password）。",
+    ),
+    "password_history_size": _number(
+        "密码历史校验条数", "5", 0, 24, unit="条",
+        description="改密时与最近 N 次历史口令比对，拒绝重复使用；0=不校验历史。",
+    ),
+    "session_idle_timeout_min": _number(
+        "会话空闲超时", "480", 5, 43200, unit="分钟",
+        description="超过此时长无任何请求，会话失效，下次请求 401 并提示因空闲超时被登出。",
+    ),
+    "session_max_age_hours": _number(
+        "会话最长时长", "12", 1, 720, unit="小时",
+        description="即便持续活跃，会话从创建起超过此时长也会失效，需重新登录。",
+    ),
+    "session_max_concurrent": _number(
+        "单账号最大并发会话数", "0", 0, 50, unit="个",
+        description="0=不限；超过时踢掉最早登录的会话，被踢会话下次请求会收到明确原因。",
+    ),
 }
 
 # provider 合法取值不再是写死枚举（CLAUDE.md「禁止黑白名单与枚举穷举」）：

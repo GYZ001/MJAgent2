@@ -32,6 +32,12 @@ def _mk_user(conn, username: str, *, is_system_admin: bool = False) -> str:
         "is_system_admin, created_at) VALUES(?,?,?,'local','active',?,?)",
         (user_id, username, username, int(is_system_admin), now()),
     )
+    # 提交：否则线程局部连接会一直持有未提交的写事务，阻塞任何需要独立连接
+    # BEGIN IMMEDIATE 的懒加载建表（EP-03 第二阶段起 create_session() 会触发
+    # app.provisioning.schema.ensure_schema() 去补 user_sessions.kind 列，
+    # 2 秒超时后失败会被吞掉，看起来"成功"，随后的 INSERT 才报 "no such
+    # column"——同一个坑已经在 tests/test_metrics_endpoint.py 踩过一次）。
+    conn.commit()
     return user_id
 
 

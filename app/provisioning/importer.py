@@ -69,20 +69,26 @@ class RowPlan:
     tier: str | None = None
 
 
-def _ensure_schemas() -> None:
-    schema.ensure_schema()
-    orgs_schema.ensure_schema()  # users.org_id 由 orgs 包补列，两者都要确保建好
+def _ensure_schemas(conn) -> None:
+    """同连接补表，不开独立连接（2026-09-12 协调方审查修复）：独立连接的
+    ``ensure_schema()`` 一旦撞上调用方线程局部连接上尚未提交的写事务会去抢
+    ``BEGIN IMMEDIATE``，2 秒超时后失败又被吞掉，表现成远离病因的报错——
+    同一类问题已在 ``app.auth.sessions``/``session_policy``/
+    ``password_policy``/``app.provisioning.invitations`` 修过，见
+    ``app.auth.session_policy`` 模块文档。"""
+    schema.ensure_tables_on_connection(conn)
+    orgs_schema.ensure_tables_on_connection(conn)  # users.org_id 由 orgs 包补列，两者都要确保建好
 
 
 def preview_batch(*, raw: bytes, filename: str, org_id: str, created_by: str) -> dict:
     """``POST .../import/preview`` 的领域实现：不写 users/teams，只写批次台账。"""
-    _ensure_schemas()
+    conn = get_conn()
+    _ensure_schemas(conn)
     try:
         parsed = csv_parse.parse_csv(raw)
     except csv_parse.CsvParseError as exc:
         raise HTTPException(422, str(exc)) from exc
 
-    conn = get_conn()
     plan = [_classify_row(conn, row, org_id=org_id) for row in parsed.rows]
     counts = _tally(plan)
     batch_id = new_id("imp")
@@ -197,9 +203,9 @@ def apply_batch(*, batch_id: str, created_by: str) -> dict:
     不重新暴露明文口令）——这是"同一批次重复提交"的安全出口，不是本次
     "同一份 CSV 连导两次"验收项（那对应两次**各自独立**的 preview+apply）。
     """
-    _ensure_schemas()
-    _purge_expired_pending()
     conn = get_conn()
+    _ensure_schemas(conn)
+    _purge_expired_pending()
     row = conn.execute("SELECT * FROM user_import_batches WHERE id=?", (batch_id,)).fetchone()
     if row is None:
         raise HTTPException(404, "导入批次不存在")
@@ -338,9 +344,9 @@ def get_report_csv(batch_id: str) -> tuple[str, str]:
     """返回 ``(filename, csv_text)``；明文口令只在本函数**第一次**为某个
     ``batch_id`` 调用时补回（弹出内存缓存），之后同一批次再下载只剩占位符。
     """
-    _ensure_schemas()
-    _purge_expired_pending()
     conn = get_conn()
+    _ensure_schemas(conn)
+    _purge_expired_pending()
     row = conn.execute(
         "SELECT filename, report_json, status FROM user_import_batches WHERE id=?", (batch_id,)
     ).fetchone()

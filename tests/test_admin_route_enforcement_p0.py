@@ -26,6 +26,9 @@ def _mk_user(conn, username: str, *, is_system_admin: bool = False) -> str:
         "is_system_admin, created_at) VALUES(?,?,?,'local','active',?,?)",
         (user_id, username, username, int(is_system_admin), now()),
     )
+    # 提交：避免线程局部连接持有未提交事务阻塞 create_session() 的懒加载建表
+    # （同 tests/test_metrics_endpoint.py 踩过的坑，见该文件注释）。
+    conn.commit()
     return user_id
 
 

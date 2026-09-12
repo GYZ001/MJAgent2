@@ -23,6 +23,7 @@ from app.auth.principal import Principal, current_actor_name
 from app.orgs import store as orgs_store
 from app.provisioning import handover as handover_domain
 from app.provisioning import importer
+from app.provisioning import invitations as invitations_domain
 
 router = APIRouter(prefix="/api/system", tags=["provisioning"])
 
@@ -89,3 +90,28 @@ def post_user_handover(user_id: str, body: dict = Body(...)):
         from_user_id=user_id, to_user_id=to_user_id, to_team_id=to_team_id,
         created_by=current_actor_name(),
     )
+
+
+@router.post("/invitations", dependencies=[Depends(require_system_admin)])
+def create_invitation(body: dict = Body(...), actor: Principal = Depends(require_system_admin)):
+    """EP-03 §6：签发一次性邀请链接。返回体带明文 token，只这一次——前端必须
+    在这次响应里把完整的 ``/invite/{token}`` 链接展示给管理员复制走。"""
+    return invitations_domain.create_invitation(
+        org_id=_actor_org_id(actor), username=str(body.get("username") or ""),
+        display_name=str(body.get("display_name") or ""), email=str(body.get("email") or ""),
+        team_id=body.get("team_id") or None, role_id=body.get("role_id") or None,
+        created_by=current_actor_name(),
+    )
+
+
+@router.get("/invitations", dependencies=[Depends(require_system_admin)])
+def list_invitations(actor: Principal = Depends(require_system_admin)):
+    """本组织全部邀请（不含 token 明文/哈希），供管理台展示状态与撤销入口。"""
+    return {"items": invitations_domain.list_invitations(_actor_org_id(actor))}
+
+
+@router.post("/invitations/{invitation_id}/revoke", dependencies=[Depends(require_system_admin)])
+def revoke_invitation(invitation_id: str):
+    """撤销一枚尚未被接受的邀请；已接受的邀请拒绝撤销（409），已撤销的幂等
+    返回当前状态。"""
+    return invitations_domain.revoke_invitation(invitation_id, revoked_by=current_actor_name())

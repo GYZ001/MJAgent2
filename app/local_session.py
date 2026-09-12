@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 
 from fastapi import Header, HTTPException, Request
 
+from app.auth import session_policy
 from app.auth.principal import Principal, get_current_principal, set_current_principal
 from app.auth.sessions import resolve_session
 from app.config import DATA_DIR
@@ -233,7 +234,11 @@ def require_local_session(
             set_current_principal(principal)
             _principal_token.set(token)
     if principal is None:
-        raise HTTPException(401, "缺少或无效的本机会话凭证")
+        # EP-03 第二阶段：被会话策略（空闲超时/最长时长/并发超限）踢下线的
+        # 用户要看得到具体原因，不是笼统的"缺少或无效"（CLAUDE.md「拦住用户
+        # 时必须给出路」）；密钥验证不通过或查无此会话时 describe_invalid_
+        # token 会自行退化回这句通用提示，不泄露信息。
+        raise HTTPException(401, session_policy.describe_invalid_token(token))
     # 保持 get_request_session_id() 可用：Command Bus / 审批令牌绑定的是
     # 这里写入 ContextVar 的原始 token，与 Principal 是谁无关。
     bind_verified_session(request)

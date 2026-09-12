@@ -42,7 +42,7 @@ def admin_headers() -> dict[str, str]:
     return {**_HEADERS, "X-Manju-Session": create_session(user_id)}
 
 
-def _login(client: TestClient, username: str, password: str = "initpass1") -> dict:
+def _login(client: TestClient, username: str, password: str = "Initpass-9000") -> dict:
     resp = client.post(
         "/api/auth/login", json={"username": username, "password": password}, headers=_HEADERS
     )
@@ -58,7 +58,7 @@ def test_create_user_then_that_user_can_log_in_with_their_own_project_space(
     created = client.post(
         "/api/system/users",
         headers=admin_headers,
-        json={"username": "zhangsan", "password": "initpass1"},
+        json={"username": "zhangsan", "password": "Initpass-9000"},
     )
     assert created.status_code == 200, created.text
 
@@ -81,7 +81,7 @@ def test_disabling_a_user_kills_their_live_session_immediately(
     """停用必须当场断线，而不是等 7 天滑动过期自然失效。"""
     user_id = client.post(
         "/api/system/users", headers=admin_headers,
-        json={"username": "wangwu", "password": "initpass1"},
+        json={"username": "wangwu", "password": "Initpass-9000"},
     ).json()["id"]
     live = {**_HEADERS, "X-Manju-Session": _login(client, "wangwu")["session_token"]}
     assert client.get("/api/auth/me", headers=live).status_code == 200
@@ -98,26 +98,26 @@ def test_password_reset_revokes_sessions_and_requires_new_password(
 ):
     user_id = client.post(
         "/api/system/users", headers=admin_headers,
-        json={"username": "lisi", "password": "initpass1"},
+        json={"username": "lisi", "password": "Initpass-9000"},
     ).json()["id"]
     live = {**_HEADERS, "X-Manju-Session": _login(client, "lisi")["session_token"]}
     assert client.get("/api/auth/me", headers=live).status_code == 200
 
     reset = client.put(
         f"/api/system/users/{user_id}", headers=admin_headers,
-        json={"password": "newpass123"},
+        json={"password": "Newpass-9000!"},
     )
     assert reset.status_code == 200
 
     assert client.get("/api/auth/me", headers=live).status_code == 401
-    relogged = _login(client, "lisi", password="newpass123")
+    relogged = _login(client, "lisi", password="Newpass-9000!")
     assert relogged["must_change_password"] is True
 
 
 def test_can_promote_and_demote_system_admin(client: TestClient, admin_headers: dict[str, str]):
     user_id = client.post(
         "/api/system/users", headers=admin_headers,
-        json={"username": "future-admin", "password": "initpass1"},
+        json={"username": "future-admin", "password": "Initpass-9000"},
     ).json()["id"]
     promoted = client.put(
         f"/api/system/users/{user_id}", headers=admin_headers,
@@ -162,7 +162,7 @@ def test_cannot_demote_the_last_system_admin_even_if_not_self(
     my_id = me["user"]["id"]
     other = client.post(
         "/api/system/users", headers=admin_headers,
-        json={"username": "second-admin", "password": "initpass1", "is_system_admin": True},
+        json={"username": "second-admin", "password": "Initpass-9000", "is_system_admin": True},
     ).json()
     other_headers = {**_HEADERS, "X-Manju-Session": create_session(other["id"])}
 
@@ -187,28 +187,28 @@ def test_non_admin_cannot_reach_any_admin_endpoint(
     """这些接口发放权限，非管理员碰到任何一个都是提权。"""
     client.post(
         "/api/system/users", headers=admin_headers,
-        json={"username": "plain", "password": "initpass1"},
+        json={"username": "plain", "password": "Initpass-9000"},
     )
     plain = {**_HEADERS, "X-Manju-Session": _login(client, "plain")["session_token"]}
 
     assert client.get("/api/system/users", headers=plain).status_code == 403
     assert client.post(
         "/api/system/users", headers=plain,
-        json={"username": "backdoor", "password": "initpass1"},
+        json={"username": "backdoor", "password": "Initpass-9000"},
     ).status_code == 403
     assert client.post(
         "/api/system/users", headers=plain,
-        json={"username": "backdoor2", "password": "initpass1", "is_system_admin": True},
+        json={"username": "backdoor2", "password": "Initpass-9000", "is_system_admin": True},
     ).status_code == 403
 
 
 def test_duplicate_username_rejected(client: TestClient, admin_headers: dict[str, str]):
     client.post(
         "/api/system/users", headers=admin_headers,
-        json={"username": "dupe", "password": "initpass1"},
+        json={"username": "dupe", "password": "Initpass-9000"},
     )
     dup = client.post(
         "/api/system/users", headers=admin_headers,
-        json={"username": "dupe", "password": "initpass1"},
+        json={"username": "dupe", "password": "Initpass-9000"},
     )
     assert dup.status_code == 409

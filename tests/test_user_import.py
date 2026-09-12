@@ -80,12 +80,12 @@ def test_four_way_classification_and_apply(client: TestClient, admin_headers: di
     # 里字段与库中完全一致，视为“没有变化”）。
     created = client.post(
         "/api/system/users", headers=admin_headers,
-        json={"username": "laoyonghu", "password": "initpass1", "display_name": "旧显示名", "tier": "free"},
+        json={"username": "laoyonghu", "password": "Initpass-1234", "display_name": "旧显示名", "tier": "free"},
     ).json()
     assert created["tier"] == "free"
     client.post(
         "/api/system/users", headers=admin_headers,
-        json={"username": "bubianhu", "password": "initpass1", "display_name": "不变户"},
+        json={"username": "bubianhu", "password": "Initpass-1234", "display_name": "不变户"},
     )
 
     text = (

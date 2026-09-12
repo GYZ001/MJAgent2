@@ -47,6 +47,17 @@ def _sweep_expired_sso_login_exchanges() -> None:
     purge_expired_login_exchanges()
 
 
+def _sweep_expired_user_invitations() -> None:
+    """EP-03 第二阶段：邀请链接（``user_invitations``）过期/已用/已撤销行的
+    物理清理挂在同一条 6 小时巡检上（PRD §6：不新开定时器）。同一条延迟
+    import 理由，见上方 ``_sweep_expired_sso_auth_requests`` 的说明——
+    ``app.provisioning`` 是具体业务包，本文件只 import ``app.audit.store``
+    + stdlib 的边界不能被模块级 import 破坏。"""
+    from app.provisioning.invitations import sweep_expired
+
+    sweep_expired()
+
+
 async def operation_audit_sweep_loop(interval_s: float = 6 * 60 * 60) -> None:
     """周期性清理过期审计行；单轮失败不影响下一轮，也不会让循环退出。"""
     while True:
@@ -54,6 +65,7 @@ async def operation_audit_sweep_loop(interval_s: float = 6 * 60 * 60) -> None:
             sweep_expired()
             _sweep_expired_sso_auth_requests()
             _sweep_expired_sso_login_exchanges()
+            _sweep_expired_user_invitations()
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 巡检循环自身不得因单批坏数据退出
