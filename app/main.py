@@ -51,6 +51,7 @@ from app.orgs.api import router as orgs_router
 from app.orgs.bootstrap import sync_builtin_role_permissions
 from app.orgs.schema import ensure_schema as ensure_orgs_schema
 from app.planning import router as planning_router
+from app.provisioning.api import router as provisioning_router
 from app.recovery import (
     acquire_runtime_recovery_lock,
     record_passive_instance,
@@ -317,6 +318,7 @@ async def _on_unhandled(request: Request, exc: Exception):
 app.include_router(system_public_router)  # health 等公开探活，不要求会话
 app.include_router(auth_router)  # /api/auth/*：login 本身必须公开，路由自身按需挂 session deps
 app.include_router(auth_admin_router)  # /api/system/users：路由自身逐条挂 require_system_admin
+app.include_router(provisioning_router)  # /api/system/users/import|assets|handover：EP-03 第一阶段，路由自身逐条挂 require_system_admin
 app.include_router(audit_router)  # /api/system/audit/*：路由自身逐条挂 require_system_admin
 app.include_router(payments_router)  # /api/payments/orders*：账号级自助购买，路由自身挂 require_local_session
 app.include_router(payments_public_router)  # /api/payments/notify/*：渠道回调，公开端点，验签是唯一防线

@@ -164,6 +164,21 @@ allowed_exceptions = []
                     # 做 422 校验（L5，同 app.orgs.bootstrap 的理由），挂
                     # APIRouter 只被 app.main 引用，与 app.system_api/
                     # app.auth.admin_api 同一种"路由→域"入口角色
+"app.provisioning" = 2  # 2026-09-11 新增（EP-03 第一阶段）：CSV 批量导入 +
+                        # 离职移交的存取与业务动作（schema.py/importer.py/
+                        # handover.py），只 import app.db（同层）+
+                        # app.orgs.store/.schema（同层）+ app.auth.passwords
+                        # （L1）+ app.quota_tiers（同层）+ app.config（L1）+
+                        # app.audit.recorder（同层）+ stdlib
+"app.provisioning.csv_parse" = 1  # 2026-09-11 新增：覆盖 app.provisioning=2
+                                  # 前缀。CSV 解码/表头/结构性校验是纯函数，
+                                  # 零 db 依赖，真 L1——1000 行预检必须能在
+                                  # 内存里跑单元测试，不碰库（EP-03 §7 明确
+                                  # 要求）
+"app.provisioning.api" = 5  # 2026-09-11 新增：覆盖 app.provisioning=2 前缀。
+                            # REST 路由只被 app.main 引用，与
+                            # app.auth.admin_api/app.orgs.api 同一种
+                            # "路由→域"入口角色，同一条理由判 L5
 "app.orchestration.state_machine" = 2  # 2026-08-30：覆盖 app.orchestration=5
                                         # 前缀，只 import app.db，见变更说明
 "app.monitor_audit_buffer" = 2  # 2026-08-30 新增：monitor_audit 本地可靠投递
@@ -356,6 +371,9 @@ allowed_exceptions = []
 "app.models_registry.purposes" = 3  # 2026-09-11 新增：purpose 目录/启动自检，
                                      # import app.models_registry.bindings（L2）+
                                      # 函数内延迟 import app.model_registry（同层）
+"app.models_registry.video_confirmation" = 3  # 2026-09-11 新增（EP-05 第三
+    # 阶段）：视频换路前的供应商终态失败确认，函数内延迟 import
+    # app.video_providers（同层），零模块级依赖
 "app.models_registry.binding_migration" = 3  # 2026-09-11 新增：4 个旧
                                               # model_*_provider 设置迁成
                                               # priority=0 绑定。真实依赖是

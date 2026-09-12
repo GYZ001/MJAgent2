@@ -19,6 +19,34 @@
   display: flex;
   gap: 8px;
 }
+.account-admin-bar-actions {
+  display: flex;
+  gap: 8px;
+}
+.import-dialog {
+  max-width: 720px;
+}
+.import-dialog-table-wrap {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--line, #e2e2e2);
+  border-radius: 8px;
+  margin: 10px 0;
+}
+.import-dialog-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.import-dialog-table th, .import-dialog-table td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--line, #eee);
+  word-break: break-word;
+}
+.import-row-error {
+  background: rgba(220, 60, 60, 0.08);
+}
 .account-admin-fail-notice ul {
   margin: 8px 0;
   padding-left: 18px;

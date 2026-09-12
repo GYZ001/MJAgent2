@@ -122,6 +122,12 @@ EXEMPT_ROUTE_REASONS: dict[str, str] = {
     "DELETE /api/roles/{role_id}": "角色删除同上；被引用时 409 并在响应体列出引用方",
     "POST /api/projects/{project_id}/grants": "项目协作授权是组织治理操作，不是制作领域命令；仅项目所有者或组织管理员可调用",
     "DELETE /api/projects/{project_id}/grants/{subject_type}/{subject_id}": "撤销项目协作授权同上",
+    # ---- EP-03 第一阶段（2026-09-11）：CSV 批量导入 + 离职移交 ----
+    # 与 POST /api/system/users 同一分类口径：账号运维操作，不是制作领域命令，
+    # 仅系统管理员可调用，不向 Agent/MCP 开放。
+    "POST /api/system/users/import/preview": "CSV 批量导入预检；不写 users/teams 等业务表，只落一条批次台账，仅系统管理员可调用",
+    "POST /api/system/users/import/{batch_id}/apply": "CSV 批量导入确认提交，仅系统管理员可调用",
+    "POST /api/system/users/{user_id}/handover": "离职资产移交是账号运维操作，不是制作领域命令；仅系统管理员可调用",
 }
 
 

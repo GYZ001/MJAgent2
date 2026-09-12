@@ -1,26 +1,24 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   api, ApiError, deleteMyAccount, me as fetchMe,
-  type DeletedUserRow, type UserRow, type UserTier,
+  type DeletedUserRow, type UnresolvedAssetsDetail, type UserRow, type UserTier,
 } from "../../api";
 import {
   CreateAccountDialog, ResetPasswordDialog, SelfDeleteDialog, SoftDeleteConfirmDialog,
   type NewAccountDraft,
 } from "../AccountAdminDialogs";
+import { ProvisioningPanel, type ProvisioningPanelHandle } from "./ProvisioningPanel";
 import { TIERS, TIER_HINTS, TIER_LABELS } from "../../lib/tier";
 import { AccountCard, DeletedAccountCard, formatTime } from "../AccountCard";
 import "../../styles/AccountAdminPage.css";
 
 /** 账号管理——「成员」标签页，系统管理员专属，移动端优先：每个账号一张卡片，
  *  操作按钮直接铺在卡片里，不藏进横向滚动或「⋯」菜单。两类删除严格区分
- *  （CLAUDE.md「危险操作分级」）：管理员删他人账号是软删，30 天回收站可恢复，
- *  经一次确认弹窗执行（不要求打用户名——它可逆）；账号自删
- *  （仅对自己生效）立即级联清空全部项目且不可恢复，是本页唯一需要真正强确认
- *  （打对用户名）的操作，见 SelfDeleteDialog。
- *
- *  EP-01 第二阶段：从 pages/AccountAdminPage.tsx 原样搬移到这里，成为「成员/
- *  团队/角色」三标签页之一——内容与鉴权模型不变（`is_system_admin` 两档），
- *  组织角色（团队/自定义角色）是与此正交的新维度，见 TeamsTab/RolesTab。 */
+ *  （CLAUDE.md「危险操作分级」）：管理员删他人账号是软删（30 天回收站可恢复，
+ *  一次确认即可）；账号自删立即级联清空全部项目且不可恢复，是本页唯一需要
+ *  强确认（打对用户名）的操作，见 SelfDeleteDialog。EP-01 第二阶段从
+ *  pages/AccountAdminPage.tsx 搬到这里，成为「成员/团队/角色」三标签页之一；
+ *  EP-03 第一阶段加入批量导入与离职资产/移交入口，见 ProvisioningPanel。 */
 
 export default function MembersTab() {
   const [users, setUsers] = useState<UserRow[] | null>(null);
@@ -29,7 +27,6 @@ export default function MembersTab() {
   const [deletedError, setDeletedError] = useState<string | null>(null);
   const [myId, setMyId] = useState<string | null>(null);
   const [myUsername, setMyUsername] = useState<string | null>(null);
-
   const [tab, setTab] = useState<"active" | "recycle">("active");
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ text: string; err: boolean } | null>(null);
@@ -43,6 +40,7 @@ export default function MembersTab() {
   const [failedNotice, setFailedNotice] = useState<FailedNotice>(null);
   const [selfDeleteBusy, setSelfDeleteBusy] = useState(false);
   const [selfDeleteInfo, setSelfDeleteInfo] = useState<{ message: string; projectCount: number } | null>(null);
+  const provisioningRef = useRef<ProvisioningPanelHandle>(null);
 
   const loadUsers = async () => {
     setUsersError(null);
@@ -142,8 +140,16 @@ export default function MembersTab() {
     notify(`已为「${u.username}」发放 ${result.packages} 包加量包（¥${result.price_cny} · 共 ${packageMin} 分钟），当前加量余额约 ${balanceMin} 分钟`);
   });
 
+  // 409：仍有未处置资产，弹出「资产 / 移交」并带上响应体里的清单（拦住用户时必须给出路）。
   const softDeleteUser = (u: UserRow) => void runAction(async () => {
-    const result = await api.deleteUser(u.id);
+    const result = await api.deleteUser(u.id).catch((err) => {
+      if (err instanceof ApiError && err.status === 409) {
+        provisioningRef.current?.openAssets(u, err.detail as UnresolvedAssetsDetail);
+        return null;
+      }
+      throw err;
+    });
+    if (!result) return;
     notify(`账号「${u.username}」已移入回收站，30 天内可恢复`);
     if (result.projects.failed.length) {
       setFailedNotice({ title: `账号「${u.username}」名下以下项目移入回收站失败，需要人工核对`, items: result.projects.failed });
@@ -222,7 +228,9 @@ export default function MembersTab() {
             回收站{deletedCount > 0 ? ` · ${deletedCount}` : ""}
           </button>
         </div>
-        <button type="button" className="btn primary" disabled={busy} onClick={() => setCreateOpen(true)}>创建账号</button>
+        <div className="account-admin-bar-actions">
+          <ProvisioningPanel ref={provisioningRef} busy={busy} onChanged={() => void loadUsers()} />
+          <button type="button" className="btn primary" disabled={busy} onClick={() => setCreateOpen(true)}>创建账号</button></div>
       </div>
 
       {tab === "active" ? (
@@ -238,8 +246,8 @@ export default function MembersTab() {
             {(users ?? []).map((u) => (
               <AccountCard key={u.id} user={u} isSelf={u.id === myId} busy={busy}
                 onSaveDisplayName={saveDisplayName} onChangeTier={changeTier} onToggleAdmin={toggleAdmin}
-                onResetPassword={setResetTarget} onResetQuota={resetQuota} onToggleStatus={toggleStatus}
-                onSoftDelete={setSoftDeleteTarget} onSelfDeleteOpen={() => void openSelfDelete()} onGrantAddon={grantAddon} />
+                onResetPassword={setResetTarget} onResetQuota={resetQuota} onToggleStatus={toggleStatus} onSoftDelete={setSoftDeleteTarget}
+                onSelfDeleteOpen={() => void openSelfDelete()} onGrantAddon={grantAddon} onOpenAssets={(t) => provisioningRef.current?.openAssets(t)} />
             ))}
           </div>
           {!users && !usersError && <p className="account-admin-muted">载入中…</p>}

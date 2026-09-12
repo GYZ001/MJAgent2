@@ -12,6 +12,7 @@ import * as admin from "./admin";
 import * as trace from "./trace";
 import * as audit from "./audit";
 import * as orgs from "./orgs";
+import * as provisioning from "./provisioning";
 
 export * from "./jobs";
 export * from "./calls";
@@ -22,6 +23,7 @@ export * from "./admin";
 export * from "./trace";
 export * from "./audit";
 export * from "./orgs";
+export * from "./provisioning";
 
 export const api_system = {
   // jobs
@@ -82,4 +84,10 @@ export const api_system = {
   listProjectGrants: orgs.listProjectGrants,
   createProjectGrant: orgs.createProjectGrant,
   deleteProjectGrant: orgs.deleteProjectGrant,
+  // provisioning：CSV 批量导入 + 离职移交（EP-03 第一阶段）
+  importPreview: provisioning.importPreview,
+  importApply: provisioning.importApply,
+  importReportBlob: provisioning.importReportBlob,
+  getUserAssets: provisioning.getUserAssets,
+  handoverUser: provisioning.handoverUser,
 };

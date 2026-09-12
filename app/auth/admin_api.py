@@ -327,12 +327,29 @@ def grant_video_addon(
 async def delete_user(user_id: str):
     """管理员删除用户账号：软删除，30 天保留期，期间可 ``restore`` 恢复。
 
-    账号名下当前活跃的项目一并移入回收站（同一个 30 天保留期）；已经在用户
-    自己回收站里的项目保留原有 24 小时时钟，不受影响。跨层调用说明见
-    ``app.domain.account_deletion`` 模块 docstring 与
-    ``app/LAYERS.toml`` 的 ``allowed_exceptions``。
+    EP-03 §5 前置闸门：名下若仍有**活跃**项目（未处置资产），拒绝删除并
+    返回 409 + 资产清单 + ``handover`` 所需的全部参数（CLAUDE.md「拦住用户
+    时必须给出路」）——EP-01 落地协作后，直接把项目连同账号一起丢进回收站
+    会让全部协作者一起失联，必须先移交给同事或团队，见
+    ``app.provisioning.handover`` 模块文档「现状缺口」一节。移交后名下活跃
+    项目清零，本函数下面这段既有的软删/30 天保留逻辑不变。
     """
     from app.domain.account_deletion import admin_soft_delete_account_core
+    from app.provisioning.handover import has_unresolved_assets, list_user_assets
+
+    if has_unresolved_assets(user_id):
+        raise HTTPException(
+            409,
+            {
+                "message": "该账号名下仍有未处置的活跃项目，请先移交后再删除",
+                "assets": list_user_assets(user_id),
+                "handover_endpoint": f"/api/system/users/{user_id}/handover",
+                "handover_params": {
+                    "to_user_id": "接收账号的 user_id；与 to_team_id 二选一",
+                    "to_team_id": "接收团队的 team_id；与 to_user_id 二选一",
+                },
+            },
+        )
 
     outcome = await admin_soft_delete_account_core(user_id)
     return {"ok": True, **outcome}

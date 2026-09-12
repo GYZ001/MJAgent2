@@ -650,7 +650,7 @@ def patch_quota_everywhere(monkeypatch, name, value, **kwargs):
         if hasattr(module, name):
             monkeypatch.setattr(module, name, value, **kwargs)
 
-from tests.patch_targets import patch_authz_everywhere as patch_authz_everywhere, patch_models_registry_everywhere as patch_models_registry_everywhere, patch_orgs_everywhere as patch_orgs_everywhere  # 搬家：行数基线
+from tests.patch_targets import patch_authz_everywhere as patch_authz_everywhere, patch_models_registry_everywhere as patch_models_registry_everywhere, patch_orgs_everywhere as patch_orgs_everywhere, patch_provisioning_everywhere as patch_provisioning_everywhere  # 搬家：行数基线
 
 def patch_api_everywhere(monkeypatch, name, value, **kwargs):
     """Patch a symbol on ``app.api`` / ``app.domain`` in every submodule that

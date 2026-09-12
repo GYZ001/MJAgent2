@@ -13,6 +13,10 @@ from typing import Any
 _SENSITIVE_KEYS = {
     "api_key", "apikey", "authorization", "password", "secret", "token",
     "access_token", "approval_token",
+    # EP-03 第一阶段：CSV 批量导入随机生成的初始口令字段名与既有 "password" 不同，
+    # 必须单独登记——否则会静默写进 operation_audit.args_json（CLAUDE.md「新字段
+    # 要登记进去」，见 app.provisioning.importer 模块文档「一次性口令」一节）。
+    "initial_password",
 }
 
 _MAX_ARGS_JSON_CHARS = 4000

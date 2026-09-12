@@ -30,12 +30,16 @@ interface AccountCardProps {
   onToggleAdmin: Act; onResetPassword: Act; onResetQuota: Act; onToggleStatus: Act; onSoftDelete: Act;
   onSelfDeleteOpen: () => void;
   onGrantAddon: (u: UserRow, packages: number) => void;
+  /** 打开「资产 / 移交」弹窗（EP-03 §5）：查看名下项目/在途任务/存储/团队
+   *  授权，需要时先移交再删除。 */
+  onOpenAssets: Act;
 }
 
 export function AccountCard(props: AccountCardProps) {
   const {
     user, isSelf, busy, onSaveDisplayName, onChangeTier, onToggleAdmin,
     onResetPassword, onResetQuota, onToggleStatus, onSoftDelete, onSelfDeleteOpen, onGrantAddon,
+    onOpenAssets,
   } = props;
   const nameId = useId();
   const [name, setName] = useState(user.display_name);
@@ -90,6 +94,10 @@ export function AccountCard(props: AccountCardProps) {
         <button type="button" className={`btn small ${user.status === "active" ? "danger ghost" : ""}`}
           disabled={busy} onClick={() => onToggleStatus(user)}>{user.status === "active" ? "禁用" : "启用"}</button>
         <button type="button" className="btn small ghost" disabled={busy} onClick={() => setAddonOpen((v) => !v)}>加量包</button>
+        {!isSelf && (
+          <button type="button" className="btn small ghost" disabled={busy}
+            onClick={() => onOpenAssets(user)}>资产 / 移交</button>
+        )}
         {!isSelf && (
           <button type="button" className="btn small danger ghost" disabled={busy}
             onClick={() => onSoftDelete(user)}>删除（移入回收站）</button>

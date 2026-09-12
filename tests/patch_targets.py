@@ -15,17 +15,18 @@ from __future__ import annotations
 def patch_models_registry_everywhere(monkeypatch, name, value, **kwargs):
     """Patch a symbol across ``app.models_registry``'s submodules (``crypto``/
     ``keyprovider``/``store``/``migration``/``bindings``/``health``/
-    ``routing``/``ratelimit``/``purposes``/``binding_migration``) wherever it
-    is actually bound.
+    ``routing``/``ratelimit``/``purposes``/``binding_migration``/
+    ``video_confirmation``) wherever it is actually bound.
 
     Real package (EP-05 first phase, 2026-09-10; second phase 2026-09-11 added
-    the last six), not an ``exec()`` facade. Call sites use module-qualified
-    access (``from app.models_registry import store as x`` then
-    ``x.get_credential(...)``), so this isn't the classic ``from .x import y``
-    name-copy trap today, but the split-package mandate is unconditional and
-    ``app/model_registry.py``/``app/hiagent.py``/``app/video_providers.py``/
-    ``app/system_api.py`` are the flagged high-risk call sites. Walks each
-    submodule, patches ``name`` where bound.
+    six more; third phase 2026-09-11 added ``video_confirmation``), not an
+    ``exec()`` facade. Call sites use module-qualified access (``from
+    app.models_registry import store as x`` then ``x.get_credential(...)``),
+    so this isn't the classic ``from .x import y`` name-copy trap today, but
+    the split-package mandate is unconditional and ``app/model_registry.py``/
+    ``app/hiagent.py``/``app/video_providers.py``/``app/system_api.py`` are
+    the flagged high-risk call sites. Walks each submodule, patches ``name``
+    where bound.
     """
     import importlib
     import sys
@@ -37,6 +38,7 @@ def patch_models_registry_everywhere(monkeypatch, name, value, **kwargs):
         "app.models_registry.bindings", "app.models_registry.health",
         "app.models_registry.routing", "app.models_registry.ratelimit",
         "app.models_registry.purposes", "app.models_registry.binding_migration",
+        "app.models_registry.video_confirmation",
     ):
         # sys.modules 按全限定名解析，不用 getattr：同名再导出会让 getattr 静默
         # 拿错对象（2026-08-30 在 app.media_exec 拆包时实测过：get_conn 连到生产库）。
@@ -72,6 +74,39 @@ def patch_orgs_everywhere(monkeypatch, name, value, **kwargs):
         # 用 sys.modules 按全限定名解析，不要用 getattr：见
         # patch_models_registry_everywhere 的同一条注释（getattr 会被子模块
         # 再导出的同名符号覆盖，静默返回错对象）。
+        module = sys.modules.get(mod_name) or importlib.import_module(mod_name)
+        if hasattr(module, name):
+            monkeypatch.setattr(module, name, value, **kwargs)
+
+
+def patch_provisioning_everywhere(monkeypatch, name, value, **kwargs):
+    """Patch a symbol shared across ``app.provisioning``'s submodules
+    (``csv_parse``/``schema``/``importer``/``handover``/``api``) wherever it
+    is actually bound.
+
+    ``app/provisioning`` is a real package from day one (EP-03 第一阶段，
+    2026-09-11) -- each submodule holds its own module namespace, and
+    ``__init__.py`` deliberately imports none of them (same reasoning as
+    ``app/orgs/__init__.py``: importing ``app.provisioning.api`` (L5) at
+    package level would leak onto ``app.provisioning``'s own L2 layer
+    declaration). Every production call site reaches submodules via
+    module-qualified access (``from app.provisioning import importer`` then
+    ``importer.preview_batch(...)``), so this isn't the classic
+    ``from .x import y`` name-copy trap today, but the split-package mandate
+    is unconditional for every package split in this repo (14 precedents
+    before this one, ``app.orgs`` from EP-01 is the closest template). Walks
+    each submodule, patches ``name`` where bound.
+    """
+    import importlib
+    import sys
+
+    kwargs.setdefault("raising", False)
+    for mod_name in (
+        "app.provisioning.csv_parse", "app.provisioning.schema",
+        "app.provisioning.importer", "app.provisioning.handover", "app.provisioning.api",
+    ):
+        # sys.modules 按全限定名解析，不用 getattr：见 patch_orgs_everywhere 的
+        # 同一条注释（getattr 会被子模块再导出的同名符号覆盖，静默返回错对象）。
         module = sys.modules.get(mod_name) or importlib.import_module(mod_name)
         if hasattr(module, name):
             monkeypatch.setattr(module, name, value, **kwargs)
