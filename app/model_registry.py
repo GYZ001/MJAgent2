@@ -75,6 +75,23 @@ def catalog_item(provider: str) -> dict[str, Any] | None:
     return _with_credentials(item) if item is not None else None
 
 
+def catalog_item_by_id(model_id: str) -> dict[str, Any] | None:
+    """按模型库条目 id（不是 provider 字符串）取条目，供
+    ``app.models_registry.routing`` 按 ``model_bindings.model_id`` 反查
+    provider/model/base_url/api_key 时使用（EP-05 第二阶段）——``id`` 与
+    ``provider`` 是两个不同字符串：自定义条目的 ``id`` 形如 ``model_xxx``，
+    ``provider`` 是 ``custom:model_xxx``，见 ``app/system_api.py::add_model``。
+    """
+    target = str(model_id or "").strip()
+    if not target:
+        return None
+    item = next(
+        (entry for entry in catalog_items() if str(entry.get("id") or "") == target),
+        None,
+    )
+    return _with_credentials(item) if item is not None else None
+
+
 def catalog_item_for_kind(provider: str, kind: str) -> dict[str, Any] | None:
     """按 provider + 能力取条目；provider 下没有该能力时返回 None。"""
     item = catalog_item(provider)

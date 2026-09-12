@@ -793,17 +793,15 @@ def _zhipu_headers() -> dict[str, str]:
 def active_provider(kind: str) -> str:
     """当前职责选中的模型库条目（provider 就是条目的唯一标识）。
 
-    没有内置 provider 可回落了：模型库是唯一来源。设置里指向的条目不存在或不
-    具备该能力时，退而选模型库里第一条具备该能力的条目——这让"刚加完模型还没
-    保存分配"也能跑起来；一条都没有时返回空串，由调用方报"未配置模型"。
+    EP-05 第二阶段起委托给 ``app.models_registry.routing``：按
+    ``model_bindings`` 的 ``<kind>:default`` 优先级链选路（enabled 且未熔断的
+    最小 priority），没有绑定时保留旧行为——回落到模型库里第一条具备该能力的
+    条目；一条都没有时返回空串，由调用方报"未配置模型"。行为兼容细节见
+    ``routing.resolve_provider_for_kind`` 的模块文档。
     """
-    from app import model_registry
+    from app.models_registry import routing
 
-    configured = (get_setting(f"model_{kind}_provider") or "").strip()
-    if configured and model_registry.catalog_item_for_kind(configured, kind):
-        return configured
-    candidates = model_registry.items_for_kind(kind)
-    return str(candidates[0].get("provider") or "").strip() if candidates else ""
+    return routing.resolve_provider_for_kind(kind)
 
 
 def _model_connection(provider: str, model: str, fallback_url: str = "", fallback_key: str = "") -> tuple[str, dict[str, str]]:

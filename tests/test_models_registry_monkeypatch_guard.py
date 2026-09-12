@@ -60,7 +60,10 @@ CONFTEST_PATH = TESTS_DIR / "conftest.py"
 PATCH_TARGETS_PATH = TESTS_DIR / "patch_targets.py"  # helper 定义搬到这里，见 tests/patch_targets.py 模块文档
 HELPER_NAME = "patch_models_registry_everywhere"
 
-SUBMODULES = ("crypto", "keyprovider", "store", "migration")
+SUBMODULES = (
+    "crypto", "keyprovider", "store", "migration",
+    "bindings", "health", "routing", "ratelimit", "purposes", "binding_migration",
+)
 FULL_NAMES = {f"app.models_registry.{sub}" for sub in SUBMODULES}
 
 

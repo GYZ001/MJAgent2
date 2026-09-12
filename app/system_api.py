@@ -2151,6 +2151,10 @@ def put_settings(body: dict):
                                    "media_scheduler_policy", "video_ready_low_watermark",
                                    "video_ready_high_watermark", "reference_shot_cohort_limit")):
             worker.ensure_workers()
+        # 同步旧版 model_*_provider 下拉框到 model_bindings，避免"保存成功但
+        # 选路无变化"的界面谎言；逻辑见 app.models_registry.routing.sync_legacy_bindings。
+        from app.models_registry.routing import sync_legacy_bindings
+        sync_legacy_bindings(changed)
         new_version = current_version + 1
         conn.execute(
             "INSERT INTO settings(key,value) VALUES('_monitor_config_version',?) "
@@ -2210,14 +2214,9 @@ def put_keys(body: dict, _admin: None = Depends(require_system_admin)):
     """
     if body.get("confirm") is not True:
         raise HTTPException(422, "写入 API Key 需 confirm=true 二次确认")
-    provider_to_key = {
-        "hiagent": "HIAGENT_API_KEY",
-        "openrouter": "OPENROUTER_API_KEY",
-        "bailian": "BAILIAN_API_KEY",
-        "deepseek": "DEEPSEEK_API_KEY",
-        "zhipu": "ZHIPU_API_KEY",
-        "minimax_h3": "MINIMAX_H3_API_KEY",
-    }
+    # provider -> ENV 映射从 config.MANAGED_KEYS 机械反推，不再单独维护一份
+    # 字面量枚举（同一变换 config.get_key_status() 已经在用，CLAUDE.md「禁止黑白名单」）。
+    provider_to_key = {name.replace("_API_KEY", "").lower(): name for name in config.MANAGED_KEYS}
     env_keys: dict[str, str] = {}
     for provider, value in body.items():
         p = str(provider).strip().lower()

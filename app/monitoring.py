@@ -169,17 +169,21 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     },
 }
 
-_MODEL_PROVIDER_OPTIONS = {
-    "model_text_provider": ["hiagent", "openrouter", "bailian", "deepseek", "zhipu"],
-    "model_vlm_provider": ["hiagent", "openrouter", "bailian"],
-    "model_video_provider": ["hiagent", "minimax_h3"],
-    "model_image_provider": ["hiagent"],
-    "model_route": ["hiagent", "openrouter"],
-}
-for _key, _options in _MODEL_PROVIDER_OPTIONS.items():
+# provider 合法取值不再是写死枚举（CLAUDE.md「禁止黑白名单与枚举穷举」）：
+# 判据改在 normalize_setting 的 "provider_ref" 分支里从模型库活数据推导——新增
+# 一家供应商只需要在模型中心加一条，这里不用改代码。EP-05 第二阶段起这 5 个键
+# 已不是选路的权威来源（app.models_registry.routing 按 model_bindings 选路），
+# 但界面仍在写它们，写入必须真的生效（见 app.system_api.put_settings 里
+# sync_legacy_binding 的调用），校验因此仍然保留、只是不再挂一张固定名单。
+_LEGACY_PROVIDER_SETTING_KEYS = (
+    "model_text_provider", "model_vlm_provider",
+    "model_video_provider", "model_image_provider", "model_route",
+)
+for _key in _LEGACY_PROVIDER_SETTING_KEYS:
     SETTINGS_SCHEMA[_key] = {
-        "label": _key, "type": "enum", "default": config.DEFAULT_SETTINGS.get(_key, _options[0]),
-        "options": _options, "immediate": True, "experimental": False,
+        "label": _key, "type": "provider_ref",
+        "default": config.DEFAULT_SETTINGS.get(_key, ""),
+        "immediate": True, "experimental": False,
     }
 
 for _key in (
@@ -222,16 +226,21 @@ def public_settings_schema() -> dict[str, dict[str, Any]]:
     return deepcopy(SETTINGS_SCHEMA)
 
 
-def _custom_provider_exists(value: str) -> bool:
-    if not value.startswith("custom:"):
-        return False
-    try:
-        rows = json.loads(get_conn().execute(
-            "SELECT value FROM settings WHERE key='custom_models'"
-        ).fetchone()["value"] or "[]")
-    except (TypeError, KeyError, json.JSONDecodeError):
-        return False
-    return any(isinstance(item, dict) and item.get("provider") == value for item in rows)
+def _known_provider_identity(raw: str) -> bool:
+    """``model_*_provider``/``model_route`` 的合法值判据：从数据推导，不挂
+    固定名单。要么模型库里真有这条条目（覆盖 ``custom:*`` 与已迁移的内置
+    条目，任意 kind），要么是内置协议家族的字面量——后者取自
+    ``config.MANAGED_KEYS``（PUT /api/keys 已经在用的同一份真源，不是又起
+    一份枚举），覆盖"env 尚未配置、模型库还没镜像出这条内置条目"的早期部署
+    窗口，与 ``app.system_health._FAMILIES`` 同一口径。不做 kind 匹配——旧版
+    ``_custom_provider_exists`` 也不做，保持"存在性判据"这条既有语义不变。
+    """
+    from app import config
+    from app.model_registry import catalog_item
+
+    if catalog_item(raw) is not None:
+        return True
+    return raw in {name.replace("_API_KEY", "").lower() for name in config.MANAGED_KEYS}
 
 
 def normalize_setting(key: str, value: Any) -> str:
@@ -271,14 +280,14 @@ def normalize_setting(key: str, value: Any) -> str:
     raw = str(value).strip()
     if kind == "enum":
         allowed = set(spec.get("options") or [])
-        if raw not in allowed and not (
-            key in {
-                "model_text_provider", "model_vlm_provider",
-                "model_video_provider", "model_image_provider",
-            }
-            and _custom_provider_exists(raw)
-        ):
+        if raw not in allowed:
             raise HTTPException(422, detail={"field": key, "message": f"只允许：{', '.join(sorted(allowed))}"})
+        return raw
+    if kind == "provider_ref":
+        if not raw or not _known_provider_identity(raw):
+            raise HTTPException(422, detail={
+                "field": key, "message": "模型库中不存在该服务商条目，请先在模型中心添加",
+            })
         return raw
     if not raw and spec.get("allow_empty"):
         return ""
