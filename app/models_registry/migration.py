@@ -109,8 +109,13 @@ def _migrate_one_item(item: dict[str, Any], plaintext_credentials: dict[str, Any
         return result
     store.put_credential(model_id, base_url=base_url, api_key=api_key, rotated_by="migration")
     result["source"] = source
-    if source == "custom_models(inline)" and item.get("api_key"):
-        item.pop("api_key", None)  # 连空串都不留，避免下游把空串当"已配置"
+    if "api_key" in item:
+        # 判据是"目录项上还有没有这个字段"，不是"这次落库用的是哪个来源的值"：
+        # 生产数据演练抓到的真漏——一条目录项同时有内联 api_key 和
+        # settings.model_credentials 覆盖、且两者不同值时，上面按优先级选中了
+        # 凭据表那把（正确），但旧判据 source == "custom_models(inline)" 为
+        # False，从没走到这里，内联明文就一直留在 custom_models 里没剔除。
+        item.pop("api_key")
         result["stripped_inline"] = True
     return result
 

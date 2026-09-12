@@ -55,6 +55,67 @@ def test_migrates_inline_custom_provider_key_and_strips_catalog() -> None:
     assert "api_key" not in item  # 连空串都不留，不是留一个假的"已配置"信号
 
 
+def test_conflicting_inline_and_override_key_strips_inline_regardless_of_winner() -> None:
+    """生产数据演练抓到的真漏（合成假数据照抄真实库的形状，不用真值）：一条
+    目录项同时有内联 api_key 与 settings.model_credentials 覆盖、且两者不同值时，
+    迁移正确地按覆盖优先落库，但旧代码的剥离判据挂在"这次是不是从内联分支取值"
+    （``source == "custom_models(inline)"``），覆盖分支胜出时这个判据恒为 False，
+    从没触发过剥离——七条模型里唯独这一条的内联明文永远留在 custom_models 里。
+
+    形状照抄生产：7 条目录项、5 条旧凭据表条目、其中 1 条 id 两边都有且两边
+    Key 不同（``mdl_conflict``）、3 条目录项（``mdl_conflict``/``mdl_shared_a``/
+    ``mdl_shared_b``）共用同一把内联 Key 字面量——这正是子串查找会产生连带
+    命中、必须以逐条字段检查为主判据的那个形状。
+    """
+    shared_inline_key = "sk-shared-inline-0001"  # 3 条目录项的内联值相同
+    override_key = "sk-override-wins-0002"  # mdl_conflict 的覆盖值，与内联不同
+
+    def _item(model_id: str, *, inline_key: str | None) -> dict:
+        item = {
+            "id": model_id, "provider": f"custom:{model_id}", "provider_label": "网关",
+            "model": "m", "label": model_id, "kinds": ["text"], "protocol": "openai",
+            "base_url": "https://gw.example.com/v1",
+        }
+        if inline_key is not None:
+            item["api_key"] = inline_key
+        return item
+
+    _set_catalog([
+        _item("mdl_shared_a", inline_key=shared_inline_key),
+        _item("mdl_shared_b", inline_key=shared_inline_key),
+        _item("mdl_conflict", inline_key=shared_inline_key),  # 两边都有、值不同
+        _item("mdl_override_only_1", inline_key=None),
+        _item("mdl_override_only_2", inline_key=None),
+        _item("mdl_override_only_3", inline_key=None),
+        _item("mdl_override_only_4", inline_key=None),
+    ])
+    _set_plaintext_credentials({
+        "mdl_conflict": {"base_url": "https://gw.example.com/v1", "api_key": override_key},
+        "mdl_override_only_1": {"base_url": "https://gw.example.com/v1", "api_key": "sk-o1"},
+        "mdl_override_only_2": {"base_url": "https://gw.example.com/v1", "api_key": "sk-o2"},
+        "mdl_override_only_3": {"base_url": "https://gw.example.com/v1", "api_key": "sk-o3"},
+        "mdl_override_only_4": {"base_url": "https://gw.example.com/v1", "api_key": "sk-o4"},
+    })
+
+    migrate_model_credentials(force=True)
+
+    # 主判据：覆盖优先级选对了值（凭据表那把，不是内联那把）。
+    assert store.get_credential("mdl_conflict")["api_key"] == override_key
+
+    # 主判据：逐条字段检查——七条全部不再带 api_key 字段，不看子串。
+    catalog = json.loads(get_setting("custom_models") or "[]")
+    assert len(catalog) == 7
+    for item in catalog:
+        assert "api_key" not in item, f"{item['id']} 仍残留内联明文 api_key"
+
+    # 兜底判据：子串查找只作为补充——单独看会被"3 条共用同一把 Key"误导
+    # （3 条里只要有 1 条真的没剔干净，子串就会命中，但命中数≠出问题的条目数，
+    # 这正是"我第一次就是被子串口径误导"的根因，所以逐条字段检查必须放在前面）。
+    blob = get_setting("custom_models") or ""
+    assert shared_inline_key not in blob
+    assert override_key not in blob
+
+
 def test_migrates_env_fallback_when_item_has_no_own_key(monkeypatch) -> None:
     from app import config
 
