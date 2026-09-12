@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +117,27 @@ def append_error_log(row: dict[str, Any]) -> None:
 def append_operation_audit(row: dict[str, Any]) -> None:
     """把一条写失败的 operation_audit 行落进本地缓冲；键与该表列名一致。不抛出。"""
     _append_row(_operation_audit_buffer_path, row)
+
+
+def note_schema_ensure_failure(module: str, exc: BaseException) -> None:
+    """各包 lazy 建表（``app.orgs``/``app.sso``/``app.provisioning``/
+    ``app.models_registry``/``app.quota_policy`` 的 ``schema.ensure_schema()``）
+    抢不到独立连接的写锁时的可观测记录——落本地文件缓冲（``append()`` 同一条
+    通道，不碰 SQLite 写锁，不会跟任何正在进行的写事务抢锁），由
+    ``monitor_audit_flush_loop`` 之后补进 ``monitor_audit`` 表。
+
+    调用方（各包 ``ensure_schema()`` 的 ``except`` 分支）不能把异常直接上抛：
+    并发进程/请求同时触发建表、或调用方自己已持有写锁时抢不到锁，都是预期
+    状况，抛出会打断当时其实不需要这张新表的正常请求；但也不能悄悄吞掉——
+    这里保证下次再发生同类锁争用时，有人能在审计里看见，而不是只看到下游
+    一句 no such table。``module`` 用调用方的 ``__name__``（如
+    ``app.orgs.schema``），本函数自己不抛出。
+    """
+    append(
+        f"schemafail_{uuid.uuid4().hex[:12]}", time.time(), "lazy_schema_ensure_failed",
+        "schema", module, "error",
+        json.dumps({"error": repr(exc)}, ensure_ascii=False),
+    )
 
 
 def _append_row(path_factory: Any, row: dict[str, Any]) -> None:

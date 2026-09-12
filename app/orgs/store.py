@@ -8,9 +8,14 @@
 
 表结构、org_default 种子与 ``users``/``projects.org_id`` 回填在
 ``app/orgs/schema.py``（lazy 建表，``app/db.py`` 基线已用满，见该模块
-文档）；每个函数入口调用 ``schema.ensure_schema()`` 兜底（多数测试不经
-``app.main`` lifespan，必须靠这条兜底，与 ``app/models_registry/store.py``
-同一惯例）。
+文档）；每个函数入口调用 ``schema.ensure_tables_on_connection(conn)`` 兜底
+（同连接、不开新连接、不申请新锁）——本模块的函数会被
+``app.quota_policy.allocation`` 在调用方已持有的 ``BEGIN IMMEDIATE`` 事务里
+直接调用，若沿用 ``schema.ensure_schema()`` 会跟调用方抢写锁、2 秒超时后
+静默建表失败（见 ``app/orgs/schema.py`` 模块文档「两个入口」一段）。种子
+（org_default + 5 个内置角色元数据行）不在这条兜底里做，由
+``app.main`` lifespan 与测试模板初始化各自调用一次完整的
+``schema.ensure_schema()`` 保证。
 
 **「迁移后行为零变化」不靠一次性把既有账号写进 team_members 达成**（早期
 设计草案这样做过，被 ``tests/test_rbac_enforcement_evidence.py`` 的一条端到端
@@ -37,7 +42,7 @@ from app.orgs.schema import ORG_DEFAULT_ID as ORG_DEFAULT_ID
 
 
 def create_org(conn: sqlite3.Connection, *, name: str, created_by: str, tenant_id: str = "default") -> str:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     org_id = new_id("org")
     conn.execute(
         "INSERT INTO orgs(id, tenant_id, name, status, created_at, created_by) VALUES(?,?,?,?,?,?)",
@@ -47,13 +52,13 @@ def create_org(conn: sqlite3.Connection, *, name: str, created_by: str, tenant_i
 
 
 def get_org(conn: sqlite3.Connection, org_id: str) -> dict | None:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     row = conn.execute("SELECT * FROM orgs WHERE id=?", (org_id,)).fetchone()
     return dict(row) if row else None
 
 
 def create_team(conn: sqlite3.Connection, *, org_id: str, name: str, description: str | None, created_by: str) -> str:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     team_id = new_id("team")
     conn.execute(
         "INSERT INTO teams(id, org_id, name, description, status, created_at, created_by) "
@@ -64,13 +69,13 @@ def create_team(conn: sqlite3.Connection, *, org_id: str, name: str, description
 
 
 def get_team(conn: sqlite3.Connection, team_id: str) -> dict | None:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     row = conn.execute("SELECT * FROM teams WHERE id=?", (team_id,)).fetchone()
     return dict(row) if row else None
 
 
 def list_teams(conn: sqlite3.Connection, org_id: str) -> list[dict]:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     rows = conn.execute("SELECT * FROM teams WHERE org_id=? ORDER BY created_at", (org_id,)).fetchall()
     return [dict(r) for r in rows]
 
@@ -80,7 +85,7 @@ def update_team(
     name: str | None, description: str | None, status: str | None,
 ) -> None:
     """局部更新：只有非 None 的字段会被写入，调用方决定要改哪些列。"""
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     fields: list[str] = []
     values: list[object] = []
     if name is not None:
@@ -99,7 +104,7 @@ def update_team(
 
 
 def add_team_member(conn: sqlite3.Connection, *, team_id: str, user_id: str, role_id: str, created_by: str) -> None:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     conn.execute(
         "INSERT INTO team_members(team_id, user_id, role_id, created_at, created_by) "
         "VALUES(?,?,?,?,?) "
@@ -109,13 +114,13 @@ def add_team_member(conn: sqlite3.Connection, *, team_id: str, user_id: str, rol
 
 
 def remove_team_member(conn: sqlite3.Connection, *, team_id: str, user_id: str) -> bool:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     cur = conn.execute("DELETE FROM team_members WHERE team_id=? AND user_id=?", (team_id, user_id))
     return cur.rowcount > 0
 
 
 def list_team_members(conn: sqlite3.Connection, team_id: str) -> list[dict]:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     rows = conn.execute(
         "SELECT * FROM team_members WHERE team_id=? ORDER BY created_at", (team_id,)
     ).fetchall()
@@ -123,7 +128,7 @@ def list_team_members(conn: sqlite3.Connection, team_id: str) -> list[dict]:
 
 
 def list_team_ids_for_user(conn: sqlite3.Connection, user_id: str) -> frozenset[str]:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     rows = conn.execute("SELECT team_id FROM team_members WHERE user_id=?", (user_id,)).fetchall()
     return frozenset(r["team_id"] for r in rows)
 
@@ -132,7 +137,7 @@ def create_role(
     conn: sqlite3.Connection, *, org_id: str | None, key: str, name: str, description: str | None,
     builtin: bool, created_by: str,
 ) -> str:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     role_id = new_id("role")
     ts = now()
     conn.execute(
@@ -144,13 +149,13 @@ def create_role(
 
 
 def get_role(conn: sqlite3.Connection, role_id: str) -> dict | None:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     row = conn.execute("SELECT * FROM roles WHERE id=?", (role_id,)).fetchone()
     return dict(row) if row else None
 
 
 def get_role_by_key(conn: sqlite3.Connection, org_id: str | None, key: str) -> dict | None:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     if org_id is None:
         row = conn.execute("SELECT * FROM roles WHERE org_id IS NULL AND key=?", (key,)).fetchone()
     else:
@@ -160,7 +165,7 @@ def get_role_by_key(conn: sqlite3.Connection, org_id: str | None, key: str) -> d
 
 def list_roles(conn: sqlite3.Connection, org_id: str) -> list[dict]:
     """本组织自定义角色 + 全局内置模板（org_id IS NULL）。"""
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     rows = conn.execute(
         "SELECT * FROM roles WHERE org_id=? OR org_id IS NULL ORDER BY builtin DESC, created_at", (org_id,)
     ).fetchall()
@@ -168,7 +173,7 @@ def list_roles(conn: sqlite3.Connection, org_id: str) -> list[dict]:
 
 
 def delete_role(conn: sqlite3.Connection, role_id: str) -> None:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     conn.execute("DELETE FROM roles WHERE id=?", (role_id,))
 
 
@@ -176,7 +181,7 @@ def role_reference_detail(conn: sqlite3.Connection, role_id: str) -> dict[str, l
     """角色仍被哪些团队成员/项目授权引用——不只是计数，供 409 响应体把引用方
     列出来（CLAUDE.md「拦住用户时必须给出路」：只给一个数字，管理员无从下手
     去解除哪一条引用）。"""
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     team_rows = conn.execute(
         "SELECT tm.team_id, t.name AS team_name, tm.user_id FROM team_members tm "
         "JOIN teams t ON t.id = tm.team_id WHERE tm.role_id=? ORDER BY tm.created_at",
@@ -200,7 +205,7 @@ def role_reference_detail(conn: sqlite3.Connection, role_id: str) -> dict[str, l
 
 
 def set_role_permissions(conn: sqlite3.Connection, role_id: str, permission_keys: frozenset[str]) -> None:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     conn.execute("DELETE FROM role_permissions WHERE role_id=?", (role_id,))
     conn.executemany(
         "INSERT INTO role_permissions(role_id, permission_key) VALUES(?,?)",
@@ -209,7 +214,7 @@ def set_role_permissions(conn: sqlite3.Connection, role_id: str, permission_keys
 
 
 def list_role_permission_keys(conn: sqlite3.Connection, role_id: str) -> frozenset[str]:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     rows = conn.execute("SELECT permission_key FROM role_permissions WHERE role_id=?", (role_id,)).fetchall()
     return frozenset(r["permission_key"] for r in rows)
 
@@ -218,7 +223,7 @@ def create_project_grant(
     conn: sqlite3.Connection, *, project_id: str, subject_type: str, subject_id: str, role_id: str,
     created_by: str, expires_at: float | None = None,
 ) -> None:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     conn.execute(
         "INSERT INTO project_grants(project_id, subject_type, subject_id, role_id, created_at, created_by, expires_at) "
         "VALUES(?,?,?,?,?,?,?) "
@@ -229,7 +234,7 @@ def create_project_grant(
 
 
 def delete_project_grant(conn: sqlite3.Connection, *, project_id: str, subject_type: str, subject_id: str) -> bool:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     cur = conn.execute(
         "DELETE FROM project_grants WHERE project_id=? AND subject_type=? AND subject_id=?",
         (project_id, subject_type, subject_id),
@@ -238,7 +243,7 @@ def delete_project_grant(conn: sqlite3.Connection, *, project_id: str, subject_t
 
 
 def list_project_grants(conn: sqlite3.Connection, project_id: str) -> list[dict]:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     rows = conn.execute(
         "SELECT * FROM project_grants WHERE project_id=? ORDER BY created_at", (project_id,)
     ).fetchall()
@@ -246,20 +251,20 @@ def list_project_grants(conn: sqlite3.Connection, project_id: str) -> list[dict]
 
 
 def user_org_id(conn: sqlite3.Connection, user_id: str) -> str | None:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     row = conn.execute("SELECT org_id FROM users WHERE id=?", (user_id,)).fetchone()
     return row["org_id"] if row else None
 
 
 def project_org_id(conn: sqlite3.Connection, project_id: str) -> str | None:
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     row = conn.execute("SELECT org_id FROM projects WHERE id=?", (project_id,)).fetchone()
     return row["org_id"] if row else None
 
 
 def user_has_org_admin(conn: sqlite3.Connection, user_id: str, org_id: str | None) -> bool:
     """用户是否在本组织内的任意团队持有 key='org_admin' 的角色。"""
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     if not org_id:
         return False
     row = conn.execute(
@@ -274,7 +279,7 @@ def user_has_org_admin(conn: sqlite3.Connection, user_id: str, org_id: str | Non
 
 def project_grant_hit(conn: sqlite3.Connection, project_id: str, user_id: str, team_ids: frozenset[str]) -> bool:
     """项目是否直接授予了该用户本人，或授予了他所属的某个团队（且未过期）。"""
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     ts = now()
     row = conn.execute(
         "SELECT 1 FROM project_grants "
@@ -303,7 +308,7 @@ def user_permission_keys(conn: sqlite3.Connection, user_id: str) -> frozenset[st
     的文档）：这里只回答"这个人一般能不能做这类动作"，不区分具体项目——
     "碰不碰得到这个项目"由 ``app/authz/resolve.py`` 的 HTTP 边界另行判断。
     """
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     ts = now()
     rows = conn.execute(
         "SELECT DISTINCT rp.permission_key FROM team_members tm "
@@ -329,7 +334,7 @@ def user_is_governed(conn: sqlite3.Connection, user_id: str, team_ids: frozenset
     can()`` 继续只受 ``admin_only`` 把关；一旦二者任一非空，就严格按
     ``role_permissions`` 判定（含权限点为空集合时拒绝一切）。
     """
-    schema.ensure_schema()
+    schema.ensure_tables_on_connection(conn)
     if team_ids:
         return True
     row = conn.execute(
