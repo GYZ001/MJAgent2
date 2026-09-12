@@ -395,6 +395,14 @@ def test_create_project_rolls_back_partial_rows(monkeypatch) -> None:
     conn.row_factory = sqlite3.Row
     conn.executescript(
         """
+        -- _create_project_core 现在会先调
+        -- app.orgs.schema.ensure_tables_on_connection(conn) 兜底建列（多数
+        -- 生产/测试宿主已经在 app.main.lifespan()/conftest 模板初始化里跑过
+        -- 完整的 app.orgs.schema.ensure_schema()，这条简化 schema 走的是绕开
+        -- lifespan 的最小连接，没有这张表就没地方挂 org_id 列，会以
+        -- OperationalError: no such table: users 收场，同样掩盖真正要验的
+        -- 回滚行为）；这里的 users 只需要存在，不需要真实列。
+        CREATE TABLE users(id TEXT PRIMARY KEY);
         CREATE TABLE projects(
             id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT,
             novel_chars INTEGER, created_at REAL,
@@ -405,7 +413,11 @@ def test_create_project_rolls_back_partial_rows(monkeypatch) -> None:
             -- 同理：三档会员配额的项目数闸门（app/quota.py::check_project_slot）
             -- 在建项目事务里查 `deleted_at IS NULL`，缺这列同样会把
             -- OperationalError 误判成"回滚生效"。
-            deleted_at REAL
+            deleted_at REAL,
+            -- 同理：建项目现在显式写入组织归属（见
+            -- app/domain/projects/create.py:_creation_org_id，修组织维度悄悄
+            -- 失效的缺口），缺这列同样会把 OperationalError 误判成"回滚生效"。
+            org_id TEXT
         );
         CREATE TABLE chapters(
             id INTEGER PRIMARY KEY AUTOINCREMENT,

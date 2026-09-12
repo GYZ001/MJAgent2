@@ -679,7 +679,11 @@ max_lines_tests = 500
 # 2026-09-01 1112 -> 1144：app/schemas.py 拆包按 CLAUDE.md 要求补 patch_schemas_everywhere
 # （不补的话 8 处 monkeypatch.setattr(schemas, ...) 会静默失效、测试照绿而桩没生效）。
 # tests/ 的基线本就是当天纳入闸门时的快照，这里一并按同一次改动的最终状态重取。
-"tests/conftest.py" = 1144
+# 2026-09-12 1144 -> 1132：企业化改造几轮下来实测超基线 8 行，把
+# _initialize_database_template() 的种子建表逻辑与 _clone_database() 抽到
+# tests/db_template.py（纯搬移，全局状态归属不变，见该文件模块文档），
+# conftest.py 只留调用；棘轮只降不升，按抽完后的实测值下拧。
+"tests/conftest.py" = 1132
 "tests/test_screenplay_scene_repair.py" = 1066
 "tests/test_core_regressions.py" = 1051
 "tests/test_minimax_h3.py" = 1037

@@ -135,6 +135,22 @@ allowed_exceptions = []
 "app.quota_expiry" = 2  # 2026-08-30 新增：会员到期闸门，只 import app.db、
                         # app.quota（取 QuotaExceeded，同层单向——app.quota
                         # 反过来不 import 本模块，不构成环）
+"app.quota_policy" = 2  # 2026-09-11 新增（EP-04 第一阶段）：quota_plans/
+                        # quota_allocations/quota_alerts 表化策略与三级（org/
+                        # team/user）取最紧判定，schema.py/plans.py/
+                        # allocation.py/usage_query.py，只 import app.db、
+                        # app.quota_tiers（同层，取 TIER_TABLE 做种子/回退，
+                        # 不是 app.quota 本体）、app.orgs.store（同层，取
+                        # org_id/team_ids）+ stdlib。app.quota 反过来 import
+                        # 本包做 effective_limits 的取值来源（同层单向）——
+                        # 本包任何模块都不得反向 import app.quota，否则叠加
+                        # 到既有的 db ↔ quota ↔ quota_addon ↔ quota_tiers 那团
+                        # 循环上
+"app.quota_policy.api" = 5  # 2026-09-11 新增：覆盖 app.quota_policy=2 前缀。
+                            # REST 路由需要 app.auth.principal/app.orgs.store
+                            # 做鉴权，挂 APIRouter 只被 app.main 引用，与
+                            # app.orgs.api/app.provisioning.api 同一种
+                            # "路由→域"入口角色，同一条理由判 L5
 "app.artifacts" = 2
 "app.evidence" = 2
 "app.errors" = 2  # 2026-08-30：原 L0，只 import app.db，见文件末尾变更说明
@@ -179,6 +195,23 @@ allowed_exceptions = []
                             # REST 路由只被 app.main 引用，与
                             # app.auth.admin_api/app.orgs.api 同一种
                             # "路由→域"入口角色，同一条理由判 L5
+"app.sso" = 2  # 2026-09-11 新增（EP-02 第一阶段）：企业身份接入与单点登录的
+               # 存取与业务动作（schema.py/store.py/provision.py），只 import
+               # app.db（同层）+ app.orgs.store（同层）+
+               # app.models_registry.crypto/.keyprovider（L1）+ stdlib
+"app.sso.profiles" = 1  # 2026-09-11 新增：覆盖 app.sso=2 前缀。IdP 协议差异
+                        # 的纯配置模板，零 app 内部依赖、零 db、零网络，真 L1
+"app.sso.oidc_verify" = 1  # 2026-09-11 新增：覆盖 app.sso=2 前缀。JWT 解析 +
+                           # RS256/ES256 签名校验，只 import cryptography +
+                           # stdlib，零 app 内部依赖，真 L1
+"app.sso.oidc" = 3  # 2026-09-11 新增：覆盖 app.sso=2 前缀。OIDC/OAuth2 出网
+                    # discovery/token/userinfo/JWKS，import httpx +
+                    # app.sso.oidc_verify/.profiles（均 L1），与
+                    # app.hiagent/app.seedance 等其它出网供应商适配同档
+"app.sso.api" = 5  # 2026-09-11 新增：覆盖 app.sso=2 前缀。REST 路由只被
+                   # app.main 引用，与 app.orgs.api/app.auth.api 同一种
+                   # "路由→域"入口角色，同一条理由判 L5
+"app.sso.admin_api" = 5  # 2026-09-11 新增：同上，IdP 配置 CRUD + 强制 SSO 开关
 "app.orchestration.state_machine" = 2  # 2026-08-30：覆盖 app.orchestration=5
                                         # 前缀，只 import app.db，见变更说明
 "app.monitor_audit_buffer" = 2  # 2026-08-30 新增：monitor_audit 本地可靠投递

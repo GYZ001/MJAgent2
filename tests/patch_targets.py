@@ -136,3 +136,36 @@ def patch_authz_everywhere(monkeypatch, name, value, **kwargs):
         module = sys.modules.get(mod_name) or importlib.import_module(mod_name)
         if hasattr(module, name):
             monkeypatch.setattr(module, name, value, **kwargs)
+
+
+def patch_sso_everywhere(monkeypatch, name, value, **kwargs):
+    """Patch a symbol shared across ``app.sso``'s submodules (``schema``/
+    ``store``/``profiles``/``oidc_verify``/``oidc``/``provision``/``api``/
+    ``admin_api``) wherever it is actually bound.
+
+    ``app/sso`` is a real package from day one (EP-02 第一阶段，2026-09-11) --
+    each submodule holds its own module namespace, and ``__init__.py``
+    deliberately imports none of them (same reasoning as ``app/orgs/
+    __init__.py``: importing ``app.sso.api``/``app.sso.admin_api`` (L5) at
+    package level would leak onto ``app.sso``'s own L2 layer declaration).
+    Every production call site reaches submodules via module-qualified
+    access (``from app.sso import store as sso_store`` then
+    ``sso_store.get_idp(...)``), so this isn't the classic ``from .x import
+    y`` name-copy trap today, but the split-package mandate is unconditional
+    for every package split in this repo (15 precedents before this one,
+    ``app.provisioning`` from EP-03 is the closest template). Walks each
+    submodule, patches ``name`` where bound.
+    """
+    import importlib
+    import sys
+
+    kwargs.setdefault("raising", False)
+    for mod_name in (
+        "app.sso.schema", "app.sso.store", "app.sso.profiles", "app.sso.oidc_verify",
+        "app.sso.oidc", "app.sso.provision", "app.sso.api", "app.sso.admin_api",
+    ):
+        # sys.modules 按全限定名解析，不用 getattr：见 patch_orgs_everywhere 的
+        # 同一条注释（getattr 会被子模块再导出的同名符号覆盖，静默返回错对象）。
+        module = sys.modules.get(mod_name) or importlib.import_module(mod_name)
+        if hasattr(module, name):
+            monkeypatch.setattr(module, name, value, **kwargs)

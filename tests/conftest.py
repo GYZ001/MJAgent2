@@ -650,7 +650,7 @@ def patch_quota_everywhere(monkeypatch, name, value, **kwargs):
         if hasattr(module, name):
             monkeypatch.setattr(module, name, value, **kwargs)
 
-from tests.patch_targets import patch_authz_everywhere as patch_authz_everywhere, patch_models_registry_everywhere as patch_models_registry_everywhere, patch_orgs_everywhere as patch_orgs_everywhere, patch_provisioning_everywhere as patch_provisioning_everywhere  # 搬家：行数基线
+from tests.patch_targets import patch_authz_everywhere as patch_authz_everywhere, patch_models_registry_everywhere as patch_models_registry_everywhere, patch_orgs_everywhere as patch_orgs_everywhere, patch_provisioning_everywhere as patch_provisioning_everywhere, patch_sso_everywhere as patch_sso_everywhere  # 搬家：行数基线
 
 def patch_api_everywhere(monkeypatch, name, value, **kwargs):
     """Patch a symbol on ``app.api`` / ``app.domain`` in every submodule that
@@ -909,6 +909,9 @@ def _release_local_connection(db, *, owned_database: Path) -> None:
         connection.close()
 
 
+from tests import db_template  # 搬家：行数基线，见 tests/db_template.py 模块文档
+
+
 def _initialize_database_template(db) -> None:
     global _DATABASE_TEMPLATE_INITIALIZED
 
@@ -917,27 +920,12 @@ def _initialize_database_template(db) -> None:
     if _DATABASE_TEMPLATE is None:
         raise RuntimeError("pytest database template is not configured")
 
-    _restore_isolated_runtime(db, database_path=_DATABASE_TEMPLATE)
-    connection = db.get_conn()
-    try:
-        db.init_db()
-        from app.orgs.bootstrap import sync_builtin_role_permissions  # 自带建表+目录加载
-        sync_builtin_role_permissions(connection)
-    finally:
-        connection.close()
-        db._local.conn = None
+    db_template.initialize_database_template(
+        db,
+        database_template=_DATABASE_TEMPLATE,
+        restore_isolated_runtime=_restore_isolated_runtime,
+    )
     _DATABASE_TEMPLATE_INITIALIZED = True
-
-
-def _clone_database(source: Path, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    source_connection = sqlite3.connect(source)
-    destination_connection = sqlite3.connect(destination)
-    try:
-        source_connection.backup(destination_connection)
-    finally:
-        destination_connection.close()
-        source_connection.close()
 
 
 def _reset_command_bus_runtime(capability_bus) -> None:
@@ -1000,7 +988,7 @@ def _reset_capability_runtime(
     _initialize_database_template(db)
 
     test_database = tmp_path / "manju.db"
-    _clone_database(_DATABASE_TEMPLATE, test_database)
+    db_template.clone_database(_DATABASE_TEMPLATE, test_database)
     _restore_isolated_runtime(db, database_path=test_database)
     # app.capabilities.dispatch 不再自带 ensure_catalog_loaded()（避免 dispatch <->
     # catalog 反向 import 焊环，见该模块的注释）；测试路径下由这里统一兜底，

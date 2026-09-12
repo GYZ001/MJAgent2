@@ -52,6 +52,9 @@ from app.orgs.bootstrap import sync_builtin_role_permissions
 from app.orgs.schema import ensure_schema as ensure_orgs_schema
 from app.planning import router as planning_router
 from app.provisioning.api import router as provisioning_router
+from app.sso.admin_api import router as sso_admin_router
+from app.sso.api import router as sso_router
+from app.sso.schema import ensure_schema as ensure_sso_schema
 from app.recovery import (
     acquire_runtime_recovery_lock,
     record_passive_instance,
@@ -63,6 +66,9 @@ from app.observability.api import router as observability_router
 from app.payments.routes import public_router as payments_public_router
 from app.payments.routes import router as payments_router
 from app.provider_task_zero_cost_api import router as provider_task_zero_cost_router
+from app.quota_policy.api import router as quota_policy_router
+from app.quota_policy.api import usage_router as quota_usage_router
+from app.quota_policy.schema import ensure_schema as ensure_quota_policy_schema
 from app.system_api import public_router as system_public_router
 from app.system_api import router as system_router
 
@@ -92,6 +98,38 @@ _SESSION_DEPS = [Depends(require_local_session)]
 _PROJECT_OWNER_DEPS = _SESSION_DEPS + [Depends(require_project_owner_access)]
 
 
+async def _start_recovery_owner_tasks() -> None:
+    """恢复协调者实例专属的启动动作：清理遗留剧本 + 崩溃恢复 + 常驻巡检任务
+    的 spawn。从 ``lifespan()`` 抽出（该函数持续被多个并行落地的 EP 各自
+    加一行 schema/router 初始化调用，任何一次新增都可能压过单函数 50 行
+    上限）——纯搬移，不改变任何调用顺序/行为。
+    """
+    purge_legacy_screenplays()
+    await recover_all()
+    from app.video_supervisor import video_supervisor_watchdog_loop
+    task_registry.spawn("system", "video_supervisor_watchdog", video_supervisor_watchdog_loop())
+    from app.observability.write_lock_holders import long_transaction_watchdog
+    task_registry.spawn("system", "write_lock_watchdog", long_transaction_watchdog())
+    # 软删除项目的回收站 24 小时自动彻底清理；只在恢复协调者实例上跑一份，
+    # 避免热重载重叠的第二实例重复巡检同一批到期项目。
+    from app.recovery import project_recycle_bin_sweep_loop
+    task_registry.spawn("system", "project_recycle_bin_sweep", project_recycle_bin_sweep_loop())
+    # 软删除账号（管理员删账号）的回收站 30 天自动彻底清理；同一份恢复
+    # 协调者独占逻辑，理由与上面的 project_recycle_bin_sweep 一致。
+    from app.recovery import account_recycle_bin_sweep_loop
+    task_registry.spawn("system", "account_recycle_bin_sweep", account_recycle_bin_sweep_loop())
+    # 已过期付费档位账号自动降级回 free + 裁剪超额项目；同一份恢复协调者
+    # 独占逻辑，理由与上面两个回收站巡检一致。
+    from app.recovery import expired_membership_sweep_loop
+    task_registry.spawn("system", "expired_membership_sweep", expired_membership_sweep_loop())
+    # monitor_audit 独立连接抢不到写锁时的本地缓冲补写；同一份恢复协调者
+    # 独占逻辑，避免两个实例同时截断同一份缓冲文件。
+    from app.recovery import monitor_audit_flush_loop
+    task_registry.spawn("system", "monitor_audit_flush", monitor_audit_flush_loop())
+    # operation_audit 365 天保留期巡检；同一份恢复协调者独占逻辑，理由同上。
+    task_registry.spawn("system", "operation_audit_sweep", operation_audit_sweep_loop())
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # 热重载时新旧 worker 会短暂重叠；允许新 worker 有界等待旧锁释放。
@@ -112,6 +150,8 @@ async def lifespan(_: FastAPI):
     migrate_legacy_bindings()
     startup_self_check()
     ensure_orgs_schema()
+    ensure_sso_schema()
+    ensure_quota_policy_schema()
     ensure_catalog_loaded()
     # EP-01：内置角色的权限点依赖运行时 Command Registry，必须排在
     # ensure_catalog_loaded() 之后才能读到完整目录，见 app/orgs/bootstrap.py
@@ -121,42 +161,7 @@ async def lifespan(_: FastAPI):
     ensure_bootstrap_token()
     ensure_session_secret()
     if recovery_owner:
-        purge_legacy_screenplays()
-        await recover_all()
-        from app.video_supervisor import video_supervisor_watchdog_loop
-        task_registry.spawn(
-            "system", "video_supervisor_watchdog", video_supervisor_watchdog_loop(),
-        )
-        from app.observability.write_lock_holders import long_transaction_watchdog
-        task_registry.spawn("system", "write_lock_watchdog", long_transaction_watchdog())
-        # 软删除项目的回收站 24 小时自动彻底清理；只在恢复协调者实例上跑一份，
-        # 避免热重载重叠的第二实例重复巡检同一批到期项目。
-        from app.recovery import project_recycle_bin_sweep_loop
-        task_registry.spawn(
-            "system", "project_recycle_bin_sweep", project_recycle_bin_sweep_loop(),
-        )
-        # 软删除账号（管理员删账号）的回收站 30 天自动彻底清理；同一份恢复
-        # 协调者独占逻辑，理由与上面的 project_recycle_bin_sweep 一致。
-        from app.recovery import account_recycle_bin_sweep_loop
-        task_registry.spawn(
-            "system", "account_recycle_bin_sweep", account_recycle_bin_sweep_loop(),
-        )
-        # 已过期付费档位账号自动降级回 free + 裁剪超额项目；同一份恢复协调者
-        # 独占逻辑，理由与上面两个回收站巡检一致。
-        from app.recovery import expired_membership_sweep_loop
-        task_registry.spawn(
-            "system", "expired_membership_sweep", expired_membership_sweep_loop(),
-        )
-        # monitor_audit 独立连接抢不到写锁时的本地缓冲补写；同一份恢复协调者
-        # 独占逻辑，避免两个实例同时截断同一份缓冲文件。
-        from app.recovery import monitor_audit_flush_loop
-        task_registry.spawn(
-            "system", "monitor_audit_flush", monitor_audit_flush_loop(),
-        )
-        # operation_audit 365 天保留期巡检；同一份恢复协调者独占逻辑，理由同上。
-        task_registry.spawn(
-            "system", "operation_audit_sweep", operation_audit_sweep_loop(),
-        )
+        await _start_recovery_owner_tasks()
     else:
         record_passive_instance()
     try:
@@ -317,6 +322,8 @@ async def _on_unhandled(request: Request, exc: Exception):
 
 app.include_router(system_public_router)  # health 等公开探活，不要求会话
 app.include_router(auth_router)  # /api/auth/*：login 本身必须公开，路由自身按需挂 session deps
+app.include_router(sso_router)  # /api/auth/sso/*：SSO 登录入口本身必须公开（start/callback/providers/break-glass），link/unlink 路由自身挂 require_local_session
+app.include_router(sso_admin_router)  # /api/admin/sso/*：IdP 配置 + 强制 SSO 开关，路由整体挂 require_system_admin
 app.include_router(auth_admin_router)  # /api/system/users：路由自身逐条挂 require_system_admin
 app.include_router(provisioning_router)  # /api/system/users/import|assets|handover：EP-03 第一阶段，路由自身逐条挂 require_system_admin
 app.include_router(audit_router)  # /api/system/audit/*：路由自身逐条挂 require_system_admin
@@ -327,6 +334,8 @@ app.include_router(identity_review_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(planning_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(orchestration_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(orgs_router, dependencies=_PROJECT_OWNER_DEPS)  # EP-01 第二阶段：组织/团队/角色/项目授权 REST
+app.include_router(quota_policy_router, dependencies=_PROJECT_OWNER_DEPS)  # EP-04 第一阶段：/api/system/quota/plans|allocations
+app.include_router(quota_usage_router, dependencies=_PROJECT_OWNER_DEPS)  # EP-04 第一阶段：/api/system/usage/*
 # 观测数据（任务/运行/调用原文/链路/证据产物）只对租户管理员开放：普通账号在前端
 # 连入口都没有（frontend/src/appSections.ts 把观测台标成 adminOnly），这里是真正的闸门。
 # 挂在 include_router 而不是 APIRouter(dependencies=...) 上，是因为

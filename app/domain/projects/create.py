@@ -16,6 +16,8 @@ from app.novel_formats import (
     prepare_novel_bytes,
     validate_novel_filename,
 )
+from app.orgs import schema as orgs_schema
+from app.orgs import store as orgs_store
 
 
 async def _read_novel_upload(file: UploadFile) -> tuple[str, bytes]:
@@ -87,6 +89,59 @@ def _creation_owner_user_id() -> str:
     return principal.user_id
 
 
+def _creation_org_id() -> str:
+    """新项目归属哪个组织——绝不落 ``None``。
+
+    此前这里根本不写 ``org_id`` 列，导致 ``INSERT`` 隐式落 NULL：
+    ``app.orgs.schema._seed_org_default_and_roles`` 的一次性回填只在进程/
+    DB_PATH 首次建表时跑一次，首启之后新建的每个项目永远是
+    ``org_id=NULL``，而 ``NULL`` 永远不等于任何 ``org_id``——组织管理员
+    （``app.orgs.store.user_has_org_admin`` + ``app.authz.access_cache.
+    project_access_allowed``）因此永远看不到新项目，组织维度随新项目增加
+    逐步失效。这正是「可选参数是缺陷的温床」的实例，所以这里不给调用方
+    留退路，函数本身也不返回 ``None``。
+
+    取值规则与 ``app.orgs.api.list_roles``/``app.provisioning.api.
+    _actor_org_id`` 同一条既有惯例：``principal.org_id or
+    orgs_store.ORG_DEFAULT_ID``。单租户下只有一个默认组织（见
+    ``app.orgs.schema`` 模块文档「单租户下默认一个 org_default，回填零
+    风险」），下面两种「取不到真实组织」的情况因此都安全地回退到同一个
+    默认组织，而不是落 NULL 静默漏项：
+    - 没有 Principal（后台任务、CLI、尚未挂会话闸门的既有测试直接调用）；
+    - 有 Principal 但 ``org_id`` 恰好是 ``None``（理论上不该发生——
+      ``users.org_id`` 由 ``ensure_schema()`` 的种子回填保证非空——但同样
+      不允许在这里把不确定性再传染给 ``projects.org_id``）。
+    """
+    from app.auth.principal import get_current_principal
+
+    principal = get_current_principal()
+    org_id = principal.org_id if principal is not None else None
+    return org_id or orgs_store.ORG_DEFAULT_ID
+
+
+def _creation_ownership(conn) -> tuple[str, str]:
+    """一次性解析新项目的账号归属 + 组织归属，供 ``_create_project_core`` 调用。
+
+    合并成一次调用（而不是让调用方分别调 ``_creation_owner_user_id()``/
+    ``_creation_org_id()`` 再自己记得加 schema 兜底），是为了不让
+    ``_create_project_core`` 自身的代码行数被这次修复推过
+    ``app/FILE_CONVENTIONS.toml`` 的存量超标基线——该函数已经在棘轮里挂账，
+    CLAUDE.md「红线只降不升」不允许这次改动把它推得更高。
+
+    ``orgs_schema.ensure_tables_on_connection(conn)`` 必须在这里做一次：
+    ``_create_project_core`` 稍后的 INSERT 要写 ``projects.org_id``，这一列
+    在部分不走完整 ``app.main.lifespan()`` 的最小化测试宿主（自建
+    ``FastAPI()`` 只挂 ``app.api.router``、只调 ``db.init_db()``）里还不
+    存在，缺列会让 INSERT 直接 ``OperationalError``，把"组织维度悄悄失效"
+    的真实修复误判成"测试环境搭建有问题"。同连接、幂等、只加列不做种子/
+    回填，必须在事务开始前调用——sqlite3 的 ``executescript`` 会隐式
+    COMMIT 掉任何尚未提交的事务，调用方已经把它放在 ``BEGIN IMMEDIATE``
+    之前。
+    """
+    orgs_schema.ensure_tables_on_connection(conn)
+    return _creation_owner_user_id(), _creation_org_id()
+
+
 def _create_project_core(
     name: str | None,
     filename: str,
@@ -105,7 +160,7 @@ def _create_project_core(
     if not report["chapters"]:
         raise HTTPException(422, "未能从文件中切分出任何章节，请检查正文或章节标题")
     conn = get_conn()
-    owner_user_id = _creation_owner_user_id()
+    owner_user_id, org_id = _creation_ownership(conn)
     project_id = new_id("proj")
     fallback_name = Path(filename).stem.strip() or "未命名小说"
     project_name = (name or "").strip() or fallback_name
@@ -138,9 +193,9 @@ def _create_project_core(
         ).fetchone()["c"]
         quota.check_project_slot(conn, owner_user_id, active_count=int(active_projects))
         conn.execute(
-            "INSERT INTO projects(id, name, status, novel_chars, created_at, owner_user_id) "
-            "VALUES(?,?,'ingested',?,?,?)",
-            (project_id, project_name, report["total_chars"], now(), owner_user_id))
+            "INSERT INTO projects(id, name, status, novel_chars, created_at, owner_user_id, org_id) "
+            "VALUES(?,?,'ingested',?,?,?,?)",
+            (project_id, project_name, report["total_chars"], now(), owner_user_id, org_id))
         # ingest_novel 已经算好本章的小节边界（app.novel.structure._extract_sections），
         # 装在 ch["paratext_json"] 里；此前这里没写这一列，小节信息落地即丢——见
         # app/source_paratext.py::chapter_paratext_offsets 的合并写入注释。

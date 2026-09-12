@@ -29,7 +29,7 @@ from app.auth.sessions import create_session
 from app.capabilities.bus import get_command_bus
 from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.schemas import CommandStatus
-from app.db import get_conn, new_id, now
+from app.db import get_conn
 from app.main import app
 from app.orgs import service as orgs_service
 from app.orgs import store as orgs_store
@@ -48,7 +48,7 @@ def _set_user_org(conn, user_id: str, org_id: str) -> None:
 
 
 def _set_project_org(conn, project_id: str, org_id: str) -> None:
-    conn.execute("UPDATE projects SET org_id=? WHERE id=?", (project_id, org_id))
+    conn.execute("UPDATE projects SET org_id=? WHERE id=?", (org_id, project_id))
 
 
 def _builtin_role_id(conn, key: str) -> str:
@@ -307,6 +307,62 @@ def test_org_admin_can_access_any_project_within_same_org(client: TestClient) ->
 
     headers_admin = _login(admin_user)
     resp = client.get("/api/projects/proj_org_admin_target", headers=headers_admin)
+    assert resp.status_code == 200, resp.text
+
+
+def test_project_created_through_real_import_path_gets_org_id_assigned() -> None:
+    """回归守卫：``app.domain.projects.create._create_project_core`` 的
+    ``INSERT INTO projects`` 曾经从不写 ``org_id``，新项目一律隐式落
+    ``NULL``——首次启动后的一次性回填（``app.orgs.schema.
+    _seed_org_default_and_roles``）只跑那一回，之后新建的每个项目永远
+    ``org_id=NULL``。这里不是"检查某字段等于某值"的形式化断言：走真实创建
+    入口（与 ``POST /api/projects``/``project.import_novel`` 共用同一个
+    ``_create_project_core``），再去查真实落盘的行，验证它确实带着非空
+    ``org_id``。"""
+    from app.domain.projects import create as projects_create
+
+    created = projects_create._create_project_core(
+        "组织归属回归测试项目", "story.txt", "第一章 起始\n正文正文正文，字数刚好够切章。".encode("utf-8"),
+    )
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT org_id FROM projects WHERE id=?", (created["project_id"],)
+    ).fetchone()
+    assert row is not None, "真实创建入口没有落库任何一行"
+    assert row["org_id"], f"新项目 org_id 不能为空，实际值={row['org_id']!r}"
+
+
+def test_org_admin_can_see_project_created_through_real_import_path(client: TestClient) -> None:
+    """同上一条缺口的行为闭环：新建项目 -> 同组织 org_admin 必须真的看得见。
+
+    不手工 ``UPDATE projects SET org_id=...``（那是在验证「已经打好补丁的
+    兼容层」，不是验证创建路径本身有没有漏），而是让 ``_create_project_core``
+    真正跑一遍产出项目行，再用真实 HTTP 请求验证。这条在修复前用独立复现
+    （手写修复前那条不写 org_id 的 INSERT 语句原文，绕开触发 lifespan
+    backfill 的 TestClient context-manager 形式）验证过确实是 404：
+    ``{"detail":"对象不存在（NF-404 ...)"}``。
+    """
+    conn = get_conn()
+    admin_user = _mk_user(conn, "org-admin-for-new-project")
+    _set_user_org(conn, admin_user, orgs_store.ORG_DEFAULT_ID)
+    conn.commit()
+
+    org_admin_role_id = _builtin_role_id(conn, "org_admin")
+    team_id = orgs_service.create_team(
+        org_id=orgs_store.ORG_DEFAULT_ID, name="新项目可见性验收团队", description=None, created_by="test",
+    )
+    orgs_service.add_team_members(
+        team_id=team_id, members=[(admin_user, org_admin_role_id)], created_by="test",
+    )
+
+    from app.domain.projects import create as projects_create
+
+    created = projects_create._create_project_core(
+        "组织可见性回归测试项目", "story.txt", "第一章 起始\n正文正文正文，字数刚好够切章。".encode("utf-8"),
+    )
+
+    headers_admin = _login(admin_user)
+    resp = client.get(f"/api/projects/{created['project_id']}", headers=headers_admin)
     assert resp.status_code == 200, resp.text
 
 

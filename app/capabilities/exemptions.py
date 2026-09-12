@@ -128,6 +128,24 @@ EXEMPT_ROUTE_REASONS: dict[str, str] = {
     "POST /api/system/users/import/preview": "CSV 批量导入预检；不写 users/teams 等业务表，只落一条批次台账，仅系统管理员可调用",
     "POST /api/system/users/import/{batch_id}/apply": "CSV 批量导入确认提交，仅系统管理员可调用",
     "POST /api/system/users/{user_id}/handover": "离职资产移交是账号运维操作，不是制作领域命令；仅系统管理员可调用",
+    # ---- EP-02 第一阶段（2026-09-11）：OIDC 单点登录内核 ----
+    # 与 POST /api/auth/login 同一分类口径：鉴权入口本身，签发/绑定/解绑会话
+    # 先于任何账号归属/scope 判定，不经 Command Bus。GET start/callback 是
+    # 302 重定向流程，不在 _MUTATING_METHODS 扫描范围内，不需要豁免项。
+    "POST /api/auth/sso/exchange": "把 OIDC callback 回跳 URL 里的一次性交换码换成真会话令牌（2026-09-12 修复：会话交接不能走查询串，否则真令牌会明文落进 nginx access log/浏览器历史/Referer）；与 POST /api/auth/login 同一类签发会话入口，不经 Command Bus",
+    "POST /api/auth/sso/link": "已登录用户发起绑定 IdP：只签发一次性 state 并返回跳转 URL，真正绑定发生在 callback；鉴权入口本身，不改变组织/角色数据",
+    "DELETE /api/auth/sso/link/{idp_id}": "解绑 IdP 身份：仅影响调用者自身的登录方式集合；解绑最后一个登录方式会被拒绝（422）",
+    "POST /api/auth/sso/break-glass": "PRD EP-02 §6 强制 SSO 下的应急本地登录通道：签发会话本身是鉴权入口，与 POST /api/auth/login 同一分类口径；一次性恢复码由服务器 shell 侧脚本签发，仅限系统管理员账号，用后强制改密并写审计",
+    "POST /api/admin/sso/providers": "登记企业身份提供方是运维安全配置，不是制作领域命令；仅系统管理员可调用，不向 Agent/MCP 开放",
+    "PUT /api/admin/sso/providers/{idp_id}": "同上，修改 IdP 配置",
+    "DELETE /api/admin/sso/providers/{idp_id}": "同上，删除 IdP 配置",
+    "PUT /api/admin/sso/local-login-policy": "切换本地口令登录策略是运维安全配置，不是制作领域命令；仅系统管理员可调用，切到 disabled 前强制做一次真实 SSO 连通性自检，不通过则拒绝切换",
+    # ---- EP-04 第一阶段（2026-09-11）：配额策略表化 + 三级取最紧 ----
+    # 全部走 app/quota_policy/api.py 手写的 _require_org_admin 校验，不经 Command
+    # Bus——配额治理是运维/组织管理操作，不是制作领域命令，与 POST /api/teams
+    # 同一分类口径；仅组织管理员/系统管理员可调用，不向 Agent/MCP 开放。
+    "POST /api/system/quota/plans": "创建组织/团队配额策略是配额治理操作，不是制作领域命令；仅组织管理员可调用",
+    "PUT /api/system/quota/allocations/{scope_type}/{scope_id}": "分配/追加组织·团队·用户三级配额同上，仅组织管理员可调用",
 }
 
 
