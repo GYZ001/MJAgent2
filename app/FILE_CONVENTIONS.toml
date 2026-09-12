@@ -80,7 +80,10 @@ max_lines_tests = 500
 "app/domain/__init__.py" = 1090
 "app/domain/bible_ops/precheck.py" = 517
 "app/domain/bible_ops/view_redo.py" = 534
-"app/domain/common.py" = 1019
+# 2026-09-11 棘轮下拧（1019→1017）：EP-01 第二阶段挂账修复——
+# _principal_access_check 的 project_grants/org_admin 三次查库改成调用
+# app.authz.access_cache.project_access_allowed（新文件），本文件净减 2 行。
+"app/domain/common.py" = 1017
 "app/domain/review_wall.py" = 1078
 "app/domain/screenplay_ops/activation.py" = 529
 "app/domain/screenplay_ops/edit.py" = 527
@@ -95,7 +98,10 @@ max_lines_tests = 500
 "app/evidence/repository.py" = 1242
 "app/final_edit.py" = 574
 "app/harness/model_gateway.py" = 980
-"app/hiagent.py" = 3130
+# 2026-09-11 3130 -> 3128：EP-05 第二阶段，active_provider() 委托给
+# app.models_registry.routing.resolve_provider_for_kind()，净减 2 行——棘轮
+# 只降不升，如实收紧。
+"app/hiagent.py" = 3128
 "app/identity_adjudication.py" = 758
 "app/identity_contracts.py" = 806
 "app/loops/base.py" = 547
@@ -164,7 +170,11 @@ max_lines_tests = 500
 "app/storyboard_authority.py" = 555
 "app/storyboard_supervisor.py" = 1620
 "app/storyboard_workspace.py" = 947
-"app/system_api.py" = 2280
+# 2026-09-11 2280 -> 2279：EP-05 第二阶段。PUT /api/keys 的 provider->ENV 硬编码
+# 映射改成从 config.MANAGED_KEYS 推导；put_settings 提交后新增一行调用
+# app.models_registry.routing.sync_legacy_bindings（同步逻辑本身在模型库包内，
+# 这里只留调用），两项相抵净减 1 行。
+"app/system_api.py" = 2279
 "app/validators/dialogue_chains.py" = 553
 "app/validators/outline_dialogue.py" = 566
 "app/validators/prep_pack_ledger.py" = 647
@@ -206,7 +216,10 @@ max_lines_tests = 500
 # 调用点，1374 -> 1243，棘轮收紧。
 "frontend/src/pages/BoardPage.tsx" = 1243
 "frontend/src/pages/CinemaPage.tsx" = 931
-"frontend/src/pages/EpisodesPage.tsx" = 736
+# 2026-09-11 棘轮下拧（736→664）：EP-01 第二阶段——批量操作确认弹窗拆到
+# components/EpisodeBatchConfirmDialog.tsx（腾出的行数比新增的「协作者」
+# 折叠区块 + ProjectCollaboratorsPanel 引用点更多，净减 72 行）。
+"frontend/src/pages/EpisodesPage.tsx" = 664
 "frontend/src/pages/MonitorPage.test.ts" = 313
 "frontend/src/pages/MonitorPage.tsx" = 874
 "frontend/src/pages/ScenesPage.tsx" = 1065

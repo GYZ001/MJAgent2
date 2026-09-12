@@ -75,6 +75,29 @@ def list_teams(conn: sqlite3.Connection, org_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def update_team(
+    conn: sqlite3.Connection, team_id: str, *,
+    name: str | None, description: str | None, status: str | None,
+) -> None:
+    """局部更新：只有非 None 的字段会被写入，调用方决定要改哪些列。"""
+    schema.ensure_schema()
+    fields: list[str] = []
+    values: list[object] = []
+    if name is not None:
+        fields.append("name=?")
+        values.append(name)
+    if description is not None:
+        fields.append("description=?")
+        values.append(description)
+    if status is not None:
+        fields.append("status=?")
+        values.append(status)
+    if not fields:
+        return
+    values.append(team_id)
+    conn.execute(f"UPDATE teams SET {', '.join(fields)} WHERE id=?", values)
+
+
 def add_team_member(conn: sqlite3.Connection, *, team_id: str, user_id: str, role_id: str, created_by: str) -> None:
     schema.ensure_schema()
     conn.execute(
@@ -149,11 +172,31 @@ def delete_role(conn: sqlite3.Connection, role_id: str) -> None:
     conn.execute("DELETE FROM roles WHERE id=?", (role_id,))
 
 
-def role_reference_counts(conn: sqlite3.Connection, role_id: str) -> dict[str, int]:
+def role_reference_detail(conn: sqlite3.Connection, role_id: str) -> dict[str, list[dict]]:
+    """角色仍被哪些团队成员/项目授权引用——不只是计数，供 409 响应体把引用方
+    列出来（CLAUDE.md「拦住用户时必须给出路」：只给一个数字，管理员无从下手
+    去解除哪一条引用）。"""
     schema.ensure_schema()
-    team_n = conn.execute("SELECT COUNT(*) AS n FROM team_members WHERE role_id=?", (role_id,)).fetchone()["n"]
-    grant_n = conn.execute("SELECT COUNT(*) AS n FROM project_grants WHERE role_id=?", (role_id,)).fetchone()["n"]
-    return {"team_members": int(team_n), "project_grants": int(grant_n)}
+    team_rows = conn.execute(
+        "SELECT tm.team_id, t.name AS team_name, tm.user_id FROM team_members tm "
+        "JOIN teams t ON t.id = tm.team_id WHERE tm.role_id=? ORDER BY tm.created_at",
+        (role_id,),
+    ).fetchall()
+    grant_rows = conn.execute(
+        "SELECT project_id, subject_type, subject_id FROM project_grants "
+        "WHERE role_id=? ORDER BY created_at",
+        (role_id,),
+    ).fetchall()
+    return {
+        "team_members": [
+            {"team_id": r["team_id"], "team_name": r["team_name"], "user_id": r["user_id"]}
+            for r in team_rows
+        ],
+        "project_grants": [
+            {"project_id": r["project_id"], "subject_type": r["subject_type"], "subject_id": r["subject_id"]}
+            for r in grant_rows
+        ],
+    }
 
 
 def set_role_permissions(conn: sqlite3.Connection, role_id: str, permission_keys: frozenset[str]) -> None:

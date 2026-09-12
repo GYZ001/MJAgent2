@@ -271,12 +271,39 @@ def require_project_owner_access(request: Request) -> None:
     if resolution.kind == "none":
         return
     if resolution.kind == "owner" and _accessible(principal, resolution):
+        _require_read_permission_for_get(request, principal)
         return
     if resolution.kind == "creator" and resolution.value == principal.user_id:
         return
     # 统一 404，不用 403：既不能让外部区分「对象不存在」和「对象存在但你无权」，
     # 也匹配现有约定（tests/test_project_observability.py 对跨项目对象一律断言 404）。
     raise HTTPException(404, _DENIED_DETAIL)
+
+
+def _require_read_permission_for_get(request: Request, principal) -> None:
+    """EP-01 第二阶段挂账：接上此前写了但没有接入点的 ``policy.read_allowed``。
+
+    GET 从不经过 Command Bus——``principal.can()`` 只覆盖 Bus 命令，是这条
+    读路径唯一完全没有权限点判定的缺口：角色治理生效后（``role_governed``），
+    一个权限点被清空的自定义角色（``tests/test_org_rbac_matrix.py::
+    test_governed_user_with_empty_role_permissions_is_denied_everything`` 已经
+    证明写操作会被拒绝一切）此前仍能对可触达的项目发起任意 GET，"空集合不等于
+    放行"这条约束在读路径上整体失效。
+
+    与 ``Principal.can()`` 同一套语义（不按"这是不是本人项目"分支）：
+    ``role_governed`` 是账号级、非按项目的开关，一旦为真就统一按
+    ``permission_keys`` 判定，即便这里的 ``resolution.kind=="owner"`` 既覆盖
+    "真正的项目所有者"也覆盖"经 project_grants/org_admin 拿到的访问"——这不是
+    本次新增的不一致，是 Command Bus 侧已经落地并被测试锁定的既有行为，读写
+    两条路径必须一致，不能读松写紧。未接入角色模型的账号
+    （``role_governed=False``，本阶段唯一的开户产出状态）不受影响。
+    """
+    if request.method != "GET" or not principal.role_governed:
+        return
+    from app.authz import policy  # 见 _accessible() 同一条延迟导入说明
+
+    if not policy.read_allowed(principal.permission_keys):
+        raise HTTPException(403, "当前角色没有该项目的读取权限，请联系组织管理员调整角色权限点")
 
 
 def _accessible(principal, resolution: ScopeResolution) -> bool:

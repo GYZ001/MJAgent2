@@ -38,7 +38,7 @@ CONFTEST_PATH = TESTS_DIR / "conftest.py"
 PATCH_TARGETS_PATH = TESTS_DIR / "patch_targets.py"  # helper 定义搬到这里，见 tests/patch_targets.py 模块文档
 HELPER_NAME = "patch_authz_everywhere"
 
-SUBMODULES = ("resolve", "policy", "catalog")
+SUBMODULES = ("resolve", "policy", "catalog", "access_cache")
 FULL_NAMES = {f"app.authz.{sub}" for sub in SUBMODULES}
 
 

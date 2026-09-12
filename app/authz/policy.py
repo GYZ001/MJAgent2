@@ -8,11 +8,21 @@
 
 权限点语法（真源见 ``app/authz/catalog.py`` 顶部文档，与 EP-01 §5 一致）：
     permission_key ::= <command_name>            # Command Bus 命令
-                      | "route:<METHOD> <path>"   # 豁免路由
+                      | "route:<METHOD> <path>"   # 豁免路由（目录/角色种子用，见下）
                       | "read:project"            # GET 缺省读面
 
-``command_allowed``/``route_allowed``/``read_allowed`` 分别消费这三种形态；
-调用方（Bus/HTTP 边界）各自只认自己那一种，互不重叠。
+``command_allowed``/``read_allowed`` 分别消费前两种形态；``"route:<METHOD>
+<path>"`` 这种权限点目前只在 ``app.authz.catalog.build_permission_catalog()``
+的目录展示与 ``org_admin``/``owner`` 模板的权限点集合里作为数据存在，没有
+对应的判定函数（EP-01 第二阶段实测复核：曾经有一个 ``route_allowed()``，
+2026-09-11 因为从未被任何调用方接线而删除——见该次交付报告"两条挂账"一节：
+83 条豁免路由横跨 payments 公开回调、``require_system_admin`` 专属运维端点、
+与挂在 ``_PROJECT_OWNER_DEPS`` 上的普通业务路由三类，统一按路由模板做权限点
+判定是一次跨越整个 HTTP 层的行为变更，会让 producer/reviewer/viewer
+——它们的内置模板目前一个 ``route:*`` 权限点都没有——对这 83 条路由从"不受
+角色约束"直接变成"全部 403"，这是需要产品拍板并配一次全量回归的独立决策，
+不是本次可以顺手做的判定层修补；真正接线前不要恢复这个函数，加回来又没有
+调用方只会重新制造同一个死代码）。
 """
 from __future__ import annotations
 
@@ -43,12 +53,6 @@ def command_allowed(permission_keys: frozenset[str], command_name: str) -> bool:
     检查"在这里是集合成员判断的自然结果，不是需要额外写的 if）。
     """
     return command_name in permission_keys
-
-
-def route_allowed(permission_keys: frozenset[str], method: str, path: str) -> bool:
-    """豁免路由级判定：``"route:<METHOD> <path>"`` 逐字匹配。"""
-    key = f"route:{method.upper()} {path}"
-    return key in permission_keys
 
 
 def read_allowed(permission_keys: frozenset[str]) -> bool:

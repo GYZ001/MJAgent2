@@ -369,3 +369,35 @@ def test_project_grant_revocation_removes_access(client: TestClient) -> None:
     )
     assert revoked is True
     assert client.get("/api/projects/proj_revoke_target", headers=headers).status_code == 404
+
+
+def test_governed_grantee_with_empty_role_permissions_cannot_get_project(client: TestClient) -> None:
+    """EP-01 第二阶段挂账：GET 从不经 Command Bus，此前是"空集合不等于放行"
+    这条约束唯一没有接上权限点判定的读路径——一个被授予访问权、但角色权限点
+    被清空的协作者，此前仍能 200 读到项目内容。见
+    ``app/authz/resolve.py::_require_read_permission_for_get``。"""
+    conn = get_conn()
+    owner = _mk_user(conn, "owner-of-proj-empty-read")
+    grantee = _mk_user(conn, "empty-read-grantee")
+    _mk_project(conn, "proj_empty_read_target", owner)
+    conn.commit()
+
+    org_id = orgs_service.create_org(name="空读权限测试组织", created_by="test")
+    empty_role_id = orgs_service.create_custom_role(
+        org_id=org_id, key="empty-read", name="无读权限角色", description=None,
+        permission_keys=frozenset(), created_by="test",
+    )
+    orgs_service.grant_project_access(
+        project_id="proj_empty_read_target", subject_type="user", subject_id=grantee,
+        role_id=empty_role_id, created_by="test",
+    )
+    headers = _login(grantee)
+    resp = client.get("/api/projects/proj_empty_read_target", headers=headers)
+    assert resp.status_code == 403, resp.text
+
+    viewer_role_id = _builtin_role_id(conn, "viewer")
+    orgs_service.grant_project_access(
+        project_id="proj_empty_read_target", subject_type="user", subject_id=grantee,
+        role_id=viewer_role_id, created_by="test",
+    )
+    assert client.get("/api/projects/proj_empty_read_target", headers=headers).status_code == 200

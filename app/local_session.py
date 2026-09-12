@@ -57,6 +57,25 @@ def get_request_session_id() -> str | None:
     return _request_session_id.get()
 
 
+# EP-01 第二阶段：给 app.authz.access_cache 用的当前 Request 引用。只在
+# HTTP 中间件（真正的 async 请求上下文）里写一次，与 _principal_token 同一
+# 惯例；深层 domain 代码只*读*它去拿 request.state 做请求级缓存——读取在
+# run_in_threadpool 派生的线程里仍然可见，会丢失的只有"写"（见
+# app/authz/resolve.py 模块顶部关于 ContextVar 的说明），这里从未在同步
+# 依赖里写它，因此是安全的。
+_current_request: contextvars.ContextVar[Request | None] = contextvars.ContextVar(
+    "current_request", default=None
+)
+
+
+def bind_current_request(request: Request | None) -> None:
+    _current_request.set(request)
+
+
+def get_current_request() -> Request | None:
+    return _current_request.get()
+
+
 def ensure_session_secret() -> str:
     global _secret
     with _lock:

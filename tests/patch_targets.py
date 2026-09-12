@@ -14,15 +14,18 @@ from __future__ import annotations
 
 def patch_models_registry_everywhere(monkeypatch, name, value, **kwargs):
     """Patch a symbol across ``app.models_registry``'s submodules (``crypto``/
-    ``keyprovider``/``store``/``migration``) wherever it is actually bound.
+    ``keyprovider``/``store``/``migration``/``bindings``/``health``/
+    ``routing``/``ratelimit``/``purposes``/``binding_migration``) wherever it
+    is actually bound.
 
-    Real package (EP-05 first phase, 2026-09-10), not an ``exec()`` facade.
-    Call sites use module-qualified access (``from app.models_registry import
-    store as x`` then ``x.get_credential(...)``), so this isn't the classic
-    ``from .x import y`` name-copy trap today, but the split-package mandate
-    is unconditional and ``app/model_registry.py``/``app/hiagent.py``/
-    ``app/video_providers.py``/``app/system_api.py`` are the flagged
-    high-risk call sites. Walks each submodule, patches ``name`` where bound.
+    Real package (EP-05 first phase, 2026-09-10; second phase 2026-09-11 added
+    the last six), not an ``exec()`` facade. Call sites use module-qualified
+    access (``from app.models_registry import store as x`` then
+    ``x.get_credential(...)``), so this isn't the classic ``from .x import y``
+    name-copy trap today, but the split-package mandate is unconditional and
+    ``app/model_registry.py``/``app/hiagent.py``/``app/video_providers.py``/
+    ``app/system_api.py`` are the flagged high-risk call sites. Walks each
+    submodule, patches ``name`` where bound.
     """
     import importlib
     import sys
@@ -31,6 +34,9 @@ def patch_models_registry_everywhere(monkeypatch, name, value, **kwargs):
     for mod_name in (
         "app.models_registry.crypto", "app.models_registry.keyprovider",
         "app.models_registry.store", "app.models_registry.migration",
+        "app.models_registry.bindings", "app.models_registry.health",
+        "app.models_registry.routing", "app.models_registry.ratelimit",
+        "app.models_registry.purposes", "app.models_registry.binding_migration",
     ):
         # sys.modules 按全限定名解析，不用 getattr：同名再导出会让 getattr 静默
         # 拿错对象（2026-08-30 在 app.media_exec 拆包时实测过：get_conn 连到生产库）。
@@ -59,7 +65,10 @@ def patch_orgs_everywhere(monkeypatch, name, value, **kwargs):
     import sys
 
     kwargs.setdefault("raising", False)
-    for mod_name in ("app.orgs.schema", "app.orgs.store", "app.orgs.service", "app.orgs.bootstrap"):
+    for mod_name in (
+        "app.orgs.schema", "app.orgs.store", "app.orgs.service", "app.orgs.bootstrap",
+        "app.orgs.api",  # EP-01 第二阶段（2026-09-11）新增：REST 路由子模块
+    ):
         # 用 sys.modules 按全限定名解析，不要用 getattr：见
         # patch_models_registry_everywhere 的同一条注释（getattr 会被子模块
         # 再导出的同名符号覆盖，静默返回错对象）。
@@ -85,7 +94,10 @@ def patch_authz_everywhere(monkeypatch, name, value, **kwargs):
     import sys
 
     kwargs.setdefault("raising", False)
-    for mod_name in ("app.authz.resolve", "app.authz.policy", "app.authz.catalog"):
+    for mod_name in (
+        "app.authz.resolve", "app.authz.policy", "app.authz.catalog",
+        "app.authz.access_cache",  # EP-01 第二阶段（2026-09-11）新增：请求级缓存子模块
+    ):
         module = sys.modules.get(mod_name) or importlib.import_module(mod_name)
         if hasattr(module, name):
             monkeypatch.setattr(module, name, value, **kwargs)

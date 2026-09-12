@@ -11,6 +11,7 @@ import * as overview from "./overview";
 import * as admin from "./admin";
 import * as trace from "./trace";
 import * as audit from "./audit";
+import * as orgs from "./orgs";
 
 export * from "./jobs";
 export * from "./calls";
@@ -20,6 +21,7 @@ export * from "./overview";
 export * from "./admin";
 export * from "./trace";
 export * from "./audit";
+export * from "./orgs";
 
 export const api_system = {
   // jobs
@@ -65,4 +67,19 @@ export const api_system = {
   listAuditEvents: audit.listAuditEvents,
   getAuditEvent: audit.getAuditEvent,
   getAuditFacets: audit.getAuditFacets,
+  // orgs：组织/团队/角色/项目授权（EP-01 第二阶段）
+  getCurrentOrg: orgs.getCurrentOrg,
+  listTeams: orgs.listTeams,
+  createTeam: orgs.createTeam,
+  updateTeam: orgs.updateTeam,
+  addTeamMembers: orgs.addTeamMembers,
+  removeTeamMember: orgs.removeTeamMember,
+  listRoles: orgs.listRoles,
+  listPermissions: orgs.listPermissions,
+  createRole: orgs.createRole,
+  updateRolePermissions: orgs.updateRolePermissions,
+  deleteRole: orgs.deleteRole,
+  listProjectGrants: orgs.listProjectGrants,
+  createProjectGrant: orgs.createProjectGrant,
+  deleteProjectGrant: orgs.deleteProjectGrant,
 };

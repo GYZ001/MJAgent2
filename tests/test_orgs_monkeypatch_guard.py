@@ -50,7 +50,7 @@ CONFTEST_PATH = TESTS_DIR / "conftest.py"
 PATCH_TARGETS_PATH = TESTS_DIR / "patch_targets.py"  # helper 定义搬到这里，见 tests/patch_targets.py 模块文档
 HELPER_NAME = "patch_orgs_everywhere"
 
-SUBMODULES = ("schema", "store", "service", "bootstrap")
+SUBMODULES = ("schema", "store", "service", "bootstrap", "api")
 FULL_NAMES = {f"app.orgs.{sub}" for sub in SUBMODULES}
 
 

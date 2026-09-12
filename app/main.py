@@ -35,6 +35,7 @@ from app.capabilities.bus import set_request_approval_token
 from app.capabilities.loader import ensure_catalog_loaded
 from app.local_session import (
     APPROVAL_HEADER,
+    bind_current_request,
     bind_request_principal,
     clear_principal_token,
     bind_verified_session,
@@ -46,6 +47,7 @@ from app.local_session import (
 from app.mcp.auth import ensure_bootstrap_token
 from app.media_urls import media_ticket_required, verify_media_ticket
 from app.models_registry.schema import ensure_schema as ensure_models_registry_schema
+from app.orgs.api import router as orgs_router
 from app.orgs.bootstrap import sync_builtin_role_permissions
 from app.orgs.schema import ensure_schema as ensure_orgs_schema
 from app.planning import router as planning_router
@@ -97,6 +99,17 @@ async def lifespan(_: FastAPI):
     init_db(reconcile_interrupted=recovery_owner)
     ensure_audit_schema()
     ensure_models_registry_schema()
+    # 4 个旧 model_*_provider 设置迁成 priority=0 绑定：常态下由
+    # app.models_registry.routing.resolve() 首次调用兜底触发（该模块是 L3，
+    # 唯一能合法 import app.model_registry 的层级，见 binding_migration.py
+    # 模块文档），但启动自检必须在第一次真实调用之前就看到迁移后的状态，
+    # 否则每次启动都会对着"migration 还没跑"的空绑定表误报全部 purpose 缺失。
+    # app.main 是入口层，import 不受层级约束，这里直接触发一次。
+    from app.models_registry.binding_migration import migrate_legacy_bindings
+    from app.models_registry.purposes import startup_self_check
+
+    migrate_legacy_bindings()
+    startup_self_check()
     ensure_orgs_schema()
     ensure_catalog_loaded()
     # EP-01：内置角色的权限点依赖运行时 Command Registry，必须排在
@@ -173,6 +186,10 @@ async def _inject_session_and_approval(request: Request, call_next):
     # Principal 必须在这里注入：同步依赖里写 ContextVar 会被 threadpool 丢弃，
     # 详见 local_session.bind_request_principal 的说明。
     principal = bind_request_principal(request)
+    # EP-01 第二阶段：同一惯例，供 app.authz.access_cache 在深层 domain 代码
+    # 里按 request.state 做请求级记忆化（详见该模块与 bind_current_request 的
+    # 说明）；只读不写，因此没有"同步依赖里写 ContextVar 会丢失"的风险。
+    bind_current_request(request)
     begin_http_request(request)
     if request.url.path.startswith("/api/"):
         audit_activity.touch(principal, request.url.path)
@@ -186,6 +203,7 @@ async def _inject_session_and_approval(request: Request, call_next):
         set_request_session_id(None)
         set_current_principal(None)
         clear_principal_token()
+        bind_current_request(None)
 
 
 @app.get("/api/session")
@@ -306,6 +324,7 @@ app.include_router(router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(identity_review_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(planning_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(orchestration_router, dependencies=_PROJECT_OWNER_DEPS)
+app.include_router(orgs_router, dependencies=_PROJECT_OWNER_DEPS)  # EP-01 第二阶段：组织/团队/角色/项目授权 REST
 # 观测数据（任务/运行/调用原文/链路/证据产物）只对租户管理员开放：普通账号在前端
 # 连入口都没有（frontend/src/appSections.ts 把观测台标成 adminOnly），这里是真正的闸门。
 # 挂在 include_router 而不是 APIRouter(dependencies=...) 上，是因为

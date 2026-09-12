@@ -168,15 +168,13 @@ def _principal_access_check(
         return True
     if project_id is None:
         return False
-    from app.orgs import store as orgs_store
+    # 延迟导入：与上面 app.orgs.store 同一顾虑——app.authz 包 __init__ 会
+    # import app.authz.resolve，模块顶层 import 会在包初始化尚未完成时形成环。
+    # 查库逻辑与请求级缓存见 app.authz.access_cache 模块文档（EP-01 第二阶段
+    # 挂账：project_grants/org_admin 判定原来每次都打三次库，零缓存）。
+    from app.authz.access_cache import project_access_allowed
 
-    conn = get_conn()
-    if orgs_store.project_grant_hit(conn, project_id, principal.user_id, principal.team_ids):
-        return True
-    project_org_id = orgs_store.project_org_id(conn, project_id)
-    if project_org_id is None or project_org_id != principal.org_id:
-        return False
-    return orgs_store.user_has_org_admin(conn, principal.user_id, project_org_id)
+    return project_access_allowed(project_id, principal.user_id, principal.team_ids, principal.org_id)
 
 
 def _assert_principal_owns(

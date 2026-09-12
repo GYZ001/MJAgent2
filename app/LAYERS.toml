@@ -159,6 +159,11 @@ allowed_exceptions = []
                           # orgs 子模块，不在 init_db() 的调用链里触发（见
                           # app/orgs/store.py 顶部文档），由 app.main 在
                           # ensure_catalog_loaded() 之后显式调用
+"app.orgs.api" = 5  # 2026-09-11 新增（EP-01 第二阶段）：覆盖 app.orgs=2 前缀。
+                    # REST 路由需要 app.authz.catalog.build_permission_catalog()
+                    # 做 422 校验（L5，同 app.orgs.bootstrap 的理由），挂
+                    # APIRouter 只被 app.main 引用，与 app.system_api/
+                    # app.auth.admin_api 同一种"路由→域"入口角色
 "app.orchestration.state_machine" = 2  # 2026-08-30：覆盖 app.orchestration=5
                                         # 前缀，只 import app.db，见变更说明
 "app.monitor_audit_buffer" = 2  # 2026-08-30 新增：monitor_audit 本地可靠投递
@@ -295,6 +300,9 @@ allowed_exceptions = []
 "app.models_registry.keyprovider" = 1  # 2026-09-10 新增：主密钥文件供给
                                         # （data/master.key，0600），只 import
                                         # app.config（同层）+ stdlib
+"app.models_registry.ratelimit" = 1  # 2026-09-11 新增（EP-05 第二阶段）：按
+                                      # 凭据 RPM/TPM/并发的进程内令牌桶+信号量，
+                                      # 纯算法零 db，只 import asyncio/stdlib
 "app.novel" = 1  # 2026-09-02 新增：WS1 从 app.ingest 拆出的章节结构判据包
                  # （app.novel.structure：标题正面定义/小节边界/尺寸拆分合并），
                  # 零 app 内部依赖，只被 app.ingest 单向导入（同层允许）；不放
@@ -324,6 +332,14 @@ allowed_exceptions = []
 "app.models_registry.migration" = 2  # 2026-09-10 新增：settings/.env 三处散落
                                       # 凭据一次性迁入新表，import app.db、
                                       # app.audit（同层）+ app.models_registry.store
+"app.models_registry.bindings" = 2  # 2026-09-11 新增（EP-05 第二阶段）：
+                                     # model_bindings 表读写，只 import app.db
+                                     # （同层）+ app.models_registry.schema（同层）
+"app.models_registry.health" = 2  # 2026-09-11 新增：健康度滑动窗口 + 熔断
+                                   # 状态机，只 import app.db（同层）+
+                                   # app.models_registry.schema（同层）；不
+                                   # import app.hiagent，避免与它（选路要用
+                                   # 本模块）互相 import 造成真实循环
 "app.observability.metrics" = 2
 "app.rejected_media" = 2
 
@@ -332,6 +348,31 @@ allowed_exceptions = []
 "app.harness" = 3  # 前缀：覆盖 .context/.contracts/.text_provider_scope（见下）
 "app.image_providers" = 3
 "app.model_registry" = 3
+"app.models_registry.routing" = 3  # 2026-09-11 新增（EP-05 第二阶段）：按
+                                    # purpose 的优先级选路 + 故障转移，import
+                                    # app.models_registry.bindings/health（L2）+
+                                    # 函数内延迟 import app.model_registry（同层，
+                                    # 避免模块级引入这条兄弟包依赖）
+"app.models_registry.purposes" = 3  # 2026-09-11 新增：purpose 目录/启动自检，
+                                     # import app.models_registry.bindings（L2）+
+                                     # 函数内延迟 import app.model_registry（同层）
+"app.models_registry.binding_migration" = 3  # 2026-09-11 新增：4 个旧
+                                              # model_*_provider 设置迁成
+                                              # priority=0 绑定。真实依赖是
+                                              # app.model_registry（同层，配置值
+                                              # 有效性判定与回落取第一条目都要
+                                              # 靠它），按真实依赖落层为 L3，不是
+                                              # PRD 原稿建议的 L2——app.models_
+                                              # registry.schema（L2）因此不能再
+                                              # 模块级 import 本模块，改由
+                                              # app.models_registry.routing（同层
+                                              # L3，见 routing.py::resolve()）与
+                                              # app.main 的 lifespan 触发，与
+                                              # app.models_registry.migration 那条
+                                              # L2 迁移（只依赖同层 store，无此问题）
+                                              # 不是同一种情况，此处如实按依赖
+                                              # 落层，与 EP-05 派单原稿建议值不符，
+                                              # 见交付报告
 "app.model_runtime_profile" = 3
 "app.text_providers" = 3
 "app.video_prompt_profiles" = 3  # 与 app.video_providers 互相 import，必须同层

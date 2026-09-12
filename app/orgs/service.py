@@ -33,10 +33,35 @@ def create_team(*, org_id: str, name: str, description: str | None, created_by: 
 
 
 def add_team_members(*, team_id: str, members: list[tuple[str, str]], created_by: str) -> None:
-    """``members``: ``[(user_id, role_id), ...]``，批量加人（EP-01 §9 的批量语义）。"""
+    """``members``: ``[(user_id, role_id), ...]``，批量加人（EP-01 §9 的批量语义）。
+
+    先整批校验角色存在，再整批写入：任何一条无效就整批 404，不做部分写入——
+    批量语义下"哪几条成功了"比一次性拒绝更难向调用方解释清楚。**不**校验
+    ``user_id`` 对应的账号是否存在——``tests/test_org_rbac_matrix.py`` 的多个
+    既有用例（EP-01 第一阶段）直接用未落库的合成 user_id 验证角色权限传播，
+    ``team_members.user_id`` 在这一阶段本来就是松耦合外键（同一份 docstring
+    的"已知陷阱"精神：不在这里新增本次派单未要求、且会打破既有约定的强校验）。
+    """
     conn = get_conn()
+    if store.get_team(conn, team_id) is None:
+        raise HTTPException(404, "团队不存在")
+    for _user_id, role_id in members:
+        if store.get_role(conn, role_id) is None:
+            raise HTTPException(404, f"角色不存在：{role_id}")
     for user_id, role_id in members:
         store.add_team_member(conn, team_id=team_id, user_id=user_id, role_id=role_id, created_by=created_by)
+    conn.commit()
+
+
+def update_team(
+    *, team_id: str, name: str | None, description: str | None, status: str | None,
+) -> None:
+    conn = get_conn()
+    if store.get_team(conn, team_id) is None:
+        raise HTTPException(404, "团队不存在")
+    if status is not None and status not in {"active", "disabled"}:
+        raise HTTPException(422, f"status 必须是 active 或 disabled，收到 {status!r}")
+    store.update_team(conn, team_id, name=name, description=description, status=status)
     conn.commit()
 
 
@@ -79,9 +104,12 @@ def delete_role(*, role_id: str) -> None:
         raise HTTPException(404, "角色不存在")
     if role["builtin"]:
         raise HTTPException(422, "内置角色模板不可删除")
-    refs = store.role_reference_counts(conn, role_id)
-    if refs["team_members"] or refs["project_grants"]:
-        raise HTTPException(409, f"角色仍被引用，无法删除：{refs}")
+    detail = store.role_reference_detail(conn, role_id)
+    if detail["team_members"] or detail["project_grants"]:
+        raise HTTPException(
+            409,
+            {"message": "角色仍被引用，无法删除，请先解除下列引用后重试", **detail},
+        )
     store.delete_role(conn, role_id)
     conn.commit()
 
@@ -90,9 +118,24 @@ def grant_project_access(
     *, project_id: str, subject_type: str, subject_id: str, role_id: str, created_by: str,
     expires_at: float | None = None,
 ) -> None:
+    """校验存在性，不校验组织归属一致性——``projects.org_id`` 目前只在
+    ``app.orgs.schema.ensure_schema()`` 的一次性回填里写过，创建项目的
+    正常路径（``app.domain.projects.create``）至今不写这一列，绝大多数
+    项目（含全部既有测试夹具）的 ``org_id`` 是 ``NULL``。若在这里额外要求
+    "角色/团队所属组织必须与项目一致"，会把这条本来就存在的历史空洞变成
+    对现有个人授权场景（EP-01 §12 的 ``project_grants`` 用户级授权）的
+    误杀——这不是本单元的职责，见交付报告"与 PRD 不符的现实"一节。
+    """
     if subject_type not in {"user", "team"}:
         raise HTTPException(422, f"subject_type 必须是 user 或 team，收到 {subject_type!r}")
     conn = get_conn()
+    if store.get_role(conn, role_id) is None:
+        raise HTTPException(404, "角色不存在")
+    if subject_type == "team":
+        if store.get_team(conn, subject_id) is None:
+            raise HTTPException(404, "团队不存在")
+    elif conn.execute("SELECT 1 FROM users WHERE id=?", (subject_id,)).fetchone() is None:
+        raise HTTPException(404, "用户不存在")
     store.create_project_grant(
         conn, project_id=project_id, subject_type=subject_type, subject_id=subject_id,
         role_id=role_id, created_by=created_by, expires_at=expires_at,

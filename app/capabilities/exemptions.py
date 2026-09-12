@@ -108,6 +108,20 @@ EXEMPT_ROUTE_REASONS: dict[str, str] = {
     "POST /api/payments/orders/{order_id}/sync": "账号自助主动查单：只读查询渠道支付状态，按既有幂等逻辑（订单状态机 CAS + "
         "quota_ledger 的 UNIQUE(attempt_key)）收敛，不创建新的付费实体",
     "POST /mcp": "MCP JSON-RPC 传输端点；具体 tools/call 映射到 Capability Registry",
+    # ---- EP-01 第二阶段（2026-09-11）：组织/团队/角色/项目授权 REST ----
+    # 全部走 app/orgs/api.py 手写的 _require_org_admin/_require_project_manage_access
+    # 校验，不经 Command Bus——组织治理是运维身份管理，不是制作领域命令，与
+    # POST /api/system/users 同一分类口径；仅组织管理员/项目所有者可调用，不向
+    # Agent/MCP 开放。
+    "POST /api/teams": "建团队是组织治理操作，不是制作领域命令；仅组织管理员可调用",
+    "PUT /api/teams/{team_id}": "团队改名/停用同上，仅组织管理员可调用",
+    "POST /api/teams/{team_id}/members": "团队成员批量增删同上，仅组织管理员可调用",
+    "DELETE /api/teams/{team_id}/members/{user_id}": "同上",
+    "POST /api/roles": "自定义角色创建是组织治理操作，不是制作领域命令；仅组织管理员可调用",
+    "PUT /api/roles/{role_id}": "角色权限点编辑同上；内置模板本身也被 service 层拦住（422）",
+    "DELETE /api/roles/{role_id}": "角色删除同上；被引用时 409 并在响应体列出引用方",
+    "POST /api/projects/{project_id}/grants": "项目协作授权是组织治理操作，不是制作领域命令；仅项目所有者或组织管理员可调用",
+    "DELETE /api/projects/{project_id}/grants/{subject_type}/{subject_id}": "撤销项目协作授权同上",
 }
 
 
