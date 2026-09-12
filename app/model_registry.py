@@ -145,6 +145,41 @@ def resolve_stage_text_provider(value: str | None) -> str | None:
     return provider if provider in valid else None
 
 
+_RATE_LIMIT_KEYS = ("rpm", "tpm", "concurrency")
+
+
+def normalize_rate_limit(value: Any) -> dict[str, int]:
+    """规范化 RPM/TPM/并发配置：只保留非负整数键，其余（负数/非数字/布尔）
+    丢弃。空字典或缺失维度表示该维度不限——与
+    ``app.models_registry.ratelimit.acquire``/``ResolvedModel.rate_limit``
+    的既定语义一致（EP-05 §7），调用方不需要另编一个默认并发上限。
+    """
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key in _RATE_LIMIT_KEYS:
+        raw = value.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw < 0:
+            continue
+        out[key] = int(raw)
+    return out
+
+
+def extra_patch_fields(body: dict[str, Any]) -> dict[str, Any]:
+    """``app/system_api.py`` 的 ``add_model``/``update_model`` 共用：解析
+    ``rate_limit``/``enabled`` 这两个独立于模型能力校验之外的补丁字段（EP-05
+    §8 管理界面新增的"启停" + "限速配置入口"，此前 ``custom_models`` 条目上
+    没有任何代码写过这两个键）。只在 body 里出现对应键时才返回该字段，保持
+    这两个端点原有的"只更新出现在 body 里的字段"语义。
+    """
+    patch: dict[str, Any] = {}
+    if "rate_limit" in body:
+        patch["rate_limit"] = normalize_rate_limit(body.get("rate_limit"))
+    if isinstance(body.get("enabled"), bool):
+        patch["enabled"] = body["enabled"]
+    return patch
+
+
 def protocol_for_provider(
     provider: str,
     *,

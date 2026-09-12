@@ -377,6 +377,18 @@ class SystemModelTestInput(StandardCommandInput):
     draft: dict[str, Any] | None = None
 
 
+class SystemModelBindingUpsertInput(StandardCommandInput):
+    """模型中心用途绑定读写（EP-05 §8）：新增/改写某个 purpose 在某个优先级
+    槽位（``priority``，0=主用）上的候选模型；"调整顺序"是前端对同一次重排
+    发两次调用，把两个 model_id 互换所在槽位。"""
+
+    purpose: str
+    model_id: str
+    priority: int
+    enabled: bool = True
+    params: dict[str, Any] | None = None
+
+
 class SystemEngineInput(StandardCommandInput):
     project_id: str
     enabled: bool

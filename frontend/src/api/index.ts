@@ -33,8 +33,8 @@ import * as seriesApi from "./series";
 import * as systemApi from "./system";
 import { getArtifactLineage, numToCn } from "./common";
 
-export type { AuthMeResponse, AuthLoginResponse } from "./auth";
-export { login, logout, me, changePassword, deleteMyAccount } from "./auth";
+export type { AuthMeResponse, AuthLoginResponse, InvitationPreview, AcceptInvitationResponse } from "./auth";
+export { login, logout, me, changePassword, deleteMyAccount, previewInvitation, acceptInvitation } from "./auth";
 export { onUnauthenticated, ApiError, ApprovalRequiredError };
 export type { ApprovalPreflight } from "./client";
 export { numToCn };

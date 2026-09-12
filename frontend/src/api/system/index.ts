@@ -7,24 +7,28 @@ import * as jobs from "./jobs";
 import * as calls from "./calls";
 import * as settings from "./settings";
 import * as models from "./models";
+import * as modelsAdmin from "./modelsAdmin";
 import * as overview from "./overview";
 import * as admin from "./admin";
 import * as trace from "./trace";
 import * as audit from "./audit";
 import * as orgs from "./orgs";
 import * as provisioning from "./provisioning";
+import * as quota from "./quota";
 import * as sso from "./sso";
 
 export * from "./jobs";
 export * from "./calls";
 export * from "./settings";
 export * from "./models";
+export * from "./modelsAdmin";
 export * from "./overview";
 export * from "./admin";
 export * from "./trace";
 export * from "./audit";
 export * from "./orgs";
 export * from "./provisioning";
+export * from "./quota";
 export * from "./sso";
 
 export const api_system = {
@@ -53,6 +57,10 @@ export const api_system = {
   createModel: models.createModel,
   updateModel: models.updateModel,
   deleteModel: models.deleteModel,
+  getModelHealth: modelsAdmin.getModelHealth,
+  getModelCredentialsSummary: modelsAdmin.getModelCredentialsSummary,
+  getPurposeStatus: modelsAdmin.getPurposeStatus,
+  upsertModelBinding: modelsAdmin.upsertModelBinding,
   // overview / telemetry
   getSystemOverview: overview.getSystemOverview,
   reportMonitorEvent: overview.reportMonitorEvent,
@@ -64,6 +72,9 @@ export const api_system = {
   deleteUser: admin.deleteUser,
   restoreUser: admin.restoreUser,
   grantVideoAddon: admin.grantVideoAddon,
+  listUserSessions: admin.listUserSessions,
+  revokeUserSession: admin.revokeUserSession,
+  issueServiceSession: admin.issueServiceSession,
   // trace
   getTraceView: trace.getTraceView,
   getTraceNodeDetail: trace.getTraceNodeDetail,
@@ -92,6 +103,9 @@ export const api_system = {
   importReportBlob: provisioning.importReportBlob,
   getUserAssets: provisioning.getUserAssets,
   handoverUser: provisioning.handoverUser,
+  createInvitation: provisioning.createInvitation,
+  listInvitations: provisioning.listInvitations,
+  revokeInvitation: provisioning.revokeInvitation,
   // sso：IdP 配置 CRUD + 强制 SSO 开关（EP-02 管理面）
   listIdps: sso.listIdps,
   createIdp: sso.createIdp,
@@ -99,4 +113,16 @@ export const api_system = {
   deleteIdp: sso.deleteIdp,
   getLocalLoginPolicy: sso.getLocalLoginPolicy,
   setLocalLoginPolicy: sso.setLocalLoginPolicy,
+  // quota：资源治理与配额（EP-04 第二阶段资源看板）
+  listQuotaPlans: quota.listQuotaPlans,
+  createQuotaPlan: quota.createQuotaPlan,
+  listQuotaAllocations: quota.listQuotaAllocations,
+  putQuotaAllocation: quota.putQuotaAllocation,
+  listQuotaAlerts: quota.listQuotaAlerts,
+  getUsageSummary: quota.getUsageSummary,
+  getUsageTimeseries: quota.getUsageTimeseries,
+  getUsageTop: quota.getUsageTop,
+  getStorageSample: quota.getStorageSample,
+  getStorageCleanupCandidates: quota.getStorageCleanupCandidates,
+  postStorageCleanup: quota.postStorageCleanup,
 };

@@ -36,6 +36,11 @@ export interface CatalogModel {
   max_output_tokens?: number;
   token_limits_source?: string;
   protocol?: string;
+  /** 显式 false 才是停用；缺省/true 视为启用（与后端 routing 的判据一致）。 */
+  enabled?: boolean;
+  /** 每凭据 RPM/TPM/并发上限；进程内限速，多进程部署下不是全局限速
+   *  （EP-05 §7，界面必须如实标注这一点，见 RateLimitModal）。 */
+  rate_limit?: { rpm?: number; tpm?: number; concurrency?: number };
 }
 
 export interface ModelCatalog {

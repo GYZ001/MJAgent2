@@ -139,3 +139,40 @@ export function grantVideoAddon(
     idempotency_key: idempotencyKey,
   }) as Promise<GrantVideoAddonResult>;
 }
+
+/* ── 会话策略：管理员查看 / 强制下线某账号的活跃会话（EP-03 第二阶段） ── */
+
+export type SessionKind = "interactive" | "service";
+
+export interface UserSessionRow {
+  id: string;
+  created_at: number;
+  last_seen_at: number;
+  expires_at: number;
+  ip: string | null;
+  user_agent: string | null;
+  kind: SessionKind;
+}
+
+export function listUserSessions(userId: string): Promise<{ items: UserSessionRow[] }> {
+  return get(`/system/users/${userId}/sessions`);
+}
+
+/** 强制下线单个会话；被踢账号的下一次请求会收到具体原因（"管理员已强制下线
+ *  此会话"），不是笼统的会话失效——见 app.auth.session_policy 模块文档。 */
+export function revokeUserSession(userId: string, sessionId: string) {
+  return mutate("POST", `/system/users/${userId}/sessions/${sessionId}/revoke`);
+}
+
+export interface IssuedServiceSession {
+  session_token: string;
+  header: string;
+  expires_at: number;
+}
+
+/** 签发一枚长期服务会话（EP-03 第二阶段第二轮）：供回归/驱动脚本等自动化
+ *  使用，豁免空闲超时/并发上限；`ttlDays` 必须落在后端校验的有限区间内
+ *  （不支持无限期）。返回体带明文 token，只这一次。 */
+export function issueServiceSession(userId: string, ttlDays: number): Promise<IssuedServiceSession> {
+  return mutate("POST", `/system/users/${userId}/service-sessions`, { ttl_days: ttlDays });
+}

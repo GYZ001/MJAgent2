@@ -61,6 +61,19 @@ async def model_test(args: I.SystemModelTestInput) -> CommandResult:
     return succeeded("模型连接测试完成", data=outcome)
 
 
+async def model_binding_upsert(args: I.SystemModelBindingUpsertInput) -> CommandResult:
+    from app.models_registry import bindings
+
+    outcome = await call_guarded(
+        bindings.upsert_binding,
+        purpose=args.purpose, model_id=args.model_id, priority=args.priority,
+        enabled=args.enabled, params=args.params, created_by="models_center_ui",
+    )
+    if isinstance(outcome, CommandResult):
+        return outcome
+    return succeeded(f"用途 {args.purpose} 的优先级 {args.priority} 已绑定到 {args.model_id}", data={"id": outcome})
+
+
 async def set_engine(args: I.SystemEngineInput) -> CommandResult:
     from app.orchestration import api as orch_api
 

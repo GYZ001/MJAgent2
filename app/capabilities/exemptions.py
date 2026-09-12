@@ -425,6 +425,21 @@ EXEMPT_ROUTE_PERMISSIONS: dict[str, _RouteExemption] = {
         "离职资产移交是账号运维操作，不是制作领域命令；仅系统管理员可调用",
         _ADMIN, admin_only=True,
     ),
+    # ---- EP-03 第二阶段（2026-09-12）：邀请链接，签发/撤销同 POST /api/system/users 口径 ----
+    "POST /api/system/invitations": _RouteExemption(
+        "签发邀请链接是账号运维操作，不是制作领域命令；仅系统管理员可调用", _ADMIN, admin_only=True,
+    ),
+    "POST /api/system/invitations/{invitation_id}/revoke": _RouteExemption(
+        "撤销邀请链接同上，仅系统管理员可调用", _ADMIN, admin_only=True,
+    ),
+    "POST /api/system/users/{user_id}/sessions/{session_id}/revoke": _RouteExemption(
+        "管理员强制下线单个会话是账号运维操作，不是制作领域命令；仅系统管理员可调用", _ADMIN, admin_only=True),
+    "POST /api/system/users/{user_id}/service-sessions": _RouteExemption(
+        "签发长期服务会话是账号运维操作，不是制作领域命令；仅系统管理员可调用", _ADMIN, admin_only=True),
+    "POST /api/invite/preview": _RouteExemption(
+        "邀请预览：未登录访客校验一次性 token 是否仍有效，token 走请求体不走 URL（同 POST /api/auth/sso/exchange 教训）", _PUBLIC),
+    "POST /api/invite/accept": _RouteExemption(
+        "邀请接受是鉴权入口本身，与 POST /api/auth/login 同一分类口径，不经 Command Bus", _PUBLIC),
     # ---- EP-02 第一阶段（2026-09-11）：OIDC 单点登录内核 ----
     # 与 POST /api/auth/login 同一分类口径：鉴权入口本身，签发/绑定/解绑会话
     # 先于任何账号归属/scope 判定，不经 Command Bus。GET start/callback 是

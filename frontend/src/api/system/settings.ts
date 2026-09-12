@@ -14,6 +14,7 @@ export interface SettingSchema {
   max_length?: number;
   allow_empty?: boolean;
   format?: "public_http_url";
+  description?: string;
 }
 
 export interface SettingsView {

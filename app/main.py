@@ -47,12 +47,14 @@ from app.local_session import (
 )
 from app.mcp.auth import ensure_bootstrap_token
 from app.media_urls import media_ticket_required, verify_media_ticket
+from app.models_registry.api import router as models_registry_admin_router
 from app.models_registry.schema import ensure_schema as ensure_models_registry_schema
 from app.orgs.api import router as orgs_router
 from app.orgs.bootstrap import sync_builtin_role_permissions
 from app.orgs.schema import ensure_schema as ensure_orgs_schema
 from app.planning import router as planning_router
 from app.provisioning.api import router as provisioning_router
+from app.provisioning.invite_api import router as invite_router
 from app.sso.admin_api import router as sso_admin_router
 from app.sso.api import router as sso_router
 from app.sso.schema import ensure_schema as ensure_sso_schema
@@ -70,6 +72,7 @@ from app.payments.routes import public_router as payments_public_router
 from app.payments.routes import router as payments_router
 from app.provider_task_zero_cost_api import router as provider_task_zero_cost_router
 from app.quota_policy.api import router as quota_policy_router
+from app.quota_policy.api import storage_router as quota_storage_router
 from app.quota_policy.api import usage_router as quota_usage_router
 from app.quota_policy.schema import ensure_schema as ensure_quota_policy_schema
 from app.system_api import public_router as system_public_router
@@ -131,6 +134,10 @@ async def _start_recovery_owner_tasks() -> None:
     task_registry.spawn("system", "monitor_audit_flush", monitor_audit_flush_loop())
     # operation_audit 365 天保留期巡检；同一份恢复协调者独占逻辑，理由同上。
     task_registry.spawn("system", "operation_audit_sweep", operation_audit_sweep_loop())
+    # EP-04 第二阶段：项目存储占用定时采样（绝不在请求路径 du）；同一份恢复
+    # 协调者独占逻辑，避免两个实例同时对同一批项目重复采样。
+    from app.quota_policy.storage import storage_sample_sweep_loop
+    task_registry.spawn("system", "project_storage_sample_sweep", storage_sample_sweep_loop())
 
 
 @asynccontextmanager
@@ -337,8 +344,10 @@ app.include_router(auth_router)  # /api/auth/*：login 本身必须公开，路�
 app.include_router(sso_router)  # /api/auth/sso/*：SSO 登录入口本身必须公开（start/callback/providers/break-glass），link/unlink 路由自身挂 require_local_session
 app.include_router(sso_admin_router)  # /api/admin/sso/*：IdP 配置 + 强制 SSO 开关，路由整体挂 require_system_admin
 app.include_router(auth_admin_router)  # /api/system/users：路由自身逐条挂 require_system_admin
-app.include_router(provisioning_router)  # /api/system/users/import|assets|handover：EP-03 第一阶段，路由自身逐条挂 require_system_admin
+app.include_router(provisioning_router)  # /api/system/users/import|assets|handover|invitations：EP-03，路由自身逐条挂 require_system_admin
+app.include_router(invite_router)  # /api/invite/{token}：EP-03 第二阶段，公开接受流程，不挂会话闸门（见该模块文档）
 app.include_router(audit_router)  # /api/system/audit/*：路由自身逐条挂 require_system_admin
+app.include_router(models_registry_admin_router)  # /api/models/registry/*：EP-05 §8，路由自身挂 require_system_admin
 app.include_router(payments_router)  # /api/payments/orders*：账号级自助购买，路由自身挂 require_local_session
 app.include_router(payments_public_router)  # /api/payments/notify/*：渠道回调，公开端点，验签是唯一防线
 app.include_router(router, dependencies=_PROJECT_OWNER_DEPS)
@@ -348,6 +357,7 @@ app.include_router(orchestration_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(orgs_router, dependencies=_PROJECT_OWNER_DEPS)  # EP-01 第二阶段：组织/团队/角色/项目授权 REST
 app.include_router(quota_policy_router, dependencies=_PROJECT_OWNER_DEPS)  # EP-04 第一阶段：/api/system/quota/plans|allocations
 app.include_router(quota_usage_router, dependencies=_PROJECT_OWNER_DEPS)  # EP-04 第一阶段：/api/system/usage/*
+app.include_router(quota_storage_router, dependencies=_SESSION_DEPS)  # EP-04 第二阶段：/api/system/storage/*（project_id 是查询参数不是路径参数，require_project_owner_access 管不到，鉴权在路由内部 _assert_can_manage_project_storage 做）
 # 观测数据（任务/运行/调用原文/链路/证据产物）只对租户管理员开放：普通账号在前端
 # 连入口都没有（frontend/src/appSections.ts 把观测台标成 adminOnly），这里是真正的闸门。
 # 挂在 include_router 而不是 APIRouter(dependencies=...) 上，是因为

@@ -15,6 +15,7 @@ import {
 import { api, ApiError, changePassword, Episode, Project } from "./api";
 import Studio from "./pages/Studio";
 import LoginPage from "./pages/LoginPage";
+import AcceptInvitePage from "./pages/AcceptInvitePage";
 import ForcePasswordChangePage from "./pages/ForcePasswordChangePage";
 import DecisionDialog from "./components/DecisionDialog";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -36,6 +37,7 @@ import {
   loadEpisodesPage,
   loadMonitorPage,
   loadOperationAuditPage,
+  loadResourceAdminPage,
   loadSsoAdminPage,
   loadReaderPage,
   loadScenesPage,
@@ -65,6 +67,7 @@ const ReaderPage = lazy(loadReaderPage);
 const AccountAdminPage = lazy(loadAccountAdminPage);
 const OperationAuditPage = lazy(loadOperationAuditPage);
 const SsoAdminPage = lazy(loadSsoAdminPage);
+const ResourceAdminPage = lazy(loadResourceAdminPage);
 
 /** 项目清单拉取失败后的重试退避区间。 */
 const PROJECTS_RETRY_MIN_MS = 2000;
@@ -266,8 +269,14 @@ export function locationFor(
   return `${project}/${view}`;
 }
 
-/** 应用真正的默认导出：先过登录闸门，未登录/校验中都不挂载下面的工作台外壳。 */
+/** 应用真正的默认导出：先过登录闸门，未登录/校验中都不挂载下面的工作台外壳。
+ *  `/invite/{token}` 是唯一的例外（EP-03 第二阶段）：邀请接受页服务的正是
+ *  "还没有任何账号/会话"的访客，必须排在 AuthProvider 之前——AuthGate 对匿名
+ *  身份一律渲染 LoginPage，会让持有邀请链接的人被错误地导向普通登录表单。 */
 export default function App() {
+  if (window.location.pathname.startsWith("/invite/")) {
+    return <AcceptInvitePage />;
+  }
   return (
     <AuthProvider>
       <AuthGate />
@@ -1039,7 +1048,9 @@ function AppShell() {
               ? <OperationAuditPage />
               : currentPathname.endsWith("/sso")
                 ? <SsoAdminPage />
-                : <MonitorPage mode="system" />
+                : currentPathname.endsWith("/resources")
+                  ? <ResourceAdminPage />
+                  : <MonitorPage mode="system" />
         )}
         </Suspense>
         </ErrorBoundary>

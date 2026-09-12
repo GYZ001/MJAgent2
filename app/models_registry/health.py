@@ -298,3 +298,74 @@ def refresh(*, force: bool = False) -> None:
     if force or now_ts - _LAST_FLUSH_AT.get(key, 0.0) >= _REFRESH_MIN_INTERVAL_S:
         _flush()
         _LAST_FLUSH_AT[key] = now_ts
+
+
+def get_window_snapshot(model_id: str) -> dict[str, Any]:
+    """当前健康度窗口的只读快照，供模型中心管理界面聚合展示（EP-05 §8）。
+
+    只读、零副作用（不含 ``effective_state`` 的 half_open 惰性推进那步以外的
+    任何写操作，惰性推进本身是 ``effective_state`` 的既有语义，调用它只是为了
+    让界面看到的状态和真实选路一致，不是本函数新增的写入）。从没见过调用的
+    model_id 返回全零快照而不是报错——CLAUDE.md「空集合不等于无需检查」的另一面，
+    没数据本身就是诚实的答案。
+    """
+    model_id = str(model_id or "").strip()
+    state = effective_state(model_id)
+    win = _window_map().get(model_id)
+    if win is None:
+        return {
+            "state": state, "calls": 0, "failures": 0, "timeouts": 0,
+            "rate_limited": 0, "opened_at": None, "half_open_at": None,
+            "last_error_code": None, "last_error_at": None,
+        }
+    return {
+        "state": state, "calls": win.calls, "failures": win.failures,
+        "timeouts": win.timeouts, "rate_limited": win.rate_limited,
+        "opened_at": win.opened_at, "half_open_at": win.half_open_at,
+        "last_error_code": win.last_error_code, "last_error_at": win.last_error_at,
+    }
+
+
+def calls_by_ref_in_window(*, window_hours: float = 24.0) -> dict[str, dict[str, Any]]:
+    """按 ``provider_calls.model``（供应商侧模型 ref 字符串）聚合近
+    ``window_hours`` 小时的调用数/失败率/p50/p95——``model_health`` 的滑动窗口
+    按调用数衰减、不是按日历时间，答不了"最近 24 小时"这个管理界面要的口径
+    （EP-05 §8），两套统计因此并存、互不覆盖：熔断决策仍然只看
+    ``record_outcome`` 维护的滑动窗口，这里只是给人看的补充视图。
+
+    刻意返回按 ``model`` 原始字符串分桶而不是按 ``models.id``——把 ref 反查
+    成模型库 id 需要 ``app.model_registry``（L3），本模块是 L2（见模块顶部
+    分层说明），模块级 import 会构成上行边；反查交给调用方
+    （``app.models_registry.admin_queries``，L3）用当前活的目录
+    （``settings.custom_models``）做，不查 ``models`` 影子表——那张表只在
+    一次性迁移时写入（见 ``app/models_registry/migration.py``），此后新增/
+    编辑的模型永远不会有对应行，按它反查会让"近 24h 调用"对新模型永远显示 0。
+    """
+    schema.ensure_schema()
+    cutoff = time.time() - max(0.0, window_hours) * 3600.0
+    rows = get_conn().execute(
+        "SELECT model, status, latency_ms FROM provider_calls "
+        "WHERE ts >= ? AND model IS NOT NULL AND model != ''",
+        (cutoff,),
+    ).fetchall()
+    buckets: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        ref = str(row["model"] or "").strip()
+        if not ref:
+            continue
+        bucket = buckets.setdefault(ref, {"calls": 0, "failures": 0, "latencies": []})
+        bucket["calls"] += 1
+        if str(row["status"] or "").upper() != "OK":
+            bucket["failures"] += 1
+        if row["latency_ms"] is not None:
+            bucket["latencies"].append(int(row["latency_ms"]))
+    result: dict[str, dict[str, Any]] = {}
+    for ref, bucket in buckets.items():
+        p50, p95 = _percentiles(bucket["latencies"])
+        calls = bucket["calls"]
+        result[ref] = {
+            "calls": calls, "failures": bucket["failures"],
+            "failure_rate": (bucket["failures"] / calls) if calls else 0.0,
+            "p50": p50, "p95": p95,
+        }
+    return result

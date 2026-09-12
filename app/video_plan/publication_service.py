@@ -147,6 +147,63 @@ class ProviderMediaPublicationService:
             pass
         return metadata
 
+    @staticmethod
+    def _resolve_owning_project_id(conn, source_revision_id: str) -> str | None:
+        """从 ``source_revision_id``（``shot_versions.id``——见
+        ``app.media_exec.input_video_mode`` 里 ``adopted_id`` 的既有用法）走
+        shot/version → episode → project 这条既有解析链，得到它实际归属的项目。
+
+        任何一环查不到都返回 ``None``——调用方必须把 ``None`` 当「拒绝发布」处理
+        （fail closed），不能把「查不到」当「不需要校验」放行：这正是本函数存在
+        的理由，即让 ``local_path``/``source_url`` 声称的发布对象与
+        ``source_revision_id`` 声称的归属互相印证，而不是各说各话。
+        """
+        row = conn.execute(
+            """SELECT e.project_id AS project_id
+               FROM shot_versions v
+               JOIN shots s ON s.id = v.shot_id
+               JOIN episodes e ON e.id = s.episode_id
+               WHERE v.id = ?""",
+            (source_revision_id,),
+        ).fetchone()
+        return str(row["project_id"]) if row and row["project_id"] else None
+
+    @staticmethod
+    def _require_path_within_owning_project(path: Path, project_id: str) -> Path:
+        """路径穿越防护 + 项目归属校验的合一判据：``path``（已 ``Path.resolve()``）
+        必须落在 ``source_revision_id`` 解析出的这一个项目目录内。任何 ``../``
+        穿越、指向另一个项目目录、或指向项目目录之外任意文件的输入，都会在下面
+        的 ``relative_to`` 上抛 ``ValueError`` 被拒绝——fail closed，不做「不在
+        已知项目列表就放行」这种黑名单式判断。
+
+        两个候选根都试一遍：``provider_media_public_base_url`` 可能对应一个与
+        ``app.config.PROJECTS_DIR`` 目录结构镜像但绝对路径不同的对象存储根
+        （``projects_dir`` 设置），命中哪一个就用哪一个计算相对路径，不假设两者
+        必然同时存在或统一到同一个绝对路径下——沿用本函数改造前就有的双根兼容
+        行为，只是把「只要在某个根下就放行」收紧成「必须在该 source_revision_id
+        所属项目的子目录下才放行」。
+        """
+        # 延迟 import：app.config.PROJECTS_DIR 在测试里常被
+        # monkeypatch.setattr(config, "PROJECTS_DIR", tmp_path) 按用例覆盖，模块
+        # 级 import 会绑定到导入时的旧值，看不到之后的桩替换。
+        from app.config import PROJECTS_DIR
+
+        candidate_roots: list[Path] = []
+        configured = get_setting("projects_dir")
+        if configured:
+            candidate_roots.append(Path(configured).resolve())
+        candidate_roots.append(PROJECTS_DIR.resolve())
+        for root in candidate_roots:
+            project_root = (root / project_id).resolve()
+            try:
+                path.relative_to(project_root)
+            except ValueError:
+                continue
+            return path.relative_to(root)
+        raise ValueError(
+            "本地媒体不在 source_revision_id 所属项目目录内，禁止跨项目或路径穿越发布"
+        )
+
     async def publish(
         self,
         *,
@@ -159,6 +216,12 @@ class ProviderMediaPublicationService:
         db = conn or get_conn()
         if not str(source_revision_id or "").strip():
             raise ValueError("媒体发布必须绑定非空 source_revision_id")
+        owning_project_id = self._resolve_owning_project_id(db, source_revision_id)
+        if not owning_project_id:
+            raise ValueError(
+                "source_revision_id 无法解析出所属项目（shot/version → episode → "
+                "project 链路查不到匹配行），拒绝发布"
+            )
         metadata: dict[str, Any] = {}
         if source_url:
             url = source_url.strip()
@@ -172,19 +235,11 @@ class ProviderMediaPublicationService:
                 raise ValueError("待发布媒体文件不存在")
             metadata = self._media_metadata(path)
             public_base = (get_setting("provider_media_public_base_url") or "").strip().rstrip("/")
-            projects_root = Path(get_setting("projects_dir") or "").resolve() if get_setting("projects_dir") else None
             if not public_base:
                 raise ValueError(
                     "本地参考视频尚未配置供应商可访问的对象存储或 provider_media_public_base_url"
                 )
-            if projects_root and path.is_relative_to(projects_root):
-                relative = path.relative_to(projects_root)
-            else:
-                from app.config import PROJECTS_DIR
-                try:
-                    relative = path.relative_to(PROJECTS_DIR.resolve())
-                except ValueError as exc:
-                    raise ValueError("本地媒体不在项目媒体目录，禁止匿名外传") from exc
+            relative = self._require_path_within_owning_project(path, owning_project_id)
             url = f"{public_base}/{quote(relative.as_posix(), safe='/')}"
             await self._check_accessible(url)
             sha = metadata["sha256"]

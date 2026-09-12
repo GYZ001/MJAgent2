@@ -262,7 +262,6 @@ max_lines_tests = 500
 "app/capabilities/commands/scene.py" = 75
 "app/capabilities/commands/screenplay.py" = 121
 "app/capabilities/commands/storyboard.py" = 73
-"app/capabilities/commands/system.py" = 130
 "app/capabilities/commands/video.py" = 246
 "app/capabilities/handlers/delivery.py" = 60
 "app/capabilities/handlers/project.py" = 100

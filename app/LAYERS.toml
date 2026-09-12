@@ -139,6 +139,15 @@ allowed_exceptions = []
 "app.quota_expiry" = 2  # 2026-08-30 新增：会员到期闸门，只 import app.db、
                         # app.quota（取 QuotaExceeded，同层单向——app.quota
                         # 反过来不 import 本模块，不构成环）
+"app.quota_project" = 2  # 2026-09-12 新增（EP-04 第二阶段）：项目级并发上限
+                         # + 存储维度闸门，从 app.quota 拆出（行数棘轮逼的，
+                         # app/quota.py 卡在 559/559 基线零余量）。模块顶层只
+                         # import app.quota_policy.allocation（同层）+
+                         # stdlib；两个函数体内延迟 `from app import quota`
+                         # 取 effective_limits/QuotaExceeded——避免与
+                         # app.quota 顶层互相 import 成环（app.quota 不
+                         # re-export 本模块，调用方直接 import 本模块，因此
+                         # 连"同层单向"的 re-export 边都不需要）
 "app.quota_policy" = 2  # 2026-09-11 新增（EP-04 第一阶段）：quota_plans/
                         # quota_allocations/quota_alerts 表化策略与三级（org/
                         # team/user）取最紧判定，schema.py/plans.py/
@@ -181,6 +190,16 @@ allowed_exceptions = []
                           # app/capabilities/ 目录下就假定它是 L5——按实际 import
                           # 落层，同一惯例见 app.authz.policy/app.authz.catalog。
 "app.auth.sessions" = 2  # 2026-08-30：覆盖 app.auth=1 前缀，碰 app.db
+"app.auth.password_policy" = 2  # 2026-09-12 新增（EP-03 第二阶段）：覆盖
+                                 # app.auth=1 前缀。碰 app.db + app.provisioning
+                                 # .schema（同层，password_history 表 DDL 放在
+                                 # 那边，见该模块文档）
+"app.auth.session_policy" = 2  # 2026-09-12 新增（EP-03 第二阶段）：覆盖
+                                # app.auth=1 前缀。碰 app.db + app.provisioning
+                                # .schema（同层）；app.auth.sessions（同层）与
+                                # app.local_session（同层）都反过来 import 本
+                                # 模块做策略判定——本模块故意不 import 它们
+                                # 任何一个，避免循环（见模块文档）
 "app.orgs" = 2  # 2026-09-10 新增（EP-01 第一阶段）：组织/团队/角色/项目授权的
                 # 存取与业务动作（store.py/service.py），只 import app.db（同
                 # 层）+ app.authz.policy（L1）+ stdlib
@@ -210,6 +229,19 @@ allowed_exceptions = []
                             # REST 路由只被 app.main 引用，与
                             # app.auth.admin_api/app.orgs.api 同一种
                             # "路由→域"入口角色，同一条理由判 L5
+"app.provisioning.invitations" = 2  # 2026-09-12 新增（EP-03 第二阶段）：邀请
+                                    # 链接的存取与业务动作，不覆盖
+                                    # app.provisioning=2 前缀的值（同为 L2），
+                                    # 显式声明只是跟随本包既有惯例（每个子
+                                    # 模块都写一条）。只 import app.db（同层）
+                                    # + app.orgs.store/.schema（同层）+
+                                    # app.auth.passwords（L1）+
+                                    # app.auth.password_policy（同层）+
+                                    # app.audit.recorder（同层）+ stdlib
+"app.provisioning.invite_api" = 5  # 2026-09-12 新增：覆盖 app.provisioning=2
+                                   # 前缀。公开邀请预览/接受两条路由，只被
+                                   # app.main 引用，与 app.provisioning.api
+                                   # 同一种"路由→域"入口角色，同一条理由判 L5
 "app.sso" = 2  # 2026-09-11 新增（EP-02 第一阶段）：企业身份接入与单点登录的
                # 存取与业务动作（schema.py/store.py/provision.py），只 import
                # app.db（同层）+ app.orgs.store（同层）+
@@ -242,6 +274,10 @@ allowed_exceptions = []
                  # 来，依赖方向永远是「高层 import 本包」，不能反过来
 "app.audit.api" = 5  # 覆盖 "app.audit" = 2 前缀：挂 APIRouter，只被 app.main
                      # 引用，与 app.auth.admin_api 同一种"路由→域"入口角色
+"app.models_registry.api" = 5  # 2026-09-12 新增（EP-05 §8）：管理界面的只读
+                                # 聚合 + 用途绑定读写路由，挂 APIRouter，只被
+                                # app.main 引用，与 app.audit.api 同一种
+                                # "路由→域"入口角色，同一条理由判 L5
 
 # ---- L3 供应商适配：可依赖 L0-L2 ----
 "app.harness.model_gateway" = 3
@@ -455,6 +491,11 @@ allowed_exceptions = []
                                               # 不是同一种情况，此处如实按依赖
                                               # 落层，与 EP-05 派单原稿建议值不符，
                                               # 见交付报告
+"app.models_registry.admin_queries" = 3  # 2026-09-12 新增（EP-05 §8 管理界面）：
+                                          # 合并 store/health/bindings/purposes（L2/L3）
+                                          # + 函数内延迟 import app.model_registry/
+                                          # app.models_registry.routing（同层 L3）的只读
+                                          # 聚合查询，供 app.models_registry.api 渲染
 "app.model_runtime_profile" = 3
 "app.text_providers" = 3
 "app.video_prompt_profiles" = 3  # 与 app.video_providers 互相 import，必须同层

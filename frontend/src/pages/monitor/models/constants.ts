@@ -109,3 +109,28 @@ export function modelAssignmentSettingKey(
 ) {
   return provider.startsWith("custom:") ? null : `${provider}_model_${kind}`;
 }
+
+/** 健康度状态 -> 中文标签，模型中心健康表/横幅/用途绑定链共用。 */
+export const HEALTH_STATE_LABELS: Record<string, string> = {
+  healthy: "健康",
+  degraded: "降级",
+  circuit_open: "熔断中",
+  half_open: "探测恢复中",
+};
+
+export function healthStateLabel(state: string) {
+  return HEALTH_STATE_LABELS[state] || state || "未知";
+}
+
+export function formatPercent(ratio: number) {
+  return `${(ratio * 100).toFixed(1)}%`;
+}
+
+export function formatLatencyMs(value: number | null | undefined) {
+  return value == null ? "—" : `${value.toLocaleString("zh-CN")} ms`;
+}
+
+export function formatTimestamp(value: number | null | undefined) {
+  if (!value) return "—";
+  return new Date(value * 1000).toLocaleString("zh-CN", { hour12: false });
+}

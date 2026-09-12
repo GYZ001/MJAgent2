@@ -97,6 +97,29 @@ def put_credential(model_id: str, *, base_url: str, api_key: str, rotated_by: st
     return {"key_fingerprint": fp, "masked_key": crypto.mask(api_key), "rotated_at": ts}
 
 
+def list_credentials_public() -> list[dict[str, Any]]:
+    """管理界面用：全部已配置凭据的掩码 + 指纹 + 轮换时间，绝不含明文
+    （EP-05 §8「只显示掩码与指纹」）。逐条临时解密只是为了现算掩码
+    （``crypto.mask()`` 需要原文的前 3/后 4 位），算完立即丢弃、从不进入
+    返回值——与 ``put_credential`` 写入时返回掩码同一原则，只是这里是读路径。
+    """
+    schema.ensure_schema()
+    rows = get_conn().execute(
+        "SELECT model_id, base_url, key_fingerprint, rotated_at, rotated_by FROM model_credentials"
+    ).fetchall()
+    items = []
+    for row in rows:
+        model_id = str(row["model_id"])
+        api_key = get_credential(model_id).get("api_key") or ""
+        items.append({
+            "model_id": model_id, "base_url": row["base_url"] or "",
+            "key_fingerprint": row["key_fingerprint"],
+            "masked_key": crypto.mask(api_key) if api_key else "",
+            "rotated_at": row["rotated_at"], "rotated_by": row["rotated_by"],
+        })
+    return items
+
+
 def delete_credential(model_id: str) -> None:
     schema.ensure_schema()
     conn = get_conn()

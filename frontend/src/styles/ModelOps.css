@@ -1,0 +1,181 @@
+/* 模型中心管理面板（EP-05 §8）：健康度表 / 用途绑定链 / 备用模型横幅。
+   复用既有 .model-modal-*/.btn 等类（见 MonitorPage.css），这里只补它们
+   没有覆盖到的新元素，不重复定义弹窗基础样式。 */
+
+.model-ops-panel {
+  margin-top: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.model-ops-panel h4 {
+  margin: 8px 0 4px;
+}
+
+.model-ops-empty {
+  color: var(--muted, #667085);
+  font-size: 13px;
+}
+
+.model-ops-muted {
+  color: var(--muted, #667085);
+  font-size: 12px;
+}
+
+.model-ops-honesty-note {
+  font-size: 12px;
+  color: var(--muted, #667085);
+}
+
+/* 顶部横幅：正在用备用模型 / 缺主用绑定，二者都必须显著可见。 */
+.model-ops-banner {
+  border: 1px solid #f0c36d;
+  background: #fff8e6;
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.model-ops-banner-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.model-ops-banner-icon {
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+.model-ops-banner-missing {
+  color: #b42318;
+}
+
+.model-ops-banner ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+/* 健康度表 */
+.model-ops-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.model-ops-table th,
+.model-ops-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid #eee;
+  vertical-align: top;
+}
+
+.model-ops-state-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.model-ops-state-badge.model-ops-state-healthy {
+  background: #e6f4ea;
+  color: #1e7e34;
+}
+
+.model-ops-state-badge.model-ops-state-degraded {
+  background: #fff4e5;
+  color: #b25e00;
+}
+
+.model-ops-state-badge.model-ops-state-circuit_open {
+  background: #fdecea;
+  color: #b42318;
+}
+
+.model-ops-state-badge.model-ops-state-half_open {
+  background: #e8eefe;
+  color: #1d4ed8;
+}
+
+tr.model-ops-state-circuit_open {
+  background: #fff7f6;
+}
+
+/* 用途绑定优先级链 */
+.model-ops-purposes {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.model-ops-purpose-row {
+  border: 1px solid #eee;
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+
+.model-ops-purpose-row.model-ops-purpose-missing {
+  border-color: #f04438;
+}
+
+.model-ops-purpose-row.model-ops-purpose-fallback {
+  border-color: #f0c36d;
+}
+
+.model-ops-purpose-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.model-ops-flag {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.model-ops-flag-danger {
+  background: #fdecea;
+  color: #b42318;
+}
+
+.model-ops-flag-warning {
+  background: #fff4e5;
+  color: #b25e00;
+}
+
+.model-ops-flag-active {
+  background: #e6f4ea;
+  color: #1e7e34;
+}
+
+.model-ops-chain {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.model-ops-chain li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.model-ops-chain-priority {
+  font-weight: 600;
+  min-width: 64px;
+}
+
+.model-ops-chain-disabled {
+  opacity: 0.5;
+}

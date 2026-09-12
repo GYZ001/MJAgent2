@@ -5,6 +5,7 @@ import AssignmentGrid from "./models/AssignmentGrid";
 import CredentialModal from "./models/CredentialModal";
 import DeleteModelModal from "./models/DeleteModal";
 import LibraryModal from "./models/LibraryModal";
+import ModelOpsPanel from "./models/ModelOpsPanel";
 import NewModelModal from "./models/NewModelModal";
 import { modelBusinessLabel } from "./models/constants";
 import { useModelCenterState } from "./models/useModelCenterState";
@@ -89,6 +90,12 @@ export default function ModelCenter({
           {s.saving ? "保存中…" : "保存模型分配"}
         </button>
       </div>
+      <ModelOpsPanel
+        catalog={catalog?.items || []}
+        onConfigureConnection={s.openConnectionDialog}
+        refreshCatalog={refreshCatalog}
+        toast={toast}
+      />
       {s.library && (
         <LibraryModal
           catalog={catalog}

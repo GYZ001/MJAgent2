@@ -1,28 +1,30 @@
 """Guard against the app.provisioning package-split monkeypatch trap.
 
 ``app/provisioning`` (EP-03 第一阶段 CSV 批量导入 + 离职移交，2026-09-11
-新增) is a real package from day one -- ``csv_parse.py``/``schema.py``/
-``importer.py``/``handover.py``/``api.py`` each hold their own module
-namespace, and ``__init__.py`` deliberately imports none of them (see its
-docstring: importing ``app.provisioning.api`` (L5) at package level would
-leak onto ``app.provisioning``'s own L2 layer declaration). Every production
-call site is written to reach it via module-qualified access (``from
-app.provisioning import importer`` then ``importer.preview_batch(...)``),
-which is *not* the ``from .x import y`` name-copy trap -- an attribute lookup
-on the same module object at call time sees a patch applied directly to that
-module regardless of how many local aliases point at it. But the mandate to
-add ``tests/patch_targets.py::patch_provisioning_everywhere`` and this guard
-applies unconditionally, the same as every other package split in this repo
-(14 precedents before this one, ``tests/test_orgs_monkeypatch_guard.py`` from
-EP-01 is the closest template and this file mirrors its structure almost
-exactly).
+新增；第二阶段 2026-09-12 added ``invitations``/``invite_api``) is a real
+package from day one -- ``csv_parse.py``/``schema.py``/``importer.py``/
+``handover.py``/``invitations.py``/``api.py``/``invite_api.py`` each hold
+their own module namespace, and ``__init__.py`` deliberately imports none of
+them (see its docstring: importing ``app.provisioning.api`` (L5) at package
+level would leak onto ``app.provisioning``'s own L2 layer declaration).
+Every production call site is written to reach it via module-qualified
+access (``from app.provisioning import importer`` then
+``importer.preview_batch(...)``), which is *not* the ``from .x import y``
+name-copy trap -- an attribute lookup on the same module object at call time
+sees a patch applied directly to that module regardless of how many local
+aliases point at it. But the mandate to add ``tests/patch_targets.py::
+patch_provisioning_everywhere`` and this guard applies unconditionally, the
+same as every other package split in this repo (14 precedents before this
+one, ``tests/test_orgs_monkeypatch_guard.py`` from EP-01 is the closest
+template and this file mirrors its structure almost exactly).
 
 The fix is ``tests/patch_targets.py``'s ``patch_provisioning_everywhere(
 monkeypatch, name, value)`` -- it walks ``app.provisioning.csv_parse``/
-``.schema``/``.importer``/``.handover``/``.api`` and patches ``name``
-wherever it is actually bound. This test scans every file under ``tests/``
-for bare-module patch attempts on those five submodules and fails if any
-turn up outside ``patch_provisioning_everywhere``'s own implementation.
+``.schema``/``.importer``/``.handover``/``.invitations``/``.api``/
+``.invite_api`` and patches ``name`` wherever it is actually bound. This test
+scans every file under ``tests/`` for bare-module patch attempts on those
+seven submodules and fails if any turn up outside
+``patch_provisioning_everywhere``'s own implementation.
 
 Deliberate scope narrowing (same reasoning as the orgs/models_registry
 guards): ``schema``/``importer``/``handover`` are common-ish words with a

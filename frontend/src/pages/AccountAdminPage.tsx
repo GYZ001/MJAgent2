@@ -2,15 +2,17 @@ import { useState } from "react";
 import MembersTab from "../components/orgs/MembersTab";
 import TeamsTab from "../components/orgs/TeamsTab";
 import RolesTab from "../components/orgs/RolesTab";
+import SecurityTab from "../components/orgs/SecurityTab";
 import "../styles/AccountAdminPage.css";
 
-type AdminTab = "members" | "teams" | "roles";
+type AdminTab = "members" | "teams" | "roles" | "security";
 
-/** 账号管理——系统管理员专属入口，三个标签页：
+/** 账号管理——系统管理员专属入口，四个标签页：
  *  - 成员：账号开户/启停/删除/加量包（原 AccountAdminPage 全部内容，见 MembersTab）
  *  - 团队：EP-01 组织协作，建团队 + 团队成员/角色管理（见 TeamsTab）
  *  - 角色：EP-01 自定义角色，内置模板只读 + 自定义角色创建/编辑/删除（见 RolesTab）
- *  三个标签各自独立请求数据、独立维护自己的忙碌态/错误态，互不干扰——本文件
+ *  - 安全：EP-03 第二阶段，邀请链接 + 密码/会话策略 + 活跃会话查看/强制下线（见 SecurityTab）
+ *  四个标签各自独立请求数据、独立维护自己的忙碌态/错误态，互不干扰——本文件
  *  只做标签切换，不持有任何业务状态。 */
 export default function AccountAdminPage() {
   const [tab, setTab] = useState<AdminTab>("members");
@@ -36,11 +38,16 @@ export default function AccountAdminPage() {
           className={`btn small ${tab === "roles" ? "primary" : "ghost"}`} onClick={() => setTab("roles")}>
           角色
         </button>
+        <button type="button" role="tab" aria-selected={tab === "security"}
+          className={`btn small ${tab === "security" ? "primary" : "ghost"}`} onClick={() => setTab("security")}>
+          安全
+        </button>
       </div>
 
       {tab === "members" && <MembersTab />}
       {tab === "teams" && <TeamsTab />}
       {tab === "roles" && <RolesTab />}
+      {tab === "security" && <SecurityTab />}
     </div>
   );
 }

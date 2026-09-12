@@ -116,3 +116,49 @@ export interface UnresolvedAssetsDetail {
   handover_endpoint: string;
   handover_params: { to_user_id: string; to_team_id: string };
 }
+
+/* ── 邀请链接（EP-03 第二阶段，见 app/provisioning/invitations.py） ── */
+
+export type InvitationStatus = "pending" | "accepted" | "revoked" | "expired";
+
+export interface InvitationRow {
+  id: string;
+  status: InvitationStatus;
+  username: string;
+  display_name: string;
+  email: string | null;
+  org_name: string | null;
+  team_id: string | null;
+  team_name: string | null;
+  role_id: string | null;
+  role_name: string | null;
+  expires_at: number;
+  created_by: string | null;
+  created_at: number;
+  accepted_user_id: string | null;
+  revoked_by: string | null;
+}
+
+/** 签发响应比 InvitationRow 多一个字段：明文 token，只在这次响应里出现一次
+ *  ——前端必须当场把完整的 `/invite/{token}` 链接展示给管理员复制走。 */
+export interface CreatedInvitation extends InvitationRow {
+  token: string;
+}
+
+export function createInvitation(body: {
+  username: string;
+  display_name?: string;
+  email?: string;
+  team_id?: string;
+  role_id?: string;
+}): Promise<CreatedInvitation> {
+  return mutate("POST", "/system/invitations", body);
+}
+
+export function listInvitations(): Promise<{ items: InvitationRow[] }> {
+  return get("/system/invitations");
+}
+
+export function revokeInvitation(invitationId: string): Promise<InvitationRow> {
+  return mutate("POST", `/system/invitations/${invitationId}/revoke`);
+}

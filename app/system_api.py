@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.auth.deps import require_system_admin
 from fastapi.responses import PlainTextResponse
 
-from app import config
+from app import config, model_registry
 from app.auth.principal import current_actor_name
 from app.db import get_conn, get_setting, new_id, rows_to_dicts, set_setting
 from app.local_session import require_local_session
@@ -376,10 +376,9 @@ def add_model(body: dict):
         "label": label, "kinds": kinds, "builtin": False,
     }
     item["protocol"] = protocol
-    params = body.get("params")
-    if isinstance(params, dict) and params:
-        item["params"] = params
-    item.update(normalize_token_limits(body))
+    if isinstance(body.get("params"), dict) and body["params"]:
+        item["params"] = body["params"]
+    item.update({**model_registry.extra_patch_fields(body), **normalize_token_limits(body)})
     if custom_provider:
         item.update({"provider_label": provider_label, "base_url": base_url})  # api_key 不落这里，见下方加密表写入
     custom = _custom_models()
@@ -617,6 +616,7 @@ def update_model(model_id: str, body: dict):
         body, current=item,
     )
     item.update({"label": label, "model": model, "kinds": kinds, "protocol": protocol})
+    item.update(model_registry.extra_patch_fields(body))
     if any(key in body for key in ("context_window_tokens", "max_output_tokens", "token_limits_source")):
         item.update(normalize_token_limits({**item, **body}))
     if custom_provider:
