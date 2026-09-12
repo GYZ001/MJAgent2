@@ -30,7 +30,8 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from types import MappingProxyType
 
 from app.quota_addon import ADDON_PACKAGE_PRICE_CNY, ADDON_PACKAGE_SECONDS
 
@@ -43,6 +44,16 @@ class TierLimits:
     token: float | None
     video_seconds: float | None
     image: float | None        # 定妆照/场景图成本上限，与 token 同周期滚动重置
+    # EP-04 第一阶段新增，追加在末尾且带默认值：不破坏既有全部位置参数构造点
+    # （TIER_TABLE 五档 + _UNLIMITED + 测试里散落的字面量构造）。空字典＝五个
+    # 维度均由账号自身档位（本文件 TIER_TABLE）决定，是 app.quota.effective_
+    # limits() 从未接入组织/团队级配额分配时的默认状态（迁移零变化）。非空时
+    # ``bound_by[dim]`` 形如 ``"team=内容中心"``/``"org=某某公司"``——最终生效
+    # 值由哪一级组织/团队分配收紧过，供 app.quota 的 QuotaExceeded 消息据此
+    # 写清"是哪一级、哪条策略挡的"（CLAUDE.md「拦住用户时必须给出路」），不
+    # 参与判断本身、纯展示信息。见 app/quota_policy/allocation.py::
+    # resolve_effective_limits。
+    bound_by: "MappingProxyType[str, str]" = field(default_factory=lambda: MappingProxyType({}))
 
 
 TIER_TABLE: dict[str, TierLimits] = {
@@ -78,3 +89,17 @@ _UPGRADE_PATH = {
         "不随 30 天周期重置），或联系管理员开通不限量账号"
     ),
 }
+
+# 企业形态下没有自助支付这条路（app/payments/routes.py 的 /api/payments/orders*
+# 在 deployment_profile=enterprise 时整体 403），_UPGRADE_PATH 那五条「升级到 xx
+# 档位」文案会指向一个已经关闭的入口——CLAUDE.md「拦住用户时必须给出路」要求
+# 换成真的能走通的路：联系组织管理员申请额度，且必须带上联系入口（不能只说
+# "联系管理员"却不给联系方式），由 app.quota_policy.allocation.upgrade_path_for
+# 按 ``config.is_enterprise_profile()`` 选择走这条还是走上面的 SaaS 文案。
+_ENTERPRISE_UPGRADE_PATH_TEMPLATE = "联系组织管理员申请额度{contact}"
+
+
+def enterprise_upgrade_path(contact: str | None) -> str:
+    """``contact`` 形如 "（管理员：张三，zhangsan@x.com）"；找不到任何组织管
+    理员/系统管理员联系方式时传空字符串，文案仍然成句（不留悬空占位符）。"""
+    return _ENTERPRISE_UPGRADE_PATH_TEMPLATE.format(contact=contact or "")

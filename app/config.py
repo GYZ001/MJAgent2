@@ -52,6 +52,8 @@ def _load_env() -> None:
 
 _load_env()
 
+DEPLOYMENT_PROFILE = (os.environ.get("DEPLOYMENT_PROFILE", "saas") or "saas").strip().lower()
+def is_enterprise_profile() -> bool: return DEPLOYMENT_PROFILE == "enterprise"  # PRD/enterprise/README.md §2
 DEFAULT_HIAGENT_BASE_URL = "https://hia.volcenginepaas.com/api/aigw/v1"
 HIAGENT_BASE_URL = os.environ.get(
     "HIAGENT_BASE_URL", DEFAULT_HIAGENT_BASE_URL

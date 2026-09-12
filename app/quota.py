@@ -54,6 +54,7 @@ from app.quota_addon import (
     ADDON_RESOURCE,
     addon_video_seconds_balance,
 )
+from app.quota_policy import allocation as alloc
 from app.quota_scope import (
     ACTIVE_JOB_STATUSES as ACTIVE_JOB_STATUSES,
     count_active_video_jobs as count_active_video_jobs,
@@ -66,7 +67,6 @@ from app.quota_tiers import (
     TierLimits as TierLimits,
     VALID_TIERS as VALID_TIERS,
     _UNLIMITED as _UNLIMITED,
-    _UPGRADE_PATH as _UPGRADE_PATH,
 )
 
 PERIOD_SECONDS = 30 * 86400.0
@@ -89,13 +89,13 @@ class QuotaExceeded(HTTPException):
     def __init__(
         self, *, gate: str, tier: str, limit: float | int | None,
         used: float | int, remaining: float | int, message: str,
-        reset_at: float | None = None,
+        reset_at: float | None = None, conn: sqlite3.Connection | None = None, user_id: str | None = None,
     ) -> None:
         detail = {
             "code": f"QUOTA_EXCEEDED_{gate.upper()}",
             "gate": gate, "message": message, "tier": tier, "limit": limit,
             "used": used, "remaining": remaining, "reset_at": reset_at,
-            "upgrade_path": _UPGRADE_PATH.get(tier, _UPGRADE_PATH["free"]),
+            "upgrade_path": alloc.upgrade_path_for(conn, user_id, tier),
         }
         super().__init__(status_code=429, detail=detail)
 
@@ -139,15 +139,14 @@ def effective_limits(conn: sqlite3.Connection, user_id: str) -> TierLimits:
     会话占位账号 ``legacy-shared``、内部脚本、测试直接调用等，见
     ``app.domain.projects._creation_owner_user_id`` 的同一条注释）时按无限量
     放行——与 ``app.domain.common._assert_principal_owns`` 对
-    ``principal is None`` 的处理是同一个既有约定，不是本模块新引入的口子。
-    """
+    ``principal is None`` 的处理是同一个既有约定，不是本模块新引入的口子。"""
     row = _user_row(conn, user_id)
     if row is None:
         return _UNLIMITED
     if int(row["is_system_admin"] or 0):
         return _UNLIMITED
     tier = row["tier"] or "free"
-    return TIER_TABLE.get(tier, TIER_TABLE["free"])
+    return alloc.resolve_effective_limits(conn, user_id=user_id, builtin=TIER_TABLE.get(tier, TIER_TABLE["free"]))
 
 
 def period_anchor(conn: sqlite3.Connection, user_id: str) -> float:
@@ -219,9 +218,9 @@ def check_project_slot(conn: sqlite3.Connection, user_id: str, *, active_count: 
     if active_count >= limits.projects:
         raise QuotaExceeded(
             gate="projects", tier=limits.tier, limit=limits.projects,
-            used=active_count, remaining=max(0, limits.projects - active_count),
+            used=active_count, remaining=max(0, limits.projects - active_count), conn=conn, user_id=user_id,
             message=(
-                f"{limits.tier} 档最多同时拥有 {limits.projects} 个项目"
+                f"{alloc.tier_or_scope_label(limits, 'projects')}最多同时拥有 {limits.projects} 个项目"
                 f"（回收站中的不计入），当前已有 {active_count} 个"
             ),
         )
@@ -245,9 +244,9 @@ def check_module_concurrency(
     if active_count >= limits.concurrency:
         raise QuotaExceeded(
             gate="concurrency", tier=limits.tier, limit=limits.concurrency,
-            used=active_count, remaining=max(0, limits.concurrency - active_count),
+            used=active_count, remaining=max(0, limits.concurrency - active_count), conn=conn, user_id=user_id,
             message=(
-                f"{module} 同时在跑的任务已达 {limits.tier} 档上限"
+                f"{module} 同时在跑的任务已达 {alloc.tier_or_scope_label(limits, 'concurrency')}上限"
                 f"（{limits.concurrency} 个），请等待现有任务结束后再试"
             ),
         )
@@ -276,9 +275,9 @@ def assert_token_capacity(conn: sqlite3.Connection, user_id: str) -> None:
     used = usage_for(conn, user_id, "token", pidx)
     if used >= limits.token:
         raise QuotaExceeded(
-            gate="token", tier=limits.tier, limit=limits.token, used=used,
+            gate="token", tier=limits.tier, limit=limits.token, used=used, conn=conn, user_id=user_id,
             remaining=max(0.0, limits.token - used), reset_at=period_reset_at(anchor),
-            message=f"30 天 token 额度已用尽（{limits.tier} 档上限 {int(limits.token)}）",
+            message=f"30 天 token 额度已用尽（{alloc.tier_or_scope_label(limits, 'token')}上限 {int(limits.token)}）",
         )
 
 
@@ -334,11 +333,11 @@ def charge_image_cost(
     token_used = usage_for(conn, user_id, "token", pidx)
     if remainder > 0 and token_used + remainder > limits.token:
         raise QuotaExceeded(
-            gate="token", tier=limits.tier, limit=limits.token, used=token_used,
+            gate="token", tier=limits.tier, limit=limits.token, used=token_used, conn=conn, user_id=user_id,
             remaining=max(0.0, limits.token - token_used), reset_at=period_reset_at(anchor),
             message=(
                 "30 天定妆照/场景图额度已耗尽，30 天 token 额度也不足以覆盖"
-                f"剩余成本（{limits.tier} 档上限 {int(limits.token)}）"
+                f"剩余成本（{alloc.tier_or_scope_label(limits, 'token')}上限 {int(limits.token)}）"
             ),
         )
     if from_pool > 0:
@@ -456,9 +455,9 @@ def reserve_video_seconds(
                 raise QuotaExceeded(
                     gate="video_seconds", tier=limits.tier, limit=limits.video_seconds,
                     used=used, remaining=max(0.0, sub_remaining + addon_balance),
-                    reset_at=period_reset_at(anchor),
+                    reset_at=period_reset_at(anchor), conn=conn, user_id=user_id,
                     message=(
-                        f"30 天视频时长额度已用尽（{limits.tier} 档上限 "
+                        f"30 天视频时长额度已用尽（{alloc.tier_or_scope_label(limits, 'video_seconds')}上限 "
                         f"{int(limits.video_seconds)} 秒），加量包余额 "
                         f"{int(addon_balance)} 秒也不足以覆盖本次所需的 "
                         f"{int(seconds)} 秒"

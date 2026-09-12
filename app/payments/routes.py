@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
+from app import config
 from app.auth.principal import get_current_principal
 from app.db import get_conn, new_id, now
 from app.local_session import require_local_session
@@ -30,7 +31,25 @@ from app.payments.models import (
 )
 from app.payments.reconcile import sync_order_with_channel
 
-router = APIRouter(prefix="/api/payments", dependencies=[Depends(require_local_session)])
+
+def _reject_if_enterprise_profile() -> None:
+    """EP-04 §8：``deployment_profile=enterprise`` 时自助支付入口整体 403（不
+    是隐藏按钮，是后端拒绝，见 PRD/enterprise/EP-04_资源治理与配额.md §8）。
+    企业客户走「组织采购额度池 -> 管理员分配」，不走个人支付宝/微信下单；
+    ``QuotaExceeded`` 的升级文案已经同步换成「联系组织管理员申请额度」
+    （见 ``app.quota_policy.allocation.upgrade_path_for``），两处口径一致，
+    不让用户被指向一条实际已经关闭的路（CLAUDE.md「拦住用户时必须给出路」）。"""
+    if config.is_enterprise_profile():
+        raise HTTPException(403, {
+            "code": "PAYMENTS_DISABLED_ENTERPRISE",
+            "message": "企业版额度由组织管理员统一采购与分配，个人自助支付入口已关闭，请联系组织管理员申请额度。",
+        })
+
+
+router = APIRouter(
+    prefix="/api/payments",
+    dependencies=[Depends(require_local_session), Depends(_reject_if_enterprise_profile)],
+)
 public_router = APIRouter(prefix="/api/payments")
 
 
