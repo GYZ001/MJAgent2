@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from app import db, monitor_audit_buffer
+from app import db, db_schema, monitor_audit_buffer
 from app.authz import policy
 
 ORG_DEFAULT_ID = "org_default"
@@ -130,12 +130,18 @@ def ensure_tables_on_connection(conn: sqlite3.Connection) -> None:
 
 
 def ensure_schema() -> None:
-    """幂等建表 + 种子 + 回填；按当前 ``db.DB_PATH`` 记忆已建。独立连接
-    （``db._run_write_transaction_once``），只供不在调用方事务里嵌套的入口
-    使用（``app.main`` 启动时、测试模板初始化）——``app.orgs.store`` 的每个
-    读写函数改用 ``ensure_tables_on_connection`` 见该函数文档。
+    """幂等建表 + 种子 + 回填；按当前 ``db.DB_PATH`` 记忆已建。
 
-    这条独立连接跑在自己的事务里，没有调用方的事务可毁，技术上即使用
+    调用方选错入口不再有后果（2026-09-12 原语层修复，见
+    ``app.db_schema.ensure_schema_respecting_caller_transaction`` 文档）：
+    ``app.db.get_conn()`` 这条线程/任务局部连接若已经处在调用方开的事务里，
+    直接改走同连接的 ``ensure_tables_on_connection(那个 conn)``，不开独立
+    连接、不抢锁（此时不做种子/回填——那次调用只保证表/列存在，等下一次不在
+    事务里的 ``ensure_schema()`` 调用补种子）；否则保持原有独立连接行为
+    （``db._run_write_transaction_once``），供 ``app.main`` 启动、测试模板
+    初始化这类不嵌套在别的事务里的入口使用。
+
+    独立连接这条分支跑在自己的事务里，没有调用方的事务可毁，技术上即使用
     ``executescript`` 也不会重演 ``ensure_tables_on_connection`` 那种隐式
     COMMIT 事故；但这里仍然复用 ``ensure_tables_on_connection(conn)`` 而不是
     另起一份 ``executescript`` DDL——两处各维护一份建表语句，日后改表结构
@@ -145,21 +151,28 @@ def ensure_schema() -> None:
     if key in _ensured_paths:
         return
 
-    def operation(conn: sqlite3.Connection) -> None:
-        ensure_tables_on_connection(conn)
-        _seed_org_default_and_roles(conn)
+    def _run_independent() -> None:
+        def operation(conn: sqlite3.Connection) -> None:
+            ensure_tables_on_connection(conn)
+            _seed_org_default_and_roles(conn)
 
-    try:
-        db._run_write_transaction_once(operation)
-    except Exception as exc:  # noqa: BLE001 建表失败留到下一次调用重试，不阻塞
-        # 调用方（并发进程/请求同时触发建表是预期状况，抛出会打断当时其实不
-        # 需要这张新表的正常请求）——但不能悄悄吞掉：落一条可观测记录（本地
-        # 文件缓冲，不占 SQLite 写锁，由 monitor_audit_flush_loop 之后补进
-        # monitor_audit 表），下次再发生同类锁争用时能在审计里看见，而不是
-        # 只看到下游一句 no such table。
-        monitor_audit_buffer.note_schema_ensure_failure(__name__, exc)
-        return
-    _ensured_paths.add(key)
+        try:
+            db._run_write_transaction_once(operation)
+        except Exception as exc:  # noqa: BLE001 建表失败留到下一次调用重试，不阻塞
+            # 调用方（并发进程/请求同时触发建表是预期状况，抛出会打断当时其实不
+            # 需要这张新表的正常请求）——但不能悄悄吞掉：落一条可观测记录（本地
+            # 文件缓冲，不占 SQLite 写锁，由 monitor_audit_flush_loop 之后补进
+            # monitor_audit 表），下次再发生同类锁争用时能在审计里看见，而不是
+            # 只看到下游一句 no such table。
+            monitor_audit_buffer.note_schema_ensure_failure(__name__, exc)
+            return
+        _ensured_paths.add(key)
+
+    db_schema.ensure_schema_respecting_caller_transaction(
+        db.get_conn(),
+        on_caller_connection=ensure_tables_on_connection,
+        run_independent=_run_independent,
+    )
 
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, coltype: str) -> None:

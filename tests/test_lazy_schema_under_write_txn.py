@@ -36,9 +36,13 @@ from __future__ import annotations
 import pytest
 
 from app import db
+from app.audit import store as audit_store
+from app.auth import sessions as auth_sessions
 from app.models_registry import schema as models_registry_schema
+from app.models_registry import store as models_registry_store
 from app.orgs import schema as orgs_schema
 from app.orgs import store as orgs_store
+from app.provisioning import handover as provisioning_handover
 from app.provisioning import schema as provisioning_schema
 from app.quota_policy import allocation as quota_policy_allocation
 from app.quota_policy import schema as quota_policy_schema
@@ -178,4 +182,174 @@ def test_quota_policy_schema_keeps_being_a_negative_control(fresh_conn):
     """反例基线：quota_policy 从一开始就逐条 execute，这条必须在任何时候都绿。"""
     assert fresh_conn.in_transaction
     quota_policy_schema.ensure_tables_on_connection(fresh_conn)
+    assert fresh_conn.in_transaction
+
+
+# ---------------------------------------------------------------------------
+# app.auth.sessions.create_session()：EP-03 第二阶段第二轮新增 user_sessions.
+# kind 补列后，这是本仓库第一个"调用方可能已持有写事务时被真实调用"的
+# provisioning 入口（此前 provisioning 没有这种调用形态，见上面模块文档），
+# 2026-09-12 协调方审查揪出：create_session/resolve_session 内部曾经用
+# provisioning_schema.ensure_schema()（独立连接），已改为
+# ensure_tables_on_connection(conn)。这里补真实调用链路的回归。
+# ---------------------------------------------------------------------------
+
+
+def test_create_session_under_caller_write_txn_does_not_lose_kind_column(fresh_conn):
+    """修复前会红：独立连接的 ensure_schema() 撞上 fresh_conn 已持有的
+    BEGIN IMMEDIATE，等满 2 秒 busy timeout 后失败被吞掉，kind 列没建成，
+    紧接着的 INSERT 报 ``sqlite3.OperationalError: table user_sessions has
+    no column named kind``。修复后：不抛异常，且 create_session 参与
+    fresh_conn 已经开着的事务（同连接补列不会另起/打断它），只在自己最后
+    显式 conn.commit() 时才结束这个事务——这里验证 commit 之前不会有任何
+    提前/隐式的事务边界变化：断言调用成功返回 token，且 fresh_conn 用的
+    还是同一个底层连接对象（没有被换成另一条）。
+    """
+    # user_sessions.user_id 有 FOREIGN KEY REFERENCES users(id)，这个连接的
+    # PRAGMA foreign_keys 是开的（真实撞到过，见上面第一次改这条用例时的
+    # sqlite3.IntegrityError）——用同一个 fresh_conn 先种一行真实用户，仍然
+    # 在调用方持有的这同一个 BEGIN IMMEDIATE 事务里，不额外提交。
+    fresh_conn.execute(
+        "INSERT INTO users(id, username, display_name, password_hash, status,"
+        " is_system_admin, must_change_password, created_at) VALUES(?,?,?,?,'active',0,0,?)",
+        ("no-such-user", "lazy-schema-probe", "lazy-schema-probe", "x", 0.0),
+    )
+    assert fresh_conn.in_transaction
+    token = auth_sessions.create_session("no-such-user")
+    assert token and "." in token
+    # create_session 自己的契约就是显式 conn.commit() 落库新会话（这是
+    # 该函数从最初版本起就有的既定行为，不是本次改动引入的）——调用完成后
+    # fresh_conn 的事务因此正常结束，不是"卡住"或"被独立连接的失败搅坏"。
+    assert not fresh_conn.in_transaction
+    row = fresh_conn.execute(
+        "SELECT kind FROM user_sessions WHERE user_id=?", ("no-such-user",)
+    ).fetchone()
+    assert row is not None and row["kind"] == "interactive"
+
+
+# ---------------------------------------------------------------------------
+# 原语层修复（2026-09-12 第二轮，四度复发后根治）：六个包（orgs/models_registry/
+# provisioning/sso/quota_policy/audit）的 ``ensure_schema()``——"错"的那个
+# 独立连接变体——现在内部先判断 ``app.db.get_conn()`` 是否已经处在调用方开的
+# 事务里；是则直接改走同连接的 ``ensure_tables_on_connection(那个 conn)``，
+# 不开新连接、不抢锁（见 ``app.db_schema.ensure_schema_respecting_caller_
+# transaction`` 文档）。下面六组用例故意调用每个包"错"的那个变体（不是
+# ``ensure_tables_on_connection``），逐一验证调用方选错入口不再有后果：不抛
+# 异常、表确实建成、且调用方事务没有被提前提交/回滚（``fresh_conn.in_
+# transaction`` 仍为 True——如果内部退回去用 executescript 或者悄悄
+# commit/rollback 了调用方的事务，这里会先于"表建成"那条断言败下来）。
+#
+# 修复前（本文件这一段用例落地前）：``ensure_schema()`` 走
+# ``db._run_write_transaction_once``，独立连接抢 fresh_conn 已经持有的
+# ``BEGIN IMMEDIATE`` 写锁，等满 2 秒 ``WRITE_TXN_BUSY_TIMEOUT_S`` 超时后
+# 异常被自己的 ``except`` 吞掉、直接返回——不抛异常这条断言本来就会通过（因
+# 为函数设计上就不上抛），但"表确实建成"这条会失败：``sqlite_master`` 里查
+# 不到对应的表。已经在一个干净的 ``/tmp`` worktree（HEAD，本次改动落地前）
+# 上跑过一遍确认这一点，见交付报告里贴的失败输出。
+# ---------------------------------------------------------------------------
+
+
+def test_orgs_ensure_schema_wrong_variant_under_caller_write_txn(fresh_conn):
+    """故意调用 orgs 的独立连接变体（不是 ensure_tables_on_connection）。"""
+    orgs_schema.ensure_schema()
+    assert fresh_conn.in_transaction, (
+        "orgs.schema.ensure_schema() 提交/回滚了调用方的事务"
+    )
+    row = fresh_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='orgs'"
+    ).fetchone()
+    assert row is not None, "orgs 表没建成——独立连接变体大概率去抢锁超时后被静默吞掉了"
+
+
+def test_sso_ensure_schema_wrong_variant_under_caller_write_txn(fresh_conn):
+    sso_schema.ensure_schema()
+    assert fresh_conn.in_transaction, (
+        "sso.schema.ensure_schema() 提交/回滚了调用方的事务"
+    )
+    row = fresh_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='identity_providers'"
+    ).fetchone()
+    assert row is not None, "identity_providers 表没建成"
+
+
+def test_provisioning_ensure_schema_wrong_variant_under_caller_write_txn(fresh_conn):
+    provisioning_schema.ensure_schema()
+    assert fresh_conn.in_transaction, (
+        "provisioning.schema.ensure_schema() 提交/回滚了调用方的事务"
+    )
+    row = fresh_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='user_import_batches'"
+    ).fetchone()
+    assert row is not None, "user_import_batches 表没建成"
+
+
+def test_models_registry_ensure_schema_wrong_variant_under_caller_write_txn(fresh_conn):
+    models_registry_schema.ensure_schema()
+    assert fresh_conn.in_transaction, (
+        "models_registry.schema.ensure_schema() 提交/回滚了调用方的事务"
+    )
+    row = fresh_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='models'"
+    ).fetchone()
+    assert row is not None, "models 表没建成"
+
+
+def test_quota_policy_ensure_schema_wrong_variant_under_caller_write_txn(fresh_conn):
+    """quota_policy 早前已经修过"调用点"（resolve_effective_limits 改走
+    ensure_tables_on_connection），但 ensure_schema() 这个原语本身在本次改动
+    之前从未获得自保——直接调用它验证原语层面确实堵上了。"""
+    quota_policy_schema.ensure_schema()
+    assert fresh_conn.in_transaction, (
+        "quota_policy.schema.ensure_schema() 提交/回滚了调用方的事务"
+    )
+    row = fresh_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='quota_plans'"
+    ).fetchone()
+    assert row is not None, "quota_plans 表没建成"
+
+
+def test_audit_ensure_schema_wrong_variant_under_caller_write_txn(fresh_conn):
+    """audit/store.py 不叫 schema.py，tests/test_schema_guard.py 的 glob 扫不到
+    它，但同一颗地雷同样适用——直接验证。"""
+    audit_store.ensure_schema()
+    assert fresh_conn.in_transaction, (
+        "audit.store.ensure_schema() 提交/回滚了调用方的事务"
+    )
+    row = fresh_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='operation_audit'"
+    ).fetchone()
+    assert row is not None, "operation_audit 表没建成"
+
+
+# ---------------------------------------------------------------------------
+# 真实业务函数在调用方持有写事务时调用：不能报 no such table / no such
+# column——不改调用点（``models_registry/{store,bindings,health}.py`` 十几处
+# ``schema.ensure_schema()``、``provisioning/handover.py`` 三处
+# ``orgs_schema.ensure_schema()``），只靠上面的原语层修复让它们安全。
+# ---------------------------------------------------------------------------
+
+
+def test_models_registry_store_list_models_under_caller_write_txn(fresh_conn):
+    """models_registry/store.py 十几处 ``schema.ensure_schema()`` 调用点之一。"""
+    result = models_registry_store.list_models()
+    assert result == []
+    assert fresh_conn.in_transaction
+
+
+def test_provisioning_handover_list_user_assets_under_caller_write_txn(fresh_conn):
+    """provisioning/handover.py 三处 ``orgs_schema.ensure_schema()`` 调用点之
+    一——``list_user_assets`` 经 ``_team_memberships`` 会 JOIN
+    team_members/teams/roles 三张 orgs 懒建表，是这批调用点里对"表没建成"最
+    敏感的一个（读到任何一张缺表都会直接抛 ``no such table``）。"""
+    fresh_conn.execute(
+        "INSERT INTO users(id, username, display_name, password_hash, status,"
+        " is_system_admin, must_change_password, created_at) VALUES(?,?,?,?,'active',0,0,?)",
+        ("handover-probe-user", "handover-probe", "handover-probe", "x", 0.0),
+    )
+    result = provisioning_handover.list_user_assets("handover-probe-user")
+    assert result["user_id"] == "handover-probe-user"
+    assert result["team_memberships"] == []
+    assert result["owned_projects"] == []
+    # list_user_assets 文档承诺"只读，不提交"——这里同时验证原语层修复没有
+    # 顺带改掉这条既有契约。
     assert fresh_conn.in_transaction

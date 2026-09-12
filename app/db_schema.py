@@ -52,3 +52,56 @@ def run(conn: sqlite3.Connection, name: str) -> Any:
     """Sugar for ``get(name)(conn)`` — the common single-connection-arg case."""
     return get(name)(conn)
 
+
+def ensure_schema_respecting_caller_transaction(
+    conn: sqlite3.Connection,
+    *,
+    on_caller_connection: Callable[[sqlite3.Connection], None],
+    run_independent: Callable[[], None],
+) -> None:
+    """Route a lazy-schema call away from a write-lock deadlock.
+
+    Six business packages (``orgs``/``models_registry``/``provisioning``/
+    ``sso``/``quota_policy``/``audit``) each keep a pair of lazy
+    table-creation entry points: an independent-connection variant
+    (conventionally named ``ensure_schema``) that opens its own connection
+    and its own ``BEGIN IMMEDIATE`` transaction, and a same-connection
+    variant (``ensure_tables_on_connection``) that runs on a connection the
+    caller already owns and never opens a new one.
+
+    Calling the independent variant while the caller's own connection
+    already holds an open write transaction makes the new connection
+    contend for the very same SQLite write lock the caller is holding, time
+    out after ``WRITE_TXN_BUSY_TIMEOUT_S`` seconds, and get silently
+    swallowed by ``ensure_schema``'s own ``except Exception`` — leaving the
+    table or column missing and surfacing far away, several call frames
+    removed from the actual cause, as ``no such table``/``no such column``.
+    This exact shape has recurred four times across four unrelated call
+    sites (EP-04 tier quota, an ``executescript`` implicit-commit variant of
+    the same race, ``create_session``/``resolve_session``, and a batch of
+    remaining ``ensure_schema()`` call sites in ``models_registry``/
+    ``provisioning``) — every prior fix patched the call site instead of the
+    primitive, so a fifth call site making the same choice was only a matter
+    of time.
+
+    This helper removes the choice instead of trusting every call site to
+    make it correctly: if ``conn`` (normally the caller's thread/task-local
+    ``app.db.get_conn()``) is already mid-transaction, run
+    ``on_caller_connection`` on that same connection — no new connection, no
+    lock contention, whichever of the two entry points the call site
+    happened to invoke. Otherwise fall back to ``run_independent`` — today's
+    independent-connection behaviour, unchanged for the bootstrap path and
+    background tasks that are never nested inside another write transaction.
+
+    ``conn`` is passed in by the caller rather than resolved here: this
+    module is imported by ``app.db`` itself and must keep zero dependency on
+    it (see the module docstring, "Zero business dependencies") — reaching
+    for ``app.db.get_conn()`` inside this module would be an upward layer
+    edge (``app.db_schema`` is declared a lower layer than ``app.db`` in
+    ``app/LAYERS.toml``).
+    """
+    if conn.in_transaction:
+        on_caller_connection(conn)
+        return
+    run_independent()
+

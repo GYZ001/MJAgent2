@@ -11,6 +11,21 @@
 （CLAUDE.md「不得在调用方的连接上隐式提交」的另一面：这里的 commit 就是这次
 状态转移本身，不是借道），与 ``app.scenes.register_initial_scene_ref``/
 ``app.multiview.scene_row_for_episode`` 同一分工。
+
+``ensure_schema()`` 接了 ``app.db_schema.ensure_schema_respecting_caller_
+transaction``（2026-09-12 补，``tests/test_schema_guard.py`` 的
+``test_ensure_schema_dispatches_independent_txn_through_shared_helper`` 实测
+揪出——本模块原样带着六个 schema.py 包在同一批修复前的老写法：``upsert_prop_
+reference``/``prop_reference_for_episode``/``latest_prop_reference_status``
+都接受调用方传入的 ``conn`` 且不在这里 commit，说明它们的调用方本来就可能已
+经在这条 ``get_conn()`` 连接上开着 ``BEGIN IMMEDIATE``；沿用独立连接建表会跟
+调用方抢同一把写锁，超时后静默建表失败，下一条 ``conn.execute`` 直接报
+``no such table``）：``app.db.get_conn()`` 若已经处在调用方开的事务里，改走
+同连接的 ``ensure_tables_on_connection(那个 conn)`` 建表，不开独立连接、不抢
+锁；否则保持原有独立连接行为。同时把原来的 ``executescript`` DDL 拆成逐条
+``conn.execute()``——``ensure_tables_on_connection(conn)`` 跑在调用方连接上，
+``executescript`` 执行前的隐式 COMMIT 会把调用方尚未提交的事务一起偷偷提交掉
+（与 ``app/quota_policy/schema.py`` 等五个包同一类地雷）。
 """
 from __future__ import annotations
 
@@ -19,31 +34,39 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from app import config, db
+from app import config, db, db_schema
 from app.refs import _safe_name
 
-_SCHEMA_DDL = """
-CREATE TABLE IF NOT EXISTS prop_references (
-  id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL,
-  prop_name TEXT NOT NULL,
-  ep_start INTEGER NOT NULL,
-  ep_end INTEGER,
-  appearance TEXT,
-  image_path TEXT,
-  prompt TEXT,
-  status TEXT NOT NULL,
-  qa_json TEXT,
-  created_at REAL NOT NULL,
-  UNIQUE(project_id, prop_name, ep_start)
-);
-CREATE INDEX IF NOT EXISTS idx_prop_refs_proj_name
-  ON prop_references(project_id, prop_name, ep_start);
-"""
+_CREATE_STATEMENTS: tuple[str, ...] = (
+    """CREATE TABLE IF NOT EXISTS prop_references (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        prop_name TEXT NOT NULL,
+        ep_start INTEGER NOT NULL,
+        ep_end INTEGER,
+        appearance TEXT,
+        image_path TEXT,
+        prompt TEXT,
+        status TEXT NOT NULL,
+        qa_json TEXT,
+        created_at REAL NOT NULL,
+        UNIQUE(project_id, prop_name, ep_start)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_prop_refs_proj_name "
+    "ON prop_references(project_id, prop_name, ep_start)",
+)
 
 PROP_REFERENCE_STATUSES = ("ready", "failed", "generating")
 
 _ensured_paths: set[str] = set()
+
+
+def ensure_tables_on_connection(conn: sqlite3.Connection) -> None:
+    """轻量、同连接、无副作用的建表兜底——不开新连接、不申请新锁、逐条
+    ``conn.execute()``（绝不用 ``executescript``），安全用于调用方已持有事务
+    的场景。见模块文档 ``ensure_schema()`` 一段。"""
+    for statement in _CREATE_STATEMENTS:
+        conn.execute(statement)
 
 
 def ensure_schema() -> None:
@@ -52,19 +75,31 @@ def ensure_schema() -> None:
     键上 ``db.DB_PATH`` 而不是任何静态路径：测试隔离下每个测试用例都会切到
     独立的新库（见 tests/conftest.py ``_restore_isolated_runtime``），键上它
     才能保证每个测试独占的新库都会重新建表。
+
+    调用方选错入口不再有后果（见模块文档）：``app.db.get_conn()`` 这条线程/
+    任务局部连接若已经处在调用方开的事务里，直接改走同连接的
+    ``ensure_tables_on_connection(那个 conn)``，不开独立连接、不抢锁；否则保
+    持原有独立连接行为（``db._run_write_transaction_once``）。
     """
     key = str(db.DB_PATH)
     if key in _ensured_paths:
         return
 
-    def operation(conn: sqlite3.Connection) -> None:
-        conn.executescript(_SCHEMA_DDL)
+    def _run_independent() -> None:
+        def operation(conn: sqlite3.Connection) -> None:
+            ensure_tables_on_connection(conn)
 
-    try:
-        db._run_write_transaction_once(operation)
-    except Exception:  # noqa: BLE001 建表失败留到下一次调用重试，不阻塞调用方
-        return
-    _ensured_paths.add(key)
+        try:
+            db._run_write_transaction_once(operation)
+        except Exception:  # noqa: BLE001 建表失败留到下一次调用重试，不阻塞调用方
+            return
+        _ensured_paths.add(key)
+
+    db_schema.ensure_schema_respecting_caller_transaction(
+        db.get_conn(),
+        on_caller_connection=ensure_tables_on_connection,
+        run_independent=_run_independent,
+    )
 
 
 def prop_ref_dir(project_id: str) -> Path:
