@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from fastapi import HTTPException, Request
 
 from app.auth.principal import get_current_principal
+from app.capabilities.exemptions import EXEMPT_ROUTE_PERMISSIONS
 from app.db import get_conn
 
 _DENIED_DETAIL = "对象不存在"
@@ -272,8 +273,10 @@ def require_project_owner_access(request: Request) -> None:
         return
     if resolution.kind == "owner" and _accessible(principal, resolution):
         _require_read_permission_for_get(request, principal)
+        _require_write_permission_for_route(request, principal)
         return
     if resolution.kind == "creator" and resolution.value == principal.user_id:
+        _require_write_permission_for_route(request, principal)
         return
     # 统一 404，不用 403：既不能让外部区分「对象不存在」和「对象存在但你无权」，
     # 也匹配现有约定（tests/test_project_observability.py 对跨项目对象一律断言 404）。
@@ -304,6 +307,36 @@ def _require_read_permission_for_get(request: Request, principal) -> None:
 
     if not policy.read_allowed(principal.permission_keys):
         raise HTTPException(403, "当前角色没有该项目的读取权限，请联系组织管理员调整角色权限点")
+
+
+def _require_write_permission_for_route(request: Request, principal) -> None:
+    """EP-01 第三阶段：恢复 ``policy.route_allowed()`` 并接入 HTTP 边界，与
+    ``_require_read_permission_for_get`` 对称——那边管 GET 缺省读面，这边管
+    **登记为豁免的** mutating 路由；Command Bus 覆盖的路由由
+    ``CommandBus._authorize`` 内部的 ``principal.can()`` 判定，本函数不重复
+    判定那部分，避免制造两套可能漂移的规则。
+
+    只在这条路径参数确实解析出了"归属对象"（``owner``/``creator``）时调用
+    （与 read 版同一克制：没有识别出归属参数的豁免路由——团队/角色/配额等
+    组织治理端点、纯遥测——继续完全交给它们各自已有的校验，不在这里重复,
+    见 EP-01 第三阶段交付报告"实际受影响路由清单"一节的取舍说明）。
+    """
+    if request.method == "GET" or not principal.role_governed:
+        return
+    route_template = getattr(request.scope.get("route"), "path", None)
+    if route_template is None:
+        return
+    exemption = EXEMPT_ROUTE_PERMISSIONS.get(f"{request.method} {route_template}")
+    if exemption is None or exemption.admin_only:
+        # 未登记的豁免：要么走 Command Bus（已在总线内部判定），要么是尚未
+        # 分类的缺口，由 scripts/check_capability_coverage.py 的静态扫描拦住。
+        # admin_only：已有 require_system_admin/ScopeResolution("admin_only")
+        # 等既有机制把关，这里不重复、不制造第二套可能与既有机制不一致的判据。
+        return
+    from app.authz import policy  # 见 _accessible() 同一条延迟导入说明
+
+    if not policy.route_allowed(principal.permission_keys, request.method, route_template):
+        raise HTTPException(403, "当前角色没有调用该操作的权限，请联系组织管理员调整角色权限点")
 
 
 def _accessible(principal, resolution: ScopeResolution) -> bool:

@@ -11,18 +11,18 @@
                       | "route:<METHOD> <path>"   # 豁免路由（目录/角色种子用，见下）
                       | "read:project"            # GET 缺省读面
 
-``command_allowed``/``read_allowed`` 分别消费前两种形态；``"route:<METHOD>
-<path>"`` 这种权限点目前只在 ``app.authz.catalog.build_permission_catalog()``
-的目录展示与 ``org_admin``/``owner`` 模板的权限点集合里作为数据存在，没有
-对应的判定函数（EP-01 第二阶段实测复核：曾经有一个 ``route_allowed()``，
-2026-09-11 因为从未被任何调用方接线而删除——见该次交付报告"两条挂账"一节：
-83 条豁免路由横跨 payments 公开回调、``require_system_admin`` 专属运维端点、
-与挂在 ``_PROJECT_OWNER_DEPS`` 上的普通业务路由三类，统一按路由模板做权限点
-判定是一次跨越整个 HTTP 层的行为变更，会让 producer/reviewer/viewer
-——它们的内置模板目前一个 ``route:*`` 权限点都没有——对这 83 条路由从"不受
-角色约束"直接变成"全部 403"，这是需要产品拍板并配一次全量回归的独立决策，
-不是本次可以顺手做的判定层修补；真正接线前不要恢复这个函数，加回来又没有
-调用方只会重新制造同一个死代码）。
+``command_allowed``/``read_allowed``/``route_allowed`` 分别消费上面三种形态。
+
+``route_allowed`` 是 EP-01 第三阶段恢复的判定函数：2026-09-11 因为"当时豁免
+路由只有 (路由 -> 理由) 两列数据，推导不出哪个角色该持有哪条 route:* 权限点"
+被删过一次（见该次交付报告"两条挂账"一节）。第三阶段给
+``app.capabilities.exemptions`` 的每条豁免补了 ``scopes``/``admin_only``
+结构化元数据后，``app.authz.catalog`` 才能把 producer/reviewer/viewer 的
+route:* 权限点集合从 scopes 推导出来（不再是"一条都没有"），本函数因此重新
+有了真实调用方——接线点是 ``app/authz/resolve.py::_require_write_permission_for_route``
+（与 ``_require_read_permission_for_get`` 对称：那边管 GET 缺省读面，这边管
+豁免路由的 mutating 请求；Command Bus 覆盖的路由由 ``CommandBus._authorize``
+内部的 ``command_allowed`` 判定，两边不重叠）。
 """
 from __future__ import annotations
 
@@ -58,3 +58,16 @@ def command_allowed(permission_keys: frozenset[str], command_name: str) -> bool:
 def read_allowed(permission_keys: frozenset[str]) -> bool:
     """GET 缺省读面：命中通用的 ``"read:project"`` 权限点即放行。"""
     return READ_PROJECT_KEY in permission_keys
+
+
+def route_allowed(permission_keys: frozenset[str], method: str, route_template: str) -> bool:
+    """豁免路由级判定（EP-01 第三阶段恢复，见模块文档）：permission_key 必须
+    逐字等于 ``f"route:{method} {route_template}"``。``method`` 必须已经是
+    大写、``route_template`` 必须已经是 FastAPI 路由模板（形如
+    ``/api/episodes/{episode_id}/video-model``，与
+    ``app.capabilities.registry._normalize_route()`` 产出的形态一致）——
+    归一化职责在调用方（L5 的 registry 模块），本函数保持零依赖，不重复实现
+    一份归一化逻辑。空集合不等于放行的道理同 ``command_allowed``：集合成员
+    判断天然对空集合返回 ``False``。
+    """
+    return f"route:{method} {route_template}" in permission_keys

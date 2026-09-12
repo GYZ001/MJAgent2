@@ -341,6 +341,32 @@ def write_coverage_json(target: Path | None = None) -> Path:
     return out
 
 
+def find_exempted_routes_without_scope() -> list[str]:
+    """EP-01 第三阶段：覆盖扫描不能只问"这条路由分类了吗"，还要问"分类得够不够
+    角色治理判定用"——每条 mutating 路由要么走 Bus（``spec.scopes`` 非空，命令
+    注册阶段已由 ``CapabilityRegistry.register_command``/既有测试兜底），要么
+    在 ``rest_exemptions`` 里登记**且声明了 scope**
+    （``CapabilityRegistry.exempt_rest()`` 已经在注册时强制要求非空 ``scopes``，
+    见 ``app/capabilities/registry.py``）。这里是运行时防线：万一未来有人绕过
+    ``exempt_rest()`` 直接操作 ``registry.rest_exemptions``/
+    ``rest_exemption_scopes`` 两个字典导致不同步，能在测试里当场抓出来，而
+    不是等 ``app/authz/resolve.py::route_allowed()`` 在生产环境悄悄漏判。
+    """
+    ensure_catalog_loaded()
+    registry = get_registry()
+    problems: list[str] = []
+    for route in discover_mutating_routes():
+        if route in registry.rest_bindings or route not in registry.rest_exemptions:
+            continue  # 已走 Bus，或尚未登记（后者由 assert_full_coverage 的 missing 分支拦住）
+        meta = registry.rest_exemption_scopes.get(route)
+        if meta is None or not meta.scopes:
+            problems.append(
+                f"{route}: 已登记豁免理由，但没有 scopes 元数据"
+                "（rest_exemptions 与 rest_exemption_scopes 不同步？）"
+            )
+    return problems
+
+
 def assert_full_coverage() -> dict[str, Any]:
     report = build_coverage_report()
     if report["missing"]:
@@ -348,6 +374,13 @@ def assert_full_coverage() -> dict[str, Any]:
         raise AssertionError(
             "Unclassified mutating endpoints (register Command/Human-only or exempt with reason):\n"
             + missing
+        )
+    scope_gaps = find_exempted_routes_without_scope()
+    if scope_gaps:
+        raise AssertionError(
+            "Exempted mutating routes missing scopes metadata "
+            "(call registry.exempt_rest(route, reason, scopes=..., admin_only=...)):\n"
+            + "\n".join(f"  - {p}" for p in scope_gaps)
         )
     return report
 

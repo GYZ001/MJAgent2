@@ -124,6 +124,16 @@ class HumanOnlySpec:
         return False
 
 
+@dataclass(frozen=True, slots=True)
+class RouteExemptionScope:
+    """豁免路由的角色治理元数据（EP-01 第三阶段）。``scopes``/``admin_only`` 的
+    词汇表与判据见 ``app/capabilities/exemptions.py::_RouteExemption`` 顶部文档
+    ——真源数据在那边，这里只是运行时 registry 的存储形状。"""
+
+    scopes: frozenset[str]
+    admin_only: bool = False
+
+
 @dataclass
 class CapabilityRegistry:
     commands: dict[str, CommandSpec] = field(default_factory=dict)
@@ -134,6 +144,9 @@ class CapabilityRegistry:
     rest_bindings: dict[str, str] = field(default_factory=dict)
     # 明确豁免：不进入 Agent/MCP，但必须登记原因
     rest_exemptions: dict[str, str] = field(default_factory=dict)
+    # 同 key（method+path）：豁免路由的 scopes/admin_only，供 app.authz.catalog
+    # 推导内置角色模板、app.capabilities.coverage 校验覆盖率用（EP-01 第三阶段）。
+    rest_exemption_scopes: dict[str, RouteExemptionScope] = field(default_factory=dict)
 
     def register_command(self, spec: CommandSpec) -> CommandSpec:
         if spec.name in self.commands:
@@ -169,11 +182,23 @@ class CapabilityRegistry:
             self._bind_rest(route, spec.name)
         return spec
 
-    def exempt_rest(self, route: str, reason: str) -> None:
+    def exempt_rest(
+        self, route: str, reason: str, *, scopes: frozenset[str], admin_only: bool = False
+    ) -> None:
+        """EP-01 第三阶段：豁免登记必须带 scopes（``admin_only=True`` 时仍要求
+        非空 scopes，供 app.authz.catalog 目录/覆盖率校验统一按"是否声明了
+        scope"判断，不必对 admin_only 的分支特判——见
+        ``app/capabilities/exemptions.py`` 顶部文档。
+        """
         key = _normalize_route(route)
         if not reason.strip():
             raise ValueError(f"exemption for {key} requires a non-empty reason")
+        if not scopes:
+            raise ValueError(f"exemption for {key} requires at least one scope")
         self.rest_exemptions[key] = reason.strip()
+        self.rest_exemption_scopes[key] = RouteExemptionScope(
+            scopes=frozenset(scopes), admin_only=admin_only
+        )
 
     def _bind_rest(self, route: str, capability_name: str) -> None:
         key = _normalize_route(route)
