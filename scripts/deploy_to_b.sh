@@ -8,12 +8,30 @@
 # 不同步（B 上的是生产真源，别覆盖）：data/、projects/、.env、logs/；
 # 也不同步 .venv、node_modules、.git、dist-staging、缓存目录。
 #
-# 用法：scripts/deploy_to_b.sh [--no-restart] [--dry-run]
+# 本脚本 rsync 的是**工作区**，不是某个提交。工作区脏的时候跑它，会把别人没写完的
+# 代码静默发到生产——2026-09-12 实测踩到边上：仓库里同时有另一拨未提交的在途改动
+# （组织/角色 + 模型库，`app/orgs` 还没建完、全仓测试是红的），只差没人手滑跑这个
+# 脚本。所以脏树默认拒绝执行，要覆盖得显式写 --allow-dirty。与前端发布闸门
+# （scripts/publish_frontend.py 拦「后端启动时间早于最新 app/**/*.py」）同一族做法：
+# 把一个人人顺手跑的动作带的副作用变响。
+#
+# 用法：scripts/deploy_to_b.sh [--no-restart] [--dry-run] [--allow-dirty]
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 B="${MJ_B_SSH:-mjb}"
-RESTART=1; DRY=""
-for a in "$@"; do case "$a" in --no-restart) RESTART=0;; --dry-run) DRY="--dry-run";; *) echo "未知参数 $a" >&2; exit 1;; esac; done
+RESTART=1; DRY=""; ALLOW_DIRTY=0
+for a in "$@"; do case "$a" in --no-restart) RESTART=0;; --dry-run) DRY="--dry-run";; --allow-dirty) ALLOW_DIRTY=1;; *) echo "未知参数 $a" >&2; exit 1;; esac; done
+
+# 排在连通性检查之前：这一条不需要网络，而且先报「连不上 B」会把真正该看的问题挡住。
+if [ "$ALLOW_DIRTY" != 1 ]; then
+  DIRTY="$(git -C "$ROOT" status --porcelain)"
+  if [ -n "$DIRTY" ]; then
+    echo "工作区不干净，拒绝发布——本脚本同步的是工作区而不是某个提交，脏树会把未完成的改动一起推上生产：" >&2
+    echo "$DIRTY" | head -30 >&2
+    echo "先提交/移走这些改动；确认它们都该上线再加 --allow-dirty。只想发已提交的代码就等走 git 的定时部署（scripts/deploy/nightly_deploy_to_b.sh）。" >&2
+    exit 4
+  fi
+fi
 
 ssh -o ConnectTimeout=10 "$B" true 2>/dev/null || { echo "连不上 $B（127.0.0.1:2222）——B 的反向隧道没起来。B 上看：systemctl status mjagent2-tunnel" >&2; exit 2; }
 

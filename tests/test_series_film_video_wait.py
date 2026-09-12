@@ -311,3 +311,55 @@ async def test_paused_run_with_matching_checkpoint_is_not_treated_as_orphan(monk
     patch_api_everywhere(monkeypatch, "_complete_episode_core", fake_complete)
     await series_stages._kick_video_completion("e", "series-run-1")
     assert captured["mode"] == "resume"
+
+
+def test_stalled_reason_surfaces_preflight_block_without_an_active_run(monkeypatch) -> None:
+    """2026-09-12 我欲封天第 4 集镜 24/25：可操作的那句话躺在 jobs.reason_text 里，
+    而连播台只报「生成台未能补齐全部镜头」。镜头级事实不依赖有没有活跃 run——
+    run 早已收口时同样要说，否则两条分支一起落空，只剩一句没有信息量的失败。"""
+    conn = _conn("run-x")
+    _insert_minimal(conn, "shots", id="s24", episode_id="e", shot_no=24)
+    _insert_minimal(
+        conn, "jobs", id="j24", project_id="p", episode_id="e", shot_id="s24", kind="video",
+        status="cancelled", reason_code="VIDEO_PREFLIGHT_BLOCKED",
+        reason_text="视频输入校验未通过：[STORYBOARD_IDENTITY_REPAIR_REQUIRED] dialogue[0]"
+                    "『此宗被称之为赵国魔宗。』是原文人物引语，不能因说话人未知就改为旁白",
+    )
+    conn.commit()
+    monkeypatch.setattr(series_stages, "get_conn", lambda: conn)
+
+    reason = series_stages._stalled_video_reason("e")
+
+    assert "第24镜" in reason
+    assert "不能因说话人未知就改为旁白" in reason
+    # 必须说清重试无效：原文案「修好失败的集后重新加入队列」会把人推向反复重试
+    assert "重新加入队列不会改变结果" in reason
+    assert "分镜台" in reason
+
+
+def test_stalled_reason_keeps_both_classes_when_they_coexist(monkeypatch) -> None:
+    """等人工与预检拦截是两种不同的卡法，同时存在时都要说，不能互相顶掉。"""
+    conn = _conn("run-y")
+    _insert_run(conn, "run-y", "PARTIAL")
+    conn.execute("UPDATE workflow_runs SET failure_message='需人工处理' WHERE id='run-y'")
+    _insert_minimal(conn, "shots", id="s1", episode_id="e", shot_no=1)
+    _insert_minimal(conn, "shots", id="s2", episode_id="e", shot_no=2)
+    _insert_minimal(conn, "jobs", id="j1", project_id="p", episode_id="e", shot_id="s1", kind="video",
+                    status="waiting_human", error="不符合安全合规要求")
+    _insert_minimal(conn, "jobs", id="j2", project_id="p", episode_id="e", shot_id="s2", kind="video",
+                    status="cancelled", reason_code="VIDEO_PREFLIGHT_BLOCKED", reason_text="发声主体需修订")
+    conn.commit()
+    monkeypatch.setattr(series_stages, "get_conn", lambda: conn)
+
+    reason = series_stages._stalled_video_reason("e")
+
+    assert "第1镜" in reason and "不符合安全合规要求" in reason
+    assert "第2镜" in reason and "发声主体需修订" in reason
+
+
+def test_stalled_reason_stays_empty_when_nothing_is_blocked(monkeypatch) -> None:
+    """没有任何可说的事实时不要造一句话出来——空着比编一个理由诚实。"""
+    conn = _conn("run-z")
+    conn.commit()
+    monkeypatch.setattr(series_stages, "get_conn", lambda: conn)
+    assert series_stages._stalled_video_reason("e") == ""

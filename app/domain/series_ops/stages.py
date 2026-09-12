@@ -176,25 +176,65 @@ def _active_video_run(conn, episode_id: str) -> dict | None:
     return dict(run) if run else None
 
 
-def _stalled_video_reason(episode_id: str) -> str:
-    conn = get_conn()
-    run = _active_video_run(conn, episode_id)
-    if not run:
-        return ""
-    reason = f"：{run['failure_message'] or run['status']}"
-    # 运行级结论只说「需人工」，不说是哪一镜、供应商说了什么；把待人工镜头的原话带上，
-    # 用户在连播台就能看到出路（CLAUDE.md「拦住用户时必须给出出路」）。
-    blocked = conn.execute(
+def _waiting_human_shots(conn, episode_id: str) -> list[str]:
+    """停在「等人工」的镜头，带上供应商/闸门给的原话。"""
+    rows = conn.execute(
         """SELECT s.shot_no, j.error FROM jobs j JOIN shots s ON s.id=j.shot_id
             WHERE j.episode_id=? AND j.kind='video' AND j.status='waiting_human'
             ORDER BY s.shot_no LIMIT 3""",
         (episode_id,),
     ).fetchall()
-    if blocked:
-        reason += "；待人工处理：" + "；".join(
-            f"第{row['shot_no']}镜 {str(row['error'] or '').strip()[:200]}" for row in blocked
-        )
-    return reason
+    if not rows:
+        return []
+    return ["待人工处理：" + "；".join(
+        f"第{row['shot_no']}镜 {str(row['error'] or '').strip()[:200]}" for row in rows
+    )]
+
+
+def _preflight_blocked_shots(conn, episode_id: str) -> list[str]:
+    """被视频输入预检拦下的镜头。
+
+    2026-09-12 实测（我欲封天第 4 集镜 24/25）：这两句在原文里是带引号的人物心声，
+    分镜台把发声主体写成了旁白，预检的 ``STORYBOARD_IDENTITY_REPAIR_REQUIRED``
+    拦住不放。连播台当时只报「生成台未能补齐全部镜头」——可操作的那句话躺在
+    ``jobs.reason_text`` 里没人看得到，而任务级文案又说「修好失败的集后重新加入
+    队列」，照着做只会一直重试（实测两次，连供应商请求都没发出去）。
+
+    与 ``_waiting_human_shots`` 分开查而不是并进一条 SQL：这类 job 的终态是
+    ``cancelled``、可操作文本在 ``reason_text`` 而不是 ``error``，两边的取数口径
+    本来就不一样；更要紧的是这一类必须额外说清「重试无效」，那是另一句话。
+    """
+    rows = conn.execute(
+        """SELECT s.shot_no, j.reason_text FROM jobs j JOIN shots s ON s.id=j.shot_id
+            WHERE j.episode_id=? AND j.kind='video' AND j.status='cancelled'
+              AND j.reason_code='VIDEO_PREFLIGHT_BLOCKED'
+            ORDER BY s.shot_no LIMIT 3""",
+        (episode_id,),
+    ).fetchall()
+    if not rows:
+        return []
+    detail = "；".join(
+        f"第{row['shot_no']}镜 {str(row['reason_text'] or '').strip()[:200]}" for row in rows
+    )
+    return [f"需在分镜台修订后才能生成（重新加入队列不会改变结果）：{detail}"]
+
+
+def _stalled_video_reason(episode_id: str) -> str:
+    """补齐失败时附在错误后面的可操作说明。
+
+    运行级结论只说「需人工」，不说是哪一镜、卡在什么上；把镜号与原话带上，用户在
+    连播台就能看到出路（CLAUDE.md「拦住用户时必须给出路」）。镜头级事实不依赖
+    「有没有活跃的视频 run」——预检拦截是 jobs 上的持久事实，run 早已收口时同样要说；
+    2026-09-12 就是因为挂在 run 上，两条分支一起落空，只剩一句没有信息量的失败。
+    """
+    conn = get_conn()
+    parts: list[str] = []
+    run = _active_video_run(conn, episode_id)
+    if run:
+        parts.append(str(run["failure_message"] or run["status"]))
+    parts.extend(_preflight_blocked_shots(conn, episode_id))
+    parts.extend(_waiting_human_shots(conn, episode_id))
+    return "：" + "；".join(parts) if parts else ""
 
 
 # 补齐 Supervisor 停在这些 checkpoint 阶段时都不能静默发起新的 fresh 尝试：
