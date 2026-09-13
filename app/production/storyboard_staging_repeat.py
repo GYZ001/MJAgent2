@@ -30,9 +30,12 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 
 from app.production.storyboard_capacity_normalize import CAPACITY_SPLIT_MARKER
+
+_LOGGER = logging.getLogger(__name__)
 
 _SUBSHOT_RE = re.compile(r"镜头\d+[：:]\s*(.+?)(?=\n\s*镜头\d+[：:]|\n\s*全片贯穿|\n\s*参考图说明|\Z)", re.S)
 _MENTION_RE = re.compile(r"@[\w:（）()·-]+")
@@ -182,3 +185,30 @@ def staging_continuation_rule(previous_prompt_text: str, *, previous_segment_no:
         "情绪推进里找到依据。回到上一段出现过的画面（同一件道具的特写、同一个方向的全景）最多"
         "只用一个子镜，且不能是开场子镜。"
     )
+
+
+class StagingSoftGate:
+    """前 ``hard_attempts`` 次校验把画面重复当阻断，之后降级为告警并留痕。
+
+    这是质量类规则，不是保真类（台词/归属那些）：判据只在五条真实拆分链上标定过，
+    一次误判会让整集分镜失败、损失一次十几分钟的生成。给模型两次带着明确指引的
+    语义重试机会（``semantic_retry_limit``），仍改不出来就放行并打
+    ``[STORYBOARD_STAGING_REPEAT][未拦截]``，与 continuity_memo 里布局变化引文找不到
+    时「记告警日志供观测、不拦整集」是同一条取舍。``model_gateway.chat_structured``
+    的 validate 回调拿不到尝试序号，所以由每段各建一个实例自己数：格式修复不会调
+    validate，每次调用就是一次语义尝试。
+    """
+
+    def __init__(self, *, hard_attempts: int, segment_no: int) -> None:
+        self.hard_attempts = hard_attempts
+        self.segment_no = segment_no
+        self.calls = 0
+
+    def filter(self, errors: list[str]) -> list[str]:
+        self.calls += 1
+        if not errors or self.calls <= self.hard_attempts:
+            return errors
+        for error in errors:
+            _LOGGER.warning("[STORYBOARD_STAGING_REPEAT][未拦截] 第 %s 段语义重试用尽后仍重拍，放行：%s",
+                            self.segment_no, error[:200])
+        return []

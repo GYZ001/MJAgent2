@@ -173,3 +173,27 @@ def test_new_action_by_the_same_character_is_not_a_repeat_once_appearance_is_str
     cur = f"镜头1：固定 {MENGHAO}猛地站起，把葫芦高高举过头顶\n"
     assert repeated_staging(sub_shots(prev), sub_shots(cur), drop_phrases=[]) != []  # 不剥：误判相似
     assert repeated_staging(sub_shots(prev), sub_shots(cur), drop_phrases=PHRASES) == []  # 剥掉：是新动作
+
+
+def test_soft_gate_blocks_for_the_hard_attempts_then_degrades_to_a_logged_warning(caplog) -> None:
+    """质量类规则：两次带指引的语义重试后仍重拍，放行并留痕，不拿整集换一个子镜。"""
+    import logging
+
+    from app.production.storyboard_staging_repeat import StagingSoftGate
+
+    gate = StagingSoftGate(hard_attempts=2, segment_no=5)
+    errors = ["第 5 段是第 4 段起同一场戏的续段，但 2 个子镜重拍了……"]
+    assert gate.filter(errors) == errors  # 初次
+    assert gate.filter(errors) == errors  # 第 1 次语义重试
+    with caplog.at_level(logging.WARNING):
+        assert gate.filter(errors) == []  # 第 2 次语义重试仍不过：放行
+    assert any("[STORYBOARD_STAGING_REPEAT][未拦截]" in r.message and "第 5 段" in r.message for r in caplog.records)
+
+
+def test_soft_gate_never_swallows_a_clean_result_or_counts_it_twice() -> None:
+    from app.production.storyboard_staging_repeat import StagingSoftGate
+
+    gate = StagingSoftGate(hard_attempts=2, segment_no=1)
+    assert gate.filter([]) == []
+    assert gate.filter([]) == []
+    assert gate.filter(["x"]) == []  # 第三次调用已过硬阻断次数：降级
