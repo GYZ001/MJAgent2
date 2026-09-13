@@ -349,6 +349,23 @@ def set_jobs_queued(module: str, count: int) -> None:
     set_gauge(JOBS_QUEUED, count, {"module": module}, help_text="排队等待执行的工作流数（按 workflow_type 分组）")
 
 
+FAIR_ORDERING_DEGRADED_TOTAL = "manju_fair_ordering_degraded_total"
+
+
+def record_fair_ordering_degraded(reason: str) -> None:
+    """公平调度（EP-04 §6）排序退化为纯 FIFO/score 排序时计一次。
+
+    调用方是 ``app.quota_policy.fair_ordering.reorder_lanes``：进程内团队配额
+    比例缓存缺失/过期/刷新异常都会退化，``reason`` 区分具体原因（供运维判断是
+    偶发抖动还是持续故障），不新建指标族之外的任何东西——沿用本文件既有的
+    "调用方只认具名函数、不直接拼 metric 字符串" 惯例（见文件顶部分节注释）。
+    """
+    inc_counter(
+        FAIR_ORDERING_DEGRADED_TOTAL, {"reason": reason},
+        help_text="公平调度排序退化为 FIFO/score 排序的次数（按原因分组）",
+    )
+
+
 def set_quota_usage_ratio(scope_type: str, scope_id: str, resource: str, ratio: float) -> None:
     set_gauge(
         QUOTA_USAGE_RATIO, ratio, {"scope_type": scope_type, "scope_id": scope_id, "resource": resource},

@@ -38,6 +38,7 @@ from typing import Any
 
 from app import errors
 from app.db import get_conn, now, rows_to_dicts
+from app.quota_policy import fair_ordering
 
 from . import worker_lifecycle
 from .common import (
@@ -214,7 +215,7 @@ def _dispatch_due_jobs_stage_aware() -> dict[str, int]:
     stamp = now()
     rows = rows_to_dicts(conn.execute(
         """SELECT j.id, j.status, j.created_at, j.after_shot_id, j.episode_id, j.pipeline_stage,
-                  v.provider_task_id, v.image_inputs, s.shot_no, s.id AS shot_pk
+                  j.project_id, v.provider_task_id, v.image_inputs, s.shot_no, s.id AS shot_pk
            FROM jobs j
            LEFT JOIN shot_versions v ON v.id=j.version_id
            LEFT JOIN shots s ON s.id=j.shot_id
@@ -348,10 +349,14 @@ def _dispatch_due_jobs_stage_aware() -> dict[str, int]:
         raise
 
     poll_candidates.sort(key=lambda row: float(row.get("created_at") or stamp))
-    video_ready.sort(key=lambda item: -item[0])
-    reference_critical.sort(key=lambda item: -item[0])
-    reference_normal.sort(key=lambda item: -item[0])
-    retake_jobs.sort(key=lambda item: -item[0])
+    # 唯一的候选选取处外部调用：四条车道各自的硬优先级分类（finalize>
+    # video_ready>reference(cohort)>retake）不变，只把同车道内的先后顺序换成
+    # 公平排序（团队剩余配额比例 + 已等待时长 + 既有 score 的加权和，退化态
+    # 原样等价于此前的 `-item[0]` 排序）——见 app/quota_policy/fair_ordering.py
+    # 模块文档，EP-04 §6 / EP-05 §10.5 第二条。
+    video_ready, reference_critical, reference_normal, retake_jobs = fair_ordering.reorder_lanes(
+        video_ready, reference_critical, reference_normal, retake_jobs, stamp=stamp,
+    )
 
     poll_capacity = max(1, worker_lifecycle._poll_worker_target or 1) * _DISPATCH_BACKLOG_PER_WORKER
     poll_slots = max(0, poll_capacity - _poll_queue.qsize())
