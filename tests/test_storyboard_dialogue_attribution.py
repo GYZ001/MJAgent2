@@ -305,3 +305,33 @@ def test_offscreen_voice_is_not_held_to_the_verbatim_spoken_rule():
     spoken_draft = _draft([spoken])
     assert dialogue_speaker_errors(spoken_draft, [], manifest_name_to_identity(PAYLOAD), src) == []
     assert spoken_draft.dialogue == []
+
+
+# ---------------------------------------------------------------- 引语跨段窗口
+def test_ledger_quote_split_across_segment_windows_still_rejects_narrator() -> None:
+    """2026-09-12 我欲封天第 4 集镜 24/25：引语「越强则越强……此宗被称之为赵国魔宗。」跨在
+    单元 7/8 的边界上，阶段二给每段的窗口一边只剩左引号、一边只剩右引号，_QUOTE_RE 配不
+    上对，in_quotes 恒 False，「引语不能改成旁白」不触发；预检拿整段原文当场拦下，出路
+    只剩人工修订。台账按引号抽出这句时就已经判定它是引语，阶段二要认台账，不认窗口。"""
+    # 本段窗口：只有左引号，右引号在下一段
+    window = "[段4·S06]除非是获得丹药或者灵石，可以大大缩短时间。[段4·S07]“越强则越强，越弱则越弱，难道这靠山宗是要以这种方法，来培养出内门弟子……"
+    required = [{"quote_id": "Q24", "text": "越强则越强，越弱则越弱，难道这靠山宗是要以这种方法，来培养出内门弟子……",
+                 "speaker": "", "source_segment_index": 4}]
+    line = _Line(NARRATOR, "越强则越强，越弱则越弱，难道这靠山宗是要以这种方法，来培养出内门弟子……", "offscreen_voice")
+    errors = dialogue_speaker_errors(_draft([line]), required, manifest_name_to_identity(PAYLOAD), window)
+    assert any("不能因说话人未知就改为旁白" in e for e in errors), errors
+
+
+def test_ledger_quote_explicitly_narrated_is_still_allowed() -> None:
+    """台账自己把这句记成旁白（剧本格式 `旁白：…` 行）时，阶段二不得反过来打回。"""
+    window = "[段1·S01]旁白：多年前，此宗被称之为赵国魔宗。"
+    required = [{"quote_id": "Q01", "text": "多年前，此宗被称之为赵国魔宗。", "speaker": "旁白", "source_segment_index": 1}]
+    line = _Line(NARRATOR, "多年前，此宗被称之为赵国魔宗。", "offscreen_voice")
+    assert dialogue_speaker_errors(_draft([line]), required, manifest_name_to_identity(PAYLOAD), window) == []
+
+
+def test_narration_outside_ledger_is_untouched_by_the_quote_rule() -> None:
+    """不在台账、也不在引号里的旁白概括，本来就允许——这条规则只管台账认定的引语。"""
+    window = "[段1·S01]时间一晃，过去了七天，这七天里孟浩在外宗又看到了几次抢夺之事。"
+    line = _Line(NARRATOR, "时间一晃，过去了七天", "offscreen_voice")
+    assert dialogue_speaker_errors(_draft([line]), [], manifest_name_to_identity(PAYLOAD), window) == []

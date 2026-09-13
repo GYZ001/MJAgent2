@@ -241,10 +241,19 @@ def dialogue_speaker_errors(
     dropped: list[int] = _unsourced_spoken_drops(
         draft, required_dialogue, segment_source_text, list(name_to_identity),
     )
+    ledger_quotes = {textmatch.condense(str(item.get("text") or "")) for item in required_dialogue}
     for index, line in enumerate(draft.dialogue):
         if line.delivery != "offscreen_voice":
             continue
         traceable, in_quotes = _trace_to_source(line.line, segment_source_text)
+        # 「是不是原文引语」以台账为准，不靠在本段窗口里重新数引号：阶段二喂的是本段
+        # 单元窗口，一句引语跨在单元边界上时，前一段只剩左引号、后一段只剩右引号，
+        # _QUOTE_RE 两边都配不上对，in_quotes 恒为 False，「引语不能改成旁白」这条就
+        # 不触发；预检拿的是整段 source_excerpt，引号对完整，同一条规则当场拦下——
+        # 阶段二放行、预检才拦，出路只剩人工修订（2026-09-12 我欲封天第 4 集镜 24/25，
+        # 「越强则越强……此宗被称之为赵国魔宗。」孟浩沉默）。台账抽这句时就是按引号
+        # 抽的，它的判断不受窗口切法影响。
+        in_quotes = in_quotes or textmatch.condense(line.line) in ledger_quotes
         if in_quotes and line.speaker_identity_id == NARRATOR and not any(item.get("speaker") == NARRATOR and textmatch.condense(str(item.get("text") or "")) == textmatch.condense(line.line) for item in required_dialogue):
             errors.append(f"dialogue[{index}]『{line.line[:20]}』是原文人物引语，不能因说话人未知就改为旁白，请保留独立发声主体")
         if not traceable:
