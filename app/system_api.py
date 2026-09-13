@@ -221,8 +221,8 @@ MODEL_PROVIDER_KINDS = {
     "deepseek": {"text"},
     "zhipu": {"text"},
 }
-# 代码里不再内嵌任何模型：模型库（custom_models）是唯一来源，页面上的每一条都是
-# 通过「添加模型」进来的。历史内嵌模型由 app/model_migration.py 一次性搬入。
+# 代码里不再内嵌任何模型：模型库（models 表）是唯一来源，页面上的每一条都是
+# 通过「添加模型」进来的；增删改查经 model_registry.catalog_items()/models_registry_store。
 
 
 def probe_kind(kinds: list[str] | set[str] | None) -> str:
@@ -260,14 +260,6 @@ def media_protocol_options(kinds: list[str] | set[str]) -> set[str]:
     return options
 
 
-def _custom_models() -> list[dict]:
-    try:
-        value = json.loads(get_setting("custom_models") or "[]")
-    except (TypeError, json.JSONDecodeError):
-        return []
-    return value if isinstance(value, list) else []
-
-
 def _token_capability_overrides() -> dict[str, dict]:
     try:
         value = json.loads(get_setting("model_token_capabilities") or "{}")
@@ -284,7 +276,7 @@ def _model_catalog() -> list[dict]:
                 item, overrides.get(str(item.get("id") or ""), {})
             )
         )
-        for item in _custom_models() if isinstance(item, dict)
+        for item in model_registry.catalog_items()
     ]
 
 
@@ -381,9 +373,7 @@ def add_model(body: dict):
     item.update({**model_registry.extra_patch_fields(body), **normalize_token_limits(body)})
     if custom_provider:
         item.update({"provider_label": provider_label, "base_url": base_url})  # api_key 不落这里，见下方加密表写入
-    custom = _custom_models()
-    custom.append(item)
-    set_setting("custom_models", json.dumps(custom, ensure_ascii=False))
+    models_registry_store.upsert_model(item, created_by=current_actor_name(fallback="admin"))
     if custom_provider:
         models_registry_store.put_credential(item_id, base_url=base_url, api_key=api_key, rotated_by=current_actor_name(fallback="admin"))
     return _public_model(item)
@@ -590,7 +580,7 @@ async def test_model_connection(body: dict):
 @router.put("/models/{model_id}")
 async def update_model_route(model_id: str, body: dict):
     from app.capabilities.dispatch import ui_route
-    current = next((item for item in _custom_models() if item.get("id") == model_id), {})
+    current = next((item for item in model_registry.catalog_items() if item.get("id") == model_id), {})
     probe_body = {**current, **body}
     if not str(body.get("api_key") or "").strip():  # 加密表才是真源，current 不再带明文
         probe_body["api_key"] = models_registry_store.get_credential(model_id).get("api_key") or ""
@@ -607,8 +597,7 @@ async def update_model_route(model_id: str, body: dict):
 
 
 def update_model(model_id: str, body: dict):
-    custom = _custom_models()
-    item = next((m for m in custom if m.get("id") == model_id), None)
+    item = next((m for m in model_registry.catalog_items() if m.get("id") == model_id), None)
     if not item:
         raise HTTPException(404, "模型不存在或为内置模型")
     # 编辑与新增共用协议合同；不能把 Seedance 等媒体模型套进旧 Text/VLM 限制。
@@ -629,7 +618,7 @@ def update_model(model_id: str, body: dict):
         effective_key = str(body.get("api_key") or "").strip() or legacy_inline_key or str(models_registry_store.get_credential(model_id).get("api_key") or "")
         if effective_key:
             models_registry_store.put_credential(model_id, base_url=base_url, api_key=effective_key, rotated_by=current_actor_name(fallback="admin"))
-    set_setting("custom_models", json.dumps(custom, ensure_ascii=False))
+    models_registry_store.upsert_model(item, created_by=current_actor_name(fallback="admin"))
     return _public_model(item)
 
 
@@ -706,15 +695,18 @@ async def delete_model_route(model_id: str):
 
 
 def delete_model(model_id: str):
-    custom = _custom_models()
-    item = next((m for m in custom if m.get("id") == model_id), None)
+    item = next((m for m in model_registry.catalog_items() if m.get("id") == model_id), None)
     if not item:
         raise HTTPException(404, "模型不存在或为内置模型")
     from app import hiagent
+    from app.models_registry import bindings as models_registry_bindings
     for kind in item.get("kinds", []):
         if hiagent.active_provider(kind) == item.get("provider") and hiagent.active_model(kind) == item.get("model"):
             raise HTTPException(409, f"该模型正在用于 {kind}，请先切换后再删除")
-    set_setting("custom_models", json.dumps([m for m in custom if m.get("id") != model_id], ensure_ascii=False))
+    referenced_by = models_registry_bindings.purposes_referencing_model(model_id)
+    if referenced_by:
+        raise HTTPException(409, f"该模型仍被以下用途绑定引用，请先解除绑定：{', '.join(referenced_by)}")
+    models_registry_store.delete_model(model_id)
     overrides = _token_capability_overrides()
     if model_id in overrides:
         overrides.pop(model_id, None)
@@ -1968,7 +1960,9 @@ def retry_job(job_id: str, body: dict | None = None, _admin: None = Depends(requ
 
 
 def _redact_settings_values(values: dict[str, Any]) -> dict[str, Any]:
-    """永远剥离 api_key / model_credentials 明文（Todolist T2）。"""
+    """永远剥离 api_key / model_credentials 明文（Todolist T2）。custom_models
+    已退场（唯一真源是 models 表）但仍防御性脱敏——迁移过渡态或手工写库可能
+    残留旧内联 api_key。"""
     public: dict[str, Any] = {}
     for key, raw in values.items():
         if key == "model_credentials":

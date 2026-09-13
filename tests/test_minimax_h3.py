@@ -814,12 +814,8 @@ def test_hiagent_dispatches_minimax_tasks_without_api_key(monkeypatch) -> None:
     assert result["status"] == "running"
 
 
-def test_minimax_h3_instance_tracks_its_own_bearer_key(monkeypatch) -> None:
+def test_minimax_h3_instance_tracks_its_own_bearer_key() -> None:
     """H3 不再作为内嵌模型存在；模型库里的实例自带 Key，缺 Key 即不可用。"""
-    store = {"custom_models": "[]"}
-    monkeypatch.setattr(system_api, "get_setting", lambda key: store.get(key, ""))
-    monkeypatch.setattr(system_api, "set_setting", lambda key, value: store.__setitem__(key, value))
-
     created = system_api.add_model({
         "provider": "custom", "provider_label": "MiniMax H3", "label": "H3",
         "model": "minimax-h3", "kinds": ["video"], "protocol": "minimax_h3",
@@ -830,9 +826,9 @@ def test_minimax_h3_instance_tracks_its_own_bearer_key(monkeypatch) -> None:
     assert created["kinds"] == ["video"]
     assert created["key_configured"] is True
 
-    import app.models_registry.store as models_registry_store  # api_key 改走加密表，不再落 settings
-    stored = json.loads(store["custom_models"])[0]
-    assert "api_key" not in stored and "h3-token" not in store["custom_models"]
+    import app.models_registry.store as models_registry_store  # api_key 改走加密表，不再落 models 表
+    stored = models_registry_store.get_model(created["id"])
+    assert "api_key" not in stored
     assert stored["base_url"] == "https://tunnel.example.test"
     assert models_registry_store.get_credential(created["id"])["api_key"] == "h3-token"
 

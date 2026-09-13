@@ -159,6 +159,15 @@ allowed_exceptions = []
                         # 本包任何模块都不得反向 import app.quota，否则叠加
                         # 到既有的 db ↔ quota ↔ quota_addon ↔ quota_tiers 那团
                         # 循环上
+"app.quota_policy.fair_ordering" = 2  # 2026-09-13 新增（EP-04 §6 接入调度器）：
+                                       # 已经会被 app.quota_policy=2 前缀覆盖到
+                                       # 同一层号（最长前缀匹配），这里显式声明
+                                       # 只是走 CLAUDE.md「新模块必须声明层号」
+                                       # 的字面要求，不改变实际解析结果。依赖
+                                       # app.db、app.observability.metrics_
+                                       # registry（L1）、app.orgs.store（同层）、
+                                       # app.quota_policy.allocation（同层同包）
+                                       # + stdlib，不 import app.quota。
 "app.quota_policy.api" = 5  # 2026-09-11 新增：覆盖 app.quota_policy=2 前缀。
                             # REST 路由需要 app.auth.principal/app.orgs.store
                             # 做鉴权，挂 APIRouter 只被 app.main 引用，与

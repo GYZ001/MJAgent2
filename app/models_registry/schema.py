@@ -28,7 +28,7 @@ from __future__ import annotations
 import sqlite3
 
 from app import db, db_schema, monitor_audit_buffer
-from app.models_registry.migration import migrate_model_credentials
+from app.models_registry.migration import migrate_model_credentials, retire_catalog_setting
 
 _CREATE_STATEMENTS: tuple[str, ...] = (
     """CREATE TABLE IF NOT EXISTS models (
@@ -37,12 +37,14 @@ _CREATE_STATEMENTS: tuple[str, ...] = (
         name TEXT NOT NULL DEFAULT '',
         protocol TEXT NOT NULL DEFAULT '',
         provider_label TEXT,
+        provider TEXT NOT NULL DEFAULT '',
         model_ref TEXT NOT NULL DEFAULT '',
         kinds_json TEXT NOT NULL DEFAULT '[]',
         base_url TEXT NOT NULL DEFAULT '',
         enabled INTEGER NOT NULL DEFAULT 1,
         capabilities_json TEXT NOT NULL DEFAULT '{}',
         rate_limit_json TEXT,
+        extra_json TEXT NOT NULL DEFAULT '{}',
         notes TEXT,
         created_at REAL NOT NULL,
         updated_at REAL NOT NULL,
@@ -107,9 +109,25 @@ def ensure_tables_on_connection(conn: sqlite3.Connection) -> None:
     内部用 executescript，会把调用方尚未提交的事务连同它持有的写锁一起偷
     偷放掉，是 CLAUDE.md「不得在调用方的连接上隐式提交」记录的那三次真实
     事故同一类地雷（``tests/test_schema_guard.py`` 有 AST 守卫钉死这一点）。
+
+    ``provider``/``extra_json`` 两列是模型库收敛成唯一真源那轮（2026-09-13）
+    补的：``CREATE TABLE IF NOT EXISTS`` 对已经存在的表（生产 B 上 EP-05 第
+    一阶段就建过、只有旧 11 列）不会补列，靠下面两条 ``_add_column_if_missing``
+    幂等追加——与 ``app/orgs/schema.py::_add_column_if_missing`` 同一手法：
+    只吞"列已存在"这一种 ``OperationalError``，其余原样抛出。
     """
     for statement in _CREATE_STATEMENTS:
         conn.execute(statement)
+    _add_column_if_missing(conn, "models", "provider", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "models", "extra_json", "TEXT NOT NULL DEFAULT '{}'")
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, coltype: str) -> None:
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
 
 
 def ensure_schema() -> None:
@@ -156,6 +174,12 @@ def ensure_schema() -> None:
         # 发——调用方持有事务时那条分支只保证表/列存在，不做迁移这种非纯建表
         # 操作，等下一次不在事务里的 ensure_schema() 调用补上。
         migrate_model_credentials()
+        # models 表收敛成唯一真源那轮（2026-09-13）补的第二步：custom_models 里
+        # models 表还没有的条目补进去，然后清空该 setting——见
+        # retire_catalog_setting() 模块文档"为什么不受 MIGRATION_FLAG 约束"。
+        # 必须排在 migrate_model_credentials() 之后（凭据要先落表，退场时才有
+        # 完整的加密记录可用），且两者共用同一条"表刚建好"触发时机。
+        retire_catalog_setting()
         # 4 个旧 model_*_provider 设置迁成 priority=0 绑定（EP-05 第二阶段）不在这里
         # 触发——app.models_registry.binding_migration 真实依赖 app.model_registry
         # （L3，回落取第一条目要用它），本模块是 L2，模块级 import 会构成层级上行边；

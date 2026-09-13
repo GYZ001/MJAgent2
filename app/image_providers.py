@@ -23,19 +23,12 @@ DEFAULT_PROTOCOL = "seedream"
 
 def protocol_for_provider(provider: str) -> str:
     """解析某个 provider 实例声明的图像协议。"""
-    import json
-
-    from app.db import get_setting
+    from app import model_registry
 
     name = str(provider or "").strip()
     if not name.startswith("custom:"):
         return DEFAULT_PROTOCOL
-    try:
-        custom = json.loads(get_setting("custom_models") or "[]")
-    except (TypeError, ValueError):
-        return DEFAULT_PROTOCOL
-    if not isinstance(custom, list):
-        return DEFAULT_PROTOCOL
+    custom = model_registry.catalog_items()
     item = next(
         (
             entry for entry in custom

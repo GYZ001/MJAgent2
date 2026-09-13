@@ -9,11 +9,15 @@ CLAUDE.md 明确「model 与 provider/凭据必须一起传递，分开传会让
 这里在 PRD schema 基础上给 ``model_credentials`` 加了一列 ``base_url``（明文，
 不是秘密），让"这把 Key 配哪个地址"永远是同一行、原子读写。
 
-``models`` 表这一阶段只是「落表」——迁移把 ``settings.custom_models`` 的目录
-条目镜像进来，供下一阶段（``model_bindings``/路由）消费；本阶段任何真实选路
-仍然读 ``settings.custom_models``（``app/hiagent.py``/``app/video_providers.py``/
-``app/system_api.py`` 均未改动这部分），``models`` 表里的数据这一阶段不会被
-路由路径读取，不影响"选路行为零变化"这条硬指标。
+2026-09-13 起，``models`` 表不再是迁移时的只读镜像——``app.system_api``
+的 ``add_model``/``update_model``/``delete_model`` 直接经本模块读写这张表，
+``settings.custom_models`` 完全退场（``app.models_registry.migration.
+retire_catalog_setting`` 一次性把存量条目补齐后清空该 setting）。全部读取
+路径（``app.hiagent``/``app.video_providers``/``app.image_providers``/
+``app.model_capabilities``/``app.system_api``）统一经
+``app.model_registry.catalog_items()`` 取数据，该函数内部调用本模块的
+``list_models()`` 并把行还原成旧 ``custom_models`` 条目的扁平 dict 形状，
+调用方不必感知底层存储已经从 settings JSON 换成了真表。
 """
 from __future__ import annotations
 
@@ -127,50 +131,80 @@ def delete_credential(model_id: str) -> None:
     conn.commit()
 
 
+_CAPABILITY_FIELDS = ("context_window_tokens", "max_output_tokens", "token_limits_source")
+_EXTRA_FIELDS = ("params", "requires_api_key")
+
+
 def upsert_model(item: dict[str, Any], *, created_by: str | None = None) -> None:
-    """把一条模型库目录条目（``settings.custom_models`` 的 dict 形状）镜像进
-    ``models`` 表。纯落表，不做能力探测、不做校验——校验是目录本身
+    """把一条模型库目录条目（旧 ``settings.custom_models`` 的 dict 形状，也是
+    ``app.system_api.add_model``/``update_model`` 内部仍在用的形状）写进
+    ``models`` 表——这张表现在是模型库的唯一写入路径，不再是迁移时的只读镜像
+    （2026-09-13 收敛）。纯落表，不做能力探测、不做校验——校验是目录本身
     （``app/system_api.py::_validated_model_definition``）的职责，这里只负责
     把已经校验过的数据存进可查询的表。
+
+    ``capabilities_json`` 只装 ``item`` 里**实际出现**的三个 token 能力字段
+    （``if key in item``，不补默认值）——迁移/新增都不得把"没探到"伪装成"探到
+    了默认值"（EP-05 §11 陷阱 3）。``extra_json`` 是 ``params``（供
+    ``app/minimax_h3.py`` 等媒体协议读取的额外请求参数）与 ``requires_api_key``
+    （历史上从未有写入口用过，但读路径 ``app/model_registry.py::_has_credentials``
+    仍在读，防御性保留）两个没有专属列的字段的落点，同一条"只存实际出现的键"
+    的规则。``provider`` 是独立列（不是派生值）：自建服务商是 ``custom:{id}``，
+    共享网关家族是字面量（``hiagent``/``openrouter``/...），两者都必须原样
+    存下来，不能在读出时重新猜。
     """
     model_id = str(item.get("id") or "").strip()
     if not model_id:
         raise ValueError("模型条目缺少 id，无法落表")
     kinds = item.get("kinds") or []
-    capabilities = {
-        key: item[key]
-        for key in ("context_window_tokens", "max_output_tokens", "token_limits_source")
-        if key in item
-    }
+    capabilities = {key: item[key] for key in _CAPABILITY_FIELDS if key in item}
+    extra = {key: item[key] for key in _EXTRA_FIELDS if key in item}
+    rate_limit = item.get("rate_limit") if isinstance(item.get("rate_limit"), dict) else None
+    enabled = 0 if item.get("enabled") is False else 1
     schema.ensure_schema()
     ts = now()
     conn = get_conn()
     conn.execute(
         """INSERT INTO models
-               (id, org_id, name, protocol, provider_label, model_ref, kinds_json,
-                base_url, enabled, capabilities_json, rate_limit_json, notes,
-                created_at, updated_at, created_by)
-           VALUES(?,NULL,?,?,?,?,?,?,1,?,NULL,NULL,?,?,?)
+               (id, org_id, name, protocol, provider_label, provider, model_ref,
+                kinds_json, base_url, enabled, capabilities_json, rate_limit_json,
+                extra_json, notes, created_at, updated_at, created_by)
+           VALUES(?,NULL,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?)
            ON CONFLICT(id) DO UPDATE SET
                name=excluded.name, protocol=excluded.protocol,
-               provider_label=excluded.provider_label, model_ref=excluded.model_ref,
-               kinds_json=excluded.kinds_json, base_url=excluded.base_url,
+               provider_label=excluded.provider_label, provider=excluded.provider,
+               model_ref=excluded.model_ref, kinds_json=excluded.kinds_json,
+               base_url=excluded.base_url, enabled=excluded.enabled,
                capabilities_json=excluded.capabilities_json,
+               rate_limit_json=excluded.rate_limit_json, extra_json=excluded.extra_json,
                updated_at=excluded.updated_at""",
         (
             model_id,
             str(item.get("label") or ""),
             str(item.get("protocol") or ""),
-            str(item.get("provider_label") or item.get("provider") or ""),
+            str(item.get("provider_label") or "") or None,
+            str(item.get("provider") or ""),
             str(item.get("model") or ""),
             json.dumps(list(kinds), ensure_ascii=False),
             str(item.get("base_url") or ""),
+            enabled,
             json.dumps(capabilities, ensure_ascii=False),
+            json.dumps(rate_limit, ensure_ascii=False) if rate_limit is not None else None,
+            json.dumps(extra, ensure_ascii=False),
             ts,
             ts,
             created_by,
         ),
     )
+    conn.commit()
+
+
+def delete_model(model_id: str) -> None:
+    """从 ``models`` 表删除一条条目；调用方负责引用检查（``model_bindings``
+    是否还引用它），这里只做落库删除本身。"""
+    schema.ensure_schema()
+    conn = get_conn()
+    conn.execute("DELETE FROM models WHERE id=?", (str(model_id or "").strip(),))
     conn.commit()
 
 
@@ -192,4 +226,6 @@ def _model_row_to_dict(row: Any) -> dict[str, Any]:
     data = dict(row)
     data["kinds"] = json.loads(data.pop("kinds_json") or "[]")
     data["capabilities"] = json.loads(data.pop("capabilities_json") or "{}")
+    data["rate_limit"] = json.loads(data.pop("rate_limit_json") or "{}")
+    data["extra"] = json.loads(data.pop("extra_json") or "{}")
     return data

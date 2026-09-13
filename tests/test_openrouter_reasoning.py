@@ -269,6 +269,8 @@ def test_reasoning_fallback_never_replays_an_identical_deepseek_request(monkeypa
 
 
 def test_text_requests_are_capped_by_active_model_output_limit(monkeypatch) -> None:
+    import app.models_registry.store as models_registry_store
+
     captured: dict = {}
     provider = "custom:model_cap"
     model = "vendor/model-cap"
@@ -279,18 +281,17 @@ def test_text_requests_are_capped_by_active_model_output_limit(monkeypatch) -> N
         captured["meta"] = meta
         return {"choices": [{"finish_reason": "stop", "message": {"content": "ok"}}]}
 
-    settings = {
-        "custom_models": json.dumps([{
-            "id": "model_cap",
-            "provider": provider,
-            "model": model,
-            "kinds": ["text"],
-            "context_window_tokens": 262144,
-            "max_output_tokens": 16384,
-            "token_limits_source": "provider_metadata",
-        }]),
-    }
-    monkeypatch.setattr(hiagent, "get_setting", lambda key: settings.get(key, ""))
+    # custom_models 已退场：目录条目改落真表（models_registry_store.upsert_model），
+    # active_model_token_limits() 现在经 app.model_registry.catalog_items() 读那张表。
+    models_registry_store.upsert_model({
+        "id": "model_cap",
+        "provider": provider,
+        "model": model,
+        "kinds": ["text"],
+        "context_window_tokens": 262144,
+        "max_output_tokens": 16384,
+        "token_limits_source": "provider_metadata",
+    }, created_by="test")
     monkeypatch.setattr(hiagent, "active_provider", lambda kind: provider)
     monkeypatch.setattr(hiagent, "active_model", lambda kind, provider=None: model)
     monkeypatch.setattr(

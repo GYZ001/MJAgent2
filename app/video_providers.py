@@ -127,18 +127,13 @@ def _catalog_item(provider: str) -> dict[str, Any] | None:
 
     凭据（``saved``）来自 ``app.models_registry.store``（加密表），不是
     ``settings.model_credentials``——EP-05 第一阶段迁移后那个 setting 恒为空。
+    目录本身（``custom``）来自 ``app.model_registry.catalog_items()``，读
+    ``models`` 表——``settings.custom_models`` 已退场，见该函数模块文档。
     """
-    import json
-
-    from app.db import get_setting
+    from app import model_registry
     from app.models_registry import store as models_registry_store
 
-    try:
-        custom = json.loads(get_setting("custom_models") or "[]")
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(custom, list):
-        return None
+    custom = model_registry.catalog_items()
     item = next(
         (
             entry for entry in custom

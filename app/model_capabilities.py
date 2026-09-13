@@ -165,30 +165,31 @@ def active_model_token_limits(
     provider: str,
     model: str,
     get_setting: Callable[[str], str],
+    catalog_items: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """读取当前模型能力；兼容尚未写入能力字段的既有模型。
 
-    ``model_token_capabilities`` 是添加模型时的探测缓存，``custom_models``
-    里的则是模型编辑里保存下来的值。两者的合并规则见
-    ``merge_token_capability_override``：按证据强度定胜负，判据从数据本身推导
-    （``token_limits_source`` 是这两条记录各自对自己成色的声明），不给哪个
-    模型或哪张表开白名单。
+    ``model_token_capabilities`` 是添加模型时的探测缓存，``catalog_items``
+    （调用方传入的模型库全量条目，通常是 ``app.model_registry.
+    catalog_items()`` 的结果）里的则是模型编辑里保存下来的值——
+    ``settings.custom_models`` 已退场，不再是这份数据的来源。两者的合并规则
+    见 ``merge_token_capability_override``：按证据强度定胜负，判据从数据本身
+    推导（``token_limits_source`` 是这两条记录各自对自己成色的声明），不给
+    哪个模型或哪张表开白名单。
+
+    ``catalog_items`` 必须由调用方显式传入，不在本函数内部查——本模块是 L1
+    （零业务依赖），``app.model_registry``/``app.models_registry.store`` 是
+    L2/L3，模块内 import 会构成层级上行边（``scripts/arch_graph.py
+    --check-layers`` 会拦住）；调用方（``app.hiagent`` 等）本来就已经站在能
+    合法 import 它们的层级上，查一次的成本比在这里开一条非法依赖低得多。
     """
-    selected: dict[str, Any] = {}
-    try:
-        custom = json.loads(get_setting("custom_models") or "[]")
-    except (TypeError, json.JSONDecodeError):
-        custom = []
-    if isinstance(custom, list):
-        selected = next(
-            (
-                item for item in custom
-                if isinstance(item, dict)
-                and item.get("provider") == provider
-                and item.get("model") == model
-            ),
-            {},
-        )
+    selected = next(
+        (
+            item for item in catalog_items
+            if item.get("provider") == provider and item.get("model") == model
+        ),
+        {},
+    )
     item_id = str(selected.get("id") or f"builtin:{provider}:{model}")
     try:
         saved = json.loads(get_setting("model_token_capabilities") or "{}")

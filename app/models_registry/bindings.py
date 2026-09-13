@@ -40,6 +40,18 @@ def get_priority_zero(purpose: str, *, org_id: str = "") -> dict[str, Any] | Non
     return _row_to_dict(row) if row is not None else None
 
 
+def purposes_referencing_model(model_id: str) -> list[str]:
+    """某个 model_id 当前被哪些 purpose 引用（任意 priority，不止 priority=0）
+    ——供 ``app.system_api.delete_model`` 的引用检查用：被引用就必须 409，
+    不能静默删（EP-05 §11 陷阱 4：会让某个阶段突然无主用）。"""
+    schema.ensure_schema()
+    rows = get_conn().execute(
+        "SELECT DISTINCT purpose FROM model_bindings WHERE model_id=? ORDER BY purpose",
+        (str(model_id or "").strip(),),
+    ).fetchall()
+    return [str(row["purpose"]) for row in rows]
+
+
 def distinct_purposes(*, org_id: str = "") -> set[str]:
     """当前已经有至少一条绑定的 purpose 集合——供目录函数并入"已知 purpose"，
     不做任何过滤，纯粹反映表里已有什么。"""

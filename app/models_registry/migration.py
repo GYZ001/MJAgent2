@@ -217,6 +217,92 @@ def _migrate_model_credentials_body(*, force: bool) -> dict[str, Any]:
     }
 
 
+_retire_in_progress = False
+
+
+def retire_catalog_setting(*, force: bool = False) -> dict[str, Any]:
+    """把 ``settings.custom_models`` 里 ``models`` 表还没有的条目补齐，然后
+    清空该 setting——模型库收敛成唯一真源那轮（2026-09-13）的第二步。
+
+    ``migrate_model_credentials`` 早先只做了"镜像"：把目录条目落一份到
+    ``models`` 表，但 ``settings.custom_models`` 本身继续保留（只剥离了内联
+    明文 Key），因为那时它仍然是全部读取路径的真实来源。现在
+    ``app.model_registry.catalog_items()`` 已经改读 ``models`` 表，
+    ``custom_models`` 留着有数据除了"两个真源并存"没有任何作用，必须清空。
+
+    **不受 ``MIGRATION_FLAG``（凭据迁移的整体闸门）约束**：那个闸门在这次
+    改动上线前大概率已经在生产环境跑成 "done"（``migrate_model_credentials``
+    是 EP-05 第一阶段就有的迁移），绑定同一个闸门这一步永远不会被触发——与
+    ``binding_migration.py::_migrate_moderation_fallback_route`` 同一个坑、
+    同一个解法。改用"``custom_models`` 是否已经是空列表"本身做幂等判据：
+    不需要另开一个标记位，天然满足"重复调用不产生重复效果"，且对生产 B（两边
+    已经一致，只是 setting 还没清空）这条件恰好只触发一次——第一次运行"零
+    迁入、清空设置、一条审计"，此后每次调用都在这里短路返回。
+
+    与 ``migrate_model_credentials`` 同款重入闸门（``_retire_in_progress``）：
+    下面的 ``store.upsert_model()`` 会触发 ``schema.ensure_schema()``，若这次
+    调用恰好是"表刚建好第一次被摸到"的那个调用者，会在自己的调用栈里把自己
+    再触发一次；见 ``migrate_model_credentials`` 模块文档同一段，不重复展开。
+    """
+    global _retire_in_progress
+    if _retire_in_progress:
+        return {"skipped": True, "reason": "reentrant_call"}
+    _retire_in_progress = True
+    try:
+        return _retire_catalog_setting_body(force=force)
+    finally:
+        _retire_in_progress = False
+
+
+def _retire_catalog_setting_body(*, force: bool) -> dict[str, Any]:
+    from app.db import get_setting, set_setting
+    from app.models_registry import store
+
+    raw = str(get_setting("custom_models") or "").strip()
+    if not force and raw in ("", "[]"):
+        return {"skipped": True, "reason": "already_retired"}
+
+    catalog = _json_setting(get_setting, "custom_models", [])
+    existing_ids = {str(m.get("id") or "") for m in store.list_models()}
+    migrated: list[str] = []
+    for item in catalog:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("id") or "").strip()
+        if not model_id or model_id in existing_ids:
+            continue
+        store.upsert_model(item, created_by="migration")
+        migrated.append(model_id)
+
+    set_setting("custom_models", "[]")
+    summary = (
+        f"models 表补迁 {len(migrated)} 条（目录原有 {len(catalog)} 条）；"
+        "settings.custom_models 已清空，不再是任何读取路径的来源"
+    )
+    _write_catalog_retirement_audit(migrated, len(catalog), summary)
+    return {"skipped": False, "migrated": migrated, "summary": summary}
+
+
+def _write_catalog_retirement_audit(migrated: list[str], catalog_total: int, summary: str) -> None:
+    from app.audit.store import insert_operation_audit_row
+    from app.db import new_id, now
+
+    insert_operation_audit_row({
+        "id": new_id("opaudit"), "ts": now(),
+        "user_id": None, "username": None, "is_system_admin": None,
+        "source": "migration", "event": "models_registry.catalog_setting_retired",
+        "event_label": "模型库 settings.custom_models 退场",
+        "method": None, "path": None,
+        "project_id": None, "episode_id": None, "target": None,
+        "outcome": "ok", "http_status": None, "error_id": None, "error_code": None,
+        "summary": summary, "duration_ms": None, "ip": None, "user_agent": None,
+        "args_json": json.dumps(
+            {"migrated": migrated, "catalog_total": catalog_total}, ensure_ascii=False,
+        ),
+    })
+
+
 # app.db.init_db() 不直接 import 本模块（P0-3 依赖倒置，见
 # docs/coupling_review_2026-08-29.md 第2步）——按名字通过 app.db_schema 查找。
 _register_table("models_registry_migration", lambda conn: migrate_model_credentials())
+_register_table("models_registry_catalog_retirement", lambda conn: retire_catalog_setting())

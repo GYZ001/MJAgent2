@@ -60,6 +60,7 @@ max_function_lines_python = 50
 max_lines_tests = 500
 
 [baseline.line_count]
+# 2026-09-13 棘轮下拧：#3 公平排序接入 / #4 models 真源收敛落地后实测变短。
 # 2026-09-11 棘轮下拧：EP-01/EP-05 第一阶段落地后实测变短，按「拆小了就把数字调小」收紧到零余量。
 "app/agent/orchestrator.py" = 616
 "app/api.py" = 1085
@@ -101,7 +102,7 @@ max_lines_tests = 500
 # 2026-09-11 3130 -> 3128：EP-05 第二阶段，active_provider() 委托给
 # app.models_registry.routing.resolve_provider_for_kind()，净减 2 行——棘轮
 # 只降不升，如实收紧。
-"app/hiagent.py" = 3128
+"app/hiagent.py" = 3124
 "app/identity_adjudication.py" = 758
 "app/identity_contracts.py" = 806
 "app/loops/base.py" = 547
@@ -174,7 +175,7 @@ max_lines_tests = 500
 # 映射改成从 config.MANAGED_KEYS 推导；put_settings 提交后新增一行调用
 # app.models_registry.routing.sync_legacy_bindings（同步逻辑本身在模型库包内，
 # 这里只留调用），两项相抵净减 1 行。
-"app/system_api.py" = 2279
+"app/system_api.py" = 2273
 "app/validators/dialogue_chains.py" = 553
 "app/validators/outline_dialogue.py" = 566
 "app/validators/prep_pack_ledger.py" = 647
@@ -368,7 +369,11 @@ max_lines_tests = 500
 "app/media_exec/authority.py" = 95
 "app/media_exec/checkpoints.py" = 78
 "app/media_exec/concat.py" = 335
-"app/media_exec/dispatch.py" = 179
+"app/media_exec/dispatch.py" = 178  # 2026-09-13 从 179 降到 178（棘轮只降不升）：
+                                     # 公平调度接入把车道内四行 `.sort()` 换成一次
+                                     # 外部模块调用，_dispatch_due_jobs_stage_aware
+                                     # 实测代码行数下降 1，见 app/quota_policy/
+                                     # fair_ordering.py。
 "app/media_exec/enqueue.py" = 195
 "app/media_exec/input_boundary.py" = 57
 "app/media_exec/input_first_frame_last.py" = 409
@@ -491,7 +496,7 @@ max_lines_tests = 500
 "app/production/screenplay_repair/preflight.py" = 154
 "app/production/screenplay_repair/qa.py" = 217
 "app/production/screenplay_repair/revalidate_resume.py" = 328
-"app/production/storyboard_pack.py" = 155
+"app/production/storyboard_pack.py" = 153
 "app/provider_task_clearance.py" = 257  # _provider_task_clearance_evaluation，
     # 从 app/completion_grant.py 按原样搬移（2026-08-30，层号治理，见
     # app/LAYERS.toml 组 5），基线随函数一起转移，不是新增欠账。
@@ -584,7 +589,7 @@ max_lines_tests = 500
 "app/storyboard_authority.py" = 157
 "app/storyboard_supervisor.py" = 501
 "app/storyboard_workspace.py" = 115
-"app/system_api.py" = 450
+"app/system_api.py" = 446
 "app/validators/continuity_gate.py" = 66
 "app/validators/dialogue_chains.py" = 299
 "app/validators/ending_hook.py" = 55

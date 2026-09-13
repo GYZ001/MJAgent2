@@ -113,12 +113,7 @@ def test_custom_instance_without_video_kind_is_not_a_video_provider(monkeypatch)
     assert video_providers.resolve("custom:model_t").provider == "hiagent"
 
 
-def test_media_models_must_declare_a_protocol(monkeypatch) -> None:
-    monkeypatch.setattr(system_api, "_custom_models", lambda: [])
-    saved: dict = {}
-    monkeypatch.setattr(
-        system_api, "set_setting", lambda key, value: saved.update({key: value}),
-    )
+def test_media_models_must_declare_a_protocol() -> None:
     draft = {
         "provider": "custom", "provider_label": "自建 H3", "label": "备用 H3",
         "model": "minimax-h3", "kinds": ["video"],

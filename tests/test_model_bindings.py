@@ -286,3 +286,52 @@ def test_startup_self_check_empty_catalog_reports_nothing_missing() -> None:
     """模型库为空的新部署：没有已知 purpose，自检不误报缺口（EP-05 §11 陷阱 6）。"""
     _set_catalog([])
     assert purposes.startup_self_check() == []
+
+
+def test_purposes_referencing_model_lists_every_priority_not_just_zero() -> None:
+    """引用检查覆盖任意 priority，不止 priority=0——EP-05 §11 陷阱 4：删除
+    一条仍在某个 purpose 里当 fallback（priority>0）的模型，不能静默成功。"""
+    _set_catalog([_custom_item(1, "text"), _custom_item(2, "text")])
+    bindings.upsert_binding(purpose="text:default", model_id="model_1", priority=0)
+    bindings.upsert_binding(purpose="text:default", model_id="model_2", priority=1)
+    bindings.upsert_binding(purpose="text:screenplay", model_id="model_2", priority=0)
+
+    assert bindings.purposes_referencing_model("model_1") == ["text:default"]
+    assert bindings.purposes_referencing_model("model_2") == ["text:default", "text:screenplay"]
+    assert bindings.purposes_referencing_model("model_never_bound") == []
+
+
+def test_delete_model_referenced_by_binding_is_rejected_with_purposes_listed() -> None:
+    """端到端（``system_api.delete_model``）：模型仍被 ``model_bindings`` 引用
+    （任意 priority）时删除必须 409 并列出引用它的 purpose，不许静默删让某个
+    阶段突然无主用（EP-05 §11 陷阱 4）。与"正在用于某职责"
+    （``hiagent.active_provider`` 那条既有检查）是两条独立检查——这里先加一条
+    不相关的文本模型占住"未配置绑定时回落到目录第一条"的位置，确保触发的是
+    新增的绑定引用检查，不是旧检查，覆盖的是绑定表本身、非 ``:default``
+    purpose 的引用。"""
+    import pytest
+    from fastapi import HTTPException
+
+    from app import system_api
+
+    system_api.add_model({
+        "provider": "custom", "provider_label": "Gateway",
+        "base_url": "https://gw-other.example.com/v1", "api_key": "k0",
+        "protocol": "openai", "model": "vendor/other", "label": "Other",
+        "kinds": ["text"],
+    })
+    item = system_api.add_model({
+        "provider": "custom", "provider_label": "Gateway",
+        "base_url": "https://gw.example.com/v1", "api_key": "k",
+        "protocol": "openai", "model": "vendor/bound", "label": "Bound",
+        "kinds": ["text"],
+    })
+    bindings.upsert_binding(purpose="text:screenplay", model_id=item["id"], priority=0)
+
+    with pytest.raises(HTTPException) as exc:
+        system_api.delete_model(item["id"])
+
+    assert exc.value.status_code == 409
+    assert "text:screenplay" in exc.value.detail
+    assert store.get_model(item["id"]) is not None
+    assert bindings.purposes_referencing_model("model_never_bound") == []

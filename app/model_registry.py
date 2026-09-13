@@ -11,33 +11,56 @@
 
 EP-05 第一阶段（2026-09-10）起，凭据（``_with_credentials``）改为读
 ``app.models_registry.store``（加密表），不再读 ``settings.model_credentials``
-——迁移会把那个 setting 置空，继续读旧路径会让所有分环节覆盖静默消失。目录
-本身（``catalog_items()``/``CATALOG_SETTING``）这一阶段仍然读
-``settings.custom_models``：新增/编辑模型的写入路径（``app/system_api.py``）
-本阶段未改造，仍然只写这个 setting，模型库落表（``models`` 表）只是迁移时的
-只读镜像，见 ``app/models_registry/store.py`` 模块文档。
+——迁移会把那个 setting 置空，继续读旧路径会让所有分环节覆盖静默消失。
+
+2026-09-13 起，目录本身（``catalog_items()``）也改读 ``app.models_registry.
+store``（``models`` 表）——这张表不再是迁移时的只读镜像，``app/system_api.py``
+的 ``add_model``/``update_model``/``delete_model`` 直接写它，``settings.
+custom_models`` 完全退场（见 ``app/models_registry/migration.py::
+retire_catalog_setting`` 与 ``app/models_registry/store.py`` 模块文档）。
+``catalog_items()`` 把 ``models`` 表的行还原成旧 ``custom_models`` 条目的
+扁平 dict 形状（``provider``/``model``/``label``/``kinds``/``base_url``/
+``context_window_tokens`` 等字段直接挂在顶层，不是嵌套的 ``capabilities``），
+本文件其余函数（``catalog_item``/``items_for_kind``/...）不必跟着改一个字符。
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
-CATALOG_SETTING = "custom_models"
+_FLAT_CAPABILITY_KEYS = ("context_window_tokens", "max_output_tokens", "token_limits_source")
 
 
-def _load(setting: str, fallback: Any) -> Any:
-    from app.db import get_setting
-
-    try:
-        value = json.loads(get_setting(setting) or "")
-    except (TypeError, ValueError):
-        return fallback
-    return value if isinstance(value, type(fallback)) else fallback
+def _row_to_catalog_item(row: dict[str, Any]) -> dict[str, Any]:
+    """把 ``models_registry.store`` 的行形状还原成旧 ``custom_models`` 条目的
+    扁平形状。只回填 ``models`` 行里实际有值的能力字段——不给"没探测过"的
+    模型凭空补一个 default 能力三元组，那是 EP-05 §11 陷阱 3 明令禁止的
+    "默认值伪装成实测值"。"""
+    item: dict[str, Any] = {
+        "id": row["id"], "provider": str(row.get("provider") or ""),
+        "model": str(row.get("model_ref") or ""), "label": str(row.get("name") or ""),
+        "kinds": list(row.get("kinds") or []), "builtin": False,
+        "protocol": str(row.get("protocol") or ""),
+        "provider_label": str(row.get("provider_label") or ""),
+        "base_url": str(row.get("base_url") or ""),
+        "enabled": bool(row.get("enabled", True)),
+        "rate_limit": dict(row.get("rate_limit") or {}),
+    }
+    capabilities = row.get("capabilities") or {}
+    for key in _FLAT_CAPABILITY_KEYS:
+        if key in capabilities:
+            item[key] = capabilities[key]
+    extra = row.get("extra") or {}
+    for key in ("params", "requires_api_key"):
+        if key in extra:
+            item[key] = extra[key]
+    return item
 
 
 def catalog_items() -> list[dict[str, Any]]:
     """模型库里的全部条目。"""
-    return [item for item in _load(CATALOG_SETTING, []) if isinstance(item, dict)]
+    from app.models_registry import store as models_registry_store
+
+    return [_row_to_catalog_item(row) for row in models_registry_store.list_models()]
 
 
 def _with_credentials(item: dict[str, Any]) -> dict[str, Any]:

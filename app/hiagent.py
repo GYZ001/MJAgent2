@@ -806,11 +806,9 @@ def active_provider(kind: str) -> str:
 
 def _model_connection(provider: str, model: str, fallback_url: str = "", fallback_key: str = "") -> tuple[str, dict[str, str]]:
     """读取单模型连接信息；``saved`` 来自 app.models_registry.store（加密表）。"""
+    from app import model_registry
     from app.models_registry import store as models_registry_store
-    try:
-        custom = json.loads(get_setting("custom_models") or "[]")
-    except (TypeError, json.JSONDecodeError):
-        custom = []
+    custom = model_registry.catalog_items()
     item = next((m for m in custom if m.get("provider") == provider and m.get("model") == model), {})
     item_id = item.get("id") or f"builtin:{provider}:{model}"
     saved = models_registry_store.get_credential(item_id)
@@ -1497,13 +1495,10 @@ def text_request_token_limits(
     model: str | None = None,
     disable_thinking: bool = False,
 ) -> tuple[str, str, int]:
+    from app import model_registry
     selected_provider = provider or active_provider("text")
     selected_model = model or active_model("text", selected_provider)
-    limits = active_model_token_limits(
-        selected_provider,
-        selected_model,
-        get_setting,
-    )
+    limits = active_model_token_limits(selected_provider, selected_model, get_setting, model_registry.catalog_items())
     answer_budget = max(1, int(requested_max_tokens))
     model_cap = int(limits["max_output_tokens"])
     if disable_thinking:
@@ -1652,7 +1647,8 @@ async def chat(messages: list[dict], *, model: str | None = None, provider: str 
         model=model,
         disable_thinking=disable_thinking,
     )
-    token_limits = active_model_token_limits(provider, selected_model, get_setting)
+    from app import model_registry
+    token_limits = active_model_token_limits(provider, selected_model, get_setting, model_registry.catalog_items())
     requested_max_tokens = max(1, int(max_tokens))
     runtime_output_limit = int(token_limits["max_output_tokens"])
     max_tokens = effective_max_tokens

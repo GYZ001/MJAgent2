@@ -37,10 +37,10 @@ def list_model_health(*, window_hours: float = 24.0) -> list[dict[str, Any]]:
     """模型库全部条目（不止被调用过的）各自的健康状态 + 近 N 小时统计。"""
     health.refresh()
     catalog = _catalog_by_id()
-    by_ref = health.calls_by_ref_in_window(window_hours=window_hours)
+    by_model_id = health.calls_by_model_id_in_window(window_hours=window_hours)
     items: list[dict[str, Any]] = []
     for model_id, item in catalog.items():
-        stats = by_ref.get(str(item.get("model") or ""), {})
+        stats = by_model_id.get(model_id, {})
         snapshot = health.get_window_snapshot(model_id)
         items.append({
             "model_id": model_id,

@@ -4,15 +4,14 @@
 能从 ``GET /purposes`` 读出来。HTTP 层测试，不是纯单元测试——横幅信号要端到
 端验证"数据库里发生了什么 -> 接口吐出了什么"，不能只测中间某个函数。
 
-``models`` 影子表（``app.models_registry.store.upsert_model``）只在一次性
-迁移时写入，本测试文件故意不调用它——``test_health_endpoint_reports_state_
-and_24h_window`` 就是在验证"近 24h 调用统计"改走活目录（
-``app.models_registry.health.calls_by_ref_in_window``）之后，即使影子表
-一行都没有也能正确统计，见该函数模块文档。
+2026-09-13 起 ``models`` 表是模型库唯一真源（不再是"只在一次性迁移时写入的
+影子表"），``_set_catalog`` 因此直接调用 ``store.upsert_model``——
+``test_health_endpoint_reports_state_and_24h_window`` 验证的是"近 24h 调用
+统计"改按 ``models.id`` 反查（``app.models_registry.health.
+calls_by_model_id_in_window``，取代了旧版按活目录字符串反查的
+``calls_by_ref_in_window`` 绕路）之后仍然正确统计。
 """
 from __future__ import annotations
-
-import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,7 +19,7 @@ from fastapi.testclient import TestClient
 from app import system_api as msys
 from app.auth.passwords import hash_password
 from app.auth.sessions import create_session
-from app.db import get_conn, new_id, now, set_setting
+from app.db import get_conn, new_id, now
 from app.main import app
 from app.models_registry import health, store
 
@@ -53,7 +52,8 @@ def _custom_item(idx: int, kind: str = "text") -> dict:
 
 
 def _set_catalog(items: list[dict]) -> None:
-    set_setting("custom_models", json.dumps(items, ensure_ascii=False))
+    for item in items:
+        store.upsert_model(item, created_by="test")
 
 
 def _insert_provider_call(model_ref: str, *, status: str, http_status: int | None, latency_ms: int) -> None:

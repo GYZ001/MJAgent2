@@ -13,12 +13,23 @@ from app import config, hiagent, system_api as api, system_health
 
 
 def _settings_store(monkeypatch, *, custom_models=None, model_route="hiagent"):
-    store = {
-        "custom_models": json.dumps(custom_models or []),
-        "model_route": model_route,
-    }
+    """``custom_models`` 已退场：目录条目改直接落进真表（``models``/
+    ``model_credentials``），不再靠伪造 ``get_setting`` 让 ``api.health()``
+    看见——``model_registry.catalog_items()`` 现在读的是真表。``model_route``
+    仍是一个独立 setting（未受本轮改动影响），继续伪造它本身没问题。"""
+    import app.models_registry.store as models_registry_store
+
+    store = {"model_route": model_route}
     monkeypatch.setattr(api, "get_setting", lambda key: store.get(key, ""))
     monkeypatch.setattr(api, "set_setting", lambda key, value: store.__setitem__(key, value))
+    for item in custom_models or []:
+        entry = {k: v for k, v in item.items() if k != "api_key"}
+        models_registry_store.upsert_model(entry, created_by="test")
+        if item.get("api_key"):
+            models_registry_store.put_credential(
+                str(item["id"]), base_url=str(item.get("base_url") or ""),
+                api_key=str(item["api_key"]), rotated_by="test",
+            )
     return store
 
 

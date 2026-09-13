@@ -172,12 +172,15 @@ def _scene_shard_semantic_review_budget(
     unit_keys: list[str],
     review_prompt: str,
 ) -> dict[str, int | str]:
+    from app import model_registry
+
     provider = hiagent.active_provider("text")
     model = hiagent.active_model("text", provider)
     limits = hiagent.active_model_token_limits(
         provider,
         model,
         get_setting,
+        model_registry.catalog_items(),
     )
     messages = [
         {
@@ -436,12 +439,15 @@ def _scene_shard_semantic_repair_budget(
     repair_prompt: str,
     unit_count: int,
 ) -> dict[str, int | str]:
+    from app import model_registry
+
     provider = hiagent.active_provider("text")
     model = hiagent.active_model("text", provider)
     limits = hiagent.active_model_token_limits(
         provider,
         model,
         get_setting,
+        model_registry.catalog_items(),
     )
     messages = [
         {
