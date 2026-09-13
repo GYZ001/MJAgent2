@@ -219,7 +219,11 @@ def _segment_continuity_rules(
             "接续，不要凭空跳到一个新姿势或新机位）；如果本段换了空间或跳过"
             "了一段时间，本段的起幅要让观众能明确感知到这次切换（用新的场景"
             "描述、光影变化，或者一个专门的转场镜头交代），不能让两段读起来"
-            "像是从互不相干的素材里各剪一段拼起来的。"
+            "像是从互不相干的素材里各剪一段拼起来的。承接不等于重拍：同一空间"
+            "紧接着的一段，起幅接上之后，每个子镜都要给观众新的东西看——人物换一个"
+            "身体动作、挪一个位置、把视线投向新的对象，或与道具发生新的互动，变化要"
+            "能在本段原文里找到依据；上一段已经拍过的画面（同一件道具的特写、同一个"
+            "方向的全景）最多只回切一次，不能整段照着上一段再拍一遍。"
         )
     else:
         rule_1 = "本段是本集第一段，没有上一段可参考，起幅由你自行判断，不必与任何前情衔接。"
@@ -301,11 +305,16 @@ def phase2_segment_rules(
     palette_current: str,
     palette_previous: str,
     previous_memo: _AiContinuityMemo | None,
+    staging_rule: str | None,
 ) -> list[str]:
     """汇总阶段二 task_payload["rules"] 的全部来源，从
     ``_generate_all_segment_prompts``（已在 155 行 function_lines 棘轮基线上，
     零余量）抽出腾行数，为新增的 continuity_memo_rules 腾出空间。各参数在
     调用处已经算好，本函数只负责拼装顺序，不重新计算任何一项。
+
+    ``staging_rule``（2.4.1）：容量拆分续段的画面推进陈述，见
+    ``app.production.storyboard_staging_repeat.staging_continuation_rule``；不是续段时
+    调用方传 None。不留默认值——漏传就是 TypeError，而不是悄悄少一条规则。
     """
     return [
         *continuity_rules,
@@ -314,4 +323,5 @@ def phase2_segment_rules(
         *([paratext_exclusion_rule] if paratext_exclusion_rule else []),
         *segment_narrative_arc_rules(palette_current=palette_current, palette_previous=palette_previous),
         *continuity_memo_rules(previous_memo),
+        *([staging_rule] if staging_rule else []),
     ]

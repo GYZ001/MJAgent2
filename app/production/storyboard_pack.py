@@ -66,6 +66,7 @@ from app.schemas.segment_identity import (
 )
 from app.production.storyboard_pack_montage import fill_montage_beat_time_anchors
 from app.production.storyboard_prop_assets import enrich_prop_manifest_entries
+from app.production.storyboard_staging_repeat import canonical_phrases, chain_prompt_texts, repeated_staging_errors, staging_continuation_rule
 from app.production.storyboard_dialects import (
     MINIMAX_H3_DIALECT_INSTRUCTIONS,  # noqa: F401 -- 重新导出，测试按旧路径 import
     SEEDANCE_DIALECT_INSTRUCTIONS,  # noqa: F401 -- 重新导出，测试按旧路径 import
@@ -465,12 +466,14 @@ class StoryboardPackBudgetError(RuntimeError):
         needed: int,
         provider: str | None,
     ) -> None:
+        from app import model_registry
         from app.db import get_setting
         from app.model_capabilities import active_model_token_limits
 
         source = ""
         try:
-            source = str(active_model_token_limits(provider or "", model, get_setting).get("token_limits_source") or "")
+            limits = active_model_token_limits(provider or "", model, get_setting, model_registry.catalog_items())
+            source = str(limits.get("token_limits_source") or "")
         except Exception:  # noqa: BLE001 取不到来源不该盖掉真正的预算错误
             source = ""
         remedy = (
@@ -1045,6 +1048,8 @@ async def _generate_all_segment_prompts(
         continuity_rules = _segment_continuity_rules(
             previous_segment_no=previous_segment_no, camera_history=camera_history,
         )
+        staging_chain = chain_prompt_texts(beat_draft.segments, by_segment_no, plan.segment_no)
+        staging_rule = staging_continuation_rule(staging_chain[-1][1] if staging_chain else "", previous_segment_no=plan.segment_no - 1, synopsis=plan.synopsis)
         # 2.4.0：source_text_by_segment 只喂本段 source_unit_ranges 范围内的
         # 单元 + 前后各两个单元的衔接上下文，不再是整段原文（见
         # storyboard_segment_ranges 模块 docstring 的真实故障）。
@@ -1066,7 +1071,7 @@ async def _generate_all_segment_prompts(
                         _paratext_exclusion_rule(segment_paratext_hit) if segment_paratext_hit else None
                     ),
                     palette_current=plan.palette, palette_previous=palette_previous,
-                    previous_memo=previous_memo,
+                    previous_memo=previous_memo, staging_rule=staging_rule,
                 ),
                 already_delivered_dialogue_rule(delivered_lines, reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no)),
             ],
@@ -1127,10 +1132,11 @@ async def _generate_all_segment_prompts(
             model_type=_AiStoryboardSegmentDraft,
             validate=lambda value, _req=required_dialogue, _pm=previous_memo,
             _st=source_payload["source_text_by_segment"], _dl=list(delivered_lines), _rv=reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no),
-            _no=plan.segment_no, _n2i=manifest_name_to_identity(payload, plan.source_segment_indexes), _sx=plan.source_segment_indexes: [*_validate_segment_draft(
+            _no=plan.segment_no, _n2i=manifest_name_to_identity(payload, plan.source_segment_indexes), _sx=plan.source_segment_indexes, _ch=staging_chain, _syn=plan.synopsis, _dp=canonical_phrases(payload): [*_validate_segment_draft(
                 value, dialect_render_format=profile.render_format, required_dialogue=_req, name_to_identity=_n2i,
                 previous_memo=_pm, segment_source_text=_st, delivered_lines=_dl, reserved_lines=_rv, current_segment_no=_no,
-            ), *generated_identity_errors(value, payload=payload, source_indexes=_sx, required_dialogue=_req, dialect=profile.render_format)],
+            ), *generated_identity_errors(value, payload=payload, source_indexes=_sx, required_dialogue=_req, dialect=profile.render_format),
+            *repeated_staging_errors(_ch, value.prompt_text, current_segment_no=_no, synopsis=_syn, drop_phrases=_dp)],
             operation_id=f"storyboard_pack_segment_{episode_id}_{plan.segment_no}_{fingerprint}",
             max_tokens=SEGMENT_PROMPT_ANSWER_TOKENS,
             format_retry_limit=1,

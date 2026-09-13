@@ -40,6 +40,10 @@ from app.production.storyboard_segment_ranges import (_AiSourceUnitRange, quote_
                                                       reassign_kept_lines_to_covering_segments)
 from app.source_excerpt import SourceSegment
 
+#: 拆出来的续段在 synopsis 末尾带的可见标记。下游（storyboard_staging_repeat 的画面
+#: 去重）靠它识别「这是同一场戏的续段」——由本模块写入、不是模型自报，所以能当判据。
+CAPACITY_SPLIT_MARKER = "（容量拆分·承接前段台词）"
+
 
 class StoryboardCapacityNormalizationError(RuntimeError):
     """归一化后复核仍然超容——说明归一化算法本身有 bug，不是模型的错。
@@ -158,7 +162,7 @@ def _split_one_segment(
             new_segments[indices[-1]].source_unit_ranges = finished
         spawned = segment_plan_cls(
             segment_no=0,
-            synopsis=f"{segment.synopsis}（容量拆分·承接前段台词）",
+            synopsis=f"{segment.synopsis}{CAPACITY_SPLIT_MARKER}",
             source_segment_indexes=list(segment.source_segment_indexes),
             beat_ids=list(segment.beat_ids),
             # 拆出的新段仍是同一场戏：色温方向必须原样继承，否则阶段二会把空 palette
