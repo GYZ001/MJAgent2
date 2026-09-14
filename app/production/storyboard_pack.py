@@ -80,10 +80,9 @@ from app.production.storyboard_beat_sheet import (
 )
 from app.production.storyboard_continuity_memo import (
     _AiContinuityMemo, ensure_travel_direction_in_prompt,
-    continuity_memo_character_advisories,
-    continuity_memo_errors,
-    continuity_memo_payload,
+    continuity_memo_character_advisories, continuity_memo_errors, continuity_memo_payload,
 )
+from app.production.storyboard_reference_repair import strip_extra_reference_markers
 from app.production.storyboard_dialogue_extract import extract_dialogue_targets
 from app.production.storyboard_dialogue_attribution import (dialogue_speaker_errors, manifest_name_to_identity,
                                                              repair_draft_tail)
@@ -1131,7 +1130,7 @@ async def _generate_all_segment_prompts(
             model_type=_AiStoryboardSegmentDraft,
             validate=lambda value, _req=required_dialogue, _pm=previous_memo,
             _st=source_payload["source_text_by_segment"], _dl=list(delivered_lines), _rv=reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no),
-            _no=plan.segment_no, _n2i=manifest_name_to_identity(payload, plan.source_segment_indexes), _sx=plan.source_segment_indexes, _ch=staging_chain, _syn=plan.synopsis, _dp=canonical_phrases(payload), _sg=staging_gate: [*ensure_travel_direction_in_prompt(value), *_validate_segment_draft(
+            _no=plan.segment_no, _n2i=manifest_name_to_identity(payload, plan.source_segment_indexes), _sx=plan.source_segment_indexes, _ch=staging_chain, _syn=plan.synopsis, _dp=canonical_phrases(payload), _sg=staging_gate: [*ensure_travel_direction_in_prompt(value), *strip_extra_reference_markers(value, payload), *_validate_segment_draft(
                 value, dialect_render_format=profile.render_format, required_dialogue=_req, name_to_identity=_n2i,
                 previous_memo=_pm, segment_source_text=_st, delivered_lines=_dl, reserved_lines=_rv, current_segment_no=_no,
             ), *generated_identity_errors(value, payload=payload, source_indexes=_sx, required_dialogue=_req, dialect=profile.render_format),
