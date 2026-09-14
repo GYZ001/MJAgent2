@@ -26,6 +26,7 @@ from app.db import get_conn, now
 from app.evidence import media as media_evidence
 from app.orchestration import media_scheduler
 
+from . import subtitle_gate
 from .common import _retry_tasks
 from .job_state import _paid_video_attempt_count, _set_job
 
@@ -180,12 +181,12 @@ def record_success_mode_attempt(conn, job, version, meta: dict, task_id) -> None
 
 
 async def run_auto_qa(job, version, dest) -> bool:
-    """判定完整补齐模式是否由 Supervisor 掌控自动重抽/采用。
+    """字幕闸门 + 判定完整补齐模式是否由 Supervisor 掌控自动重抽/采用。
 
-    VLM 视觉质检已整体下线，不再有独立的"自动 QA"步骤要跑；``version``/
-    ``dest`` 参数保留仅为调用方兼容。返回 ``supervisor_controlled``。
+    VLM 视觉质检（评分制）已整体下线；这里只跑 ``subtitle_gate``——一个可标定的
+    二值问题，结论写进 ``qa_json``，由候选登记并进技术校验。返回 ``supervisor_controlled``。
     """
-    del version, dest
+    await subtitle_gate.evaluate_version(job, version, dest)
     supervisor_controlled = False
     try:
         ep_mode = get_conn().execute(

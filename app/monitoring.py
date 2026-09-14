@@ -158,6 +158,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "storyboard_source_rebind_enabled": _boolean("分镜原文重绑定", "true", experimental=True),
     "video_reference_batch_prompt": _boolean("批量参考图提示词", "true"),
     "video_reference_role_adaptive": _boolean("质量角色自适应", "false", experimental=True),
+    "video_subtitle_gate_enabled": _boolean("视频字幕闸门", "true"),
     "provider_media_max_download_bytes": _number(
         "视频参考素材大小上限", str(512 * 1024 * 1024),
         1_048_576, 2_147_483_648, unit="字节",

@@ -93,6 +93,7 @@ export const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
     keys: [
       "download_concurrency",
       "finalize_concurrency",
+      "video_subtitle_gate_enabled",
       "provider_media_public_base_url",
       "provider_media_max_download_bytes",
     ],
@@ -148,6 +149,7 @@ export const SETTING_FIELD_IMPACTS: Record<string, string> = {
   auto_retake_threshold: "兼容历史配置；质检分数不再触发自动重做",
   max_repair_attempts: "同一问题允许自动修复的最大次数",
   download_concurrency: "同时下载多少个模型生成结果",
+  video_subtitle_gate_enabled: "候选视频落盘后抽帧检查画面有没有叠加字幕，有则判不通过并自动重提（牌匾、书信等画面文字不算）",
   finalize_concurrency: "同时执行多少个文件落盘与校验任务",
   provider_media_public_base_url: "自有对象存储或 CDN 中项目媒体目录的公开基址",
   provider_media_max_download_bytes: "参考视频发布校验允许读取的最大文件大小",

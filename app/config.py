@@ -461,7 +461,7 @@ DEFAULT_SETTINGS = {
     "video_ready_high_watermark": "6",
     "reference_shot_cohort_limit": "15",
     "video_reference_batch_prompt": "true",   # P1：一镜一次提示词合同
-    "video_reference_role_adaptive": "false", # P2：质量角色自适应（实验，默认关）
+    "video_reference_role_adaptive": "false", "video_subtitle_gate_enabled": "true",  # 前者实验默认关；后者见 subtitle_gate
     # 本地项目媒体映射到自有对象存储/CDN 的公开基址；为空时视频输入明确阻断。
     "provider_media_public_base_url": "",
     "provider_media_max_download_bytes": str(512 * 1024 * 1024),

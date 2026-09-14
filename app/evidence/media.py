@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.db import get_conn
-from app.evidence import repository
+from app.evidence import repository, subtitle_overlay
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 
 
@@ -210,8 +210,10 @@ def record_video_candidate(version_id: str, *, step_run_id: str | None = None) -
         artifact = repository.get_artifact(row["artifact_id"])
         if artifact:
             return artifact
-    technical = validate_video_file(row["video_path"], expected_duration_s=row["duration_s"])
     qa = json.loads(row["qa_json"] or "{}")
+    technical = subtitle_overlay.technical_with_verdict(
+        validate_video_file(row["video_path"], expected_duration_s=row["duration_s"]), qa,
+    )
     artifact = repository.create_artifact(
         EvidenceArtifact(
             type="shot_video",
@@ -232,14 +234,11 @@ def record_video_candidate(version_id: str, *, step_run_id: str | None = None) -
         step_run_id=step_run_id,
     )
     file_eval = Evaluation(
-        evaluator_type="file",
-        evaluator_name="video_technical_validator",
-        evaluator_version="1.0.0",
+        evaluator_type="file", evaluator_name="video_technical_validator", evaluator_version="1.0.0",
         status="passed" if technical["passed"] else "failed",
         hard_gate_passed=technical["passed"],
         score=100 if technical["passed"] else 0,
-        issues=technical["issues"],
-        evidence=technical["evidence"],
+        issues=technical["issues"], evidence=technical["evidence"],
     )
     repository.create_evaluation(artifact["id"], file_eval, step_run_id=step_run_id)
     if qa:
