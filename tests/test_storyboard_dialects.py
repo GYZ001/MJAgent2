@@ -359,3 +359,11 @@ def test_reference_mention_errors_require_at_name_for_characters_with_portraits(
     errors = reference_mention_errors(prompt, resources)
     assert len(errors) == 1 and "@黄总" in errors[0] and "李麦麦" not in errors[0] and "张姐" not in errors[0]
     assert reference_mention_errors("镜头1：@黄总 站在地面上拍桌，画外音（李麦麦）：\"完了。\"", resources) == []
+
+
+def test_seedance_dialect_keeps_gore_out_of_prompts_as_a_positive_rule():
+    """2026-09-14 第 11 集镜 5：「地面散落血迹，整体氛围凶险肃杀」让视频网关整段合规拒收五次，
+    去掉即通过。规则写成正面陈述（用什么表现凶险），不是词表禁令。"""
+    assert "血腥与凶险只用光影、人物神色与环境音表现" in SEEDANCE_FLAT
+    assert "死亡用倒地不动、旁人色变、镜头切走来交代" in SEEDANCE_FLAT
+
