@@ -67,7 +67,14 @@ if healthy; then
   echo "$NEW" > "$MARK"
   log "部署完成 $NEW，B 后端经隧道健康（http://127.0.0.1:18230/ -> 200）"
   ls -1dt "$REL"/*/ 2>/dev/null | tail -n +4 | xargs -r rm -rf
-  exit 0
+  # 选路冒烟：四职责非空 + 文本真实调用 + 图像真实鉴权（2026-09-14 图像密钥失效一周无人察觉）。
+  # 冒烟不过不回滚——密钥/选路问题回滚救不了，报出来让人处理。
+  if ssh "$B" '/root/MJAgent2/.venv/bin/python /root/MJAgent2/scripts/deploy/smoke_provider_routing.py' 2>&1 | grep -v '^INFO' | tee -a "$LOG" | grep -q '^SMOKE OK$'; then
+    log "选路冒烟通过"
+    exit 0
+  fi
+  log "选路冒烟未通过（见上方输出）：部署已生效，但有职责选路为空或密钥失效，需人工处理"
+  exit 4
 fi
 log "部署 $NEW 后 40s 内健康检查未通过"
 if [ "$OLD" != none ] && [ -d "$REL/$OLD/dist" ]; then
