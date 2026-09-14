@@ -20,6 +20,7 @@ from typing import Any
 
 from app.compiler import ensure_source_excerpt_in_prompt
 from app.production.storyboard_identity_submission import assert_segment_submission
+from app.production.storyboard_speech_render import render_segment_speech
 from app.production.storyboard_identity_contract import identity_contract_fingerprint
 
 
@@ -39,11 +40,15 @@ def storyboard_pack_prompt_text(
     第 2 集镜 5 三次烧同一句字幕）。现在与 compiler 的旧版路径同一写法追加在末尾；
     提交断言（assert_segment_submission）只看分镜包段本身，追加不影响它。
 
-    ``override`` 是生成接口显式提交的修订后提示词（``prompt_override``，段形态、带
-    @角色 标签）。以前对 2.x 镜头静默丢弃：接口接受、版本 meta 记下、发给供应商的
-    仍是原段——失败提示却让人「编辑本镜提示词后重抽」（2026-09-14 第 11 集镜 5 被
-    网关合规拒绝，四个变体发出去的正文一字未改）。现在覆盖正文，但提交断言按覆盖后
-    的段跑：台词逐字、发声者、人物合同一条都不放松——这不是绕过闸门，是让接口说话算话。
+    ``override`` 是生成接口显式提交的修订后提示词（``prompt_override``）。以前对 2.x
+    镜头静默丢弃：接口接受、版本 meta 记下、发给供应商的仍是原段——失败提示却让人
+    「编辑本镜提示词后重抽」（2026-09-14 第 11 集镜 5 被网关合规拒绝，四个变体发出去的
+    正文一字未改）。现在覆盖正文，但提交断言按覆盖后的段跑：台词逐字、发声者、人物
+    合同一条都不放松——这不是绕过闸门，是让接口说话算话。
+
+    形态：与分镜段 ``speech_template`` 同形——带 @角色 标签，台词处写 ``{{speech:Uxx}}``
+    占位符而不是原话；这里按段自己的 ``speech_dialect`` 展开成 prompt_text，展开结果与
+    模板一致才能过 ``explicit_prompt_speaker_errors``。段没有模板（旧产物）时原样使用。
     """
     # shot_contract_json 才是权威来源，这里直接读 shot 模型上已解析好的
     # storyboard_pack_segment；不再插入占位「已采纳」版本，也不再依赖
@@ -51,8 +56,12 @@ def storyboard_pack_prompt_text(
     segment = dict(shot.storyboard_pack_segment or {})
     prompt_text = str(segment.get("prompt_text") or "")
     if (override or "").strip():
-        prompt_text = str(override).strip()
-        segment["prompt_text"] = prompt_text
+        if segment.get("speech_template"):
+            segment["speech_template"] = str(override).strip()
+            render_segment_speech(segment, dialect=str(segment.get("speech_dialect") or ""))
+        else:
+            segment["prompt_text"] = str(override).strip()
+        prompt_text = str(segment.get("prompt_text") or "")
     if not prompt_text.strip():
         raise ValueError(
             "[STORYBOARD_PACK_PROMPT_MISSING] 该分镜台 2.0.0 段没有已产出的 "

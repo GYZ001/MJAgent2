@@ -140,14 +140,14 @@ def _video_model_rejection_guidance(
                 f"视频供应商对本镜连续 {CONTENT_REJECTION_MIN_TASKS} 次独立任务给出了完全相同的"
                 f"拒绝结果，判定为真实的模型拒绝。{quote}"
                 "系统已停止对本镜的自动重试，并把本镜按「跳过」处理：本集成片照常合成、"
-                "不含本镜。需要补上时请以修订后的本镜提示词重抽（生成接口 prompt_override，仍受台词逐字与人物合同断言约束）。",
+                "不含本镜。需要补上时请以修订后的本镜提示词重抽（生成接口 prompt_override，与分镜段模板同形：@角色 标签与 {{speech:Uxx}} 占位符，仍受台词逐字与人物合同断言约束）。",
             )
         return (
             "VIDEO_PROVIDER_MODEL_REJECTED",
             f"当前视频模型明确拒绝了本次输入，系统已保持 {mode or '原计划模式'} "
             f"失败且没有改写内容或切换生成方式。{quote}"
             "系统已停止对本镜的自动付费重试，转人工处理。"
-            "请以修订后的本镜提示词重抽（生成接口 prompt_override，仍受台词逐字与人物合同断言约束），或切换视频供应商。",
+            "请以修订后的本镜提示词重抽（生成接口 prompt_override，与分镜段模板同形：@角色 标签与 {{speech:Uxx}} 占位符，仍受台词逐字与人物合同断言约束），或切换视频供应商。",
         )
     if (
         exc.failure.category is hiagent.ProviderFailureCategory.TECHNICAL
@@ -158,7 +158,7 @@ def _video_model_rejection_guidance(
             exc.failure.reason_code,
             f"视频供应商执行失败，供应商原文：{provider_text}。"
             "系统已停止对本镜的自动付费重试，转人工处理。"
-            "请在页面核对供应商任务状态，或请以修订后的本镜提示词重抽（生成接口 prompt_override，仍受台词逐字与人物合同断言约束）、或切换视频供应商。",
+            "请在页面核对供应商任务状态，或请以修订后的本镜提示词重抽（生成接口 prompt_override，与分镜段模板同形：@角色 标签与 {{speech:Uxx}} 占位符，仍受台词逐字与人物合同断言约束）、或切换视频供应商。",
         )
     return None
 
