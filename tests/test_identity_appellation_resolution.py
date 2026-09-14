@@ -55,6 +55,11 @@ def _bible(*names: str) -> Bible:
 
 
 # ---------------------------------------------------------------------------
+def _segs(text: str):
+    from types import SimpleNamespace
+    return [SimpleNamespace(text=text)]
+
+
 # _verified_verdicts：代码侧结构核验（不信任模型的 enum/证据结构性声明）
 # ---------------------------------------------------------------------------
 
@@ -64,7 +69,7 @@ def test_narrator_label_never_becomes_a_verdict():
     ])
     verified = ar._verified_verdicts(
         response, candidates={"里奥"}, source_text="随便什么原文",
-        valid_segment_indexes={1},
+        segments=_segs("随便什么原文"), valid_segment_indexes={1},
     )
     assert verified == []
 
@@ -78,7 +83,7 @@ def test_named_identity_without_verbatim_evidence_falls_back_to_unresolved():
     ])
     verified = ar._verified_verdicts(
         response, candidates={"里奥"}, source_text="我八岁的时候被诊断出长不高。",
-        valid_segment_indexes={1},
+        segments=_segs("我八岁的时候被诊断出长不高。"), valid_segment_indexes={1},
     )
     assert len(verified) == 1
     assert verified[0].identity == ar.UNRESOLVED
@@ -94,7 +99,7 @@ def test_named_identity_with_verbatim_evidence_passes():
     ])
     verified = ar._verified_verdicts(
         response, candidates={"里奥"}, source_text=source_text,
-        valid_segment_indexes={1, 2, 3},
+        segments=_segs(source_text), valid_segment_indexes={1, 2, 3},
     )
     assert len(verified) == 1
     assert verified[0].identity == "里奥"
@@ -105,7 +110,7 @@ def test_out_of_range_segment_indexes_are_dropped_not_kept():
         ar._AppellationVerdict(raw_label="众猴", identity=ar.COLLECTIVE, segment_indexes=[1, 99]),
     ])
     verified = ar._verified_verdicts(
-        response, candidates=set(), source_text="", valid_segment_indexes={1},
+        response, candidates=set(), source_text="", segments=_segs(""), valid_segment_indexes={1},
     )
     assert verified[0].segment_indexes == [1]
 
@@ -117,7 +122,7 @@ def test_identity_outside_candidates_and_not_collective_becomes_unresolved():
         ar._AppellationVerdict(raw_label="某人", identity="候选之外的名字", segment_indexes=[1]),
     ])
     verified = ar._verified_verdicts(
-        response, candidates={"里奥"}, source_text="", valid_segment_indexes={1},
+        response, candidates={"里奥"}, source_text="", segments=_segs(""), valid_segment_indexes={1},
     )
     assert verified[0].identity == ar.UNRESOLVED
 
@@ -199,7 +204,7 @@ def test_paobukuai_ep2_narration_resolves_to_the_single_bible_character(monkeypa
         ar._AppellationResolutionResponse(appellations=[
             ar._AppellationVerdict(raw_label="旁白", identity="里奥", segment_indexes=[1]),
         ]),
-        candidates={"里奥"}, source_text=PAOBUKUAI_EP2_SOURCE, valid_segment_indexes={1},
+        candidates={"里奥"}, source_text=PAOBUKUAI_EP2_SOURCE, segments=_segs(PAOBUKUAI_EP2_SOURCE), valid_segment_indexes={1},
     )
     assert rejected == []
 
@@ -474,3 +479,26 @@ def test_appellation_named_to_someone_else_in_source_is_not_registered_as_alias(
     aliases = {k: v.get("aliases") for k, v in characters.items()}
     assert "少年" not in (aliases.get("bible:王有材") or []), aliases
     assert not functional_extras, "被否决的别名不该变成一个无名角色卡"
+
+
+def test_evidence_crossing_a_paragraph_break_with_self_closed_quote_still_passes():
+    """2026-09-14 第 13 集：模型判「大汉→曹阳」，证据跨了一个段落换行并自补了收尾引号——
+    引用格式差异不是改写，按 _prep_pack_locate_phrase 定位通过，落库 evidence 取原文真实形态。"""
+    from types import SimpleNamespace
+    seg1 = "许师姐是一张很大的虎皮。看到山下有一个大汉，正迈步临近公开区。"
+    seg2 = "“是曹阳……此人凝气二层巅峰，半只脚迈入三层。”"
+    segments = [SimpleNamespace(text=seg1), SimpleNamespace(text=seg2)]
+    response = ar._AppellationResolutionResponse(appellations=[
+        ar._AppellationVerdict(
+            raw_label="大汉", identity="曹阳",
+            evidence="看到山下有一个大汉，正迈步临近公开区。“是曹阳……”", segment_indexes=[1],
+        ),
+        ar._AppellationVerdict(raw_label="那人", identity="曹阳", evidence="原文没有这一句", segment_indexes=[1]),
+    ])
+    verified = ar._verified_verdicts(
+        response, candidates={"曹阳"}, source_text=seg1 + "\n" + seg2,
+        valid_segment_indexes={1, 2}, segments=segments,
+    )
+    assert [v.identity for v in verified] == ["曹阳", ar.UNRESOLVED]
+    assert verified[0].evidence == "看到山下有一个大汉，正迈步临近公开区。“是曹阳"
+

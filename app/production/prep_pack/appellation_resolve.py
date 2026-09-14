@@ -42,7 +42,7 @@ from typing import Any
 from .appellation_response_repair import repair_appellation_payload
 from .asset_lookup import _resolve_portrait_id
 from .chunking import _chunk_segments
-from .provenance import _prep_pack_provenance
+from .provenance import _prep_pack_locate_phrase, _prep_pack_provenance
 
 COLLECTIVE = "collective"
 UNRESOLVED = "unresolved"
@@ -193,12 +193,19 @@ def _apply_unresolved_verdict(
 
 def _verified_verdicts(
     response: _AppellationResolutionResponse, *, candidates: set[str], source_text: str,
-    valid_segment_indexes: set[int],
+    valid_segment_indexes: set[int], segments: list[Any],
 ) -> list[_AppellationVerdict]:
     """代码侧结构核验：模型 enum 遵守不是可证明保证（同类既有闸门口径，见
     functional_candidate_verdict.py）。raw_label 为空/是旁白、segment_indexes
-    越界或为空、以及"声称是候选本人但证据不是原文逐字子串"，一律拒绝——
-    拒绝的条目按 identity=unresolved 处理，不静默丢弃、也不假装通过。"""
+    越界或为空、以及"声称是候选本人但证据在原文里定位不到"，一律拒绝——
+    拒绝的条目按 identity=unresolved 处理，不静默丢弃、也不假装通过。
+
+    证据定位用 ``_prep_pack_locate_phrase``（与场景/真名引文同一原语）：引文两端的
+    引号、收尾标点、跨段换行是引用格式不是内容，剥掉后仍须逐字连续命中；落库的
+    evidence 换成原文里真实存在的形态。2026-09-14 第 13 集实测：模型判「大汉→曹阳」，
+    证据「看到山下有一个大汉，正迈步临近公开区。“是曹阳……”」只差一个跨段换行和一个
+    自补的收尾引号，原始子串比较把它打成 unresolved，曹阳在同一段里被拆成两个人。
+    """
     verified: list[_AppellationVerdict] = []
     for item in response.appellations:
         raw_label = item.raw_label.strip()
@@ -210,8 +217,11 @@ def _verified_verdicts(
         identity = item.identity.strip()
         evidence = item.evidence.strip()
         if identity in candidates:
-            if not evidence or evidence not in source_text:
+            located, phrase = _prep_pack_locate_phrase(segments, evidence) if evidence else ([], "")
+            if not located:
                 identity = UNRESOLVED
+            else:
+                evidence = phrase
         elif identity != COLLECTIVE:
             identity = UNRESOLVED
         verified.append(_AppellationVerdict(
@@ -271,7 +281,7 @@ async def resolve_narration_appellations(
         )
         for verdict in _verified_verdicts(
             response, candidates=candidates_set, source_text=source_text,
-            valid_segment_indexes=valid_segment_indexes,
+            valid_segment_indexes=valid_segment_indexes, segments=segments,
         ):
             if verdict.identity in candidates_set:
                 if _alias_contradicted_by_naming(verdict, candidates_set, texts_by_index):
