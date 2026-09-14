@@ -14,6 +14,9 @@
 2. 该动词所在小句里若有人物称谓，取最后一个为发声者；否则取本句第一个人物称谓
    （无主语小句沿用句首主语，「精明男子……眼见孟浩迟疑，内心暗笑，心道……」→精明男子）；
 3. 单字称谓（他/她/你/我）不参与判定——准备包里存在代词别名（见记忆），它们指代不定。
+4. 引文整体归属：台词落在某段成对引号里（引文内部可以有多个句号），引文收尾之后的第一个
+   发声动词、或引文起始之前同句里最后一个发声动词，其发声者是该人物——「“是曹阳……有好戏
+   看。”这修士连忙靠近一些，暗道……」（2026-09-14 第 13 集第 8 段），逐句切分看不到这个结构。
 """
 from __future__ import annotations
 
@@ -59,6 +62,39 @@ def _bigrams(text: str) -> set[str]:
     return {text[i:i + 2] for i in range(len(text) - 1)}
 
 
+def _content_start(sentence: str, line_bigrams: set[str]) -> int:
+    """台词正文在这句里从哪个下标开始（第一个与台词共享的二元组）；找不到按句末算。"""
+    for index in range(len(sentence) - 1):
+        if sentence[index:index + 2] in line_bigrams:
+            return index
+    return len(sentence)
+
+
+_QUOTE_RE = re.compile(r"[“「『]([^”」』]{2,}?)[”」』]")
+_ATTRIBUTION_WINDOW = 80
+
+
+def _quoted_span_evidence(plain: str, prefix: str, line_bigrams: set[str], own: list[str], everyone: list[str]) -> bool:
+    """判据 4：找到装着台词的整段引文，看引文收尾后的下一句/起始前的上一句谁在「道」。"""
+    for match in _QUOTE_RE.finditer(plain):
+        inner = match.group(1)
+        if prefix not in inner:
+            if not line_bigrams:
+                continue
+            covered = len(line_bigrams & _bigrams(textmatch.condense(inner))) / len(line_bigrams)
+            if covered < textmatch.KEY_LINE_PRESENT_RATIO:
+                continue
+        after = _SENTENCE_SPLIT_RE.split(plain[match.end():match.end() + _ATTRIBUTION_WINDOW])[0]
+        verb_after = _VERB_ONLY_RE.search(after)
+        if verb_after is not None and _speaker_of(after[:verb_after.start()], everyone) in own:
+            return True
+        before = _SENTENCE_SPLIT_RE.split(plain[max(0, match.start() - _ATTRIBUTION_WINDOW):match.start()])[-1]
+        verbs_before = list(_VERB_ONLY_RE.finditer(before))
+        if verbs_before and _speaker_of(before[:verbs_before[-1].start()], everyone) in own:
+            return True
+    return False
+
+
 def voicing_evidence(line: str, identity: str, name_to_identity: dict[str, str], source_text: str) -> bool:
     """原文同一句里是否有「identity 的称谓 + 发声/心理动词 + 本台词」这种依据。
 
@@ -80,8 +116,10 @@ def voicing_evidence(line: str, identity: str, name_to_identity: dict[str, str],
             return True
         if match is None and line_bigrams:
             covered = len(line_bigrams & _bigrams(textmatch.condense(sentence))) / len(line_bigrams)
+            content_start = _content_start(sentence, line_bigrams)  # 台词正文里的「霸道/知道」不是发声动词
             if covered >= textmatch.KEY_LINE_PRESENT_RATIO and any(
-                _speaker_of(sentence[:verb.start()], everyone) in own for verb in _VERB_ONLY_RE.finditer(sentence)
+                _speaker_of(sentence[:verb.start()], everyone) in own
+                for verb in _VERB_ONLY_RE.finditer(sentence) if verb.end() <= content_start + 1
             ):
                 return True
-    return False
+    return _quoted_span_evidence(plain, prefix, line_bigrams, own, everyone)

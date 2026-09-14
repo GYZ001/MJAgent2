@@ -62,3 +62,28 @@ def test_first_person_rendering_of_a_thought_traces_to_its_thinker() -> None:
     assert voicing_evidence(line, "bible:孟浩", NAMES, source) is True
     assert voicing_evidence(line, "bible:精明男子", NAMES, source) is False
 
+
+EP13_SEG2 = (
+    "“怎么他还在，这坑人的家伙，他实在是太损了！”这修士又恨又怕，叹气正要离开，忽然他双眼一亮，看到山下有一个大汉，正迈步临近公开区。\n"
+    "“是曹阳……此人凝气二层巅峰，半只脚迈入三层，他表兄陆烘更是低阶公开区内第一人，使得曹阳在这里横行霸道，"
+    "就算是一向喜欢卑鄙的趁别人双双打斗受伤时出手，可却让人敢怒不敢言，若是换了其他人如此，早就被围攻了。"
+    "昨日他没来，其他人还好些，今日或许有好戏看。”这修士连忙靠近一些，暗道这曹阳最好去招惹养丹坊分店的家伙。\n"
+    "曹阳冷哼一声，他身子高大，虎背熊腰。"
+)
+EP13_NAMES = {"这修士": "entity:d58", "曹阳": "bible:曹阳", "大汉": "entity:400c", "孟浩": "bible:孟浩"}
+
+
+def test_multi_sentence_quote_attributed_after_the_closing_mark() -> None:
+    """2026-09-14 第 13 集第 8 段：引文内含多个句号，发声者「这修士」与动词「暗道」在引号收尾之后。"""
+    line = "是曹阳……此人凝气二层巅峰，半只脚迈入三层，他表兄陆烘更是低阶公开区内第一人，使得曹阳在这里横行霸道，"
+    assert voicing_evidence(line, "entity:d58", EP13_NAMES, EP13_SEG2) is True
+    # 「“……”这修士又恨又怕，叹气正要离开」：引号后只有称谓没有发声动词——紧邻的称谓也可能是听者
+    # （「“你走吧。”孟浩闻言一愣」），保守起见不算证据。
+    assert voicing_evidence("怎么他还在，这坑人的家伙，他实在是太损了！", "entity:d58", EP13_NAMES, EP13_SEG2) is False
+
+
+def test_quote_attributed_to_someone_else_after_closing_mark_is_rejected() -> None:
+    line = "是曹阳……此人凝气二层巅峰，半只脚迈入三层，他表兄陆烘更是低阶公开区内第一人，使得曹阳在这里横行霸道，"
+    assert voicing_evidence(line, "bible:曹阳", EP13_NAMES, EP13_SEG2) is False
+    assert voicing_evidence(line, "bible:孟浩", EP13_NAMES, EP13_SEG2) is False
+
