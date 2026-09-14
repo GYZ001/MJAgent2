@@ -79,6 +79,12 @@ class _AiContinuityMemo(BaseModel):
     props: list[_AiPropState] = Field(default_factory=list)
     layout: str = ""
     layout_change_source_quote: str = ""
+    # 屏幕行进方向：同行人物在镜头里的统一走向（例如「一行人自画左向画右沿山路行进」），
+    # 静止场景写「静止」。2026-09-14 用户看片：第 2 集走山路时三个人各走各的方向——提示词
+    # 与备忘里此前没有任何屏幕方向信息，模型每镜自选。与 layout 同一形状：默认逐字沿用，
+    # 原文写到转身/折返/换路才可改并引用原句；只告警不阻断。
+    travel_direction: str = ""
+    travel_direction_change_source_quote: str = ""
 
 
 def continuity_memo_payload(previous_memo: _AiContinuityMemo | None) -> dict[str, Any] | None:
@@ -127,7 +133,25 @@ def _continuity_memo_rules_with_previous(previous_memo: _AiContinuityMemo) -> li
             "改变时必须把 layout_change_source_quote 填成本段原文里写明这次移动的那一句原话"
             "——判据与 time_of_day_source_quote 完全一样，找不到逐字匹配会被判定为编造。"
         ),
+        _travel_direction_rule(previous_memo.travel_direction),
     ]
+
+
+def _travel_direction_rule(previous: str) -> str:
+    """屏幕行进方向的正面陈述：有上一段就逐字沿用，本段每个有行进的镜头都写同一走向。"""
+    inherit = (
+        f"上一段记录的屏幕行进方向是「{previous}」：本段默认逐字复制到 continuity_memo."
+        "travel_direction，本段每一个有人物行进的镜头都按这个走向写清（例如「一行人自画左向画右"
+        "沿山路行进」），同行的人物同一走向、跟拍与切换机位都不反向；"
+        if previous.strip() else
+        "上一段没有记录屏幕行进方向：本段若有人物行进，由第一个行进镜头定下走向并写进 "
+        "continuity_memo.travel_direction（例如「一行人自画左向画右沿山路行进」），本段其余镜头"
+        "与之后各段逐字沿用；静止场景写「静止」；"
+    )
+    return inherit + (
+        "只有本段原文明确写到转身、折返、换路、迎面相遇这类改变走向的动作时才允许改变，改变时把 "
+        "travel_direction_change_source_quote 填成本段原文里写明这次改变的那一句原话。"
+    )
 
 
 def _continuity_memo_rules_first_segment() -> list[str]:
@@ -153,6 +177,7 @@ def _continuity_memo_rules_first_segment() -> list[str]:
             "continuity_memo.layout 由本段画面本身确定人物与人物、人物与家具的相对位置；这两个"
             "字段一旦在本段定下，之后各段默认逐字沿用，不得无原文依据地改变。"
         ),
+        _travel_direction_rule(""),
     ]
 
 
@@ -180,7 +205,9 @@ def continuity_memo_output_contract_text() -> str:
         "外观（form，例如网状/透明、颜色材质）、位置（location，谁手里/哪把椅子上/桌面哪一"
         "侧）与状态（state，拉链开合、里面有没有猫）；layout 是本段结束时人物之间以及人物与"
         "家具的相对位置，一两句话；layout 与上一段不同时，layout_change_source_quote 必须是"
-        "本段原文里写明这次移动/变化的那句原话。"
+        "本段原文里写明这次移动/变化的那句原话；travel_direction 是本段结束时同行人物在镜头里的"
+        "统一屏幕走向（例如「一行人自画左向画右沿山路行进」，静止写「静止」），与上一段不同时 "
+        "travel_direction_change_source_quote 必须是本段原文里写明转身/折返/换路的那句原话。"
     )
 
 
@@ -273,6 +300,24 @@ def layout_change_advisories(
     return []
 
 
+def travel_direction_advisories(
+    memo: _AiContinuityMemo, previous_memo: _AiContinuityMemo | None, segment_source_text: str,
+) -> list[str]:
+    """屏幕行进方向变化的告警判据（不阻断），与 layout_change_advisories 同一形状。"""
+    if previous_memo is None or not previous_memo.travel_direction.strip():
+        return []
+    if memo.travel_direction == previous_memo.travel_direction:
+        return []
+    quote = memo.travel_direction_change_source_quote.strip()
+    if not quote:
+        return ["continuity_memo.travel_direction 与上一段不同但没有给出 travel_direction_change_source_quote（未拦截）"]
+    if not _quote_found_in_source(quote, segment_source_text):
+        return [
+            f"continuity_memo.travel_direction_change_source_quote『{quote}』在本段原文里找不到逐字匹配（未拦截）"
+        ]
+    return []
+
+
 def continuity_memo_errors(
     memo: _AiContinuityMemo,
     previous_memo: _AiContinuityMemo | None,
@@ -288,6 +333,8 @@ def continuity_memo_errors(
     errors.extend(_prop_form_errors(memo, previous_memo))
     for advisory in layout_change_advisories(memo, previous_memo, segment_source_text):
         log.warning("[STORYBOARD_CONTINUITY_MEMO_LAYOUT][未拦截] %s", advisory)
+    for advisory in travel_direction_advisories(memo, previous_memo, segment_source_text):
+        log.warning("[STORYBOARD_CONTINUITY_MEMO_TRAVEL][未拦截] %s", advisory)
     if not memo.time_of_day.strip():
         errors.append("continuity_memo.time_of_day 不能为空：每一帧画面都有时段")
     if memo.time_of_day_basis == "inherited":
