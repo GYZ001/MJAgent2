@@ -26,6 +26,11 @@ def test_accepted_card_name_rules() -> None:
     assert accepted_card_name("老人", "", fragments) == "老人"
     assert accepted_card_name("刘备", "刘备", fragments) == "刘备"
     assert accepted_card_name("老人", "老", fragments) == "老人"  # 缩短：不采信
+    # 「真名（称谓）」拼接只评估真名部分：真名在原文片段里逐字出现才采信，否则沿用称谓
+    assert accepted_card_name("大汉", "曹阳（大汉）", "第0013章 大汉曹阳，身后大汉") == "曹阳"
+    assert accepted_card_name("大汉", "曹阳(大汉)", "第0013章 大汉曹阳") == "曹阳"
+    assert accepted_card_name("大汉", "曹阳（大汉）", fragments) == "大汉"
+    assert accepted_card_name("身后大汉", "曹阳（大汉）", "大汉曹阳") == "曹阳"  # 括号里是称谓的子串同样拆
 
 
 def _conn(*characters: Character) -> sqlite3.Connection:

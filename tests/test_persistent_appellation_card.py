@@ -124,13 +124,6 @@ def test_later_appellation_binds_back_to_the_original_card(monkeypatch) -> None:
         return {"status": "exists", "name": "许师姐"}
 
     patch_portraits_everywhere(monkeypatch, "ensure_character_card", fake_card)
-    seen: list[str] = []
-
-    def fake_portrait(conn_, project_id, name, episode_no):
-        seen.append(name)
-        return "portrait_of_xu"
-
-    patch_prep_pack_everywhere(monkeypatch, "_resolve_portrait_id", fake_portrait)
 
     result = _run(pa.resolve_persistent_appellation(
         conn, project_id="p", episode_no=3, label="许姑娘",
@@ -138,7 +131,33 @@ def test_later_appellation_binds_back_to_the_original_card(monkeypatch) -> None:
     ))
 
     assert result["canonical_name"] == "许师姐"
-    assert seen == ["许师姐"]
+    assert result["resolved"] is True
+
+
+def test_card_without_portrait_still_binds(monkeypatch) -> None:
+    """出图解耦到后台后，刚建的卡此刻必然没图；绑定只看建卡结果，不看定妆照。
+
+    真实事故（2026-09-14 第 11 集）：「大汉」建成「曹阳（大汉）」（status=added、
+    无图），旧实现在这里查 _resolve_portrait_id 拿到 None 就返回 None，标签落
+    群演、卡进不了准备包，分镜前资产准备也永远轮不到给它补图。
+    """
+    conn = _conn(["大汉来了", "大汉又来了", "大汉第三次"])
+
+    async def fake_card(project_id, name, episode_no, **kwargs):
+        assert kwargs["generate_portrait"] is False
+        return {"status": "added", "name": "曹阳", "has_portrait": False, "portrait_deferred": True}
+
+    patch_portraits_everywhere(monkeypatch, "ensure_character_card", fake_card)
+    patch_prep_pack_everywhere(monkeypatch, "_resolve_portrait_id", lambda *a, **k: None)
+
+    result = _run(pa.resolve_persistent_appellation(
+        conn, project_id="p", episode_no=1, label="大汉",
+        segments=[_Seg("身后大汉手中一把飞剑")],
+    ))
+
+    assert result is not None
+    assert result["canonical_name"] == "曹阳"
+    assert result["persistent_appellation"] is True
 
 
 def test_conflicting_owner_is_not_carded(monkeypatch) -> None:

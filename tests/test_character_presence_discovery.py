@@ -435,3 +435,54 @@ def test_ensure_cards_for_text_skips_card_when_functional_label_collides() -> No
     resolutions = cards_ensure._functional_identity_resolutions(functional_candidates)
     route_names = {item["canonical_name"] for item in resolutions}
     assert len(route_names) == 2  # 两个不同的人拿到了两个不同的 route_name
+
+
+def test_qualifying_functional_card_feeds_back_a_binding_resolution(monkeypatch) -> None:
+    """群演升格建卡后必须回写决议并退出功能身份候选（2026-09-14 第 11 集实例）。
+
+    旧实现只把卡追加进 added：标签仍带一条 functional_identity 决议，准备包解析器
+    按 skip（群演）处理，卡建了也绑不进去、也轮不到补图；建卡模型结合后续章节
+    给的真名（「大汉」→「曹阳」）更是无人消费。
+    """
+    async def fake_card(project_id, name, episode_no, **kwargs):
+        assert name == "大汉"
+        return {"status": "added", "name": "曹阳", "has_portrait": False, "portrait_deferred": True}
+
+    patch_portraits_everywhere(monkeypatch, "ensure_character_card", fake_card)
+    candidates = [{
+        "identity_kind": "functional", "source_label": "大汉", "name": "大汉",
+        "identity_group": "current-1:F2", "source_segment_ids": ["seg:1"],
+    }]
+    resolutions: list[dict] = []
+    added, warnings = asyncio.run(cards_ensure._ensure_qualifying_functional_cards(
+        "p1", 11, "身后大汉手中一把飞剑。\n\n大汉搜走储物袋。\n\n那大汉转身踏入公开区。",
+        candidates, generate_portraits=False, write_guard=None, resolutions=resolutions,
+    ))
+
+    assert [item["name"] for item in added] == ["曹阳"]
+    assert candidates == []  # 已建卡的标签退出功能身份候选，不再产生 functional_identity 决议
+    assert [(r["source_label"], r["canonical_name"], r["resolution"]) for r in resolutions] == [
+        ("大汉", "曹阳", "future_identity"),
+    ]
+    assert any("定妆资产将补齐" in line for line in warnings)
+
+
+def test_functional_card_minor_verdict_keeps_functional_identity(monkeypatch) -> None:
+    """建卡被评估模型判为路人（skipped_minor）时不回写决议，标签留在功能身份候选里。"""
+    async def fake_card(project_id, name, episode_no, **kwargs):
+        return {"status": "skipped_minor", "name": name, "reason": "戏份不足"}
+
+    patch_portraits_everywhere(monkeypatch, "ensure_character_card", fake_card)
+    candidates = [{
+        "identity_kind": "functional", "source_label": "中年男子", "name": "中年男子",
+        "identity_group": "current-1:F3",
+    }]
+    resolutions: list[dict] = []
+    added, _warnings = asyncio.run(cards_ensure._ensure_qualifying_functional_cards(
+        "p1", 11, "中年男子咳嗽。\n\n中年男子摆手。", candidates,
+        generate_portraits=False, write_guard=None, resolutions=resolutions,
+    ))
+
+    assert added == [] and resolutions == []
+    assert [item["source_label"] for item in candidates] == ["中年男子"]
+

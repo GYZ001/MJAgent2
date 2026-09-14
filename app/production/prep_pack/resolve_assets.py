@@ -835,8 +835,7 @@ async def _resolve_assets(
             # "都不是"，本人反倒落进群演。
             bible = _load_project_bible(conn, project_id)
             newly_added_character_names = frozenset(
-                str(item.get("name") or "").strip()
-                for item in (discovery_result.get("added") or [])
+                str(item.get("name") or "").strip() for item in (discovery_result.get("added") or [])
                 if isinstance(item, dict) and str(item.get("name") or "").strip()
             )
             resolution_evidence_by_label = {
@@ -927,6 +926,7 @@ async def _resolve_assets(
                 skip_character_names.discard(name)
                 character_rename[name] = resolution["canonical_name"]
                 candidate_verdict_pins[name] = resolution
+            bible = _load_project_bible(conn, project_id)  # 候选解析可能刚建了卡（persistent_appellation），pass2 判归属要看到它
 
         if unresolved_scenes:
             stats["scene_discovery_calls"] += 1

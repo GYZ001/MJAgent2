@@ -17,7 +17,6 @@ from pydantic import (
 from typing import Any
 
 from .alias_resolution import _prep_pack_cross_episode_alias_conflict
-from .asset_lookup import _resolve_portrait_id
 from .persistent_appellation import resolve_persistent_appellation
 from .functional_candidates import (
     _PREP_PACK_FUNCTIONAL_CANDIDATE_NO_MATCH_LABEL,
@@ -218,8 +217,8 @@ async def _prep_pack_functional_candidate_verdict_only(
     if pinned is None:
         return attempted_no_bind
     canonical_name = response.selected_candidate
-    if not _resolve_portrait_id(conn, project_id, canonical_name, episode_no):
-        return attempted_no_bind
+    # 不再要求候选已有定妆照：出图解耦到后台后，同一轮映射刚建的卡没有图；
+    # 候选集本就取自人物谱，绑定只看在册，图由分镜前资产准备按 bible:{name} 补齐。
     conflicting_name = _prep_pack_cross_episode_alias_conflict(
         conn, project_id, episode_id,
         alias=label, canonical_name=canonical_name, bible=bible,

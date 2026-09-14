@@ -66,13 +66,16 @@ async def resolve_persistent_appellation(
 ) -> dict[str, Any] | None:
     """跨章稳定的称谓 → 建卡出图，返回可直接并入候选判别结果的 payload。
 
-    ``None`` 表示不适用（跨章次数不够、本集钉不住锚点、建卡没成、或建完仍然
-    没有可绑定的定妆照），调用方维持原行为让标签落 functional_extras——不确定
-    不绑，与候选判别同一套纪律。
+    ``None`` 表示不适用（跨章次数不够、本集钉不住锚点、建卡没成），调用方维持
+    原行为让标签落 functional_extras——不确定不绑，与候选判别同一套纪律。
+
+    绑定不以"已有定妆照"为门槛：出图已解耦到后台（下面 generate_portrait=False），
+    刚建的卡在这一刻必然没图，若在此拒绝绑定，标签落群演、卡进不了准备包，
+    分镜前资产准备也就永远轮不到给它补图——真实事故：第 11 集「大汉」建成
+    「曹阳（大汉）」后仍以无图群演投产。生产侧取图按 ``bible:{name}`` 查人物谱
+    当前定妆照（app.multiview / storyboard_ops.current_portraits），不看快照。
     """
     from app.portraits import ensure_character_card
-
-    from .asset_lookup import _resolve_portrait_id
 
     if label_chapter_span(conn, project_id, label) <= PERSISTENT_APPELLATION_MIN_CHAPTERS:
         return None
@@ -94,8 +97,6 @@ async def resolve_persistent_appellation(
     if status not in {"added", "exists"}:
         return None
     canonical_name = str((result or {}).get("name") or "").strip() or label
-    if not _resolve_portrait_id(conn, project_id, canonical_name, episode_no):
-        return None
     return {
         "resolved": True,
         "canonical_name": canonical_name,

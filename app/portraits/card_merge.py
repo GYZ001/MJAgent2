@@ -33,6 +33,7 @@ None/False，调用方据此照常建卡，不重试、不降级判据、不猜�
 from __future__ import annotations
 
 import json
+import re
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -382,9 +383,14 @@ def accepted_card_name(label: str, proposed: str | None, fragments: str) -> str:
     - 原文里真的出现的名字（「小公主」→「雨馨」）：必须逐字出现在检索到的原文片段里。
     其它（凭空起名、缩短、换词）一律不采信。判据来自称谓与原文，不含任何词表
     （真实事故：神墓「老人」「孩子」「神秘人」各成一卡，后续每集的同称谓都与之冲突）。
+    「真名（称谓）」拼接（「大汉」→「曹阳（大汉）」）只评估括号前的真名：称谓躲在括号里
+    会冒充"加限定"而被采信，卡名带括号后真名逐字出现时又对不上这张卡（第 11 集实例）。
     """
     label = str(label or "").strip()
     proposed = str(proposed or "").strip()
+    composite = re.fullmatch(r"(.+?)[（(](.+?)[）)]", proposed)
+    if composite and (label in composite.group(2) or composite.group(2) in label):
+        proposed = composite.group(1).strip()
     if proposed and proposed == strip_relational_title(label):
         return proposed  # 「王腾飞师兄」→「王腾飞」：去掉关系称谓是合法的定名，不是截短（第 13 轮卡名带师兄）
     if not proposed or proposed == label or proposed in label:  # 空、相同、或只是把称谓截短：都不采信

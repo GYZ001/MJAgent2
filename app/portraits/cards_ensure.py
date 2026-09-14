@@ -207,6 +207,7 @@ async def _ensure_qualifying_functional_cards(
     project_id: str, episode_no: int, source_text: str,
     functional_candidates: list[dict],
     *, generate_portraits: bool, write_guard: Callable[[], None] | None,
+    resolutions: list[dict],
 ) -> tuple[list[dict], list[str]]:
     """无名但反复在场/处于高潮的功能身份也建卡定妆，不再只留裸标签资源
     （WS3：人物发现按叙事分量与画面存在判定）。生产事故：奶奶（"矮墙"意象
@@ -220,15 +221,23 @@ async def _ensure_qualifying_functional_cards(
     ``_forward_fragments`` 按裸文本检索会把两个人的原文证据混进同一张卡，
     这里不试图解决——称谓消歧仍交给上面已有的 route_name/scope_qualifier
     机制，只是那条路径不建卡（见函数调用处 docstring）。
+
+    建成/命中的卡必须回写决议（source_label → 卡的规范名，future_identity）并把该标签
+    从 ``functional_candidates`` 原地移除：若再出一条 functional_identity，准备包解析器
+    按 skip（群演）处理，卡建了也绑不进去（第 11 集「曹阳（大汉）」实例）；卡名可能
+    与标签不同（建卡模型结合后续章节定真名），准备包的 rename 正靠这条决议。
     """
     groups_by_label: dict[str, set[str]] = {}
+    items_by_label: dict[str, list[dict]] = {}
     for item in functional_candidates:
         label = str(item.get("source_label") or item.get("name") or "").strip()
         group = str(item.get("identity_group") or f"source:{label}").strip()
         if label:
             groups_by_label.setdefault(label, set()).add(group)
+            items_by_label.setdefault(label, []).append(item)
     added: list[dict] = []
     warnings: list[str] = []
+    carded: set[str] = set()
     for label, groups in sorted(groups_by_label.items()):
         if len(groups) != 1:
             continue
@@ -239,10 +248,23 @@ async def _ensure_qualifying_functional_cards(
             project_id, label, episode_no,
             generate_portrait=generate_portraits, write_guard=write_guard,
         )
+        if result.get("status") not in {"added", "exists"}:
+            continue
+        canonical_name = str(result.get("name") or label).strip() or label
+        carded.add(label)
+        for item in items_by_label[label]:
+            resolutions.append(_identity_resolution(
+                item, canonical_name, "future_identity",
+                reason="功能身份画面证据充分，已建人物卡并绑定到该卡",
+            ))
         if result.get("status") == "added":
             added.append(result)
             if not result.get("has_portrait"):
                 warnings.append(f"{label}：功能身份画面证据充分，人物卡已添加，定妆资产将补齐")
+    functional_candidates[:] = [
+        item for item in functional_candidates
+        if str(item.get("source_label") or item.get("name") or "").strip() not in carded
+    ]
     return added, warnings
 
 
@@ -385,17 +407,18 @@ async def ensure_cards_for_text(
     )
     warnings.extend(portrait_backfill_warnings)
 
-    # 功能身份的 route_name 消歧 + 决议（见 _functional_identity_resolutions
-    # docstring：本函数已顶格 function_lines 基线，这段搬到独立函数）。
-    resolutions.extend(_functional_identity_resolutions(functional_candidates))
-
-    # 无名但反复在场/处于高潮的功能身份也建卡定妆（见函数 docstring）。
+    # 无名但反复在场/处于高潮的功能身份也建卡定妆（见函数 docstring）：先于
+    # 功能身份决议运行，建成卡的标签会被原地移出 functional_candidates。
     functional_added, functional_card_warnings = await _ensure_qualifying_functional_cards(
         project_id, episode_no, source_text, functional_candidates,
-        generate_portraits=generate_portraits, write_guard=write_guard,
+        generate_portraits=generate_portraits, write_guard=write_guard, resolutions=resolutions,
     )
     added.extend(functional_added)
     warnings.extend(functional_card_warnings)
+
+    # 功能身份的 route_name 消歧 + 决议（见 _functional_identity_resolutions
+    # docstring：本函数已顶格 function_lines 基线，这段搬到独立函数）。
+    resolutions.extend(_functional_identity_resolutions(functional_candidates))
 
     for name, items in unknown_by_name.items():
         ensure_kwargs = {
