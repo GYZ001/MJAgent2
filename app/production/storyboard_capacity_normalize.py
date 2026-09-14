@@ -85,10 +85,16 @@ def _kept_ids_by_segment(draft: Any, quotes_by_id: dict[str, DialogueQuote]) -> 
 
 def _split_ranges_at_unit(
     ranges: list[_AiSourceUnitRange], split_source_index: int, split_unit: int,
+    *, share_boundary: bool = False,
 ) -> tuple[list[_AiSourceUnitRange], list[_AiSourceUnitRange]]:
     """按 (split_source_index, split_unit) 把范围列表切成"留在前一箱"/"划入
     后一箱"两组：命中段以句单元切分，其它段按原文先后分配。
     后文与拆分点一起进入后一箱，避免把后续台词重新挪回已满的前箱、造成叙事倒退。
+
+    ``share_boundary``：拆点单元同时留在两箱。前一箱的最后一条台词与后一箱的第一条
+    台词落在同一个句单元时（一句超长引语被台账预拆成两条、合计超容）必须共享——
+    否则前一箱的窗口不含自己的必保台词，阶段二追溯必然失败、整集分镜失败
+    （2026-09-14 我欲封天第 3 集：Q24 49 字 + Q25 9 字同在段3·S03）。
     """
     before: list[_AiSourceUnitRange] = []
     after: list[_AiSourceUnitRange] = []
@@ -97,13 +103,14 @@ def _split_ranges_at_unit(
             before.append(r)
         elif r.source_segment_index > split_source_index:
             after.append(r)
-        elif split_unit <= r.from_unit:
+        elif split_unit < r.from_unit or (split_unit == r.from_unit and not share_boundary):
             after.append(r)
         elif split_unit > r.to_unit:
             before.append(r)
         else:
             before.append(_AiSourceUnitRange(
-                source_segment_index=r.source_segment_index, from_unit=r.from_unit, to_unit=split_unit - 1,
+                source_segment_index=r.source_segment_index, from_unit=r.from_unit,
+                to_unit=split_unit if share_boundary else split_unit - 1,
             ))
             after.append(_AiSourceUnitRange(
                 source_segment_index=r.source_segment_index, from_unit=split_unit, to_unit=r.to_unit,
@@ -155,11 +162,17 @@ def _split_one_segment(
         quote_id_to_index[qid] = first_index
     indices = [first_index]
     remaining_ranges = list(segment.source_unit_ranges)
+    previous_bin = bins[0]
     for extra_bin in bins[1:]:
         split_point = _split_point_for_bin(extra_bin[0], quotes_by_id, source_segments)
         if split_point is not None:
-            finished, remaining_ranges = _split_ranges_at_unit(remaining_ranges, *split_point)
+            # 前一箱末条与本箱首条同在一个句单元 → 该单元两箱共享（见 _split_ranges_at_unit）。
+            share = _split_point_for_bin(previous_bin[-1], quotes_by_id, source_segments) == split_point
+            finished, remaining_ranges = _split_ranges_at_unit(
+                remaining_ranges, *split_point, share_boundary=share,
+            )
             new_segments[indices[-1]].source_unit_ranges = finished
+        previous_bin = extra_bin
         spawned = segment_plan_cls(
             segment_no=0,
             synopsis=f"{segment.synopsis}{CAPACITY_SPLIT_MARKER}",
