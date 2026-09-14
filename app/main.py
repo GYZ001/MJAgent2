@@ -425,6 +425,16 @@ class SpaStaticFiles(StaticFiles):
     # 前端也认不出来。老老实实返回 404，前端才能识别成「分包没取到」并自动重载。
     _NO_FALLBACK = ("api/", "api", "media/", "media", "mcp/", "mcp", "assets/", "assets")
 
+    async def __call__(self, scope, receive, send) -> None:
+        # 本服务没有任何 WebSocket 路由，但外部扫描器会向站点根发 ws 握手；这类 scope
+        # 走到 StaticFiles 会被它的 ``assert scope["type"] == "http"`` 炸成 500 并在
+        # 日志里刷整段 traceback（B 上已积 17 条）。在 accept 之前发 close 即按 ASGI
+        # 约定拒绝握手（uvicorn 回 403），不进 StaticFiles。
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        await super().__call__(scope, receive, send)
+
     async def get_response(self, path: str, scope):
         try:
             response = await super().get_response(path, scope)
