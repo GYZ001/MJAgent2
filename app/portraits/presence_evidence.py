@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
+from difflib import SequenceMatcher
 
 _SENTENCE_END_CHARS = "。！？!?\n"
 _QUOTE_OPEN_CHARS = "「『"
@@ -211,6 +213,30 @@ def _occurrence_kinds(name: str, sentence: str) -> list[str]:
     return sorted(kinds)
 
 
+_NEAR_VERBATIM_MIN_CHARS = 3
+_NEAR_VERBATIM_RATIO = 0.6
+
+
+def _label_hit(name: str, sentence: str) -> str:
+    """句中与候选称谓对应的那段原文：逐字命中就是称谓本身；否则取两者最长连续公共
+    片段，长度 ≥3 字且 ≥ 称谓长度的 60% 才算命中，返回空串表示不在场。
+
+    称谓是发现模型自己的措辞，原文常常不是逐字这么写的：标签「虎头虎脑少年」，原文写
+    「这少年虎头虎脑」「那虎头虎脑的家伙」「虎头虎脑的少年」——按标签逐字搜三处全 0，
+    这个反复出场、后来被点名叫小虎的孩子就被判成路人（2026-09-14 我欲封天第 1 集）。
+    判据只看两段文本本身，与 textmatch.longest_run_ratio 同族，不含任何称谓词表。
+    """
+    if not name or not sentence:
+        return ""
+    if name in sentence:
+        return name
+    matcher = SequenceMatcher(None, name, sentence, autojunk=False)
+    block = matcher.find_longest_match(0, len(name), 0, len(sentence))
+    if block.size < max(_NEAR_VERBATIM_MIN_CHARS, math.ceil(len(name) * _NEAR_VERBATIM_RATIO)):
+        return ""
+    return sentence[block.b:block.b + block.size]
+
+
 def _shot_tag_hits(name: str, shot_rows: list[dict] | None) -> list[dict]:
     """分镜已经把 name 标进 ``shots.characters`` 标签列表——已有分镜时最强的
     画面存在信号（分镜台自己判定的在场角色，不是从原文猜的）。"""
@@ -250,16 +276,15 @@ def collect_presence_evidence(
     seen_excerpts: set[str] = set()
     if name:
         for chapter_idx, content in sorted((chapters_by_idx or {}).items()):
-            if name not in (content or ""):
-                continue
-            for sentence in _split_sentences(content):
-                if name not in sentence:
+            for sentence in _split_sentences(content or ""):
+                hit = _label_hit(name, sentence)
+                if not hit:
                     continue
                 excerpt = sentence[:120]
                 if excerpt in seen_excerpts:
                     continue
                 seen_excerpts.add(excerpt)
-                kinds = _occurrence_kinds(name, sentence)
+                kinds = _occurrence_kinds(hit, sentence)
                 entry = {
                     "chapter_idx": chapter_idx,
                     "excerpt": excerpt,
