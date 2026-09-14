@@ -150,7 +150,10 @@ TEXT_VERIFIED_METHODS = {"direct", "alias"}
 # 分支按 method 值分型、不按字段位置分型，登记进本集合即对三处调用点
 # （check_manifest_characters/check_manifest_scenes/check_key_line_speakers）
 # 统一生效，是安全的超集登记。
-ANCHOR_VERIFIED_METHODS = {"resolution", "discovery", "absorbed_speaker", "candidate_verdict"}
+# appellation_resolution（prep_pack 2.0.x 称谓解析）与 resolution 同形：anchor_phrase 取自
+# anchor_segments 指向的原文段（2026-09-14 第 1 集实测），按锚点核验；此前不在集合里，
+# 主角全部被报「不在已知枚举内，无法核验」。
+ANCHOR_VERIFIED_METHODS = {"resolution", "discovery", "absorbed_speaker", "candidate_verdict", "appellation_resolution"}
 FORWARD_ANCHOR_METHOD = "resolution_forward"
 INHERITED_ALIAS_METHOD = "alias_inherited"
 KNOWN_PROVENANCE_METHODS = (
@@ -1134,16 +1137,17 @@ def check_missing_characters(
     conn: sqlite3.Connection, project_id: str, episode_no: int,
     pack: dict[str, Any], source_text: str, alias_registry: dict[str, set[str]],
 ) -> tuple[list[Issue], int, int]:
-    manifest_portrait_ids = {
-        str(c.get("portrait_id")) for c in ((pack.get("asset_manifest") or {}).get("characters")) or []
-        if c.get("portrait_id")
-    }
+    manifest_characters = ((pack.get("asset_manifest") or {}).get("characters")) or []
+    manifest_portrait_ids = {str(c.get("portrait_id")) for c in manifest_characters if c.get("portrait_id")}
+    # prep_pack 2.0.x 起清单按身份键收录（identity_id="bible:名字"，portrait_id 留空）：
+    # 只认 portrait_id 会把本集所有主角都误报成「未收录」（2026-09-14 第 1–3 集实测）。
+    manifest_identity_ids = {str(c.get("identity_id")) for c in manifest_characters if c.get("identity_id")}
     issues: list[Issue] = []
     scanned = 0
     clean = 0
     for row in _known_characters(conn, project_id, episode_no):
         scanned += 1
-        if row["id"] in manifest_portrait_ids:
+        if row["id"] in manifest_portrait_ids or f"bible:{row['character_name']}" in manifest_identity_ids:
             clean += 1
             continue
         candidates = [row["character_name"], *sorted(alias_registry.get(row["id"], set()))]
@@ -1172,16 +1176,16 @@ def check_missing_scenes(
     conn: sqlite3.Connection, project_id: str, episode_no: int,
     pack: dict[str, Any], source_text: str, alias_registry: dict[str, set[str]],
 ) -> tuple[list[Issue], int, int]:
-    manifest_scene_ids = {
-        str(s.get("scene_reference_id")) for s in ((pack.get("asset_manifest") or {}).get("scenes")) or []
-        if s.get("scene_reference_id")
-    }
+    manifest_scenes = ((pack.get("asset_manifest") or {}).get("scenes")) or []
+    manifest_scene_ids = {str(s.get("scene_reference_id")) for s in manifest_scenes if s.get("scene_reference_id")}
+    # 2.0.x 清单按 scene_id="scene:名字" 收录（scene_reference_id 留空），同上。
+    manifest_scene_keys = {str(s.get("scene_id")) for s in manifest_scenes if s.get("scene_id")}
     issues: list[Issue] = []
     scanned = 0
     clean = 0
     for row in _known_scenes(conn, project_id, episode_no):
         scanned += 1
-        if row["id"] in manifest_scene_ids:
+        if row["id"] in manifest_scene_ids or f"scene:{row['scene_name']}" in manifest_scene_keys:
             clean += 1
             continue
         candidates = [row["scene_name"], *sorted(alias_registry.get(row["scene_name"], set()))]
