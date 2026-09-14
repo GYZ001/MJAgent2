@@ -120,6 +120,16 @@ def ensure_tables_on_connection(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
     _add_column_if_missing(conn, "models", "provider", "TEXT NOT NULL DEFAULT ''")
     _add_column_if_missing(conn, "models", "extra_json", "TEXT NOT NULL DEFAULT '{}'")
+    # 补列只给老行一个空串默认值，不会把 provider 字符串补回来；而 retire_catalog_setting()
+    # 紧接着清空 settings.custom_models，原来能抄的来源也没了。生产 B 2026-09-14 03:30
+    # 部署这轮后 7 条目录项 provider 全空，routing.resolve() 解析出 provider=''，
+    # active_provider() 对四个职责全部返回空串，任何生成调用都报「模型  未配置 API Key」。
+    # 自建条目的 provider 按 app/system_api.py::add_model 与 app/model_migration.py 同一
+    # 规则是 custom:{id}；这里只回填「空串且 id 是自建形态」的行，共享网关家族
+    # （builtin:* id）的字面量 provider 无法推导，留空由人工在模型中心补。
+    conn.execute(
+        "UPDATE models SET provider = 'custom:' || id WHERE provider = '' AND id LIKE 'model\\_%' ESCAPE '\\'"
+    )
 
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, coltype: str) -> None:
