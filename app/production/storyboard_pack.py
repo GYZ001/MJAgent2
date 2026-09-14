@@ -79,7 +79,7 @@ from app.production.storyboard_beat_sheet import (
     _generate_beat_sheet, _paratext_exclusion_rule as _paratext_exclusion_rule, _paratext_segment_indexes as _paratext_segment_indexes, _source_block_for_prompt as _source_block_for_prompt, _validate_beat_sheet_draft as _validate_beat_sheet_draft,
 )
 from app.production.storyboard_continuity_memo import (
-    _AiContinuityMemo,
+    _AiContinuityMemo, ensure_travel_direction_in_prompt,
     continuity_memo_character_advisories,
     continuity_memo_errors,
     continuity_memo_payload,
@@ -1131,7 +1131,7 @@ async def _generate_all_segment_prompts(
             model_type=_AiStoryboardSegmentDraft,
             validate=lambda value, _req=required_dialogue, _pm=previous_memo,
             _st=source_payload["source_text_by_segment"], _dl=list(delivered_lines), _rv=reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no),
-            _no=plan.segment_no, _n2i=manifest_name_to_identity(payload, plan.source_segment_indexes), _sx=plan.source_segment_indexes, _ch=staging_chain, _syn=plan.synopsis, _dp=canonical_phrases(payload), _sg=staging_gate: [*_validate_segment_draft(
+            _no=plan.segment_no, _n2i=manifest_name_to_identity(payload, plan.source_segment_indexes), _sx=plan.source_segment_indexes, _ch=staging_chain, _syn=plan.synopsis, _dp=canonical_phrases(payload), _sg=staging_gate: [*ensure_travel_direction_in_prompt(value), *_validate_segment_draft(
                 value, dialect_render_format=profile.render_format, required_dialogue=_req, name_to_identity=_n2i,
                 previous_memo=_pm, segment_source_text=_st, delivered_lines=_dl, reserved_lines=_rv, current_segment_no=_no,
             ), *generated_identity_errors(value, payload=payload, source_indexes=_sx, required_dialogue=_req, dialect=profile.render_format),

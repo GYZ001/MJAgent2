@@ -383,3 +383,27 @@ def continuity_memo_character_advisories(
         for index, character in enumerate(memo.characters)
         if character.identity_id not in segment_character_ids
     ]
+
+
+#: 提示词里表示屏幕走向的用词——就是方言规则示例里教模型写的那套（「自画左向画右」等）。
+_DIRECTION_WORDS = ("画左", "画右", "画近", "画远", "向左", "向右", "自左", "自右", "屏幕左", "屏幕右")
+
+
+def ensure_travel_direction_in_prompt(draft: Any) -> list[str]:
+    """备忘里声明了行进方向、提示词却没写走向词时，把模型自己声明的方向追加进提示词。
+
+    2026-09-14 第 8 集实测：16 段里 14 段的 continuity_memo.travel_direction 非静止且跨段逐字
+    沿用，但只有 3 段的 prompt_text 出现走向词——视频模型只看提示词，方向留在备忘里等于没写。
+    追加的是模型自己在备忘里的原话，不发明内容；validate 回调里调用，永远返回空错误列表。
+    """
+    memo = getattr(draft, "continuity_memo", None)
+    direction = str(getattr(memo, "travel_direction", "") or "").strip()
+    prompt = str(getattr(draft, "prompt_text", "") or "")
+    if not direction or direction == "静止" or not prompt.strip():
+        return []
+    if any(word in prompt for word in _DIRECTION_WORDS):
+        return []
+    draft.prompt_text = prompt.rstrip() + f"\n本段行进方向：{direction}；同行人物保持同一走向，跟拍与切换机位不反向。"
+    log.info("[STORYBOARD_TRAVEL_DIRECTION_APPENDED] 提示词缺走向词，已按备忘追加：%s", direction[:40])
+    return []
+

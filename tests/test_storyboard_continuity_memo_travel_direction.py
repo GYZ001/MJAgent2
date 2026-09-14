@@ -8,6 +8,7 @@ from app.production.storyboard_continuity_memo import (
     _AiContinuityMemo,
     continuity_memo_output_contract_text,
     continuity_memo_rules,
+    ensure_travel_direction_in_prompt,
     travel_direction_advisories,
 )
 from app.production.storyboard_dialects import SEEDANCE_DIALECT_INSTRUCTIONS
@@ -44,3 +45,19 @@ def test_rules_and_contract_and_dialect_all_state_the_direction_rule() -> None:
     assert "由第一个行进镜头定下走向" in first
     assert "travel_direction" in continuity_memo_output_contract_text()
     assert "同一屏幕行进" in SEEDANCE_DIALECT_INSTRUCTIONS and "不反向" in SEEDANCE_DIALECT_INSTRUCTIONS
+
+
+def test_direction_from_memo_is_appended_when_prompt_lacks_direction_words() -> None:
+    """第 8 集实测：14/16 段备忘有方向，只有 3 段提示词写了走向词。"""
+    from types import SimpleNamespace
+    draft = SimpleNamespace(prompt_text="镜头1：孟浩沿广场通道走向出口。\n全片贯穿：环境音为人群低语。",
+                            continuity_memo=_memo(travel_direction="自画右向画左沿广场通道往出口行进"))
+    assert ensure_travel_direction_in_prompt(draft) == []
+    assert draft.prompt_text.endswith("本段行进方向：自画右向画左沿广场通道往出口行进；同行人物保持同一走向，跟拍与切换机位不反向。")
+    already = SimpleNamespace(prompt_text="镜头1：孟浩自画右向画左走向出口。", continuity_memo=_memo(travel_direction="自画右向画左行进"))
+    ensure_travel_direction_in_prompt(already)
+    assert "本段行进方向" not in already.prompt_text
+    static = SimpleNamespace(prompt_text="镜头1：孟浩站定。", continuity_memo=_memo(travel_direction="静止"))
+    ensure_travel_direction_in_prompt(static)
+    assert static.prompt_text == "镜头1：孟浩站定。"
+
