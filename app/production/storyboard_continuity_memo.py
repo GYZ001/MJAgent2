@@ -185,8 +185,15 @@ def continuity_memo_output_contract_text() -> str:
 
 
 def _normalize_for_quote_match(text: str) -> str:
-    """空白归一后逐字比对——不做同义改写归并，「夜晚」与「深夜」必须视为不同。"""
-    without_segment_tags = re.sub(r"\[段\d+\]\s*", "", text)
+    """空白归一后逐字比对——不做同义改写归并，「夜晚」与「深夜」必须视为不同。
+
+    原文窗口 2.4.0 起按句单元渲染成「[段N·S07] 句子」（storyboard_segment_ranges.
+    render_source_units），旧格式是「[段N] 整段」；两种标签都要剥掉，否则跨句的引用
+    中间夹着单元标签就永远匹配不上。2026-09-14 我欲封天第 1–3 集 19 条「找不到逐字匹配
+    （未拦截）」实测：9 条是这种假阳性，另 9 条是模型把两句压缩拼接（丢了中间小句），
+    剥标签只消除前者，后者仍如实告警。
+    """
+    without_segment_tags = re.sub(r"\[段\d+(?:·S\d+)?\]\s*", "", text)
     return re.sub(r"\s+", "", without_segment_tags)
 
 
