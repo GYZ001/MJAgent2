@@ -29,24 +29,36 @@ def segment_identity_fingerprint(shot) -> str:
     return identity_contract_fingerprint(segment) if segment else ""
 
 
-def storyboard_pack_prompt_text(shot, critique: list[str] | None = None) -> str:
+def storyboard_pack_prompt_text(
+    shot, critique: list[str] | None = None, *, override: str | None = None,
+) -> str:
     """分镜台 2.0.0 段：原样复用模型已产出的 prompt_text，不重新编译。
 
     ``critique`` 是 Supervisor 定向重抽（L2 retake_directed）带来的「上一版必须改正」，
     以前只进幂等键、不进提示词——对 2.x 镜头定向重抽等于换个种子重来（2026-09-14
     第 2 集镜 5 三次烧同一句字幕）。现在与 compiler 的旧版路径同一写法追加在末尾；
     提交断言（assert_segment_submission）只看分镜包段本身，追加不影响它。
+
+    ``override`` 是生成接口显式提交的修订后提示词（``prompt_override``，段形态、带
+    @角色 标签）。以前对 2.x 镜头静默丢弃：接口接受、版本 meta 记下、发给供应商的
+    仍是原段——失败提示却让人「编辑本镜提示词后重抽」（2026-09-14 第 11 集镜 5 被
+    网关合规拒绝，四个变体发出去的正文一字未改）。现在覆盖正文，但提交断言按覆盖后
+    的段跑：台词逐字、发声者、人物合同一条都不放松——这不是绕过闸门，是让接口说话算话。
     """
     # shot_contract_json 才是权威来源，这里直接读 shot 模型上已解析好的
     # storyboard_pack_segment；不再插入占位「已采纳」版本，也不再依赖
     # adopted_version_id（见 app.production.storyboard_pack 模块文档）。
-    prompt_text = str((shot.storyboard_pack_segment or {}).get("prompt_text") or "")
+    segment = dict(shot.storyboard_pack_segment or {})
+    prompt_text = str(segment.get("prompt_text") or "")
+    if (override or "").strip():
+        prompt_text = str(override).strip()
+        segment["prompt_text"] = prompt_text
     if not prompt_text.strip():
         raise ValueError(
             "[STORYBOARD_PACK_PROMPT_MISSING] 该分镜台 2.0.0 段没有已产出的 "
             "prompt_text，请先在分镜台重新生成本段"
         )
-    assert_segment_submission(shot.storyboard_pack_segment, source_text=str(getattr(shot, "source_excerpt", "") or ""))
+    assert_segment_submission(segment, source_text=str(getattr(shot, "source_excerpt", "") or ""))
     lines = [c.strip() for c in (critique or [])[:6] if c and c.strip()]
     if lines:
         prompt_text = prompt_text.rstrip() + "\n上一版必须改正：" + "；".join(lines)

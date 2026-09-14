@@ -95,3 +95,42 @@ def test_only_finished_rejections_count() -> None:
     _insert_version(conn, "ver_2", status="succeeded", passed=True)
     _insert_version(conn, "ver_3", status="running", passed=None)
     assert coverage._technically_rejected(conn, "shot_1") is False
+
+
+def test_pack_prompt_override_replaces_body_and_is_asserted(monkeypatch) -> None:
+    """生成接口的 prompt_override 对 2.x 镜头必须真的生效，且提交断言按覆盖后的段跑。
+    2026-09-14 第 11 集镜 5：被网关合规拒绝后按提示「编辑提示词重抽」提交四个变体，
+    发给供应商的正文一字未改——override 只进了 meta。"""
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        enqueue_prompt, "assert_segment_submission",
+        lambda segment, *, source_text: seen.append(dict(segment)),
+    )
+    shot = SimpleNamespace(
+        storyboard_pack_segment={"prompt_text": "原段正文。\n", "dialogue": [{"line": "圣贤说过"}]},
+        source_excerpt="原文",
+    )
+    out = enqueue_prompt.storyboard_pack_prompt_text(shot, override="  修订后正文。 ")
+    assert out == "修订后正文。"
+    assert seen[-1]["prompt_text"] == "修订后正文。" and seen[-1]["dialogue"] == [{"line": "圣贤说过"}]
+    assert shot.storyboard_pack_segment["prompt_text"] == "原段正文。\n"  # 不回写分镜段
+    assert enqueue_prompt.storyboard_pack_prompt_text(shot, override="   ") == "原段正文。\n"  # 空白覆盖视同未给
+    directed = enqueue_prompt.storyboard_pack_prompt_text(shot, critique=[HINT], override="修订后正文。")
+    assert directed == "修订后正文。\n上一版必须改正：" + HINT
+
+
+def test_pack_prompt_override_still_fails_closed_on_submission_errors(monkeypatch) -> None:
+    def _reject(segment, *, source_text):
+        if "圣贤说过" not in segment["prompt_text"]:
+            raise ValueError("[STORYBOARD_IDENTITY_REPAIR_REQUIRED] 台词缺失")
+
+    monkeypatch.setattr(enqueue_prompt, "assert_segment_submission", _reject)
+    shot = SimpleNamespace(storyboard_pack_segment={"prompt_text": "圣贤说过。"}, source_excerpt="原文")
+    assert enqueue_prompt.storyboard_pack_prompt_text(shot) == "圣贤说过。"
+    try:
+        enqueue_prompt.storyboard_pack_prompt_text(shot, override="把台词删了。")
+    except ValueError as exc:
+        assert "台词缺失" in str(exc)
+    else:
+        raise AssertionError("覆盖删掉台词必须被提交断言拦下")
+

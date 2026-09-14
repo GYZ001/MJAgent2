@@ -1470,7 +1470,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     )
 
     if is_storyboard_pack_shot:
-        prompt_text = enqueue_prompt.storyboard_pack_prompt_text(shot, critique=critique)
+        prompt_text = enqueue_prompt.storyboard_pack_prompt_text(shot, critique=critique, override=prompt_override)
     else:
         prompt_text, preflight_repair = enqueue_prompt.compile_legacy_prompt(
             shot, prev_shot, screenplay, bible, extra_negative, critique, preflight_repair,
