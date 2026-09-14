@@ -751,7 +751,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         if not passed:
             # 技术校验失败：Supervisor 模式留作不可采用候选交其重抽；否则限次自动重提
             run_job_steps.settle_technical_failure(
-                job, job_id, owner, cost, resubmits, meta, supervisor_controlled,
+                job, job_id, owner, cost, resubmits, meta, supervisor_controlled, version_id=version["id"],
             )
             return
         await run_job_steps.adopt_and_settle_candidate(

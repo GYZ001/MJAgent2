@@ -38,6 +38,7 @@ def _wire(monkeypatch, *, set_job_ok: bool = True, limit: int = 2):
 def _settle(resubmits: int, supervisor: bool) -> None:
     run_job_steps.settle_technical_failure(
         {"episode_id": "ep_1", "shot_id": "shot_1", "after_shot_id": None}, "job_1", "owner", 1.5, resubmits, {}, supervisor,
+        version_id="ver_1",
     )
 
 
@@ -57,9 +58,17 @@ def test_worker_mode_resubmits_within_limit(monkeypatch) -> None:
 
 def test_worker_mode_raises_when_limit_exhausted(monkeypatch) -> None:
     calls = _wire(monkeypatch, limit=2)
-    with pytest.raises(ProviderError):
+    monkeypatch.setattr(run_job_steps, "_technical_issue_summary", lambda version_id: "画面叠加了字幕：『靠山宗』")
+    with pytest.raises(ProviderError) as excinfo:
         _settle(resubmits=2, supervisor=False)
     assert calls["set_job"] == [] and calls["resubmit"] == []
+    exc = excinfo.value
+    assert isinstance(exc, run_job_steps.VideoTechnicalGateExhausted)
+    assert "连续 3 次未通过" in str(exc) and "靠山宗" in str(exc) and "生成台" in str(exc)
+    # 报错码系统按「质量校验」展示原因原样，不再是「大模型/外部服务调用失败，可稍后重试」
+    from app.errors import classify
+    assert classify(exc) == ("quality_gate", "QA")
+    assert exc.failure.disposition.value == "manual_review" and exc.retryable is False
 
 
 def test_lost_lease_settles_nothing(monkeypatch) -> None:

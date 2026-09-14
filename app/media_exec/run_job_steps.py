@@ -23,6 +23,8 @@ import time
 
 from app.compiler import shot_cost_cny
 from app.db import get_conn, now
+from app.errors import ContentGenerationError
+from app.hiagent import ProviderError, ProviderFailure
 from app.evidence import media as media_evidence
 from app.orchestration import media_scheduler
 
@@ -259,7 +261,38 @@ def resubmit_after_technical_failure(job, resubmits: int, meta: dict) -> None:
         pass
 
 
-def settle_technical_failure(job, job_id, owner, cost, resubmits: int, meta: dict, supervisor_controlled: bool) -> None:
+class VideoTechnicalGateExhausted(ContentGenerationError, ProviderError):
+    """非 Supervisor 路径下技术校验（含字幕闸门）连续未通过、自动重提耗尽。
+
+    同时是 ContentGenerationError（app.errors.classify → 质量校验，非技术类，原因原样
+    展示）与 ProviderError（run_job 的错误处理按 manual_review 落 waiting_human，交人
+    工）。曾经只抛裸 ProviderError，用户看到的是「大模型/外部服务调用失败，可稍后重试」
+    ——不是供应商故障，重试也不会好，且没有出路。
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            failure=ProviderFailure.technical("technical_gate_exhausted", retryable=False),
+        )
+
+
+def _technical_issue_summary(version_id: str) -> str:
+    """该版本技术校验的第一条问题文案（供人看的原因），没有就空串。"""
+    row = get_conn().execute(
+        "SELECT technical_validation_json FROM shot_versions WHERE id=?", (version_id,),
+    ).fetchone()
+    try:
+        issues = (json.loads((row["technical_validation_json"] if row else None) or "{}") or {}).get("issues") or []
+    except ValueError:
+        return ""
+    first = issues[0] if issues else None
+    return str((first.get("message") if isinstance(first, dict) else first) or "")
+
+
+def settle_technical_failure(
+    job, job_id, owner, cost, resubmits: int, meta: dict, supervisor_controlled: bool, *, version_id: str,
+) -> None:
     """技术校验（含字幕闸门）不通过时的收尾。
 
     - Supervisor 掌控（完整补齐模式）：Worker 只产出候选、无重抽权。任务照常收工，
@@ -267,14 +300,19 @@ def settle_technical_failure(job, job_id, owner, cost, resubmits: int, meta: dic
       可采用候选、带 VIDEO_TECHNICAL_CONTRACT_FAILED，按 L1 同输入重抽。曾经这里抛
       ProviderError，被记成「未分类供应商失败 / manual_review」，Supervisor 当外部终态
       停手、整集判失败（2026-09-14 第 1 集镜 17 字幕命中）。
-    - 非 Supervisor：重提计数未超上限就自动新建版本重提；超了才抛错交人工。
+    - 非 Supervisor：重提计数未超上限就自动新建版本重提；超了抛
+      VideoTechnicalGateExhausted 交人工，文案带具体原因与出路。
     """
-    from app.hiagent import ProviderError
     from app.media_pipeline.retry_policy import technical_resubmit_limit
     from .enqueue import reconcile_episode_generation_status
 
     if not supervisor_controlled and resubmits >= technical_resubmit_limit():
-        raise ProviderError("视频文件技术校验失败，候选不可采用")
+        reason = _technical_issue_summary(version_id)
+        raise VideoTechnicalGateExhausted(
+            f"视频技术校验连续 {resubmits + 1} 次未通过，已停止自动重提"
+            + (f"：{reason}" if reason else "")
+            + "。请到生成台查看该镜候选，手动重抽或调整分镜描述后再生成"
+        )
     if _set_job(job_id, "succeeded", lease_owner=owner):
         media_scheduler.settle_budget(job_id, cost, success=True)
         reconcile_episode_generation_status(job["episode_id"])
