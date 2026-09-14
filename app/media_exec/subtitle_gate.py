@@ -22,6 +22,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -78,27 +79,76 @@ def build_messages(frames: list[bytes]) -> list[dict[str, Any]]:
     ]
 
 
+_FRAGMENT = re.compile(r"\{[^{}]*\}")
+_OVERLAY = re.compile(r'"overlay_text"\s*:\s*(true|false)\b')
+_INDEX = re.compile(r'"index"\s*:\s*(\d+)')
+_TEXT_SEEN = re.compile(r'"text_seen"\s*:\s*"((?:[^"\\]|\\.)*)"')
+_WHERE = re.compile(r'"where"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+
 def parse_verdict(raw: str, frames_checked: int) -> dict[str, Any]:
-    """模型原文 → 结论；解析不出 frames 列表就抛 ValueError，由调用方按「未判定」放行。"""
+    """模型原文 → 结论。
+
+    整体 JSON 合法就按结构读；不合法就退到逐帧碎片解析——B 上实测 43 次里有 3 次
+    整体 JSON 坏了但逐帧对象完好（键名里混进控制字符、多写一个 ``]``）。两种读法
+    共用同一条判据：任一帧 ``overlay_text: true`` 即命中；没有命中时必须每一帧都
+    读到了、且不少于送检帧数，才判「无」；否则抛 ValueError，由调用方按「未判定」
+    放行并留痕。读不出的帧不编值。
+    """
     text = (raw or "").strip()
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end <= start:
         raise ValueError("模型没有返回 JSON 对象")
-    data = json.loads(text[start:end + 1])
-    frames = data.get("frames") if isinstance(data, dict) else None
-    if not isinstance(frames, list):
-        raise ValueError("模型返回缺少 frames 列表")
+    body = text[start:end + 1]
+    frames = _frames_by_structure(body)
+    if frames is None:
+        frames = _frames_by_fragments(body)
     overlay = [
-        {"index": item.get("index"), "text_seen": str(item.get("text_seen") or ""),
-         "where": str(item.get("where") or "")}
-        for item in frames
-        if isinstance(item, dict) and item.get("overlay_text") is True
+        {"index": item["index"], "text_seen": item["text_seen"], "where": item["where"]}
+        for item in frames if item["overlay_text"] is True
     ]
+    if not overlay and len(frames) < frames_checked:
+        raise ValueError(f"模型只报告了 {len(frames)}/{frames_checked} 帧")
     return {
         "checked": True, "frames_checked": frames_checked, "frames_reported": len(frames),
         "subtitle_overlay": bool(overlay), "overlay_frames": overlay,
     }
 
+
+def _frames_by_structure(body: str) -> list[dict[str, Any]] | None:
+    """整体 JSON 合法时按结构读；不合法返回 None 交给碎片解析。只认字面 True。"""
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None
+    frames = data.get("frames") if isinstance(data, dict) else None
+    if not isinstance(frames, list):
+        raise ValueError("模型返回缺少 frames 列表")
+    return [
+        {"index": item.get("index"), "overlay_text": item.get("overlay_text") is True,
+         "text_seen": str(item.get("text_seen") or ""), "where": str(item.get("where") or "")}
+        for item in frames if isinstance(item, dict)
+    ]
+
+
+def _frames_by_fragments(body: str) -> list[dict[str, Any]]:
+    """整体 JSON 坏了时逐个 ``{...}`` 碎片读：读得出 true/false 的才算一帧。"""
+    frames: list[dict[str, Any]] = []
+    for ordinal, match in enumerate(_FRAGMENT.finditer(body), start=1):
+        fragment = match.group(0)
+        flag = _OVERLAY.search(fragment)
+        if flag is None:
+            continue
+        index = _INDEX.search(fragment)
+        text_seen = _TEXT_SEEN.search(fragment)
+        where = _WHERE.search(fragment)
+        frames.append({
+            "index": int(index.group(1)) if index else ordinal,
+            "overlay_text": flag.group(1) == "true",
+            "text_seen": (text_seen.group(1) if text_seen else "").replace('\\"', '"'),
+            "where": (where.group(1) if where else "").replace('\\"', '"'),
+        })
+    return frames
 
 async def detect_subtitle_overlay(video_path: str, *, call_meta: dict[str, Any]) -> dict[str, Any]:
     frames = await asyncio.to_thread(sample_frames, video_path)

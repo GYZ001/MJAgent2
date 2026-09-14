@@ -56,6 +56,52 @@ def test_parse_verdict_rejects_unparseable_answers(raw: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# parse_verdict：整体 JSON 坏了退到逐帧碎片（B 上实测样本）
+# ---------------------------------------------------------------------------
+
+def _frame(i: int, flag: str = "false", text: str = "", where: str = "") -> str:
+    return f'{{"index": {i}, "overlay_text": {flag}, "text_seen": "{text}", "where": "{where}"}}'
+
+
+def test_fragment_fallback_survives_control_char_in_key_name() -> None:
+    """实测样本：第一帧的键名 index 被吐成了控制字符，整体 json.loads 直接炸。"""
+    frames = ['{"\n    \t\t: 1, "overlay_text": false, "text_seen": "", "where": ""}'] + [_frame(i) for i in range(2, 11)]
+    raw = '{"frames": [\n    ' + ",\n    ".join(frames) + "\n]}"
+    verdict = subtitle_gate.parse_verdict(raw, frames_checked=10)
+    assert verdict["subtitle_overlay"] is False and verdict["frames_reported"] == 10
+
+
+def test_fragment_fallback_survives_extra_closing_bracket() -> None:
+    """实测样本：frames 数组后多写了一个 ``]``。"""
+    raw = '{"frames":[' + ",".join(_frame(i) for i in range(1, 11)) + " ]\n  ]\n}"
+    verdict = subtitle_gate.parse_verdict(raw, frames_checked=10)
+    assert verdict["subtitle_overlay"] is False and verdict["frames_reported"] == 10
+
+
+def test_fragment_fallback_reports_hit_with_text_and_position() -> None:
+    raw = '{"frames":[' + ",".join([_frame(1), _frame(2, "true", "仙人", "画面下方"), _frame(3)]) + "]]}"
+    verdict = subtitle_gate.parse_verdict(raw, frames_checked=3)
+    assert verdict["subtitle_overlay"] is True
+    assert verdict["overlay_frames"] == [{"index": 2, "text_seen": "仙人", "where": "画面下方"}]
+
+
+def test_fragment_fallback_refuses_to_guess_unreadable_frame() -> None:
+    """有一帧连 true/false 都读不出、又没有别的帧命中 → 未判定，不编「无」。"""
+    raw = '{"frames":[' + ",".join([_frame(1), '{"index": 2, "overlay_text": ??}', _frame(3)]) + "]]}"
+    with pytest.raises(ValueError):
+        subtitle_gate.parse_verdict(raw, frames_checked=3)
+
+
+def test_structure_mode_refuses_partial_report_without_hit() -> None:
+    """模型少报了帧且没有命中 → 未判定；有命中则不管少报多少都判命中。"""
+    raw = json.dumps({"frames": [{"index": 1, "overlay_text": False}]})
+    with pytest.raises(ValueError):
+        subtitle_gate.parse_verdict(raw, frames_checked=3)
+    raw_hit = json.dumps({"frames": [{"index": 1, "overlay_text": True, "text_seen": "仙人", "where": "下方"}]})
+    assert subtitle_gate.parse_verdict(raw_hit, frames_checked=3)["subtitle_overlay"] is True
+
+
+# ---------------------------------------------------------------------------
 # enabled()
 # ---------------------------------------------------------------------------
 
