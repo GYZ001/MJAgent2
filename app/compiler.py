@@ -16,6 +16,7 @@ from app.character_policy import (
     typed_functional_identity_names,
 )
 from app.schemas import Bible, EpisodeScreenplay, Shot
+from app.production.video_text_policy import compile_text_policy, text_negative
 from app.spoken_contract import SPOKEN_DELIVERIES
 
 # 正向质量/稳定锚点（Seedance 最佳实践：显式给出稳定与质量约束，比单纯负面词更有效）
@@ -686,35 +687,6 @@ def keyframe_visual_contract(
 
 
 
-def _compile_text_policy(shot: Shot) -> str:
-    from app.continuity import required_text_strategy
-
-    required = getattr(shot, "required_text", None)
-    if required is not None and (getattr(required, "exact_text", None) or "").strip():
-        exact = required.exact_text.strip()
-        surface = (required.surface or "画面指定表面").strip()
-        strategy = required_text_strategy(shot)
-        if strategy == "audio_only":
-            return (
-                f"只通过对白/画外音交付「{exact}」的信息；{surface}上不出现可读文字。"
-                "画面中禁止字幕、标志、水印或乱码。"
-            )
-        if strategy == "deterministic_insert":
-            return (
-                f"只生成无字、干净的「{surface}」与人物表演；不得尝试拼写「{exact}」。"
-                "精确中文由服务端确定性插入镜头交付，原始视频禁止任何可读字。"
-            )
-        if strategy == "none":
-            return "画面不出现任何文字、字幕、标志或水印。"
-        style = (required.style or "清晰可读").strip()
-        start = getattr(required, "appear_start_s", 0.0) or 0.0
-        until = getattr(required, "stable_until_s", None)
-        until_s = f"{until}s" if until is not None else "镜头结束"
-        return (
-            f"仅在{surface}上于 {start}s 起稳定显示指定文字「{exact}」，保持到 {until_s}；"
-            f"文字样式：{style}。禁止出现任何其他文字、字幕、标志、水印或乱码。"
-        )
-    return "画面中不出现任何文字、字幕、标志或水印。"
 
 
 def _compile_audio_timeline(shot: Shot, voice_bible: list | None = None) -> str:
@@ -999,11 +971,7 @@ def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
     parts = [
         "不要重演前序剧情",
         "不要提前表演下一镜内容",
-        (
-            f"除「{(shot.required_text.exact_text or '').strip()}」外不要出现任何其他文字"
-            if required_text_strategy(shot) == "embedded_prop"
-            else "不要生成字幕、乱码、可读道具字样或水印"
-        ),
+        text_negative(shot, required_text_strategy(shot)),
         "不要出现镜头内未指定的人物",
         "不要复制人物或生成分身",
         "不要出现额外肢体、手指异常、脸部变形或身体比例突变",
@@ -1463,7 +1431,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     _ = prev_tail_action
 
     audio_block = _compile_audio_timeline(shot, voice_bible)
-    text_block = _compile_text_policy(shot)
+    text_block = compile_text_policy(shot)
     structured_state_block = structured_state_prompt(shot)
     timeline_block = _compile_action_timeline(
         duration_s=shot_dur,

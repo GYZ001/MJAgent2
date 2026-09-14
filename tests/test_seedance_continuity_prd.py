@@ -399,9 +399,10 @@ def test_legacy_action_detail_does_not_infer_typed_phase_count() -> None:
     assert errors == []
 
 
-def test_required_text_defaults_to_deterministic_insert_and_keeps_raw_video_textless() -> None:
+def test_required_text_defaults_to_embedded_prop_generated_by_video_model() -> None:
     no_text = compile_prompt(_shot(required_text=None), _bible())
-    assert "画面中不出现任何文字" in no_text
+    assert "按画面描述直接生成" in no_text and "不出现任何文字" not in no_text
+    assert "不要生成字幕、名条、标题条、乱码或水印" in no_text and "可读道具字样" not in no_text
 
     with_text_shot = _shot(
         required_text=RequiredOnScreenText(
@@ -414,21 +415,20 @@ def test_required_text_defaults_to_deterministic_insert_and_keeps_raw_video_text
     )
     with_text = compile_prompt(with_text_shot, _bible())
 
-    assert "禁地" in with_text
-    assert "画面中不出现任何文字" not in with_text
-    assert "精确中文由服务端确定性插入" in with_text
-    assert "不要生成字幕、乱码、可读道具字样或水印" in with_text
-    assert "除「禁地」外不要出现任何其他文字" not in with_text
+    assert "仅在山门木牌上于 0.5s 起稳定显示指定文字「禁地」" in with_text
+    assert "除「禁地」外不要出现字幕或其它文字" in with_text
+    assert "服务端确定性插入" not in with_text
 
 
-def test_embedded_prop_text_remains_an_explicit_opt_in() -> None:
+def test_deterministic_insert_remains_an_explicit_opt_in() -> None:
     shot = _shot(required_text=RequiredOnScreenText(
-        surface="山门木牌", exact_text="禁地", strategy="embedded_prop",
+        surface="山门木牌", exact_text="禁地", strategy="deterministic_insert",
     ))
 
     prompt = compile_prompt(shot, _bible())
 
-    assert "除「禁地」外不要出现任何其他文字" in prompt
+    assert "精确中文由服务端确定性插入" in prompt
+    assert "不要生成字幕、乱码、可读道具字样或水印" in prompt
 
 
 def test_offscreen_speaker_keeps_speaker_id_not_narration() -> None:

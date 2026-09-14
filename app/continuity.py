@@ -1310,9 +1310,9 @@ def required_text_strategy(shot: Shot) -> str:
     required = shot.required_text
     if not required or not (required.exact_text or "").strip():
         return "none"
-    strategy = str(getattr(required, "strategy", "") or "deterministic_insert").strip()
+    strategy = str(getattr(required, "strategy", "") or "embedded_prop").strip()
     if strategy not in {"audio_only", "deterministic_insert", "embedded_prop", "none"}:
-        return "deterministic_insert"
+        return "embedded_prop"
     return strategy
 
 

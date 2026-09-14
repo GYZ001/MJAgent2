@@ -91,12 +91,12 @@ def onscreen_text_for_capacity(required_text: object) -> str:
         return ""
     if isinstance(required_text, dict):
         strategy = str(
-            required_text.get("strategy") or "deterministic_insert"
+            required_text.get("strategy") or "embedded_prop"
         ).strip().casefold()
         exact_text = required_text.get("exact_text")
     else:
         strategy = str(
-            getattr(required_text, "strategy", None) or "deterministic_insert"
+            getattr(required_text, "strategy", None) or "embedded_prop"
         ).strip().casefold()
         exact_text = getattr(required_text, "exact_text", "")
     if strategy in {"audio_only", "none"}:

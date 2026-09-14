@@ -253,6 +253,7 @@ def test_final_edit_smoke_renders_text_and_uses_incoming_transition(tmp_path: Pa
         required_text=RequiredOnScreenText(
             surface="令牌特写",
             exact_text="天门已开",
+            strategy="deterministic_insert",  # 终剪插字自 2026-09-14 起是显式选用
             delivery_owner_shot_no=1,
             appear_start_s=0.1,
             stable_until_s=0.7,

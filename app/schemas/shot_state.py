@@ -69,7 +69,7 @@ class ContinuityState(BaseModel):
 class RequiredOnScreenText(BaseModel):
     surface: str = ""
     exact_text: str = ""
-    strategy: str = "deterministic_insert"
+    strategy: str = "embedded_prop"  # 2026-09-14 起默认由视频模型直接生成；后期插字需显式选用
     delivery_owner_shot_no: int | None = None
     appear_start_s: float = 0.0
     stable_until_s: float | None = None

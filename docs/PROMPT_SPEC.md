@@ -414,7 +414,7 @@ events 生成 `plot_spine/spine_beats`，再投影正文、对白链和完整叙
 
 视频最终 prompt 由 `app.compiler.compile_prompt` 确定性编译，合同版本写入 `prompt_contract_version=seedance_structured_continuity_v5`。核心输入是叙事 `continuity_mode`、已发布视频模式、首帧来源、镜间关系、自然语言状态链与可比较的 `continuity_state_in/out`。`FIRST_LAST_FRAME_MODE` 以实际输入首帧覆盖文本起点，并新增 `FIRST-LAST CONTINUOUS PATH`，不得再按 `same_scene_cut` 输出“不要沿用上一镜尾帧”的冲突指令。
 
-最终 prompt 固定包含 FORMAT、REFERENCE ROLES、START STATE、ONE CURRENT ACTION、END STATE、STRUCTURED CONTINUITY、AUDIO TIMELINE、ON-SCREEN TEXT、DO NOT 等段落。`required_text.strategy=deterministic_insert` 时，原始视频明确禁字，精确中文由终剪渲染；转场也只由 final_edit 执行，避免双重转场。`source_excerpt` 只作为上游改编证据与校验依据，禁止进入 Seedance 最终 prompt。
+最终 prompt 固定包含 FORMAT、REFERENCE ROLES、START STATE、ONE CURRENT ACTION、END STATE、STRUCTURED CONTINUITY、AUDIO TIMELINE、ON-SCREEN TEXT、DO NOT 等段落。`required_text.strategy` 默认 `embedded_prop`（2026-09-14 起：画面文字由视频模型直接生成，台词只出声不出字）；显式选用 `deterministic_insert` 时，原始视频明确禁字，精确中文由终剪渲染；转场也只由 final_edit 执行，避免双重转场。`source_excerpt` 只作为上游改编证据与校验依据，禁止进入 Seedance 最终 prompt。
 
 信息台账实行“内部编号、中文语义”双层合同：`new_information_ids` 只保存 `I1`、`I2` 这类稳定去重键，界面通过 `information_ledger[].content` 展示中文内容；历史 snake_case ID 可保留用于兼容，但会在接口层派生中文说明。生成视频前，`do_not_repeat` 必须解析成中文剧情约束；无法解析的裸 ID 会被过滤，绝不直接发送给 Seedance。
 
