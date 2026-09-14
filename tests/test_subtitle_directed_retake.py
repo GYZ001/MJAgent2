@@ -7,9 +7,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import json
+import sqlite3
+
+from app import db as db_mod
 from app.evidence import subtitle_overlay
 from app.media_exec import enqueue_prompt
 from app.video_issues import issues_from_qa
+from app.video_supervisor import coverage
 from app.video_repair_router import route
 
 HINT = "台词只以声音呈现，画面上不出现任何字幕、名条或标题条（上一版画面叠加了『拜见师兄』）"
@@ -54,3 +59,39 @@ def test_gate_verdict_hint_names_the_seen_text() -> None:
     merged = subtitle_overlay.technical_with_verdict({"passed": True, "issues": [], "evidence": {}}, {"subtitle_gate": verdict})
     hint = merged["issues"][0].repair_hint
     assert hint.startswith("台词只以声音呈现") and "拜见师兄" in hint
+
+
+def _conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db_mod.SCHEMA)
+    for statement in db_mod.MIGRATIONS:
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError:
+            pass
+    return conn
+
+
+def _insert_version(conn, version_id: str, *, status: str, passed: bool | None) -> None:
+    technical = json.dumps({"passed": passed, "issues": []}) if passed is not None else None
+    conn.execute(
+        "INSERT INTO shot_versions (id, shot_id, version_no, status, technical_validation_json, prompt_text, idem_key, created_at)"
+        " VALUES (?,?,?,?,?,'',?,1.0)",
+        (version_id, "shot_1", int(version_id[-1]), status, technical, f"idem_{version_id}"),
+    )
+
+
+def test_resumed_run_does_not_treat_technically_rejected_shot_as_first_attempt() -> None:
+    conn = _conn()
+    assert coverage._technically_rejected(conn, "shot_1") is False
+    _insert_version(conn, "ver_1", status="succeeded", passed=False)
+    assert coverage._technically_rejected(conn, "shot_1") is True
+
+
+def test_only_finished_rejections_count() -> None:
+    conn = _conn()
+    _insert_version(conn, "ver_1", status="waiting_human", passed=False)
+    _insert_version(conn, "ver_2", status="succeeded", passed=True)
+    _insert_version(conn, "ver_3", status="running", passed=None)
+    assert coverage._technically_rejected(conn, "shot_1") is False

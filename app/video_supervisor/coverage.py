@@ -177,6 +177,25 @@ def _latest_video_jobs(
     return active_jobs, rejected
 
 
+def _technically_rejected(conn, shot_id: str) -> bool:
+    """该镜是否已有「跑完但技术校验不通过」的版本（跨 run）。
+
+    有则不能当首次尝试盲派：首次派发不经 Issue 路由、没有定向批注，恢复运行时会把
+    上一 run 已经三连败的镜再来一次同输入重抽（2026-09-14 我欲封天第 2 集镜 5 v4）。
+    走路由后 issues_cascade._issues_from_candidate 会把最新技术拒绝版本露出来，字幕
+    命中按 L2 定向重抽、批注进提示词。
+    """
+    row = conn.execute(
+        """SELECT 1 FROM shot_versions
+            WHERE shot_id=? AND status='succeeded'
+              AND json_valid(technical_validation_json)
+              AND json_extract(technical_validation_json,'$.passed')=0
+            LIMIT 1""",
+        (shot_id,),
+    ).fetchone()
+    return row is not None
+
+
 def rebuild_coverage_ledger(
     episode_id: str,
     *,
@@ -426,7 +445,7 @@ def rebuild_coverage_ledger(
             provider_rejected=sid in rejected_shots,
             human_adopted=_human_adopted(conn, sid),
             continuity_degraded=bool(saved.get("continuity_degraded") or graded.get("continuity_degraded")),
-            never_attempted=dispatch_map.get(sid, 0) == 0 and not saved.get("attempts_dispatched"),
+            never_attempted=dispatch_map.get(sid, 0) == 0 and not saved.get("attempts_dispatched") and not _technically_rejected(conn, sid),
             qa_history=qa_history,
             rebuilt_reference=bool(saved.get("rebuilt_reference")),
             fatal_repeat_count=int(saved.get("fatal_repeat_count") or 0),
