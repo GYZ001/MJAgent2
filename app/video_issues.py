@@ -53,6 +53,40 @@ def _mk(
     )
 
 
+#: 技术校验里「提示词本身诱发」的规则：同输入重抽对它没用（2026-09-14 我欲封天第 2 集镜 5
+#: 三次都把「拜见师兄」烧在画面底部，L1 三连败直接 L6 转人工、整集失败）。这类规则从第一次
+#: 重抽起就走 L2 定向重抽，把 repair_hint 作为「上一版必须改正」写进提示词。
+_PROMPT_INDUCED_TECHNICAL_RULES = frozenset({"subtitle_overlay"})
+
+
+def _technical_contract_issue(
+    raw: Any, *, shot_id: str, shot_no: int | None, version_id: str | None, job_id: str | None,
+) -> Issue:
+    """把技术校验的一条问题（dict 或 Issue）翻译为 VIDEO_TECHNICAL_CONTRACT_FAILED。"""
+    if isinstance(raw, dict):
+        tech_code = str(raw.get("code") or "")
+        message = str(raw.get("message") or tech_code)
+        repair_hint = str(raw.get("repair_hint") or "")
+    else:
+        tech_code = str(getattr(raw, "code", "") or "")
+        message = str(getattr(raw, "message", "") or tech_code)
+        repair_hint = str(getattr(raw, "repair_hint", "") or "")
+    level = "L2" if tech_code in _PROMPT_INDUCED_TECHNICAL_RULES else "L1"
+    return _mk(
+        "VIDEO_TECHNICAL_CONTRACT_FAILED",
+        IssueSeverity.BLOCKER,
+        shot_id=shot_id,
+        message=message or "视频技术合同未通过",
+        shot_no=shot_no,
+        version_id=version_id,
+        job_id=job_id,
+        rule_id=tech_code or "technical_contract",
+        repair_hint=repair_hint or None,
+        category="operational",
+        extra={"runtime_blocking": True, "recommended_level": level},
+    )
+
+
 def issues_from_qa(
     qa: dict | None,
     technical: dict | None,
@@ -69,23 +103,8 @@ def issues_from_qa(
     technical = technical or {}
     out: list[Issue] = []
     for raw in technical.get("issues") or []:
-        if isinstance(raw, dict):
-            tech_code = str(raw.get("code") or "")
-            message = str(raw.get("message") or tech_code)
-        else:
-            tech_code = str(getattr(raw, "code", "") or "")
-            message = str(getattr(raw, "message", "") or tech_code)
-        out.append(_mk(
-            "VIDEO_TECHNICAL_CONTRACT_FAILED",
-            IssueSeverity.BLOCKER,
-            shot_id=shot_id,
-            message=message or "视频技术合同未通过",
-            shot_no=shot_no,
-            version_id=version_id,
-            job_id=job_id,
-            rule_id=tech_code or "technical_contract",
-            category="operational",
-            extra={"runtime_blocking": True, "recommended_level": "L1"},
+        out.append(_technical_contract_issue(
+            raw, shot_id=shot_id, shot_no=shot_no, version_id=version_id, job_id=job_id,
         ))
 
     facts = classify_video_hard_failures(qa, technical=technical)

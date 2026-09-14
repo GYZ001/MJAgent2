@@ -32,7 +32,12 @@ def technical_with_verdict(technical: dict[str, Any], qa: dict[str, Any] | None)
         severity=IssueSeverity.BLOCKER,
         subject="video",
         message=f"画面叠加了字幕：{_describe(verdict.get('overlay_frames') or [])}；视频生成只负责画面与声音，字幕由后续功能另做",
-        repair_hint="自动重新生成该镜头（不超过技术重提上限）；仍出现则在分镜台调整该段提示词后重做",
+        # repair_hint 会被 Supervisor 的定向重抽原样写进下一版提示词的「上一版必须改正」，
+        # 所以写给视频模型看：完整的正面陈述 + 上一版具体错在哪。
+        repair_hint=(
+            "台词只以声音呈现，画面上不出现任何字幕、名条或标题条"
+            f"（上一版画面叠加了{_describe(verdict.get('overlay_frames') or [])}）"
+        ),
         repairable=True,
     )
     return {**technical, "passed": False, "issues": [*(technical.get("issues") or []), issue]}
