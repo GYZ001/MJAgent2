@@ -15,6 +15,7 @@ from app.source_excerpt import SourceSegment
 from app.production.storyboard_identity_scope import scoped_name_map
 from app.production.storyboard_speaker_context import dialogue_listeners, explicit_script_speaker
 from app.production.storyboard_speech_render import remove_draft_utterance
+from app.production.storyboard_voicing_evidence import voicing_evidence
 
 _LOGGER = logging.getLogger(__name__)
 NARRATOR = "旁白"
@@ -271,9 +272,9 @@ def dialogue_speaker_errors(
         named = explicit_script_speaker(line.line, segment_source_text, list(name_to_identity))
         if named and name_to_identity[named] != line.speaker_identity_id:
             errors.append(f"dialogue[{index}] 原文角色行明确由「{named}」发声，请核对台词与提示词")
-        if not in_quotes and not explicit and not named and line.speaker_identity_id != NARRATOR:
+        if not in_quotes and not explicit and not named and line.speaker_identity_id != NARRATOR and not voicing_evidence(line.line, line.speaker_identity_id, name_to_identity, segment_source_text):
             old = identity_to_name.get(line.speaker_identity_id, line.speaker_identity_id)
-            errors.append(f"dialogue[{index}]『{line.line[:20]}』缺少人物发声证据；若是叙述者讲述，请将 speaker_identity_id 和提示词共同改为旁白；若为人物自述，请提供原文发声依据。当前归属「{old}」未被自动改写")
+            errors.append(f"dialogue[{index}]『{line.line[:20]}』缺少人物发声证据：原文同一句里没有「{old}＋说道/心道/暗想…＋这句话」的依据；若是叙述者讲述，请把 speaker_identity_id 与提示词一起改为旁白；若原文确有该人物的发声或心理动词引出这句话，请让台词逐字取自那句话。当前归属「{old}」未被自动改写")
     if dropped:
         draft.dialogue = [line for i, line in enumerate(draft.dialogue) if i not in dropped]
     return errors
