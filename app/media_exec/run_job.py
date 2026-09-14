@@ -749,15 +749,11 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         )
         passed, meta, resubmits = run_job_steps.evaluate_technical_validation(conn, version, meta)
         if not passed:
-            # 技术校验失败：在 technical_resubmit_limit 内自动新建版本重提
-            from app.media_pipeline.retry_policy import technical_resubmit_limit
-            if not supervisor_controlled and resubmits < technical_resubmit_limit():
-                if _set_job(job_id, "succeeded", lease_owner=owner):
-                    media_scheduler.settle_budget(job_id, cost, success=True)
-                    reconcile_episode_generation_status(job["episode_id"])
-                    run_job_steps.resubmit_after_technical_failure(job, resubmits, meta)
-                return
-            raise ProviderError("视频文件技术校验失败，候选不可采用")
+            # 技术校验失败：Supervisor 模式留作不可采用候选交其重抽；否则限次自动重提
+            run_job_steps.settle_technical_failure(
+                job, job_id, owner, cost, resubmits, meta, supervisor_controlled,
+            )
+            return
         await run_job_steps.adopt_and_settle_candidate(
             conn, job, job_id, owner, version, cost, supervisor_controlled,
         )

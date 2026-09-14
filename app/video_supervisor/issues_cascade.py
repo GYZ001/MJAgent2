@@ -21,17 +21,7 @@ def _collect_issues(
 ) -> list[Issue]:
     issues = load_persisted_shot_issues(entry.shot_id, run_id=run_id)
     conn = get_conn()
-    if entry.best_version_id:
-        row = conn.execute(
-            "SELECT * FROM shot_versions WHERE id=?", (entry.best_version_id,)
-        ).fetchone()
-        if row:
-            qa = json.loads(row["qa_json"] or "{}")
-            technical = json.loads(row["technical_validation_json"] or "{}")
-            issues.extend(issues_from_qa(
-                qa, technical, shot_id=entry.shot_id,
-                version_id=row["id"], shot_no=entry.shot_no,
-            ))
+    issues.extend(_issues_from_candidate(conn, entry))
     if not issues:
         # 终态失败（供应商已明确拒绝：provider_create_state='model_rejected'
         # 或 disposition='external_terminal'）不受 owner_run_id 过滤——这件事
@@ -84,6 +74,36 @@ def _collect_issues(
             for code in entry.last_issue_codes
         ]
     return issues
+
+
+def _issues_from_candidate(conn, entry: ShotCoverageEntry) -> list[Issue]:
+    """最佳候选的 QA/技术结论 → Issue。
+
+    没有可采用候选时，退到该镜最新一个跑完但技术不通过的版本：字幕闸门等技术拒绝
+    就是这样落盘的（版本 succeeded、technical.passed=0），覆盖统计不把它当候选；
+    不在这里露出来，Supervisor 只会看到「无结构化 Issue」，理由既不进日志也不进界面。
+    """
+    version_id = entry.best_version_id
+    if not version_id:
+        rejected = conn.execute(
+            """SELECT id FROM shot_versions
+               WHERE shot_id=? AND status='succeeded'
+                 AND json_valid(technical_validation_json)
+                 AND json_extract(technical_validation_json,'$.passed')=0
+               ORDER BY version_no DESC LIMIT 1""",
+            (entry.shot_id,),
+        ).fetchone()
+        version_id = rejected["id"] if rejected else None
+    if not version_id:
+        return []
+    row = conn.execute("SELECT * FROM shot_versions WHERE id=?", (version_id,)).fetchone()
+    if not row:
+        return []
+    qa = json.loads(row["qa_json"] or "{}")
+    technical = json.loads(row["technical_validation_json"] or "{}")
+    return issues_from_qa(
+        qa, technical, shot_id=entry.shot_id, version_id=row["id"], shot_no=entry.shot_no,
+    )
 
 
 def _apply_cascade(entry: ShotCoverageEntry, ledger: CoverageLedger, cp: VideoSupervisorCheckpoint) -> list[int]:
