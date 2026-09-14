@@ -5,9 +5,20 @@ import asyncio
 import sqlite3
 from dataclasses import dataclass
 
+import pytest
+
 from app import db
 from app.production.prep_pack import persistent_appellation as pa
 from tests.conftest import patch_portraits_everywhere, patch_prep_pack_everywhere
+
+
+@pytest.fixture(autouse=True)
+def _same_person_by_default(monkeypatch):
+    """跨章同一人核验默认判 true（各用例只测建卡/绑定本身）；否决用例自行覆盖。"""
+    async def _yes(label, contexts, *, project_id, episode_id):
+        return True
+
+    patch_prep_pack_everywhere(monkeypatch, "appellation_denotes_one_person", _yes)
 
 
 @dataclass
@@ -242,3 +253,33 @@ def test_wrapper_keeps_extra_when_both_levels_decline(monkeypatch) -> None:
     ))
 
     assert result == {"resolved": False, "attempted": True}
+
+
+
+def test_generic_role_phrase_denoting_different_people_is_not_carded(monkeypatch) -> None:
+    """「受伤的修士」跨 3 章逐字命中，但模型按片段判定不是同一个人 → 不建卡、不绑定（2026-09-14 第 11/12 集实测）。"""
+    conn = _conn(["受伤的修士右肩流血", "受伤的修士手臂被划开", "受伤的修士倒地"])
+    calls: list[str] = []
+
+    async def fake_card(project_id, name, episode_no, **kwargs):
+        calls.append(name)
+        return {"status": "added", "name": name}
+
+    async def _no(label, contexts, *, project_id, episode_id):
+        assert label == "受伤的修士" and len(contexts) == 3 and episode_id == "ep_x"
+        return False
+
+    patch_portraits_everywhere(monkeypatch, "ensure_character_card", fake_card)
+    patch_prep_pack_everywhere(monkeypatch, "appellation_denotes_one_person", _no)
+    result = _run(pa.resolve_persistent_appellation(
+        conn, project_id="p", episode_no=2, label="受伤的修士", segments=[_Seg("受伤的修士手臂被划开")], episode_id="ep_x",
+    ))
+    assert result is None and calls == []
+
+
+def test_chapter_contexts_take_first_hit_per_chapter_with_window() -> None:
+    conn = _conn(["无关。" * 30 + "许师姐来了。" + "后文。" * 30, "无关", "许师姐又来了"])
+    contexts = pa.label_chapter_contexts(conn, "p", "许师姐")
+    assert [c["chapter_idx"] for c in contexts] == [1, 3]
+    assert "许师姐来了" in contexts[0]["text"] and len(contexts[0]["text"]) <= 2 * pa._IDENTITY_CONTEXT_WINDOW + 3
+    assert pa.label_chapter_contexts(conn, "p", "") == []

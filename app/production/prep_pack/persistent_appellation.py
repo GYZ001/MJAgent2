@@ -30,10 +30,20 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict
+
+from app.harness import model_gateway
+
+log = logging.getLogger(__name__)
 
 # 用户定的产品口径（2026-08-31）：全书出现超过 2 章就算一个角色，不再当群演。
 PERSISTENT_APPELLATION_MIN_CHAPTERS = 2
+# 跨章片段最多取几章、每处前后各取多少字给模型看。
+_IDENTITY_CONTEXT_CHAPTERS = 6
+_IDENTITY_CONTEXT_WINDOW = 90
 
 
 def label_chapter_span(conn, project_id: str, label: str) -> int:
@@ -45,6 +55,69 @@ def label_chapter_span(conn, project_id: str, label: str) -> int:
         "SELECT content FROM chapters WHERE project_id=?", (project_id,),
     ).fetchall()
     return sum(1 for row in rows if label in str(row["content"] or ""))
+
+
+def label_chapter_contexts(conn, project_id: str, label: str) -> list[dict[str, Any]]:
+    """标签在各章首次逐字出现处的前后片段（最多 _IDENTITY_CONTEXT_CHAPTERS 章），供同一人核验。"""
+    label = str(label or "").strip()
+    if not label:
+        return []
+    rows = conn.execute(
+        "SELECT idx, content FROM chapters WHERE project_id=? ORDER BY idx", (project_id,),
+    ).fetchall()
+    contexts: list[dict[str, Any]] = []
+    for row in rows:
+        content = str(row["content"] or "")
+        position = content.find(label)
+        if position < 0:
+            continue
+        start = max(0, position - _IDENTITY_CONTEXT_WINDOW)
+        end = min(len(content), position + len(label) + _IDENTITY_CONTEXT_WINDOW)
+        contexts.append({"chapter_idx": int(row["idx"] or 0), "text": content[start:end].replace("\n", " ")})
+        if len(contexts) >= _IDENTITY_CONTEXT_CHAPTERS:
+            break
+    return contexts
+
+
+class _AppellationIdentityVerdict(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    same_individual: bool
+    reason: str = ""
+
+
+async def appellation_denotes_one_person(
+    label: str, contexts: list[dict[str, Any]], *, project_id: str, episode_id: str | None,
+) -> bool:
+    """跨章逐字命中只证明"这个词反复出现"，证明不了"每次都是同一个人"——
+    「受伤的修士」在第 11 集（右肩受伤者）与第 12 集（手臂受伤者）是两场打斗里的两个人
+    （2026-09-14 实测），按同一张卡绑定会把不同群演并成一张脸。这里把各章片段交给模型
+    判断是否同一人；判不出、调用失败都按"不是"处理——不确定不绑，与候选判别同一套纪律。
+    """
+    if len(contexts) < 2:
+        return False
+    catalog = "\n\n".join(f"[第{item['chapter_idx']}章] …{item['text']}…" for item in contexts)
+    prompt = f"""下面是称谓「{label}」在小说不同章节里的出现片段（每段前标了章号）：
+{catalog}
+
+任务：只依据这些片段，判断各章里的「{label}」是否都指同一个人。
+- same_individual 填 true 的依据：各片段的身份线索连贯——同一处所、同一段人物关系、前后事件相互承接，
+  或作者把这个称谓固定用来指代某一个具体的人；
+- same_individual 填 false 的依据：各片段各自描述不同场合里不同的人（例如不同打斗里各自受伤的修士、
+  不同店铺里的掌柜、路上遇到的不同老者），或片段信息不足以确认是同一个人；
+- 拿不准时填 false。reason 用一句话说明依据。
+只输出符合 Schema 的 JSON。"""
+    try:
+        verdict = await model_gateway.chat_structured(
+            [{"role": "user", "content": prompt}],
+            model_type=_AppellationIdentityVerdict, validate=None,
+            operation_id=f"persistent_appellation_identity_{episode_id or project_id}_{label}",
+            max_tokens=400, temperature=0.1,
+        )
+    except Exception as exc:  # noqa: BLE001 模型调用失败按"不是同一人"处理：不确定不绑
+        log.warning("[PERSISTENT_APPELLATION][核验失败] 「%s」：%s", label, str(exc)[:160])
+        return False
+    log.info("[PERSISTENT_APPELLATION][同一人核验] 「%s」 -> %s：%s", label, verdict.same_individual, verdict.reason[:80])
+    return bool(verdict.same_individual)
 
 
 def label_episode_anchor(segments: Any, label: str) -> dict[str, Any] | None:
@@ -62,12 +135,12 @@ def label_episode_anchor(segments: Any, label: str) -> dict[str, Any] | None:
 
 
 async def resolve_persistent_appellation(
-    conn, *, project_id: str, episode_no: int, label: str, segments: Any,
+    conn, *, project_id: str, episode_no: int, label: str, segments: Any, episode_id: str | None = None,
 ) -> dict[str, Any] | None:
     """跨章稳定的称谓 → 建卡出图，返回可直接并入候选判别结果的 payload。
 
-    ``None`` 表示不适用（跨章次数不够、本集钉不住锚点、建卡没成），调用方维持
-    原行为让标签落 functional_extras——不确定不绑，与候选判别同一套纪律。
+    ``None`` 表示不适用（跨章次数不够、本集钉不住锚点、跨章片段经模型核验不是同一个人、
+    建卡没成），调用方维持原行为让标签落 functional_extras——不确定不绑，与候选判别同一套纪律。
 
     绑定不以"已有定妆照"为门槛：出图已解耦到后台（下面 generate_portrait=False），
     刚建的卡在这一刻必然没图，若在此拒绝绑定，标签落群演、卡进不了准备包，
@@ -81,6 +154,10 @@ async def resolve_persistent_appellation(
         return None
     anchor = label_episode_anchor(segments, label)
     if anchor is None:
+        return None
+    if not await appellation_denotes_one_person(
+        label, label_chapter_contexts(conn, project_id, label), project_id=project_id, episode_id=episode_id,
+    ):
         return None
     # require_identity_card：跨章复现已经是"这是个稳定身份"的结构证据，不能
     # 再让模型以"本集戏份少"把它降回路人——那正是漂移的来源。

@@ -260,6 +260,6 @@ async def _prep_pack_resolve_functional_extra_candidate(
         return verdict
     carded = await resolve_persistent_appellation(
         conn, project_id=project_id, episode_no=episode_no,
-        label=label, segments=segments,
+        label=label, segments=segments, episode_id=episode_id,
     )
     return {**verdict, **carded} if carded else verdict
