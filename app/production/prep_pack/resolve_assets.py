@@ -25,6 +25,7 @@ from .asset_lookup import (
     _prep_pack_group_scene_quotes_by_canonical,
     _prep_pack_register_scene_alias_if_new,
     _prep_pack_resolve_scene_reference_with_alias,
+    _resolve_character_binding,
     _resolve_portrait_id,
     _resolve_scene_reference_id,
     _rebind_titled_owner,
@@ -235,7 +236,7 @@ async def _resolve_assets(
                     alias=alias, suspected_true_name=suspected_true_name,
                     subject_kind=subject_kind, bible=bible,
                     resolve_fn=(
-                        _resolve_portrait_id if subject_kind == "character"
+                        _resolve_character_binding if subject_kind == "character"
                         else _resolve_scene_reference_id
                     ),
                     run_id=run_id, verdict_cache=true_name_verdict_cache,
@@ -280,7 +281,7 @@ async def _resolve_assets(
                     episode_no=episode_no, source_text=source_text,
                     alias=name, suspected_true_name=suspected_true_name,
                     subject_kind="character", bible=bible,
-                    resolve_fn=_resolve_portrait_id, run_id=run_id,
+                    resolve_fn=_resolve_character_binding, run_id=run_id,
                     verdict_cache=true_name_verdict_cache,
                 )
                 if verification["accepted"]:

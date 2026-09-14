@@ -126,6 +126,29 @@ def _prep_pack_group_scene_quotes_by_canonical(
     return grouped
 
 
+def _resolve_character_binding(conn, project_id: str, character_name: str, episode_no: int) -> str | None:
+    """真名假设的目标能否绑定：有定妆照回 portrait_id；没图但人物谱在册回 ``bible:{name}``。
+
+    出图已解耦到后台，同一轮映射刚建的卡此刻没有图，但它是合法的绑定目标（与
+    persistent_appellation / functional_candidate_verdict 同一条纪律，2026-09-14）。
+    只用作"目标是否存在"的判据，不当 portrait_id 用。
+    """
+    portrait_id = _resolve_portrait_id(conn, project_id, character_name, episode_no)
+    if portrait_id:
+        return portrait_id
+    row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+    raw = (row["bible_json"] if row else None) or ""
+    if not raw:
+        return None
+    try:
+        bible = Bible.model_validate_json(raw)
+    except ValueError:
+        return None
+    if resolve_card_owner(bible, character_name) == ("owner", character_name):
+        return f"bible:{character_name}"
+    return None
+
+
 def _rebind_titled_owner(conn, project_id: str, episode_no: int, bible, resolved_name: str, portrait_id):
     """「登记名＋关系称谓」的称呼归到登记名那张卡（card_owner 的派生精确匹配），并补查它的定妆照。"""
     owner_status, owner_name = resolve_card_owner(bible, resolved_name)
