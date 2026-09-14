@@ -317,9 +317,13 @@ async def _on_request_validation(request: Request, exc: RequestValidationError):
 @app.exception_handler(HTTPException)
 async def _on_http_exception(request: Request, exc: HTTPException):
     ctx = await _request_context(request)
+    # 非登录接口的 401 是「会话已失效」这一预期结果，不是故障：一个会话过期的标签页 24 小时
+    # 打了 639 次（2026-09-14 实测），逐条落库只会把 error_logs 淹掉。登录接口的 401（密码错）
+    # 仍落库——那是限流/审计要看的信号。
     rec = errors.log_error(
         exc, action=f"{request.method} {request.url.path}", context=ctx,
         http_status=exc.status_code,
+        persist=not (exc.status_code == 401 and request.url.path != "/api/auth/login"),
     )
     note_error_id(rec.error_id)
     return _error_json(

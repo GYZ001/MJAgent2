@@ -87,6 +87,9 @@ describe('无分集工作台路由', () => {
 
   it('对象不存在时停止自动轮询，瞬时故障仍允许恢复', () => {
     expect(shouldRetryPollError({ status: 404 })).toBe(false)
+    // 登录失效/无权访问也不是瞬时故障：一个会话过期的标签页曾 24 小时打了 639 次 401
+    expect(shouldRetryPollError({ status: 401 })).toBe(false)
+    expect(shouldRetryPollError({ status: 403 })).toBe(false)
     expect(shouldRetryPollError({ status: 500 })).toBe(true)
     expect(shouldRetryPollError(new Error('网络中断'))).toBe(true)
   })

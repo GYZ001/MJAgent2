@@ -286,7 +286,7 @@ def _public_text(category: str, code: str, error_id: str, base_message: str, is_
 def log_error(exc: BaseException | None, *, action: str | None = None,
               context: Any | None = None, http_status: int | None = None,
               message: str | None = None, public_message: str | None = None,
-              meta: dict | None = None) -> ErrorRecord:
+              meta: dict | None = None, persist: bool = True) -> ErrorRecord:
     """落库一条报错并返回展示用记录。
 
     - message：覆盖写入日志的原文（默认从 exc 提取）。
@@ -314,15 +314,18 @@ def log_error(exc: BaseException | None, *, action: str | None = None,
     if retryable is not None:
         merged_meta.setdefault("retryable", retryable)
 
-    try:
-        db.insert_error_log(
-            error_id, category=category, category_label=cat["label"], code=code,
-            is_technical=is_tech, http_status=status, action=action, context=context,
-            message=raw_message, traceback_text=tb,
-            exc_type=type(exc).__name__ if exc is not None else None, meta=merged_meta,
-        )
-    except Exception:  # noqa: BLE001 日志落库失败绝不能再抛，否则会掩盖真正的业务错误
-        pass
+    # persist=False：只生成展示用记录、不写 error_logs——给「不是故障、只是预期结果」的响应用
+    # （会话过期的 401）；错误码与 error_id 照常返回，前端行为不变。
+    if persist:
+        try:
+            db.insert_error_log(
+                error_id, category=category, category_label=cat["label"], code=code,
+                is_technical=is_tech, http_status=status, action=action, context=context,
+                message=raw_message, traceback_text=tb,
+                exc_type=type(exc).__name__ if exc is not None else None, meta=merged_meta,
+            )
+        except Exception:  # noqa: BLE001 日志落库失败绝不能再抛，否则会掩盖真正的业务错误
+            pass
 
     return ErrorRecord(error_id=error_id, category=category, category_label=cat["label"],
                        code=code, is_technical=is_tech, http_status=status, action=action,

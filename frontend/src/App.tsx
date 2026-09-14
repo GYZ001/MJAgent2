@@ -1275,8 +1275,12 @@ function WorkspaceEmpty({ label, view }: { label: string; view: View }) {
 /** 轮询某资源；interval=0 或函数返回 0 不轮询。intervalMs 传函数时可按最新数据动态调间隔。
  *  手动 refresh 会重新唤醒并计算轮询间隔，覆盖 idle → running 的异步任务状态切换。
  *  内置单飞、卸载后响应保护；页面重新获得焦点时立即追平一次后端状态。 */
+/** 轮询遇错是否继续：404（资源不存在）、401（登录已失效，AuthContext 已切回登录页）、
+ *  403（无权访问）都不是瞬时故障，重试只会每隔几分钟往后端刷一条同样的 4xx——
+ *  2026-09-14 实测：一个会话过期的标签页 24 小时打了 639 次 401，每次都进 error_logs。 */
 export function shouldRetryPollError(error: unknown): boolean {
-  return Number((error as { status?: number } | null)?.status) !== 404;
+  const status = Number((error as { status?: number } | null)?.status);
+  return status !== 404 && status !== 401 && status !== 403;
 }
 
 export function usePoll<T>(

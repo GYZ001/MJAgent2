@@ -4,15 +4,18 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 
 from collections.abc import Callable
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from app.evidence import repository as evidence_repository
 from app import hiagent
 from app.harness import model_gateway
-from app.schemas import extract_json
 
 from .constants import (
     APPEARANCE_MAX,
@@ -326,22 +329,36 @@ def extract_character_fragments(text: str, name: str, *, window: int = FRAGMENT_
 
 # ---------- 外观变化判定（调模型，按集一次批量判定） ----------
 
-async def screen_appearance_changes(entries: list[dict], ep_label: str) -> dict[str, dict]:
-    """一次调用，批量判断本集里哪些【已有定妆照】角色外观相比各自当前锚点发生【明显视觉变化】。
+class _AppearanceChangeVerdict(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str = ""
+    changed: bool = False
+    new_appearance: str = ""
+    change_dimensions: list[str] = Field(default_factory=list)
+    identity_change_authorized: bool = False
+    persistence: str = "persistent"
+    reason: str = ""
+    evidence_excerpt: str = ""
 
-    entries: [{"name", "current_appearance", "fragments"}]（fragments 为空者会被忽略）。
-    返回 {name: {new_appearance, reason, change_dimensions, persistence, evidence_excerpt}}，
-    仅含确实变化、且给出了新锚点的角色。"""
-    entries = [e for e in entries if (e.get("fragments") or "").strip()]
-    if not entries:
-        return {}
+
+class _AppearanceChangeVerdicts(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    changes: list[_AppearanceChangeVerdict] = Field(default_factory=list)
+
+
+def _entries_fingerprint(entries: list[dict]) -> str:
+    return hashlib.sha256(json.dumps(entries, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+
+def _appearance_change_prompt(entries: list[dict], ep_label: str) -> str:
+    """外观变化判定的提示词（从 screen_appearance_changes 拆出，避免撞单函数 50 行红线）。"""
     blocks = []
     for i, e in enumerate(entries, 1):
         blocks.append(
             f"角色{i}「{e['name']}」\n当前定妆照外观锚点：{e.get('current_appearance') or '（无）'}\n"
             f"本集提及该角色的原文片段：\n{(e.get('fragments') or '')[:FRAGMENT_BUDGET]}")
     body = "\n\n".join(blocks)
-    prompt = f"""任务：逐个判断下列小说人物在新一段剧情（{ep_label}）里，外观相比各自【既有定妆照】是否发生【明显视觉变化】。
+    return f"""任务：逐个判断下列小说人物在新一段剧情（{ep_label}）里，外观相比各自【既有定妆照】是否发生【明显视觉变化】。
 
 {body}
 
@@ -357,11 +374,31 @@ async def screen_appearance_changes(entries: list[dict], ep_label: str) -> dict[
 - identity_change_authorized：只有原文证据明确支持持久身份形态变化时为 true，否则为 false
 
 只输出一个 JSON 对象：{{"changes": [{{"name": "角色名", "changed": true/false, "new_appearance": "", "change_dimensions": [str], "identity_change_authorized": bool, "persistence": "persistent", "reason": "一句话依据", "evidence_excerpt": "原文短片段"}}]}}"""
-    raw = await model_gateway.chat(
-        [{"role": "user", "content": prompt}], temperature=0.2, max_tokens=1600,
+
+
+async def screen_appearance_changes(entries: list[dict], ep_label: str) -> dict[str, dict]:
+    """一次调用，批量判断本集里哪些【已有定妆照】角色外观相比各自当前锚点发生【明显视觉变化】。
+
+    entries: [{"name", "current_appearance", "fragments"}]（fragments 为空者会被忽略）。
+    返回 {name: {new_appearance, reason, change_dimensions, persistence, evidence_excerpt}}，
+    仅含确实变化、且给出了新锚点的角色。"""
+    entries = [e for e in entries if (e.get("fragments") or "").strip()]
+    if not entries:
+        return {}
+    prompt = _appearance_change_prompt(entries, ep_label)
+    # 结构化调用：网关自带格式修复重试。曾用裸 chat + extract_json，模型偶发吐坏 JSON
+    # （2026-09-14 第 5 集，8 次里 1 次）就整段抛出，调用方按「判定失败不阻断分镜」静默跳过
+    # 本集的定妆照更新——人物形象在这一集就悄悄不跟着原文变了。
+    verdicts = await model_gateway.chat_structured(
+        [{"role": "user", "content": prompt}],
+        model_type=_AppearanceChangeVerdicts,
+        validate=None,
+        operation_id=f"screen_appearance_changes_{ep_label}_{_entries_fingerprint(entries)}",
+        max_tokens=1600,
+        temperature=0.2,
         call_meta={"stage": "screen_appearance_changes"},
     )
-    obj = extract_json(raw)
+    obj = verdicts.model_dump()
     valid = {e["name"] for e in entries}
     out: dict[str, dict] = {}
     from app.multiview import normalize_appearance_change

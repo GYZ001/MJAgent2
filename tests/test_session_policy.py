@@ -77,11 +77,25 @@ def test_max_age_returns_401_with_specific_reason(client: TestClient):
             (now() - 2 * 3600, now(), sid),
         )
         conn.commit()
+        before = conn.execute("SELECT COUNT(*) FROM error_logs WHERE http_status=401").fetchone()[0]
         resp = client.get("/api/auth/me", headers=_headers(token))
         assert resp.status_code == 401, resp.text
         assert "最长时长" in resp.json()["detail"]
+        # 会话过期是预期结果不是故障：不写 error_logs（一个过期标签页曾 24 小时刷 639 条）
+        assert conn.execute("SELECT COUNT(*) FROM error_logs WHERE http_status=401").fetchone()[0] == before
+        assert resp.json().get("error_id")  # 展示用错误码/ID 照常返回
     finally:
         set_setting("session_max_age_hours", "12")
+
+
+def test_login_401_is_still_persisted(client: TestClient):
+    """登录接口的 401（密码错）是限流/审计要看的信号，仍落库。"""
+    conn = get_conn()
+    before = conn.execute("SELECT COUNT(*) FROM error_logs WHERE http_status=401").fetchone()[0]
+    resp = client.post("/api/auth/login", json={"username": f"nobody-{new_id('u')}", "password": "wrong-password"})
+    assert resp.status_code in (401, 429), resp.text
+    if resp.status_code == 401:
+        assert conn.execute("SELECT COUNT(*) FROM error_logs WHERE http_status=401").fetchone()[0] == before + 1
 
 
 def test_concurrent_limit_kicks_oldest_with_reason(client: TestClient):
