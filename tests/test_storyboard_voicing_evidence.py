@@ -53,3 +53,12 @@ def test_gate_accepts_inner_thought_attributed_to_its_thinker() -> None:
 def test_gate_still_rejects_wrong_thinker_with_actionable_message() -> None:
     errors = dialogue_speaker_errors(_draft("bible:孟浩"), [], NAMES, SOURCE)
     assert len(errors) == 1 and "缺少人物发声证据" in errors[0] and "改为旁白" in errors[0]
+
+
+def test_first_person_rendering_of_a_thought_traces_to_its_thinker() -> None:
+    """第 5 集第 8 段：原文「孟浩沉默，暗道自己只有凝气一层…」，台词改成第一人称「我只有凝气一层…」。"""
+    source = "[段1·S09] 孟浩沉默，暗道自己只有凝气一层，这种所谓的单独丹药，应该不会落在自己身上。"
+    line = "我只有凝气一层，这种所谓的单独丹药，应该不会落在我身上。"
+    assert voicing_evidence(line, "bible:孟浩", NAMES, source) is True
+    assert voicing_evidence(line, "bible:精明男子", NAMES, source) is False
+

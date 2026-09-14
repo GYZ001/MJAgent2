@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import re
 
+from app import textmatch
+
 _TAG_RE = re.compile(r"\[段\d+·S\d+\]")
 _SENTENCE_SPLIT_RE = re.compile(r"[。！？!?…]+")
 _CLAUSE_SPLIT_RE = re.compile(r"[，,；;、]")
@@ -50,19 +52,36 @@ def _speaker_of(before: str, everyone: list[str]) -> str | None:
     return min(in_sentence)[1] if in_sentence else None
 
 
+_VERB_ONLY_RE = re.compile(f"(?:{_VERB_RE})")
+
+
+def _bigrams(text: str) -> set[str]:
+    return {text[i:i + 2] for i in range(len(text) - 1)}
+
+
 def voicing_evidence(line: str, identity: str, name_to_identity: dict[str, str], source_text: str) -> bool:
-    """原文同一句里是否有「identity 的称谓 + 发声/心理动词 + 本台词」这种依据。"""
+    """原文同一句里是否有「identity 的称谓 + 发声/心理动词 + 本台词」这种依据。
+
+    两种命中：台词起始片段紧跟动词（「心道这些刚入外宗的弟子…」）；或这句话按二元组覆盖
+    能落到某个原文句（≥ KEY_LINE_PRESENT_RATIO），该句里动词之前的发声者是 identity——
+    心理活动常被改成第一人称（原文「暗道自己只有凝气一层」，台词「我只有凝气一层」，
+    2026-09-14 第 5 集第 8 段），逐字紧邻对不上，但句子归属是清楚的。
+    """
     own, everyone = _labels(name_to_identity, identity)
     prefix = (line or "").strip().lstrip(_STRIP_QUOTES)[:_LINE_PREFIX_CHARS]
     if not own or len(prefix) < 4:
         return False
-    pattern = re.compile(f"(?:{_VERB_RE}){_GAP}{re.escape(prefix)}")
+    strict = re.compile(f"(?:{_VERB_RE}){_GAP}{re.escape(prefix)}")
+    line_bigrams = _bigrams(textmatch.condense(line))
     plain = _TAG_RE.sub("", source_text or "")
     for sentence in _SENTENCE_SPLIT_RE.split(plain):
-        match = pattern.search(sentence)
-        if match is None:
-            continue
-        speaker = _speaker_of(sentence[:match.start()], everyone)
-        if speaker in own:
+        match = strict.search(sentence)
+        if match is not None and _speaker_of(sentence[:match.start()], everyone) in own:
             return True
+        if match is None and line_bigrams:
+            covered = len(line_bigrams & _bigrams(textmatch.condense(sentence))) / len(line_bigrams)
+            if covered >= textmatch.KEY_LINE_PRESENT_RATIO and any(
+                _speaker_of(sentence[:verb.start()], everyone) in own for verb in _VERB_ONLY_RE.finditer(sentence)
+            ):
+                return True
     return False
