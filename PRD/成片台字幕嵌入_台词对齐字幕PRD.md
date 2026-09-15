@@ -249,6 +249,19 @@ B 机复测（同脚本、4 线程，Python 3.11 + tuna 源装轮子）：模型
 7. **连播**：两集已烧字幕的成片合并，`merge_mode == stream_copy`，`film.srt` 时间偏移与 `chapters` 一致。
 8. **门禁**：`arch_graph --check-layers` 0 上行边、`check_file_conventions` 无新增基线、`test_schema_guard`、干净副本全量、B 生产快照演练（独立手写对齐脚本 `/tmp/asr_probe/probe.py` 作为观察点，与新包结果逐句比对）。
 
+## 14.1 验收记录（2026-09-15，落地即验）
+
+| 判据 | 结果 |
+|---|---|
+| 对齐率（B 现网 3 集 77 句，独立脚本） | 拼音域 ≥0.9 有 72 句；念了的最低 0.67、没念的 0.0；阈值 0.60 落在空当 |
+| 第 11 集（18 镜、270.8s）A 沙箱演练（B 快照 + 真实镜头） | 29 句 28 对齐、1 句 missing（「你……你……」结巴句）；与独立观察点 29 句 0 处不一致；3 帧字幕带亮像素 6–7k、顶部 0；第二次合成 18/18 缓存命中、ASR 0；关闭开关后报告 enabled=false、边车清除、URL 不再暴露 |
+| 第 11 集 B 生产真实 API 合成 | 167s 总耗时（ASR 13.3s + 编码约 135s，8 核）；报告与 A 演练逐项相同；4 帧抽样字幕位置/字形正确（见 /tmp/b_frames）；`subtitle_srt_url` 可下载、328 行 srt |
+| 关闭等价 | `_run_concat_demuxer` 关闭态参数逐项相同（守卫用例）；draft 路径仍先试 `-c copy` |
+| 无音轴镜头 | 验收中实测「抽音轨失败拖垮整集」缺陷，已修：无音轨镜不进 ASR 批次，判 no_audio（真 ffmpeg 用例） |
+| 门禁 | 分层上行边 0、文件规范无新增基线、schema 守卫、ruff（仅既有 `test_scope_split_compat.py` 两条旧告警）；四单元定向测试全绿 |
+| 上线 | 189def44 于 2026-09-15 01:31 PDT 发到 B（干净导出构建前端、pip 装 sherpa-onnx+pypinyin、选路冒烟通过）；B 模型经 `--from-file` 安装、预检「字幕嵌入引擎 ok」；`subtitle_burn_in_enabled` 已在 B 打开 |
+| 未做 | 人工听测 10 句开口时刻（只与独立 ASR 观察点比对过）；连播 `film.srt` 与交付包 srt 只有单测、未在 B 真跑；前端在 B 只核对了产物包含新面板，未人工点开页面 |
+
 ## 15. 分期与派单切分
 
 | 单元 | 内容 | 依赖 |
