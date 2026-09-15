@@ -152,6 +152,19 @@ def _shot_rows_by_no(conn: Any, episode_id: str) -> dict[int, Any]:
     return {int(row["shot_no"]): row for row in rows}
 
 
+def cached_alignment_matches(cached: dict, lines: list[LineSpec]) -> bool:
+    """缓存键只有（版本、文件哈希、模型），台词文本不在键里：账本文本变了（2026-09-15
+    括号舞台提示从台词里拆出去）仍会命中，cue 就沿用缓存里的旧文本、命中率也是按旧文本
+    算的。逐句比对 utterance_id 与文本，任一不同就按未命中重跑 ASR 与对齐。"""
+    cached_lines = cached.get("lines") if isinstance(cached, dict) else None
+    if not isinstance(cached_lines, list) or len(cached_lines) != len(lines):
+        return False
+    return all(
+        str(item.get("utterance_id") or "") == spec.utterance_id and str(item.get("text") or "") == spec.text
+        for item, spec in zip(cached_lines, lines, strict=True)
+    )
+
+
 def _collect_jobs_and_cache(
     conn: Any, piece_specs: list[tuple[int, str, float]], probe_by_shot: dict[int, dict],
     manifest_by_shot: dict[int, dict], shot_rows: dict[int, Any], model_id: str,
@@ -176,7 +189,7 @@ def _collect_jobs_and_cache(
         cached_result = store.get_alignment(
             conn, shot_version_id=version_id, media_sha256=media_sha, model_id=model_id,
         )
-        if cached_result is not None:
+        if cached_result is not None and cached_alignment_matches(cached_result, lines):
             cached[shot_no] = (cached_result, lines, version_id)
             continue
         if bool((probe_by_shot.get(shot_no) or {}).get("has_audio", True)):
