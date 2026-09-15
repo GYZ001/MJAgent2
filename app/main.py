@@ -75,6 +75,7 @@ from app.quota_policy.api import router as quota_policy_router
 from app.quota_policy.api import storage_router as quota_storage_router
 from app.quota_policy.api import usage_router as quota_usage_router
 from app.quota_policy.schema import ensure_schema as ensure_quota_policy_schema
+from app.subtitles.store import ensure_schema as ensure_subtitles_schema
 from app.system_api import public_router as system_public_router
 from app.system_api import router as system_router
 
@@ -147,6 +148,7 @@ async def lifespan(_: FastAPI):
     recovery_owner = acquire_runtime_recovery_lock(wait_timeout_s=5.0)
     init_db(reconcile_interrupted=recovery_owner)
     ensure_audit_schema()
+    ensure_subtitles_schema()
     ensure_models_registry_schema()
     # 4 个旧 model_*_provider 设置迁成 priority=0 绑定：常态下由
     # app.models_registry.routing.resolve() 首次调用兜底触发（该模块是 L3，

@@ -48,6 +48,7 @@ from app.quota_policy import allocation as quota_policy_allocation
 from app.quota_policy import schema as quota_policy_schema
 from app.sso import schema as sso_schema
 from app.sso import store as sso_store
+from app.subtitles import store as subtitles_store
 
 
 @pytest.fixture
@@ -352,4 +353,52 @@ def test_provisioning_handover_list_user_assets_under_caller_write_txn(fresh_con
     assert result["owned_projects"] == []
     # list_user_assets 文档承诺"只读，不提交"——这里同时验证原语层修复没有
     # 顺带改掉这条既有契约。
+    assert fresh_conn.in_transaction
+
+
+# ---------------------------------------------------------------------------
+# app.subtitles.store（2026-09-14 新增，U2）：同一套六包 lazy 建表手法的第七个
+# 实例——``ensure_schema()``/``ensure_tables_on_connection()`` 逐行照抄
+# ``app/models_registry/schema.py``。补进本文件是 U2 派单里明确要求的登记项，
+# 与上面六段同构：同连接入口、不隐式提交、错入口在原语层也自保、真实业务函数
+# （``get_alignment``）在调用方持有写事务时不报 no such table。
+# ---------------------------------------------------------------------------
+
+
+def test_subtitles_store_schema_same_connection_entry_point_under_caller_write_txn(fresh_conn):
+    subtitles_store.ensure_tables_on_connection(fresh_conn)
+    row = fresh_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='subtitle_alignments'"
+    ).fetchone()
+    assert row is not None
+
+
+def test_subtitles_store_schema_does_not_implicitly_commit_callers_transaction(fresh_conn):
+    assert fresh_conn.in_transaction
+    subtitles_store.ensure_tables_on_connection(fresh_conn)
+    assert fresh_conn.in_transaction, (
+        "subtitles.store.ensure_tables_on_connection 隐式提交了调用方的事务"
+        "（很可能内部还在用 executescript）"
+    )
+
+
+def test_subtitles_store_ensure_schema_wrong_variant_under_caller_write_txn(fresh_conn):
+    """故意调用「错」的独立连接变体（不是 ensure_tables_on_connection）。"""
+    subtitles_store.ensure_schema()
+    assert fresh_conn.in_transaction, (
+        "subtitles.store.ensure_schema() 提交/回滚了调用方的事务"
+    )
+    row = fresh_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='subtitle_alignments'"
+    ).fetchone()
+    assert row is not None, "subtitle_alignments 表没建成——独立连接变体大概率去抢锁超时后被静默吞掉了"
+
+
+def test_subtitles_store_get_alignment_under_caller_write_txn(fresh_conn):
+    """真实业务函数（``get_alignment``）在调用方持有写事务时被调用：不能报
+    no such table，也不应该抛任何异常。"""
+    result = subtitles_store.get_alignment(
+        fresh_conn, shot_version_id="no-such-version", media_sha256="sha", model_id="model",
+    )
+    assert result is None
     assert fresh_conn.in_transaction

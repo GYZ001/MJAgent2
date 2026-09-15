@@ -264,3 +264,32 @@ def test_main_exit_code_reflects_fail(monkeypatch, tmp_path, capsys):
     assert exit_code == 1
     out = capsys.readouterr().out
     assert "FAIL" in out
+
+
+# ---------------------------------------------------------------------------
+# 字幕嵌入引擎（U2）：模型目录缺失 → 开关关 WARN / 开关开 FAIL
+# ---------------------------------------------------------------------------
+
+
+def test_check_subtitle_engine_warn_when_model_dir_missing_and_switch_off(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANJU_ASR_MODEL_DIR", str(tmp_path / "no-such-model-dir"))
+    monkeypatch.setattr(preflight.app.db, "get_setting", lambda key: "")
+
+    results = preflight.check_subtitle_engine()
+
+    assert len(results) == 1
+    assert results[0].level == preflight.WARN
+
+
+def test_check_subtitle_engine_fail_when_model_dir_missing_and_switch_on(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANJU_ASR_MODEL_DIR", str(tmp_path / "no-such-model-dir"))
+    monkeypatch.setattr(
+        preflight.app.db, "get_setting",
+        lambda key: "true" if key == "subtitle_burn_in_enabled" else "",
+    )
+
+    results = preflight.check_subtitle_engine()
+
+    assert len(results) == 1
+    assert results[0].level == preflight.FAIL
+    assert "model" in results[0].message.lower() or "tokens" in results[0].message.lower()

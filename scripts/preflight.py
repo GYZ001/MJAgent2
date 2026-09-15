@@ -31,6 +31,7 @@ sys.path.insert(0, str(ROOT))
 # 没有 export 过的供应商 Key，那正是 docker-compose/systemd 两条部署路径的
 # 真实配置来源，必须触发这个副作用才能如实检查。
 import app.config  # noqa: E402,F401
+import app.db  # noqa: E402 -- check_subtitle_engine() 读 subtitle_burn_in_enabled 开关
 
 OK, WARN, FAIL = "ok", "warn", "fail"
 
@@ -229,6 +230,51 @@ def check_required_env_vars() -> CheckResult:
     return CheckResult("必需环境变量", OK, f"已配置：{', '.join(present)}")
 
 
+def _subtitle_burn_in_enabled() -> bool:
+    # 读不到（表未建/库不可达）一律当「关」——这是 PRD §10 明确的口径：开关关
+    # 时任何字幕引擎缺失只降级成 WARN，不拦启动/部署。
+    try:
+        return str(app.db.get_setting("subtitle_burn_in_enabled")).strip().lower() == "true"
+    except Exception:  # noqa: BLE001 读不到当 false，见上
+        return False
+
+
+def _check_cjk_font() -> list[str]:
+    try:
+        from app.final_edit import _font_path
+        _font_path()
+        return []
+    except RuntimeError as exc:
+        return [f"CJK 字体不可用：{exc}"]
+
+
+def _check_ffmpeg_ass_filter() -> list[str]:
+    import subprocess
+    try:
+        out = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return [f"无法探测 ffmpeg 滤镜列表：{exc}"]
+    if " ass " not in out.stdout:
+        return ["ffmpeg 未编译 ass 滤镜（需要带 libass 的构建）"]
+    return []
+
+
+def check_subtitle_engine() -> list[CheckResult]:
+    """字幕嵌入引擎：sherpa_onnx 可导入 + 模型三件套 + CJK 字体 + ffmpeg ass 滤镜。
+
+    开关（``subtitle_burn_in_enabled``）开着时任一缺失都是 FAIL（会拦成片合
+    成）；开关关着时只降级成 WARN（今天不用，但值得提醒）——PRD/成片台字幕
+    嵌入_台词对齐字幕PRD.md §10/§11 明确的口径，不在这里自行放宽或收紧。
+    """
+    from app.subtitles.engine import engine_status
+
+    problems = list(engine_status().problems) + _check_cjk_font() + _check_ffmpeg_ass_filter()
+    if not problems:
+        return [CheckResult("字幕嵌入引擎", OK, "sherpa_onnx/模型/字体/ffmpeg ass 滤镜均就绪")]
+    level = FAIL if _subtitle_burn_in_enabled() else WARN
+    return [CheckResult("字幕嵌入引擎", level, "；".join(problems))]
+
+
 def run_all(data_dir: Path) -> list[CheckResult]:
     results: list[CheckResult] = [check_disk_space(data_dir)]
     results.extend(check_secret_file_permissions(data_dir))
@@ -236,6 +282,7 @@ def run_all(data_dir: Path) -> list[CheckResult]:
     results.extend(check_model_connectivity())
     results.extend(check_port_binding())
     results.append(check_required_env_vars())
+    results.extend(check_subtitle_engine())
     return results
 
 

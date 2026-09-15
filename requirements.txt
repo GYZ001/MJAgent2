@@ -5,3 +5,5 @@ pydantic>=2.7
 python-multipart>=0.0.9
 Pillow==11.3.0
 cryptography==45.0.7
+sherpa-onnx==1.13.8
+pypinyin==0.55.0
