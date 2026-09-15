@@ -203,13 +203,13 @@ def _artifact_type_counts(artifact_ids: list[str]) -> dict[str, int]:
             counts[row["type"]] = counts.get(row["type"], 0) + int(row["c"])
     return counts
 
-def compute_bible_impact_preview(
-    project_id: str,
-    bible_body: dict,
-    *,
-    expected_version=None,
-) -> dict:
-    """定稿前只读影响预检：不写库、不失效下游。"""
+def scoped_bible_errors(errors: list[str], only_character_idx: int | None) -> list[str]:
+    """角色级保存只对被改的那张卡负责：别的角色的既有校验错误不拦这次保存（2026-09-15 改「散散」被「阿凯外观 10 字」的薄卡拦住）；None 表示整本校验。"""
+    return [e for e in errors if only_character_idx is None or not e.startswith("characters[") or e.startswith(f"characters[{only_character_idx}]")]
+
+
+def compute_bible_impact_preview(project_id: str, bible_body: dict, *, expected_version=None, only_character_idx: int | None = None) -> dict:
+    """定稿前只读影响预检：不写库、不失效下游。``only_character_idx`` 给角色级保存用：只按那张卡的校验错误拦。"""
     from app.multiview import CHARACTER_REQUIRED_VIEWS
 
     p = _project_or_404(project_id)
@@ -221,7 +221,7 @@ def compute_bible_impact_preview(
     if errors:
         raise HTTPException(422, "；".join(errors))
     from app.validators import validate_bible
-    v_errors = validate_bible(instance)
+    v_errors = scoped_bible_errors(validate_bible(instance), only_character_idx)
     if v_errors:
         raise HTTPException(422, "；".join(v_errors))
 
