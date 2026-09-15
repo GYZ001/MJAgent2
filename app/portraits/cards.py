@@ -256,13 +256,13 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
     if (require_identity_card and (not verdict["card_complete"] or verdict["rejected_evidence"])) or (verdict["dropped_appearance"] and not verdict["card_complete"]):
         reasons: list[str] = []
         if verdict["dropped_appearance"]:
-            reasons.append("以下子句在原文里没有依据，已被删除：" + "；".join(verdict["dropped_appearance"]) + "。材质、图案、兽皮、饰物、法器、伤疤等都是标志性特征，只写原文对该角色本人确有描写的；原文没写就只保留通用形态（性别年龄感/发型发色/服装款式与颜色），这同样是合法结果。")
+            reasons.append("以下子句在原文里没有依据，已被删除：" + "；".join(verdict["dropped_appearance"]) + "。材质、图案、兽皮、饰物、法器、伤疤等都是标志性特征，只写原文对该角色本人确有描写的；原文没写就只保留通用形态（人：性别年龄感/发型发色/服装款式与颜色；非人角色：物种/毛色毛长/体型/部位形态/眼睛颜色），这同样是合法结果。")
         if not verdict["card_complete"]:
             reasons.append(
                 f"appearance_canonical 不完整（当前 {len(verdict['appearance_canonical'])} 字，"
                 f"要求 {APPEARANCE_MIN}~{APPEARANCE_MAX} 字；或 role 不是 主角/重要配角/反派 "
-                "之一）。请重写为完整外观锚点，只写通用形态（性别年龄感/发型发色/服装款式与"
-                "颜色）即可满足长度要求，不必强行加标志性特征。"
+                "之一）。请重写为完整外观锚点，只写通用形态（人：性别年龄感/发型发色/服装款式与"
+                "颜色；非人角色：物种/毛色毛长/体型/部位形态/眼睛颜色）即可满足长度要求，不必强行加标志性特征。"
             )
         if verdict["rejected_evidence"]:
             detail = "；".join(
