@@ -41,3 +41,19 @@ def test_stage_direction_context_plus_dialogue_with_ellipsis_is_located() -> Non
     located, phrase = _prep_pack_locate_phrase(segments, "小李走过来，把一张叠好的纸放在桌角。小李：周医生，我下个月……")
     assert located == [2]
     assert phrase in segments[1].text
+
+
+def test_two_segment_quotes_joined_by_semicolon_are_located_in_order() -> None:
+    """第四次重跑：模型为 segment_indexes [4, 13] 各引一句、用「；」相连；拼接符不是内容，两句各自逐字命中且同序即定位。"""
+    from types import SimpleNamespace
+    from app.production.prep_pack.provenance import _prep_pack_locate_phrase
+
+    segments = [
+        SimpleNamespace(text="（小李走过来。）\n小李：周医生，我下个月……\n周晚：嗯？"),
+        SimpleNamespace(text="（前台。）\n小李：（探头）周医生，你跟谁说话？\n周晚：没谁。"),
+    ]
+    located, phrase = _prep_pack_locate_phrase(segments, "小李：周医生，我下个月……；小李：（探头）周医生，你跟谁说话？")
+    assert located and phrase and any(phrase in seg.text for seg in segments)
+    # 次序颠倒（第二段的话引在前）仍拒绝
+    located2, _ = _prep_pack_locate_phrase(segments, "小李：（探头）周医生，你跟谁说话？；小李：周医生，我下个月……")
+    assert located2 == []
