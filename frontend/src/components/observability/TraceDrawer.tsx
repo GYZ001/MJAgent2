@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { durationLabel, hasUnfinished, traceDurations, useServerClock } from "./traceElapsed";
 
 import { api } from "../../api";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
@@ -173,13 +174,6 @@ function formatTime(value?: number | null) {
   return value
     ? new Date(value * 1000).toLocaleString("zh-CN", { hour12: false })
     : "—";
-}
-
-function formatDuration(value?: number | null) {
-  const milliseconds = Math.max(0, Number(value || 0));
-  if (milliseconds < 1000) return `${Math.round(milliseconds)}ms`;
-  if (milliseconds < 60_000) return `${(milliseconds / 1000).toFixed(1)} 秒`;
-  return `${Math.floor(milliseconds / 60_000)} 分 ${Math.round((milliseconds % 60_000) / 1000)} 秒`;
 }
 
 interface TraceMediaContentItem {
@@ -394,6 +388,7 @@ function TraceTreeNode({
   childrenByParent,
   displayNames,
   summaries,
+  durations,
   expandedIds,
   selectedId,
   onSelect,
@@ -404,6 +399,7 @@ function TraceTreeNode({
   childrenByParent: Map<string, TraceNode[]>;
   displayNames: Map<string, string>;
   summaries: Map<string, TraceNodeSummary>;
+  durations: Map<string, string>;
   expandedIds: Set<string>;
   selectedId: string;
   onSelect: (node: TraceNode) => void;
@@ -453,7 +449,7 @@ function TraceTreeNode({
               {ROLE_LABELS[role]} · {processingSummary || traceDisplaySubtitle(node)}
             </small>
           </span>
-          <span className="trace-node-duration">{formatDuration(node.latency_ms)}</span>
+          <span className="trace-node-duration">{durations.get(node.id)}</span>
         </button>
       </div>
       {children.length > 0 && expanded && (
@@ -465,6 +461,7 @@ function TraceTreeNode({
               childrenByParent={childrenByParent}
               displayNames={displayNames}
               summaries={summaries}
+              durations={durations}
               expandedIds={expandedIds}
               selectedId={selectedId}
               onSelect={onSelect}
@@ -606,6 +603,8 @@ export default function TraceDrawer({
     () => traceNodeSummaries(trace?.nodes || []),
     [trace?.nodes],
   );
+  const now = useServerClock(trace?.server_time, hasUnfinished(trace));
+  const durations = useMemo(() => traceDurations(trace?.nodes || [], now), [trace?.nodes, now]);
   const selectedNode = trace?.nodes.find((node) => node.id === selectedId);
   const detailValue =
     tab === "input" ? detail?.input : tab === "output" ? detail?.output : detail?.metadata;
@@ -688,7 +687,7 @@ export default function TraceDrawer({
                 状态
               </span>
               <span>
-                <b>{formatDuration(trace.latency_ms)}</b>
+                <b>{durationLabel(trace, now)}</b>
                 总耗时
               </span>
               <span>
@@ -732,6 +731,7 @@ export default function TraceDrawer({
                       childrenByParent={childrenByParent}
                       displayNames={displayNames}
                       summaries={summaries}
+                      durations={durations}
                       expandedIds={expandedIds}
                       selectedId={selectedId}
                       onSelect={(next) => {
@@ -765,7 +765,7 @@ export default function TraceDrawer({
                       </div>
                       <div>
                         <dt>耗时</dt>
-                        <dd>{formatDuration(selectedNode.latency_ms)}</dd>
+                        <dd>{durationLabel(selectedNode, now)}</dd>
                       </div>
                     </dl>
                   )}

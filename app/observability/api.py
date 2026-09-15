@@ -18,6 +18,7 @@ from fastapi.responses import PlainTextResponse
 from app.auth.deps import require_system_admin
 from app.db import get_conn
 from app.evidence import repository
+from app.observability.trace_timing import _call_finished_at
 from app.orchestration import api as orchestration_api
 from app.orchestration.engine import step_presentation
 from app import system_api
@@ -993,8 +994,7 @@ def _trace_tree(
                 "subtitle": call_method,
                 "status": source_row.get("status") or "unknown",
                 "started_at": source_row.get("ts"),
-                "finished_at": float(source_row.get("ts") or 0)
-                + float(source_row.get("latency_ms") or 0) / 1000,
+                "finished_at": _call_finished_at(source_row),
                 "latency_ms": int(source_row.get("latency_ms") or 0),
             })
         return _scope({
@@ -1277,8 +1277,7 @@ def _trace_tree(
             "subtitle": call_method,
             "status": call.get("status") or "unknown",
             "started_at": call.get("ts"),
-            "finished_at": float(call.get("ts") or 0)
-            + float(call.get("latency_ms") or 0) / 1000,
+            "finished_at": _call_finished_at(call),
             "latency_ms": int(call.get("latency_ms") or 0),
         })
     if video_context:

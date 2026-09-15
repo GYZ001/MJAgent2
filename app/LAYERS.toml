@@ -103,6 +103,7 @@ allowed_exceptions = []
 "app.config" = 1
 "app.atomic_io" = 1
 "app.observability.tracing" = 1
+"app.observability.trace_timing" = 1  # 2026-09-15：链路节点结束时间推导，纯标准库；app.observability.api 使用
 "app.observability.write_lock_holders" = 2  # 2026-09-04：只依赖 app.db 的连接登记表，与 app.db 同层
 "app.observability.provider_heartbeat" = 2  # 2026-09-04：流式心跳写入，从 app.db 挪出，app.hiagent(3) 使用
 "app.observability.machine_watermark" = 2  # 2026-09-05：/proc 水位采样，只依赖 app.db/app.config；准入点在 L3-L5
