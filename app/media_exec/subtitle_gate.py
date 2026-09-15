@@ -1,8 +1,9 @@
 """视频字幕闸门：候选视频落盘后抽帧问 VLM「画面上有没有叠加字幕」。L5（碰 hiagent 与 db）。
 
-产品规则（2026-09-14 用户拍板）：视频生成只负责画面与声音，字幕由后续功能另做；
-牌匾、书信这类画面本身需要的文字不在禁止之列。所以判据是「叠加在画面之上、不属于
-场景物体的文字」，不是「任何文字」——把牌匾判成缺陷会打掉合法画面。
+产品规则（2026-09-14 用户拍板，2026-09-15 收窄为「台词黑名单」）：视频生成只负责画面与
+声音，字幕由后续功能另做；牌匾、书信、倒计时、贴图艺术字这类画面文字**不拦**。判据从数据
+推导：VLM 报出的画面文字与本镜台词（台词账本里说出口的话）逐句比对，对得上的才是字幕，
+对不上的记为 ``diegetic_frames`` 放行。实测反例：「距续约30天」倒计时被当字幕连拦三版。
 
 结论写进 ``shot_versions.qa_json`` 的 ``subtitle_gate`` 键，由 ``app.evidence.subtitle_overlay``
 （L2）在候选登记时并进技术校验：有字幕就 ``passed=False``，走既有的
@@ -28,7 +29,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from app import hiagent
+from app import hiagent, textmatch
 from app.db import get_conn, get_setting
 
 _LOGGER = logging.getLogger(__name__)
@@ -175,6 +176,54 @@ def write_verdict(version_id: str, verdict: dict[str, Any]) -> None:
     conn.commit()
 
 
+# 画面文字算不算「台词」：去标点后互为子串，或最长连续公共块 / 二元组覆盖率过半（VLM 抄字会错一两个
+# 字：「重伤」抄成「重山」）。阈值取 0.5——半句台词叠在画面上就是字幕，短于两字的碎片只认子串。
+DIALOGUE_MATCH_RATIO = 0.5
+
+
+def _is_dialogue_text(seen: str, lines: list[str]) -> bool:
+    needle = textmatch.condense(seen)
+    if not needle:
+        return False
+    for line in lines:
+        hay = textmatch.condense(line)
+        if not hay:
+            continue
+        if needle in hay or hay in needle:
+            return True
+        if len(needle) >= 2 and (
+            textmatch.longest_run_ratio(needle, hay) >= DIALOGUE_MATCH_RATIO
+            or textmatch.bigram_coverage(needle, hay) >= DIALOGUE_MATCH_RATIO
+        ):
+            return True
+    return False
+
+
+def apply_dialogue_blacklist(verdict: dict[str, Any], lines: list[str] | None) -> dict[str, Any]:
+    """只有与本镜台词对得上的画面文字才算字幕。``lines`` 为 None（读不到台词）时保持 VLM 原判。"""
+    if lines is None or not verdict.get("checked"):
+        return verdict
+    frames = list(verdict.get("overlay_frames") or [])
+    subtitle = [f for f in frames if _is_dialogue_text(str(f.get("text_seen") or ""), lines)]
+    diegetic = [f for f in frames if f not in subtitle]
+    return {**verdict, "subtitle_overlay": bool(subtitle), "overlay_frames": subtitle, "diegetic_frames": diegetic,
+            "dialogue_lines_checked": len(lines)}
+
+
+def spoken_lines_for_shot(shot_id: str) -> list[str] | None:
+    """本镜台词账本里说出口的话（与字幕对齐同一份 LineSpec）；读不到返回 None，闸门保持 VLM 原判。"""
+    from app.subtitles.episode import shot_line_specs  # L4，与本模块（L5）方向合法
+
+    try:
+        row = get_conn().execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
+        if row is None:
+            return None
+        return [spec.text for spec in shot_line_specs(row) if spec.text]
+    except Exception as exc:  # noqa: BLE001 读台词失败不改变闸门结论，只留痕
+        _LOGGER.warning("[VIDEO_SUBTITLE_GATE] 读取镜头 %s 台词失败，保持模型原判：%s", shot_id, exc)
+        return None
+
+
 async def evaluate_version(job: Any, version: Any, dest: str) -> dict[str, Any] | None:
     """worker 在候选登记前调用；返回写入的结论，闸门关闭时返回 None。永不抛出。"""
     if not enabled():
@@ -188,9 +237,12 @@ async def evaluate_version(job: Any, version: Any, dest: str) -> dict[str, Any] 
         verdict = {"checked": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
         _LOGGER.warning("[VIDEO_SUBTITLE_GATE][未判定] 版本 %s 放行：%s", version_id, verdict["error"])
     else:
+        verdict = apply_dialogue_blacklist(verdict, spoken_lines_for_shot(str(job["shot_id"])))
+        if verdict.get("diegetic_frames"):
+            _LOGGER.info("[VIDEO_SUBTITLE_GATE][画面文字放行] 版本 %s：%s", version_id, verdict["diegetic_frames"][:3])
         if verdict["subtitle_overlay"]:
             _LOGGER.warning("[VIDEO_SUBTITLE_GATE][拦截] 版本 %s 画面叠加字幕：%s", version_id, verdict["overlay_frames"][:3])
         else:
-            _LOGGER.info("[VIDEO_SUBTITLE_GATE][通过] 版本 %s 检查 %s 帧无叠加字幕", version_id, verdict["frames_checked"])
+            _LOGGER.info("[VIDEO_SUBTITLE_GATE][通过] 版本 %s 检查 %s 帧无台词字幕", version_id, verdict["frames_checked"])
     write_verdict(version_id, verdict)
     return verdict
