@@ -29,6 +29,7 @@ from app.validators import normalize_action_desc
 from fastapi import HTTPException
 
 from .mutation_primitives import (
+    render_time_only_edit,
     _apply_contract_to_public_shot,
     _board_from_shot_rows,
     _narrative_semantic_edit_fields,
@@ -191,7 +192,7 @@ async def edit_shot(shot_id: str, body: dict):
         project_bible = _project_bible_or_placeholder(project)
         character_changes = (
             []
-            if narrative_authority
+            if narrative_authority or render_time_only_edit(changed_fields)
             else normalize_offbible_characters(
                 Storyboard(episode_no=ep["episode_no"], shots=[instance]),
                 project_bible,
@@ -418,7 +419,7 @@ async def edit_shot(shot_id: str, body: dict):
             "UPDATE shots SET storyboard_artifact_id=? WHERE id=?",
             (manual_artifact["id"], shot_id),
         )
-        invalidated = stage_shot_artifact_cleanup(conn, shot_id)
+        invalidated = {} if render_time_only_edit(changed_fields) else stage_shot_artifact_cleanup(conn, shot_id)  # 只改转场不清视频
         cleanup_outbox_id = invalidated.get("outbox_id")
         conn.execute(
             "UPDATE episodes SET status='scripted', storyboard_warning=NULL WHERE id=?",

@@ -64,6 +64,18 @@ def _screenplay_rebuild_block(conn, ep) -> dict | None:
         "action": "请先重建并重新发布剧本，再继续分镜",
     }
 
+# 只在成片阶段生效、不改镜头视频内容的字段：改它们不该作废/清除该镜已生成的付费视频，也不涉及
+# 人物称谓解析（2026-09-15 实测：给 7 个镜头写入转场，单镜保存把 7 段已生成视频全部清掉；第 17 镜还因
+# 群演 entity 称谓未解析被拒保存）。转场由 final_edit 在拼接时渲染，镜头视频本身一帧不变。
+RENDER_TIME_ONLY_EDIT_FIELDS = frozenset({"transition"})
+
+
+def render_time_only_edit(changed_fields) -> bool:
+    """改动字段全部属于成片阶段字段（且至少改了一项）。"""
+    changed = set(changed_fields)
+    return bool(changed) and changed <= RENDER_TIME_ONLY_EDIT_FIELDS
+
+
 def _narrative_semantic_edit_fields(changed_fields) -> list[str]:
     return sorted(set(changed_fields) - _NARRATIVE_PRESENTATION_EDIT_FIELDS)
 
