@@ -185,3 +185,32 @@ def test_overlong_quote_extraction_path_is_still_pre_split_like_legacy():
     new = extract_dialogue_targets(segments, set(), speaker_names=[])
     assert len(new) == len(legacy) > 1
     assert [q.text for q in new] == [q.text for q in legacy]
+
+
+_LONGMAO_SCENE = (
+    "【段 02｜人间·医院·前台｜夜】\n"
+    "人物：周晚、小李\n"
+    "（小李走过来，把一张叠好的纸放在桌角。）\n"
+    "小李：周医生，我下个月……\n"
+    "周晚：（没抬头）知道了。工资我不会拖。\n"
+    "周晚：（自言自语）都说我好……那怎么没人来。\n"
+    "周晚：（接过猫，听诊器贴上去）你又喂它火腿肠了？\n"
+    "阿凯：别告诉我姐。（顿了顿）她会骂我。"
+)
+
+
+def test_stage_directions_in_parentheses_are_not_spoken_text() -> None:
+    """2026-09-15《龙猫出爪》：台词正文开头的「（自言自语）」「（接过猫，听诊器贴上去）」是舞台提示，
+    不是说出口的话；进了账本就会烧成字幕、也让 ASR 对齐找不到这句。"""
+    quotes = extract_dialogue_targets([_seg(_LONGMAO_SCENE)], set(), speaker_names=["周晚", "小李", "阿凯"])
+    texts = [q.text for q in quotes]
+    assert "（" not in "".join(texts) and "(" not in "".join(texts)
+    assert texts[:4] == ["周医生，我下个月……", "知道了。工资我不会拖。", "都说我好……那怎么没人来。", "你又喂它火腿肠了？"]
+    # 中间的舞台提示把一句拆成两段说出口的话，各自逐字连续、偏移成立
+    tail = [q for q in quotes if q.speaker == "阿凯"]
+    assert [q.text for q in tail] == ["别告诉我姐。", "她会骂我。"]
+    for q in quotes:
+        assert _LONGMAO_SCENE[q.start_offset:q.end_offset] == q.text
+    by_text = {q.text: q for q in quotes}
+    assert by_text["都说我好……那怎么没人来。"].note == "自言自语"
+    assert by_text["你又喂它火腿肠了？"].note == "接过猫，听诊器贴上去"

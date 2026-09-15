@@ -108,8 +108,33 @@ def _quote_parts_with_offsets(text: str, base_offset: int, *, max_chars: int) ->
     return results
 
 
+# 台词正文里的「（…）」/「(…)」是舞台提示（自言自语 / 没抬头 / 接过猫，听诊器贴上去），
+# 不是说出口的话：2026-09-15《龙猫出爪》第 1 集，「周晚：（自言自语）都说我好……」整行进了
+# 台词账本，字幕烧成「（自言自语）都说我好……」，ASR 对齐也因括号里的动作描写找不到这句。
+# 这里按括号把台词拆成若干段说出口的话（每段仍是原文里逐字连续的子串，偏移各自成立），
+# 括号内容并入 note 供发声方式判定；不做任何改写。
+_STAGE_DIRECTION_RE = re.compile(r"[（(][^（()）]*[）)]")
+
+
+def _spoken_spans(dialogue: str, begin: int) -> tuple[list[tuple[str, int]], str]:
+    """拆掉舞台提示后的 [(说出口的文本, 原始坐标起点)]，以及拼接起来的提示文本。"""
+    spans: list[tuple[str, int]] = []
+    notes: list[str] = []
+    cursor = 0
+    for match in _STAGE_DIRECTION_RE.finditer(dialogue):
+        spoken, spoken_begin, _ = _strip_span(dialogue[cursor:match.start()], begin + cursor)
+        if spoken:
+            spans.append((spoken, spoken_begin))
+        notes.append(match.group(0)[1:-1].strip())
+        cursor = match.end()
+    spoken, spoken_begin, _ = _strip_span(dialogue[cursor:], begin + cursor)
+    if spoken:
+        spans.append((spoken, spoken_begin))
+    return spans, "；".join(n for n in notes if n)
+
+
 def _extract_script_segment(segment_text: str, speaker_names: set[str], *, max_chars: int) -> list[_LineHit]:
-    """剧本格式段：逐行只取说话人行冒号之后的台词部分。"""
+    """剧本格式段：逐行只取说话人行冒号之后的台词部分（去掉括号舞台提示）。"""
     results: list[_LineHit] = []
     for line_start, line in _iter_lines(segment_text):
         matched = _speaker_line_match(line, speaker_names)
@@ -120,8 +145,11 @@ def _extract_script_segment(segment_text: str, speaker_names: set[str], *, max_c
         stripped, begin, _end = _strip_span(dialogue_raw, line_start + match.start("dialogue"))
         if not stripped:
             continue
-        for part, part_start, part_end in _quote_parts_with_offsets(stripped, begin, max_chars=max_chars):
-            results.append((speaker, note, part, part_start, part_end))
+        spans, inline_note = _spoken_spans(stripped, begin)
+        note = "；".join(n for n in (note, inline_note) if n)
+        for spoken, spoken_begin in spans:
+            for part, part_start, part_end in _quote_parts_with_offsets(spoken, spoken_begin, max_chars=max_chars):
+                results.append((speaker, note, part, part_start, part_end))
     return results
 
 
