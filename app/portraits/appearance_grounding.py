@@ -38,6 +38,12 @@ _GENERIC_TOKENS: tuple[str, ...] = tuple(sorted({
     "体态", "身材", "体格", "壮实", "挺拔", "高大", "中等", "偏瘦", "微胖", "壮硕", "清瘦", "纤细", "矮小", "健壮", "瘦削", "如松",
     # 数字
     "一", "二", "两", "三", "四", "五", "六", "七", "八", "九", "十",
+}, key=len, reverse=True))
+# 非人角色的通用形态词元只参与【外观子句】落地，不进 _GENERIC_RE：卡名/别名的具体性判据
+# （card_aliases.alias_is_specific / card_name_is_specific）也复用 _GENERIC_RE，物种词进去后
+# 「龙猫」「小虎」这类由物种词构成的真名会被判成「指谁都行的通称」而拒绝建卡（2026-09-15 实测：
+# 龙猫四轮判定全过，卡名一步静默拒绝）。
+_CREATURE_TOKENS: tuple[str, ...] = tuple(sorted({
     # 非人角色的通用形态（作为角色出镜的动物 / 拟人化生物 / 灵兽 / 数字生物）：物种、毛色毛长、
     # 体型、部位形态、眼睛颜色——对它们而言等价于人的「性别年龄感 / 发型发色 / 服装」，原文没写
     # 可按画风设定。2026-09-15《龙猫出爪》：主角是猫，「明黄色短毛猫」「橘白相间的家猫」整句被当
@@ -55,6 +61,9 @@ _GENERIC_TOKENS: tuple[str, ...] = tuple(sorted({
     "黑白", "斑点", "花斑", "纹路", "柔软", "爪垫", "粉润", "软萌", "萌", "物种", "偏小", "偏大", "圆头", "竖耳", "粗细", "匀整",
 }, key=len, reverse=True))
 _GENERIC_RE = re.compile("|".join(re.escape(t) for t in _GENERIC_TOKENS))
+_GROUNDING_GENERIC_RE = re.compile("|".join(
+    re.escape(t) for t in sorted({*_GENERIC_TOKENS, *_CREATURE_TOKENS}, key=len, reverse=True)
+))
 # 叙事时序词元（闭集语法成分）：带这些词的子句写的是剧情经过，不是可跨镜稳定复现的静态外观
 # （第 11 轮：赵武刚「本集短暂变为兽化形态，后恢复人形，最终尸体…」整段进了外观锚点）。
 _NARRATIVE_RE = re.compile(r"本集|随后|后来|最终|最后|短暂|一度|曾经|曾|变为|变成|化作|恢复|尸体|死后|此刻|当时|之后|之前")
@@ -62,7 +71,7 @@ _NARRATIVE_RE = re.compile(r"本集|随后|后来|最终|最后|短暂|一度|�
 
 def _residue(clause: str) -> str:
     """去掉通用形态词元与功能字后剩下的字符（保持原顺序，非通用片段之间用空格分开）。"""
-    text = _GENERIC_RE.sub(" ", clause)
+    text = _GROUNDING_GENERIC_RE.sub(" ", clause)
     text = "".join(ch if (_CJK_RE.match(ch) and ch not in _FUNCTION_CHARS) else " " for ch in text)
     return " ".join(part for part in text.split() if part)
 

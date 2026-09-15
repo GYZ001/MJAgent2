@@ -46,3 +46,14 @@ def test_card_names_allow_qualified_descriptors_but_not_bare_or_demonstrative_on
         assert card_name_is_specific(ok), ok
     for bad in ("这青年", "那女子", "老者", "青年男子", "年轻女性", "师弟", ""):
         assert not card_name_is_specific(bad), bad
+
+
+def test_names_built_from_species_words_stay_specific() -> None:
+    """2026-09-15《龙猫出爪》：非人角色的物种词元只参与外观子句落地，不进卡名/别名具体性判据——
+    否则「龙猫」「小虎」这类由物种词构成的真名会被判成通称，四轮建卡判定全过却在卡名一步静默拒绝。"""
+    from app.portraits.card_aliases import card_name_is_specific
+
+    for name in ("龙猫", "小虎", "虎爷", "大黄", "馒头"):
+        assert alias_is_specific(name), name
+        assert card_name_is_specific(name), name
+    assert not card_name_is_specific("那只猫")
