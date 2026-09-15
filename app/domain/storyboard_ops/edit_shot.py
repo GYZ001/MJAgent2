@@ -47,7 +47,7 @@ async def edit_shot(shot_id: str, body: dict):
     expected_version = body.get("expected_version")
     meta_keys = {
         "expected_version", "edit_session_token", "preview_token",
-        "baseline_content_hash", "change_source", "source_binding",
+        "baseline_content_hash", "change_source", "source_binding", "revision_reason",
     }
     patch = {k: v for k, v in body.items() if k not in meta_keys}
     routed = await ui_route(
@@ -58,7 +58,7 @@ async def edit_shot(shot_id: str, body: dict):
             "preview_token": body.get("preview_token"),
             "baseline_content_hash": body.get("baseline_content_hash"),
             "change_source": body.get("change_source") or "standard_edit",
-            "source_binding": body.get("source_binding"),
+            "source_binding": body.get("source_binding"), "revision_reason": body.get("revision_reason"),
         },
     )
     if routed is not None:

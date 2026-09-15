@@ -246,6 +246,7 @@ class ShotUpdateInput(StandardCommandInput):
     baseline_content_hash: str | None = None
     change_source: str = "standard_edit"
     source_binding: dict[str, Any] | None = None
+    revision_reason: str | None = None  # 2.x 段台词人工修订的留档原因（storyboard_dialogue_revision）
 
 
 class StoryboardConfirmInput(StandardCommandInput):

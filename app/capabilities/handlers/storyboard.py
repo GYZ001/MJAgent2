@@ -88,6 +88,8 @@ async def shot_update(args: I.ShotUpdateInput) -> CommandResult:
     patch["change_source"] = args.change_source
     if args.source_binding is not None:
         patch["source_binding"] = args.source_binding
+    if args.revision_reason:
+        patch["revision_reason"] = args.revision_reason
     outcome = await call_guarded(api.edit_shot, args.shot_id, patch)
     if isinstance(outcome, CommandResult):
         return outcome
