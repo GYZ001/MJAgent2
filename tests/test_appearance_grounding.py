@@ -69,3 +69,16 @@ def test_creature_generic_form_is_kept_and_unbacked_accessory_dropped() -> None:
 def test_pet_cat_generic_form_without_source_description_is_kept() -> None:
     kept, dropped = ground_appearance("橘白相间的短毛家猫，体态圆胖毛发蓬松", "阿凯（怀里抱一只橘白猫\"馒头\"）")
     assert dropped == [] and kept == "橘白相间的短毛家猫，体态圆胖毛发蓬松"
+
+
+def test_body_part_form_clauses_are_generic_but_adornments_still_need_evidence() -> None:
+    """龙猫提名第三轮：模型换了一套部位措辞，逐词补表追不上；部位形态按结构判据放行，饰物仍要证据。"""
+    kept, dropped = ground_appearance(
+        "明黄色短毛猫，身形匀称灵活，琥珀色圆形眼眸，长有两根白色长须，尾巴修长柔顺，颈挂铜铃项圈，可切换掌心大小与正常猫体型",
+        _LONGMAO_CH1,
+    )
+    assert kept == "明黄色短毛猫，身形匀称灵活，琥珀色圆形眼眸，长有两根白色长须，尾巴修长柔顺"
+    assert dropped == ["颈挂铜铃项圈", "可切换掌心大小与正常猫体型"]
+    # 人的伤疤/佩刀/兽皮照旧要原文依据（部位词 + 饰物标记 → 走核验）
+    kept2, dropped2 = ground_appearance("成年黑发男子，左眉留有一道浅疤，腰间佩刀，肩披虎皮", "丁力听令后带人巡查山门。")
+    assert kept2 == "成年黑发男子" and dropped2 == ["左眉留有一道浅疤", "腰间佩刀", "肩披虎皮"]

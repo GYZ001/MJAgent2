@@ -67,6 +67,24 @@ _GROUNDING_GENERIC_RE = re.compile("|".join(
 # 叙事时序词元（闭集语法成分）：带这些词的子句写的是剧情经过，不是可跨镜稳定复现的静态外观
 # （第 11 轮：赵武刚「本集短暂变为兽化形态，后恢复人形，最终尸体…」整段进了外观锚点）。
 _NARRATIVE_RE = re.compile(r"本集|随后|后来|最终|最后|短暂|一度|曾经|曾|变为|变成|化作|恢复|尸体|死后|此刻|当时|之后|之前")
+# 部位形态子句（结构判据，2026-09-15）：写的是某个身体部位的形状/颜色/质地（「琥珀色圆形眼眸」
+# 「尾巴修长柔顺」「毛发光泽感强」）就是通用形态，不要求原文逐字依据——模型描述动物部位的措辞
+# 是开放集合，逐词补表追不上（龙猫提名连续三轮各换一套词，全被删到 6～18 字）。但子句里一旦
+# 出现饰物 / 材质 / 伤痕 / 器物标记（项圈、铃铛、佩戴、疤、甲、袍、剑…），它就是标志性特征，
+# 仍走原文依据核验。两张表都是闭集语法成分，不是任何角色的名单。
+_BODY_PART_RE = re.compile(
+    r"眼|眸|瞳|耳|尾|须|胡|爪|掌|肉垫|毛|头|脸|面部|鼻|嘴|牙|齿|舌|颈|脖|身形|身躯|身材|体型|体态|背|腹|肢|腿|足|蹄|翅|翼|羽|鳞|犄角|鬃|喙"
+)
+_ADORNMENT_RE = re.compile(
+    r"项圈|铃|环|链|坠|佩|戴|挂|缠|披|系|疤|伤|纹身|刺青|甲|铠|袍|衣|裙|衫|装|器|剑|刀|枪|杖|珠|玉|宝|符|印|鞍|缰|兽皮|皮甲|皮革|绸|锦|铁|铜|金饰"
+)
+# 「可切换掌心大小」「能变大」是能力不是静态形态，不享受部位形态放行，照旧走原文依据核验。
+_NON_STATIC_RE = re.compile(r"可切换|切换|可变|能变|会变|变大|变小|缩小|放大")
+
+
+def _body_part_form(clause: str) -> bool:
+    """部位形态子句：含身体部位词，且不含饰物/材质/伤痕/器物标记与能力描述。"""
+    return bool(_BODY_PART_RE.search(clause)) and not _ADORNMENT_RE.search(clause) and not _NON_STATIC_RE.search(clause)
 
 
 def _residue(clause: str) -> str:
@@ -105,7 +123,7 @@ def ground_appearance(appearance: str, fragments: str) -> tuple[str, list[str]]:
             continue
         for clause in clauses:
             residue = _residue(clause)
-            if not residue or _grounded(residue, source):
+            if not residue or _body_part_form(clause) or _grounded(residue, source):
                 kept.append(clause)
             else:
                 dropped.append(clause)
