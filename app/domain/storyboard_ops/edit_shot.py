@@ -29,6 +29,7 @@ from app.validators import normalize_action_desc
 from fastapi import HTTPException
 
 from .mutation_primitives import (
+    apply_segment_dialogue_revision,
     edit_touches_identities,
     render_time_only_edit,
     _apply_contract_to_public_shot,
@@ -102,9 +103,7 @@ async def edit_shot(shot_id: str, body: dict):
         )
     if not approved_changes:
         return {"ok": True, "unchanged": True, "artifact_id": current_version, "impact": {"stale_count": 0}}
-    merged = dict(shot)
-    merged["characters"] = json.loads(merged["characters"] or "[]")
-    merged["dialogues"] = json.loads(merged["dialogues"] or "[]")
+    merged = {**dict(shot), "characters": json.loads(shot["characters"] or "[]"), "dialogues": json.loads(shot["dialogues"] or "[]")}
     merged["continuity_from_prev"] = bool(merged["continuity_from_prev"])
     _apply_contract_to_public_shot(merged)
     editable_keys = (
@@ -147,8 +146,8 @@ async def edit_shot(shot_id: str, body: dict):
     )
     if errors:
         raise HTTPException(422, "；".join(errors))
-    # 产品禁止旁白：保存时强制清空 narration，并从 timeline 剥离 narration 轨。
-    instance.narration = ""
+    apply_segment_dialogue_revision(instance, submitted_changes, reason=body.get("revision_reason"))  # 2.x 段台词修订
+    instance.narration = ""  # 产品禁止旁白：保存时强制清空，并从 timeline 剥离 narration 轨
     if instance.audio_timeline:
         instance.audio_timeline = [item for item in instance.audio_timeline if item.type != "narration"]
     # VAL-422：人工编辑必须重新通过确定性业务校验；「人改过」≠ hard gate 通过。

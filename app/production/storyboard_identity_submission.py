@@ -7,9 +7,17 @@ from app.production.storyboard_identity_contract import identity_contract_errors
 from app.production.storyboard_speech_render import explicit_prompt_speaker_errors, speaker_names
 from app.production.storyboard_identity_validation import final_identity_prompt_errors, identity_schema_errors, quote_provenance_errors
 from app.production.storyboard_dialogue_ledger import required_dialogue_missing_errors
+from app.production.storyboard_dialogue_revision import has_revisions, revision_errors, source_faithful_copy
 
 
 def segment_submission_errors(segment: dict, *, source_text: str) -> list[str]:
+    """人工修订过台词的段（storyboard_dialogue_revision）：溯源类检查按原句跑，再核验修订展开。"""
+    revised = has_revisions(segment)
+    errors = _source_checked_errors(source_faithful_copy(segment) if revised else segment, source_text=source_text)
+    return list(dict.fromkeys([*errors, *(revision_errors(segment) if revised else [])]))
+
+
+def _source_checked_errors(segment: dict, *, source_text: str) -> list[str]:
     schema_errors = identity_schema_errors(segment)
     if schema_errors:
         return schema_errors
