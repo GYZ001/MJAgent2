@@ -422,6 +422,10 @@ allowed_exceptions = []
 "app.task_registry" = 1
 "app.textmatch" = 1
 "app.visual_styles" = 1
+"app.subtitles" = 1  # 2026-09-14 新增（U1/U2 并行落地）：align/cues/timeline/ass/
+                     # asr_worker 均只依赖 stdlib（asr_worker 的 sherpa_onnx 只在
+                     # 子进程 main() 内延迟 import，主进程永不触碰）；store/engine
+                     # 两个子模块层号更高，用更具体的 key 覆盖本前缀，见下方
 
 # ---- 新增 L2 持久化 ----
 "app.benchmarks" = 2
@@ -461,6 +465,12 @@ allowed_exceptions = []
                                              # 改在 app.models_registry.health/routing 的真实调用点
                                              # 直接写内存注册表，见两文件改动，本文件不重复采集）
 "app.rejected_media" = 2
+"app.subtitles.store" = 2  # 2026-09-14 新增（U2）：subtitle_alignments 缓存表
+                            # lazy 建表，只 import app.db/app.db_schema/
+                            # app.monitor_audit_buffer（同层或更低），覆盖
+                            # "app.subtitles" = 1 前缀
+"app.subtitles.settings" = 2  # 2026-09-15 新增（U3）：读 app.db.get_setting 的
+                               # 监制房字幕样式设置，覆盖 "app.subtitles" = 1 前缀
 
 # ---- 新增 L3 供应商适配 ----
 "app.generation_concurrency" = 3  # 2026-08-30：原 4，见文件末尾变更说明
@@ -551,6 +561,19 @@ allowed_exceptions = []
 "app.storyboard_control" = 4
 "app.storyboard_supervisor" = 4
 "app.storyboard_workspace" = 4
+"app.subtitles.engine" = 4  # 2026-09-14 新增（U2）：wav 抽取（ffmpeg 子进程）+
+                            # asr_worker 子进程调度 + 全机串行锁，import app.config
+                            # （L1）；不 import app.subtitles.store——调用方
+                            # concat.py（L5）自己分别调用 engine.transcribe_media()
+                            # 与 store.get/put_alignment()，覆盖 "app.subtitles" = 1 前缀
+"app.subtitles.episode" = 4  # 2026-09-15 新增（U3）：整集字幕编排，import
+                              # app.subtitles.{align,cues,ass,timeline,store,engine,
+                              # settings}（同层或更低）+ app.final_edit._font_path
+                              # （同层 L4，final_edit._compose 反向调用本模块的
+                              # compose_artifacts 一律用函数内延迟 import 避免
+                              # 循环）+ app.production.storyboard_speech_render/
+                              # storyboard_identity_contract（同层 L4，复用既有说话
+                              # 人展示名解析）；不 import app.media_exec.*（L5）
 "app.video_command_operations" = 4
 "app.video_control" = 4
 "app.video_cost_model" = 4
