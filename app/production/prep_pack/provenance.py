@@ -125,7 +125,7 @@ def _prep_pack_citation_forms(phrase: str) -> list[str]:
 
 def _prep_pack_locate_stitched_quote(segments: list[SourceSegment], phrase: str) -> tuple[list[int], str]:
     """整条不命中时的最后一步：拆句后每句都逐字命中且与原文同序，才以最长句（≥6 字）为锚点；任一句定位不到或次序颠倒即整条拒绝。ERR-20260902-507cb0《三国演义》第一回：原文相隔数十字的两句被接成一条 quote，两轮重试一字不差——拼接是引用格式不是改写；反例见 test_prep_pack_asset_discovery 的 invented_quotes。"""
-    parts = [part.strip() for part in re.split(r"(?<=[。！？…．.!?])", phrase) if part.strip()]
+    parts = [x for x in (part.strip() for part in re.split(r"(?<=[。！？…．.!?])", phrase)) if x and x.strip(_PREP_PACK_TERMINAL_MARKS + "…")]  # 只剩「…」的碎片不是句子（2026-09-15「周医生→周晚」证据尾部「……」因此整条被拒）
     located: list[tuple[list[int], str]] = []
     for sentence in parts if len(parts) >= 2 else []:
         hit = next(((s, f) for f in _prep_pack_citation_forms(sentence) if (s := _prep_pack_locate_verbatim(segments, f))), None)

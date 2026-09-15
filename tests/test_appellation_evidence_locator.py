@@ -26,3 +26,18 @@ def test_evidence_crossing_a_paragraph_break_with_self_closed_quote_still_passes
     )
     assert [v.identity for v in verified] == ["曹阳", ar.UNRESOLVED]
     assert verified[0].evidence == "看到山下有一个大汉，正迈步临近公开区。“是曹阳"
+
+
+def test_stage_direction_context_plus_dialogue_with_ellipsis_is_located() -> None:
+    """2026-09-15《龙猫出爪》：模型引「（小李走过来…桌角。）」时丢了舞台提示括号，又以「……」收尾；
+    拆句后不能掉出只剩「…」的碎片，否则整条被拒、「周医生」落成群演。"""
+    from types import SimpleNamespace
+    from app.production.prep_pack.provenance import _prep_pack_locate_phrase
+
+    segments = [
+        SimpleNamespace(text="（前台只开一盏台灯。周晚坐在桌前。）"),
+        SimpleNamespace(text="（小李走过来，把一张叠好的纸放在桌角。）\n小李：周医生，我下个月……\n周晚：嗯？"),
+    ]
+    located, phrase = _prep_pack_locate_phrase(segments, "小李走过来，把一张叠好的纸放在桌角。小李：周医生，我下个月……")
+    assert located == [2]
+    assert phrase in segments[1].text
