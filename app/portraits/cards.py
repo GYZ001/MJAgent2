@@ -483,6 +483,7 @@ async def ensure_character_card(
 
         portrait_worthy, defer_reason = portrait_generation_decision(
             require_identity_card=require_identity_card, presence=presence,
+            appearance_thin=bool(verdict.get("appearance_thin")),
         )
         if not generate_portrait or not portrait_worthy:
             existing["status"] = "auto_applied_asset_pending"

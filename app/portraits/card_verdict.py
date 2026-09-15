@@ -162,7 +162,7 @@ def unimportant_verdict_result(
     return {"status": "skipped_minor", "name": name, "reason": verdict["reason"]}
 
 
-def portrait_generation_decision(*, require_identity_card: bool, presence: dict) -> tuple[bool, str]:
+def portrait_generation_decision(*, require_identity_card: bool, presence: dict, appearance_thin: bool = False) -> tuple[bool, str]:
     """身份已确认的真名是否值得【自动】出定妆照（WS10-A：一句话真名过度收录）。
 
     生产事故（跑不快的孩子）：德科、埃托奥、莱曼、蒙铁尔、马丁内斯各只在一句话
@@ -190,6 +190,13 @@ def portrait_generation_decision(*, require_identity_card: bool, presence: dict)
     放行：那条路径的 ``important`` 本来就是模型自己给出的戏份判断，不是被合同
     强制的常量，不需要再加一层画面存在证据闸门。
     """
+    if appearance_thin:
+        # 外观经原文核验后过薄（不足 APPEARANCE_MIN）的卡照建不照画：2026-09-15《龙猫出爪》
+        # 「散散」（线团怪）外观只剩「体型娇小」4 字，自动出图把它画成了穿汉服的小女孩——
+        # 薄卡是诚实的，凭薄卡出的图是编的。等人物谱里外观补全后再出图（手动或下次自愈补图）。
+        return False, (
+            "外观锚点经原文核验后过薄，人物卡已登记但未自动出图；请在人物谱补全外观后生成定妆照"
+        )
     if not require_identity_card or functional_card_worthy(presence):
         return True, ""
     return False, (

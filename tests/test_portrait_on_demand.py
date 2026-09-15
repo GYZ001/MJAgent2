@@ -165,3 +165,19 @@ def test_recurring_named_identity_still_gets_auto_portrait(monkeypatch) -> None:
     assert result["has_portrait"] is True
     assert result.get("portrait_on_demand") in (False, None)
     assert portrait_calls["n"] == 1
+
+
+def test_thin_appearance_card_is_registered_but_not_auto_portraited() -> None:
+    """2026-09-15《龙猫出爪》「散散」：外观经核验只剩「体型娇小」4 字，自动出图画成穿汉服的小女孩。
+    薄卡照建，但不自动出图，理由要给出补全外观的出路。"""
+    from app.portraits.card_verdict import portrait_generation_decision
+
+    worthy, reason = portrait_generation_decision(
+        require_identity_card=True, presence={"segments": [1, 2], "dialogue": True, "action": True},
+        appearance_thin=True,
+    )
+    assert worthy is False
+    assert "补全外观" in reason
+    # 外观不薄时维持原判据
+    worthy2, _ = portrait_generation_decision(require_identity_card=False, presence={}, appearance_thin=False)
+    assert worthy2 is True
