@@ -93,7 +93,7 @@ async def edit_shot(shot_id: str, body: dict):
         "edit_session_token": body.get("edit_session_token"),
         "preview_token": body.get("preview_token"),
         "baseline_content_hash": body.get("baseline_content_hash"),
-        "change_source": body.get("change_source") or "standard_edit",
+        "change_source": body.get("change_source") or "standard_edit", "revision_reason": body.get("revision_reason"),
     }
     current_version = shot["storyboard_artifact_id"] or ""
     if expected_version is not None and str(expected_version) != str(current_version):
