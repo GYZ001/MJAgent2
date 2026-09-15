@@ -10,6 +10,7 @@
 # 安装：cp scripts/deploy/mjagent2-nightly-deploy.{service,timer} /etc/systemd/system/
 #       systemctl daemon-reload && systemctl enable --now mjagent2-nightly-deploy.timer
 # 手动：FORCE=1 scripts/deploy/nightly_deploy_to_b.sh   （rev 没变也强制发一次）
+# 退出码：0 完成/无变化；1 前端构建失败；2 连不上 B；3 健康检查失败；4 选路冒烟失败；5 B 有在途任务未部署
 set -euo pipefail
 ROOT=/root/MJAgent2
 D=/root/mjagent2-deploy
@@ -31,6 +32,14 @@ if [ "$NEW" = "$OLD" ] && [ "${FORCE:-0}" != 1 ]; then
 fi
 log "开始部署 $OLD -> $NEW"
 ssh -o ConnectTimeout=15 "$B" true 2>/dev/null || { log "连不上 $B（B 的反向隧道没起来），放弃"; exit 2; }
+# 0) B 有在途运行/任务就不部署：重启会把用户正在跑的映射包/分镜/视频全部掐断，自动续跑
+#    也是从头再来（2026-09-15 16:31 CST 实测掐断了用户的映射包）。检查脚本经 stdin 送到
+#    B 上执行，不依赖 B 的检出里有没有它。检查本身失败按「有在途」处理，宁可不发。
+in_flight="$(ssh "$B" '/root/MJAgent2/.venv/bin/python -' < "$ROOT/scripts/deploy/in_flight_on_b.py" 2>/dev/null || true)"
+if [ "$in_flight" != IDLE ]; then
+  log "B 上有在途任务（${in_flight:-检查失败}），本次不部署以免掐断；等它们结束后再跑，或先在页面取消"
+  exit 5
+fi
 
 # 1) 前端产物：从干净导出构建（复用 A 的 node_modules），产物存 releases/<rev>/dist 供回滚
 build_dist() {
