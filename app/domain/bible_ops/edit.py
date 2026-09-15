@@ -214,6 +214,18 @@ def _commit_bible_revision(project_id: str, p: dict, instance: "Bible", *, reaso
         "bible_version": int(p.get("bible_version") or 0) + 1,
     }
 
+def _errors_for_character(errors: list[str], target_idx: int) -> list[str]:
+    """角色级保存只对被改的那张卡负责：其它角色的既有校验错误不该拦住这次保存。
+
+    2026-09-15《龙猫出爪》：要把「散散」的外观从 4 字补成 39 字，整本校验却报「阿凯
+    外观 10 字」——阿凯是映射台建的薄卡，用户改哪张卡都被别的卡拦住，界面上「保存角色」
+    就成了一句空话。校验串的形态由 validate_bible 固定为「characters[i](name).字段 …」，
+    非角色条目的错误（world/scene 等）照旧全部保留。
+    """
+    own = f"characters[{target_idx}]"
+    return [e for e in errors if not e.startswith("characters[") or e.startswith(own)]
+
+
 @router.put("/projects/{project_id}/characters/{character_name}")
 async def edit_character(project_id: str, character_name: str, body: dict):
     """角色级保存：只替换指定角色对象，并按 bible_version 做乐观并发控制。"""
@@ -257,7 +269,7 @@ async def edit_character(project_id: str, character_name: str, body: dict):
     if errors:
         raise HTTPException(422, "；".join(errors))
     from app.validators import validate_bible
-    errors = validate_bible(instance)
+    errors = _errors_for_character(validate_bible(instance), target_idx)
     if errors:
         raise HTTPException(422, "；".join(errors))
 
