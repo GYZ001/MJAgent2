@@ -713,10 +713,7 @@ def _validate_concat_output(
                 "ffmpeg", "-nostdin", "-v", "error", "-xerror",
                 "-i", str(path), "-map", "0:v:0", "-f", "null", "-",
             ],
-            check=True,
-            capture_output=True,
-            timeout=decode_timeout_s,
-        )
+            check=True, capture_output=True, timeout=decode_timeout_s, preexec_fn=low_priority)
     except subprocess.TimeoutExpired as exc:
         raise ValueError(
             f"合片产物完整解码超过 {int(decode_timeout_s)} 秒，上一版成片仍保留"
