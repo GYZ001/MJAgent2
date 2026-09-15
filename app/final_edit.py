@@ -431,7 +431,7 @@ def _compose(
     filters: list[str] = []
     for index in range(len(prepared)):
         filters.extend([
-            f"[{index}:v]fps={FINAL_FPS},settb=AVTB,setpts=PTS-STARTPTS[v{index}]",  # xfade 要求恒定帧率（2026-09-15 实测 1/0 报错回退无转场拼接）
+            f"[{index}:v]settb=AVTB,setpts=PTS-STARTPTS,fps={FINAL_FPS}[v{index}]",  # fps 必须在 setpts 之后：FFmpeg 7 的 setpts 把帧率标成未知，xfade 拒收（守卫见 tests/test_final_edit_xfade_chain.py）
             f"[{index}:a]aresample={FINAL_AUDIO_RATE},asetpts=PTS-STARTPTS[a{index}]",
         ])
     video_label = "v0"
