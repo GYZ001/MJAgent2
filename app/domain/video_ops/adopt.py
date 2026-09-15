@@ -21,6 +21,37 @@ from app.domain.review_wall import (
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation
 from fastapi import HTTPException
+from pathlib import Path
+
+
+def _assert_version_adoptable(version, body: dict) -> bool:
+    """返回 human_override。系统代采只接受 succeeded；人工采纳还接受 waiting_human（闸门拦下、
+    交人判断的版本），前提是视频文件真实存在——人工采纳是最高优先级，但采纳一个不存在的文件没有意义。"""
+    human_override = bool(body.get("human_override"))
+    if not version:
+        raise HTTPException(409, "该版本不存在或未成功")
+    if version["status"] == "succeeded":
+        return human_override
+    if human_override and version["status"] == "waiting_human" and version["video_path"] and Path(version["video_path"]).is_file():
+        return True
+    raise HTTPException(409, "该版本不存在或未成功")
+
+
+def _quality_issues_overridden(technical: dict, human_override: bool) -> list[str]:
+    """技术门禁未过时：人工采纳可越过 category=quality 的判定（字幕闸门等主观/视觉判定），返回被越过的
+    issue code 供审计；文件级问题（不存在、容器坏、时长异常，category 非 quality）谁都不能越过。"""
+    if technical.get("passed"):
+        return []
+    issues = [i for i in (technical.get("issues") or []) if isinstance(i, dict)]
+    if human_override and issues and all(str(i.get("category") or "") == "quality" for i in issues):
+        return [str(i.get("code") or "") for i in issues]
+    raise HTTPException(409, "视频技术门禁未通过，不能人工采用" if not human_override else "视频文件本身不可用（不存在、容器损坏或时长异常），不能采纳")
+
+
+def _settle_waiting_human(conn, version, overridden: list[str]) -> None:
+    """人工采纳了「等待人工」的版本：这就是那个人工处理，把版本落成 succeeded，合成才认它。"""
+    if version["status"] == "waiting_human" and overridden:
+        conn.execute("UPDATE shot_versions SET status='succeeded', error=NULL WHERE id=?", (version["id"],))
 
 
 def _adopt_version_core(shot_id: str, body: dict) -> dict:
@@ -35,8 +66,7 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
     _review_assert_shot_positive(shot_id, body.get("qualification_version"))
     conn = get_conn()
     v = conn.execute("SELECT * FROM shot_versions WHERE id=? AND shot_id=?", (version_id, shot_id)).fetchone()
-    if not v or v["status"] != "succeeded":
-        raise HTTPException(409, "该版本不存在或未成功")
+    human_override = _assert_version_adoptable(v, body)
     from app.evidence import media as media_evidence
 
     try:
@@ -49,8 +79,7 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
             "SELECT technical_validation_json FROM shot_versions WHERE id=?", (version_id,)
         ).fetchone()
         technical = json.loads(refreshed["technical_validation_json"] or "{}")
-    if not technical.get("passed"):
-        raise HTTPException(409, "视频技术门禁未通过，不能人工采用")
+    overridden = _quality_issues_overridden(technical, human_override)
     qa = json.loads(v["qa_json"] or "{}")
     observed_state_out = qa.get("observed_state_out")
     if observed_state_out:
@@ -68,16 +97,17 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
             evaluator_type="human", evaluator_name=current_actor_name(),
             evaluator_version="1.0.0", status="passed", hard_gate_passed=True,
             score=100, evidence={
-                "decision": "adopt", "reason": reason, "playback_rate": playback_rate,
+                "decision": "adopt", "reason": reason, "playback_rate": playback_rate, "overrode_quality_issues": overridden,
             },
         )],
     )
     shot = conn.execute("SELECT episode_id, adopted_version_id FROM shots WHERE id=?", (shot_id,)).fetchone()
     previous_rate = float(v["playback_rate"] or 1.0)
     conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (version_id, shot_id))
+    _settle_waiting_human(conn, v, overridden)
     conn.execute(
         "UPDATE shot_versions SET adoption_reason=?, playback_rate=? WHERE id=?",
-        (reason, playback_rate, version_id),
+        (reason + (f"（人工越过质量判定：{'、'.join(overridden)}）" if overridden else ""), playback_rate, version_id),
     )
     conn.execute(
         """INSERT INTO gate_decisions(
@@ -130,7 +160,7 @@ async def adopt_version(shot_id: str, body: dict):
         "video.adopt_version",
         {
             "shot_id": shot_id, "version_id": body.get("version_id"), "reason": body.get("reason"),
-            "playback_rate": body.get("playback_rate", 1.0),
+            "playback_rate": body.get("playback_rate", 1.0), "human_override": True,  # REST 只有人在用：人工采纳最高优先级
             "qualification_version": body.get("qualification_version"),
             "idempotency_key": body.get("idempotency_key"), "request_id": body.get("request_id"),
         },

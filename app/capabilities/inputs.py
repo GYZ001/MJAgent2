@@ -283,6 +283,9 @@ class VideoAdoptVersionInput(StandardCommandInput):
     version_id: str
     qualification_version: str | None = None
     playback_rate: float = Field(default=1.0, ge=0.5, le=2.0, allow_inf_nan=False)
+    # 人工采纳是最高优先级（2026-09-15 用户拍板）：有可播放文件即可采纳，字幕闸门等质量判定只记录不拦；
+    # 只有人（界面/代理）能带这个标志，合成时的自动代采不带。
+    human_override: bool = False
 
 
 class VideoRepairStaleAssetsInput(StandardCommandInput):

@@ -16,19 +16,14 @@ function newIdemKey(prefix: string): string {
   return `${prefix}:${rand}`
 }
 
+/** 人工采纳是最高优先级（2026-09-15 用户拍板）：有可播放视频就能采纳，字幕闸门这类质量判定
+ *  只作提示不拦人；没有视频文件的（失败/生成中）才不能采纳。 */
 export function attemptAdoptability(
-  version: Pick<ShotVersion, 'id' | 'status' | 'technical_validation_json'>,
+  version: Pick<ShotVersion, 'id' | 'status' | 'video_url'>,
   adoptedId: string | null | undefined,
 ): AttemptAdoptability {
   if (version.id === adoptedId) return { adoptable: false, reason: '已是采纳版本' }
-  if (version.status !== 'succeeded') return { adoptable: false, reason: '该版本未成功，只能预览，不能采纳' }
-  let passed = false
-  try {
-    passed = Boolean((JSON.parse(version.technical_validation_json || 'null') as { passed?: boolean } | null)?.passed)
-  } catch {
-    passed = false
-  }
-  if (!passed) return { adoptable: false, reason: '该版本未通过技术门禁（如画面叠加字幕），只能预览，不能采纳' }
+  if (!version.video_url) return { adoptable: false, reason: '该版本没有可播放的视频，只能查看记录，不能采纳' }
   return { adoptable: true, reason: '' }
 }
 
