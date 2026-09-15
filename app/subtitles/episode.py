@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -79,6 +80,17 @@ def _speaker_display_name(identity_id: str, names: dict[str, str]) -> str:
     return identity_id.split(":", 1)[-1] if identity_id else ""
 
 
+# 台词正文里的「（…）」/「(…)」是舞台提示（自言自语 / 没抬头 / 接过猫，听诊器贴上去），不是说出口的话：
+# 2026-09-15《龙猫出爪》第 1 集字幕烧成「（自言自语）都说我好……」，ASR 对齐也因括号里的动作描写
+# 找不到这句。存量账本（分镜时抽取未拆括号的那些）在这里兜住：对齐与出条只用说出口的话。
+_STAGE_DIRECTION_RE = re.compile(r"[（(][^（()）]*[）)]")
+
+
+def spoken_text(line: str) -> str:
+    """去掉括号舞台提示后的说出口的话；没有括号时原样返回。"""
+    return _STAGE_DIRECTION_RE.sub("", str(line or "")).strip()
+
+
 def _segment_line_specs(segment: dict, dialogue: list) -> list[LineSpec]:
     names = speaker_names(segment)
     specs: list[LineSpec] = []
@@ -88,7 +100,7 @@ def _segment_line_specs(segment: dict, dialogue: list) -> list[LineSpec]:
         identity = str(item.get("speaker_identity_id") or "")
         specs.append(LineSpec(
             utterance_id=str(item.get("utterance_id") or f"U{index:02d}"),
-            text=str(item.get("line") or ""),
+            text=spoken_text(item.get("line")),
             speaker=_speaker_display_name(identity, names),
             delivery_kind=str(item.get("delivery_kind") or effective_delivery_kind(item)),
         ))
@@ -103,7 +115,7 @@ def _legacy_line_specs(legacy: list) -> list[LineSpec]:
         delivery = str(item.get("delivery") or "spoken_dialogue")
         specs.append(LineSpec(
             utterance_id=f"L{index:02d}",
-            text=str(item.get("line") or ""),
+            text=spoken_text(item.get("line")),
             speaker=str(item.get("speaker") or ""),
             delivery_kind=_LEGACY_DELIVERY_KIND.get(delivery, "spoken_dialogue"),
         ))
