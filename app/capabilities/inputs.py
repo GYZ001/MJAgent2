@@ -156,6 +156,12 @@ class EpisodeScopedInput(StandardCommandInput):
     episode_id: str
 
 
+class DeliveryConcatenateInput(EpisodeScopedInput):
+    """``delivery.concatenate``：``background=True``（浏览器路由）立即返回 202、合成在后台线程跑，
+    成片台轮询 mix-status 的 ``concat_in_progress``；代理/MCP 调用默认同步等待结果（仍在线程里跑，不冻结事件循环）。"""
+    background: bool = False
+
+
 class VideoGenerateEpisodeInput(EpisodeScopedInput):
     """整集生成视频（``video.generate_episode``）专用输入。
 

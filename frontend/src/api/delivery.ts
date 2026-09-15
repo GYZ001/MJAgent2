@@ -55,6 +55,10 @@ export interface MixStatus {
   final_edit_report?: Record<string, unknown> | null;
   /** 有字幕嵌入且生成了 srt 文件时的可下载地址（/media/...）；否则为 null/缺省。 */
   subtitle_srt_url?: string | null;
+  /** 整集合成正在后台执行（2026-09-15：合成改为后台任务，浏览器请求立即返回）。 */
+  concat_in_progress?: boolean;
+  /** 最近一次后台合成的失败原因；成功后清空。 */
+  concat_last_error?: string | null;
   shots: MixShot[];
 }
 

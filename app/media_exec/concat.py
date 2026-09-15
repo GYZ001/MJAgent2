@@ -15,10 +15,11 @@ from app.artifacts import _adopted_video_paths
 from app.atomic_io import atomic_copy
 from app.db import get_conn, new_id, now, rows_to_dicts
 from app.media_pipeline.delivery_encode import (
-    DELIVERY_VIDEO_ARGS, INTERMEDIATE_VIDEO_ARGS, canvas_filter, encode_timeout_s,
+    DELIVERY_VIDEO_ARGS, low_priority, INTERMEDIATE_VIDEO_ARGS, canvas_filter, encode_timeout_s,
     probe_resolution, probe_video_codec, uniform_resolution,
 )
 from app.media_urls import build_media_url
+from app.media_exec import concat_state  # noqa: E402 —— 与 subtitle_episode 同组
 from app.subtitles import episode as subtitle_episode
 
 
@@ -908,8 +909,7 @@ def episode_mix_status(episode_id: str) -> dict:
         "generation_active": bool(active_shot_nos),
         "active_shot_nos": active_shot_nos,
         "all_ready": len(shots) > 0 and available == len(shots),
-        "shots_skipped": len(skipped_shot_nos),
-        "skipped_shot_nos": skipped_shot_nos,
+        "shots_skipped": len(skipped_shot_nos), "skipped_shot_nos": skipped_shot_nos,
         "final_video_url": _existing_final_url(ep),
         "final_video_stale": _final_video_is_stale(ep),
         "final_is_partial": bool(
@@ -917,6 +917,7 @@ def episode_mix_status(episode_id: str) -> dict:
         ),
         "final_edit_report": subtitle_episode.trim_report_for_projection(final_edit_report),
         "subtitle_srt_url": subtitle_episode.srt_sidecar_url(final_path, final_edit_report),
+        "concat_in_progress": concat_state.in_progress(episode_id), "concat_last_error": concat_state.last_error(episode_id),
         "shots": out,
     }
 
@@ -1039,7 +1040,7 @@ def _run_concat_demuxer(
         try:
             subprocess.run(
                 concat_in + ["-c", "copy", "-movflags", "+faststart", str(concat_output)],
-                check=True, capture_output=True, timeout=timeout_s)
+                check=True, capture_output=True, timeout=timeout_s, preexec_fn=low_priority)
             return
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             pass
@@ -1048,7 +1049,7 @@ def _run_concat_demuxer(
         subprocess.run(
             concat_in + [*vf_args, *DELIVERY_VIDEO_ARGS, "-c:a", "aac", "-ar", str(audio_rate),
                          "-movflags", "+faststart", str(concat_output)],
-            check=True, capture_output=True, timeout=timeout_s)
+            check=True, capture_output=True, timeout=timeout_s, preexec_fn=low_priority)
     except subprocess.TimeoutExpired as exc:
         raise ValueError(f"整集合成超过 {int(timeout_s)} 秒，已停止本次任务；上一版成片仍保留，可稍后重试") from exc
     except subprocess.CalledProcessError as exc:
@@ -1103,7 +1104,7 @@ def _draft_concat_pieces(
                 "-movflags", "+faststart", str(prepared_path),
             ]
             try:
-                subprocess.run(prepare_cmd, check=True, capture_output=True, timeout=concat_timeout_s)
+                subprocess.run(prepare_cmd, check=True, capture_output=True, timeout=concat_timeout_s, preexec_fn=low_priority)
             except subprocess.TimeoutExpired as exc:
                 raise ValueError(f"镜 {shot_no} 的音视频归一处理超时；上一版成片仍保留，可稍后重试") from exc
             except subprocess.CalledProcessError as exc:
@@ -1299,8 +1300,7 @@ def concatenate_episode(
         "shots": len(piece_specs),
         "ffmpeg_missing": False,
         "shots_total": len(all_shot_nos),
-        "shots_skipped": len(skipped_shot_nos),
-        "skipped_shot_nos": skipped_shot_nos,
+        "shots_skipped": len(skipped_shot_nos), "skipped_shot_nos": skipped_shot_nos,
         "missing_model_shot_nos": missing_model_shot_nos,
         "skip_reasons": skip_reasons,
         "included_shot_nos": piece_shot_nos,

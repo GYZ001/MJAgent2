@@ -1,14 +1,56 @@
 """delivery.* Command Handlers（成片拼接、交付候选、审批与客户反馈）。"""
 from __future__ import annotations
 
+import asyncio
+import logging
+
 from app.capabilities import inputs as I
 from app.capabilities.handlers.common import accepted, call_guarded, failed, succeeded
 from app.capabilities.schemas import CommandResult
 
+_LOGGER = logging.getLogger(__name__)
 
-async def concatenate(args: I.EpisodeScopedInput) -> CommandResult:
+
+async def _concatenate_in_thread(worker, args, **operation) -> dict:
+    """合成是 ffmpeg/ASR 的分钟级重活，必须离开事件循环线程（2026-09-15 实测：跑在循环上时
+    整个后端冻结 122 秒，健康页都超时）。"""
+    return await asyncio.to_thread(worker.concatenate_episode, args.episode_id, **operation)
+
+
+async def _concatenate_background(worker, args, *, request_fingerprint: str, claim_token: str, **operation) -> None:
+    from app.media_exec import concat_state
+
+    try:
+        await _concatenate_in_thread(worker, args, **operation)
+        concat_state.clear_error(args.episode_id)
+    except Exception as exc:  # noqa: BLE001 后台任务没有调用方接异常：释放 receipt、记下原因供成片台展示
+        worker.release_concat_operation(
+            idempotency_key=args.idempotency_key or "", request_fingerprint=request_fingerprint, claim_token=claim_token,
+        )
+        concat_state.record_error(args.episode_id, str(exc))
+        _LOGGER.warning("[CONCAT][后台失败] 集 %s：%s", args.episode_id, exc)
+
+
+def _spawn_background(worker, args, *, request_fingerprint: str, claim_token: str, **operation) -> CommandResult:
+    from app import task_registry
+    from app.media_exec import concat_state
+
+    concat_state.clear_error(args.episode_id)
+    task_registry.spawn(concat_state.TASK_KIND, args.episode_id, _concatenate_background(
+        worker, args, request_fingerprint=request_fingerprint, claim_token=claim_token, **operation,
+    ))
+    return accepted("成片合成已在后台开始，完成后成片台自动刷新", data={"concat_in_progress": True},
+                    resource_uris=[f"manju://episodes/{args.episode_id}/delivery"])
+
+
+async def concatenate(args: I.DeliveryConcatenateInput) -> CommandResult:
     from app import worker
     from app.capabilities.bus import canonical_command_request_fingerprint
+    from app.media_exec import concat_state
+
+    if concat_state.in_progress(args.episode_id):
+        return accepted("本集成片正在后台合成中", data={"concat_in_progress": True},
+                        resource_uris=[f"manju://episodes/{args.episode_id}/delivery"])
 
     request_fingerprint = canonical_command_request_fingerprint(
         "delivery.concatenate",
@@ -64,16 +106,11 @@ async def concatenate(args: I.EpisodeScopedInput) -> CommandResult:
             resource_uris=[f"manju://episodes/{args.episode_id}/delivery"],
         )
     assert claim_token is not None
-
-    outcome = await call_guarded(
-        worker.concatenate_episode,
-        args.episode_id,
-        operation_idempotency_key=args.idempotency_key,
-        operation_request_fingerprint=request_fingerprint,
-        operation_claim_token=claim_token,
-        operation_release_authority=release_authority,
-        operation_video_delivery_manifest=video_delivery_manifest,
-    )
+    operation = dict(operation_idempotency_key=args.idempotency_key, operation_request_fingerprint=request_fingerprint, operation_claim_token=claim_token,
+                     operation_release_authority=release_authority, operation_video_delivery_manifest=video_delivery_manifest)
+    if getattr(args, "background", False):  # 旧调用方仍传 EpisodeScopedInput
+        return _spawn_background(worker, args, request_fingerprint=request_fingerprint, claim_token=claim_token, **operation)
+    outcome = await call_guarded(_concatenate_in_thread, worker, args, **operation)
     if isinstance(outcome, CommandResult):
         worker.release_concat_operation(
             idempotency_key=args.idempotency_key or "",

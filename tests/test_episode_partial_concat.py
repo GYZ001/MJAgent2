@@ -81,7 +81,7 @@ def _database(shot_nos: tuple[int, ...] = (1, 2, 3), *, db_path: Path | None = N
     # db_path 给需要"用第二条独立连接读盘上数据"的用例用——:memory: 私有于
     # 单个连接对象，验证不了真提交是否落盘；传入真实文件路径时可以另开一条
     # sqlite3.connect() 独立核对，而不是用写入的同一条连接自证。
-    conn = sqlite3.connect(str(db_path) if db_path is not None else ":memory:")
+    conn = sqlite3.connect(str(db_path) if db_path is not None else ":memory:", check_same_thread=False)  # 处理器在线程里跑领域函数
     conn.row_factory = sqlite3.Row
     conn.executescript(db.SCHEMA)
     for statement in db.MIGRATIONS:

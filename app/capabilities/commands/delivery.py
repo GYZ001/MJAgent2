@@ -21,7 +21,7 @@ def commands() -> list[CommandSpec]:
             "delivery.concatenate",
             title="拼接成片",
             description="拼接已采用镜头为成片",
-            input_model=I.EpisodeScopedInput,
+            input_model=I.DeliveryConcatenateInput,
             risk=RiskLevel.R2_MATERIAL,
             confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.REQUIRED,

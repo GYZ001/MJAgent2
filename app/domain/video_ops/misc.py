@@ -36,7 +36,7 @@ async def concatenate(episode_id: str, body: dict | None = None):
     from app.capabilities.dispatch import ui_route
     payload = dict(body) if isinstance(body, dict) else {}
     routed = await ui_route("delivery.concatenate", {
-        "episode_id": episode_id,
+        "episode_id": episode_id, "background": True,  # 浏览器：立即返回 202，成片台轮询 concat_in_progress
         "idempotency_key": payload.get("idempotency_key"),
         "request_id": payload.get("request_id"),
     })

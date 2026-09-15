@@ -10,6 +10,7 @@ import { deliveryWarningLabel } from './cinema/deliveryLabels'
 import SubtitlePanel from './cinema/SubtitlePanel'
 import { subtitleSummaryLine } from './cinema/subtitleSummary'
 import "../styles/CinemaPage.css";
+import { isConcatAccepted, useConcatWatch } from './cinema/concatWatch'
 
 const DELIVERY_STATUS_LABELS: Record<string, string> = {
   waiting_human: '待人工复验',
@@ -211,6 +212,10 @@ export default function CinemaPage() {
   useEffect(() => {
     if (polledMix) setMix(previous => reconcileMixStatus(previous, polledMix))
   }, [polledMix])
+  useConcatWatch(polledMix, mixBusy, { setMixBusy, onFinished: error => {
+    setMixBusy(false); mixTimer.clear(); localStorage.removeItem(deliveryOperationStorageKey(`concat:${episodeId}`))
+    toast(error ? `成片合成失败：${error}` : '成片合成完成，已刷新', Boolean(error)); refreshDelivery()
+  } })
 
   useEffect(() => {
     if (!polledDelivery) return
@@ -348,6 +353,11 @@ export default function CinemaPage() {
       const result = await api.concatenateEpisode(ep.id, {
         idempotency_key: concatKey,
       })
+      if (isConcatAccepted(result)) {
+        toast('成片合成已在后台开始，完成后自动刷新；期间页面照常可用')
+        setMix(previous => previous ? { ...previous, concat_in_progress: true } : previous)
+        return  // mixBusy 保持，轮询到 concat_in_progress 变假时收尾（见下方 useEffect）
+      }
       localStorage.removeItem(deliveryOperationStorageKey(`concat:${ep.id}`))
       if (result.ffmpeg_missing) {
         mixTimer.clear()

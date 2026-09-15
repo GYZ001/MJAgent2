@@ -32,6 +32,8 @@
 """
 from __future__ import annotations
 
+import os
+
 import json
 import subprocess
 from pathlib import Path
@@ -40,9 +42,22 @@ DELIVERY_WIDTH = 1080
 DELIVERY_HEIGHT = 1920
 
 # 最终成片：一次性有损编码，H.264 High + medium + crf 20（依据见模块 docstring）。
+# 编码线程给机器留两核（2026-09-15 实测：8 核 B 合成时负载 9+，uvicorn 与 ASR 抢不到 CPU）；
+# 配合 low_priority() 把 ffmpeg/ASR 子进程 nice 到 10，后端进程的响应优先于重编码。
+ENCODE_THREADS = max(2, (os.cpu_count() or 4) - 2)
+
+
+def low_priority() -> None:
+    """subprocess.run(..., preexec_fn=low_priority)：子进程自降 CPU 优先级，不影响父进程。"""
+    try:
+        os.nice(10)
+    except OSError:
+        pass
+
+
 DELIVERY_VIDEO_ARGS = [
     "-c:v", "libx264", "-preset", "medium", "-crf", "20",
-    "-pix_fmt", "yuv420p", "-profile:v", "high",
+    "-pix_fmt", "yuv420p", "-profile:v", "high", "-threads", str(ENCODE_THREADS),
 ]
 # 中间件（片段级归一化，非最终交付物）：近无损，避免与最终编码叠加成两代有损。
 INTERMEDIATE_VIDEO_ARGS = [

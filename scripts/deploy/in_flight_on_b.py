@@ -10,13 +10,14 @@ jobs 状态在 ACTIVE_JOB_STATUSES 算在途。
 
 用法（部署脚本通过 stdin 把本文件送到 B 上执行，不依赖 B 的检出里有没有它）：
     ssh mjb '/root/MJAgent2/.venv/bin/python -' < scripts/deploy/in_flight_on_b.py
-输出一行：``IDLE`` 或 ``IN_FLIGHT runs=<n> jobs=<m>``；退出码 0 空闲、1 有在途、2 检查本身失败。
+输出一行：``IDLE`` 或 ``IN_FLIGHT runs=<n> jobs=<m> concats=<k>``；退出码 0 空闲、1 有在途、2 检查本身失败。
 """
 from __future__ import annotations
 
 import os
 import sqlite3
 import sys
+import time
 
 REPO = os.environ.get("MJAGENT2_REPO") or "/root/MJAgent2"
 os.chdir(REPO)
@@ -36,10 +37,17 @@ def main() -> int:
         jobs = int(conn.execute(
             f"SELECT COUNT(*) FROM jobs WHERE status IN ({placeholders})", ACTIVE_JOB_STATUSES,
         ).fetchone()[0] or 0)
+        try:  # 整集合成（concat_operation_receipts 租约未过期）也是在途：2026-09-15 部署重启掐断过用户的合成
+            concats = int(conn.execute(
+                "SELECT COUNT(*) FROM concat_operation_receipts WHERE status='running' AND lease_expires_at > ?",
+                (time.time(),),
+            ).fetchone()[0] or 0)
+        except sqlite3.OperationalError:
+            concats = 0
     finally:
         conn.close()
-    if runs or jobs:
-        print(f"IN_FLIGHT runs={runs} jobs={jobs}")
+    if runs or jobs or concats:
+        print(f"IN_FLIGHT runs={runs} jobs={jobs} concats={concats}")
         return 1
     print("IDLE")
     return 0

@@ -13,7 +13,7 @@ from app.capabilities.handlers import delivery as delivery_handler
 
 
 def _memory_database() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(db.SCHEMA)
     conn.execute("INSERT INTO projects(id,name,created_at) VALUES('p','P',0)")

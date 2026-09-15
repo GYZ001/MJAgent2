@@ -110,6 +110,14 @@ def engine_status() -> EngineStatus:
     )
 
 
+def _low_priority() -> None:
+    """ASR/ffmpeg 子进程自降 CPU 优先级（nice 10），后端进程的响应优先；本包 L1 不依赖 app.media_pipeline。"""
+    try:
+        os.nice(10)
+    except OSError:
+        pass
+
+
 def extract_wav(source: Path, wav_path: Path, *, timeout_s: float) -> None:
     """ffmpeg 抽 16kHz 单声道 s16le wav；失败/超时都抛 ``AsrEngineError``。"""
     cmd = [
@@ -117,7 +125,7 @@ def extract_wav(source: Path, wav_path: Path, *, timeout_s: float) -> None:
         "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav_path),
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=timeout_s)
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout_s, preexec_fn=_low_priority)
     except subprocess.TimeoutExpired as exc:
         raise AsrEngineError(f"ffmpeg 抽取音轨超时（{source}）；请检查源文件是否损坏") from exc
     except FileNotFoundError as exc:
@@ -130,7 +138,7 @@ def extract_wav(source: Path, wav_path: Path, *, timeout_s: float) -> None:
 def _run_worker(cmd: list[str], *, timeout_s: float) -> subprocess.CompletedProcess:
     """子进程调用的唯一入口——测试通过 monkeypatch 本函数注入假输出，不 patch
     ``subprocess.run`` 全局（那会连累其它模块共用的 subprocess 调用）。"""
-    return subprocess.run(cmd, cwd=str(config.ROOT), capture_output=True, timeout=timeout_s)
+    return subprocess.run(cmd, cwd=str(config.ROOT), capture_output=True, timeout=timeout_s, preexec_fn=_low_priority)
 
 
 def _extract_all_wavs(jobs: Mapping[str, Path], tmp_dir: Path, timeout_s: float) -> list[dict[str, str]]:

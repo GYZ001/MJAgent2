@@ -18,7 +18,7 @@ from app.continuity import (
     structured_boundary_issues,
 )
 from app.media_pipeline.delivery_encode import (
-    DELIVERY_HEIGHT as FINAL_HEIGHT, DELIVERY_VIDEO_ARGS, DELIVERY_WIDTH as FINAL_WIDTH,
+    DELIVERY_HEIGHT as FINAL_HEIGHT, low_priority, DELIVERY_VIDEO_ARGS, DELIVERY_WIDTH as FINAL_WIDTH,
     INTERMEDIATE_VIDEO_ARGS, canvas_filter, encode_timeout_s, scale_box, scale_px,
 )
 from app.schemas import Shot
@@ -43,7 +43,7 @@ class TransitionSpec:
 
 def _run_ffmpeg(command: list[str], *, timeout: float, context: str) -> None:
     try:
-        subprocess.run(command, check=True, capture_output=True, timeout=timeout)
+        subprocess.run(command, check=True, capture_output=True, timeout=timeout, preexec_fn=low_priority)
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"{context}超时") from exc
     except subprocess.CalledProcessError as exc:
