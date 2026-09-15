@@ -55,9 +55,7 @@ _load_env()
 DEPLOYMENT_PROFILE = (os.environ.get("DEPLOYMENT_PROFILE", "saas") or "saas").strip().lower()
 def is_enterprise_profile() -> bool: return DEPLOYMENT_PROFILE == "enterprise"  # PRD/enterprise/README.md §2
 DEFAULT_HIAGENT_BASE_URL = "https://hia.volcenginepaas.com/api/aigw/v1"
-HIAGENT_BASE_URL = os.environ.get(
-    "HIAGENT_BASE_URL", DEFAULT_HIAGENT_BASE_URL
-).rstrip("/")
+HIAGENT_BASE_URL = os.environ.get("HIAGENT_BASE_URL", DEFAULT_HIAGENT_BASE_URL).rstrip("/")
 HIAGENT_API_KEY = os.environ.get("HIAGENT_API_KEY", "")
 # HiAgent 内置模型的技术标识。模型库、默认职责分配与真实调用必须共用同一来源，
 # 避免“模型测试可用，但 active_model 仍为空”的双轨状态。
@@ -75,26 +73,12 @@ MINIMAX_H3_BASE_URL = os.environ.get(
     "MINIMAX_H3_BASE_URL", "https://whatever-jane-circuits-cabinet.trycloudflare.com"
 ).rstrip("/")
 MINIMAX_H3_API_KEY = os.environ.get("MINIMAX_H3_API_KEY", "")
-MINIMAX_H3_VIDEO_WIDTH = max(
-    32, min(4096, int(os.environ.get("MINIMAX_H3_VIDEO_WIDTH", "576")) // 32 * 32)
-)
-MINIMAX_H3_VIDEO_HEIGHT = max(
-    32, min(4096, int(os.environ.get("MINIMAX_H3_VIDEO_HEIGHT", "1024")) // 32 * 32)
-)
-_minimax_h3_acceleration = os.environ.get(
-    "MINIMAX_H3_ACCELERATION", "turbo"
-).strip().lower()
-MINIMAX_H3_ACCELERATION = (
-    _minimax_h3_acceleration
-    if _minimax_h3_acceleration in {"standard", "turbo"}
-    else "turbo"
-)
-MINIMAX_H3_TURBO_PROFILE = (
-    os.environ.get("MINIMAX_H3_TURBO_PROFILE", "quality").strip() or "quality"
-)
-MINIMAX_H3_VIDEO_VAE = (
-    os.environ.get("MINIMAX_H3_VIDEO_VAE", "fp16").strip() or "fp16"
-)
+MINIMAX_H3_VIDEO_WIDTH = max(32, min(4096, int(os.environ.get("MINIMAX_H3_VIDEO_WIDTH", "576")) // 32 * 32))
+MINIMAX_H3_VIDEO_HEIGHT = max(32, min(4096, int(os.environ.get("MINIMAX_H3_VIDEO_HEIGHT", "1024")) // 32 * 32))
+_minimax_h3_acceleration = os.environ.get("MINIMAX_H3_ACCELERATION", "turbo").strip().lower()
+MINIMAX_H3_ACCELERATION = _minimax_h3_acceleration if _minimax_h3_acceleration in {"standard", "turbo"} else "turbo"
+MINIMAX_H3_TURBO_PROFILE = os.environ.get("MINIMAX_H3_TURBO_PROFILE", "quality").strip() or "quality"
+MINIMAX_H3_VIDEO_VAE = os.environ.get("MINIMAX_H3_VIDEO_VAE", "fp16").strip() or "fp16"
 _minimax_h3_step_min, _minimax_h3_step_max = (
     (4, 8) if MINIMAX_H3_ACCELERATION == "turbo" else (1, 100)
 )
@@ -462,6 +446,9 @@ DEFAULT_SETTINGS = {
     "reference_shot_cohort_limit": "15",
     "video_reference_batch_prompt": "true",   # P1：一镜一次提示词合同
     "video_reference_role_adaptive": "false", "video_subtitle_gate_enabled": "true",  # 前者实验默认关；后者见 subtitle_gate
+    # 成片台字幕嵌入（PRD/成片台字幕嵌入_台词对齐字幕PRD.md）：总开关默认关，四个样式键取 §8 缺省值。
+    "subtitle_burn_in_enabled": "false", "subtitle_font_size": "64", "subtitle_margin_bottom": "400",
+    "subtitle_max_chars_per_line": "14", "subtitle_show_speaker": "false",
     # 本地项目媒体映射到自有对象存储/CDN 的公开基址；为空时视频输入明确阻断。
     "provider_media_public_base_url": "",
     "provider_media_max_download_bytes": str(512 * 1024 * 1024),

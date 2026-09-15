@@ -159,6 +159,12 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "video_reference_batch_prompt": _boolean("批量参考图提示词", "true"),
     "video_reference_role_adaptive": _boolean("质量角色自适应", "false", experimental=True),
     "video_subtitle_gate_enabled": _boolean("视频字幕闸门", "true"),
+    # 成片台字幕嵌入（PRD/成片台字幕嵌入_台词对齐字幕PRD.md §8/§10）：总开关 + 四个样式键。
+    "subtitle_burn_in_enabled": _boolean("成片字幕嵌入", "false"),
+    "subtitle_font_size": _number("字幕字号", "64", 40, 120, unit="px"),
+    "subtitle_margin_bottom": _number("字幕底边距", "400", 0, 800, unit="px", description="避开短视频平台底部 UI"),
+    "subtitle_max_chars_per_line": _number("字幕每行字数", "14", 8, 24, unit="字"),
+    "subtitle_show_speaker": _boolean("字幕显示说话人前缀", "false"),
     "provider_media_max_download_bytes": _number(
         "视频参考素材大小上限", str(512 * 1024 * 1024),
         1_048_576, 2_147_483_648, unit="字节",

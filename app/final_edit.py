@@ -27,12 +27,9 @@ FINAL_FPS = 24
 FINAL_AUDIO_RATE = 48_000
 
 _FONT_CANDIDATES = (
-    "/System/Library/Fonts/Supplemental/Songti.ttc",
-    "/System/Library/Fonts/Hiragino Sans GB.ttc",
-    "/System/Library/Fonts/STHeiti Medium.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/System/Library/Fonts/Supplemental/Songti.ttc", "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/STHeiti Medium.ttc", "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
 )
 
 
@@ -413,14 +410,20 @@ def _text_owners(shots: list[Shot]) -> tuple[dict[str, int], list[dict[str, Any]
     return owners, warnings
 
 
-def _compose(prepared: list[dict[str, Any]], transitions: list[TransitionSpec], destination: Path) -> dict[str, Any]:
+def _compose(
+    prepared: list[dict[str, Any]], transitions: list[TransitionSpec], destination: Path,
+    *, subtitle_plan: Any = None, work_dir: Path | None = None,
+) -> dict[str, Any]:
+    from app.subtitles.episode import compose_artifacts  # 延迟导入避免与 episode.py 的模块级 import 本文件循环（同层 L4）
+
     if len(prepared) == 1:
-        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", prepared[0]["path"],
+        artifacts = compose_artifacts(prepared, [], subtitle_plan, work_dir)
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", prepared[0]["path"], *(["-vf", artifacts.filter_arg] if artifacts else []),
                *DELIVERY_VIDEO_ARGS, "-c:a", "copy", "-movflags", "+faststart", str(destination)]
         _run_ffmpeg(cmd, timeout=encode_timeout_s(prepared[0]["duration_s"]), context="最终编码（单镜）")
         if not destination.is_file() or destination.stat().st_size <= 0:
             raise RuntimeError("最终编辑未产出有效文件")
-        return {"total_duration_s": prepared[0]["duration_s"], "transitions": []}
+        return {"total_duration_s": prepared[0]["duration_s"], "transitions": [], "subtitle_artifacts": artifacts}
 
     command = ["ffmpeg", "-y", "-loglevel", "error"]
     for item in prepared:
@@ -460,6 +463,8 @@ def _compose(prepared: list[dict[str, Any]], transitions: list[TransitionSpec], 
         video_label = next_video
         audio_label = next_audio
     base_command = list(command)
+    artifacts = compose_artifacts(prepared, reports, subtitle_plan, work_dir)
+    filters, video_label = ([*filters, f"[{video_label}]{artifacts.filter_arg}[vsub]"], "vsub") if artifacts else (filters, video_label)
 
     def command_with_normalizer(normalizer: str) -> list[str]:
         normalized_filters = [*filters, f"[{audio_label}]{normalizer}[aout]"]
@@ -475,11 +480,7 @@ def _compose(prepared: list[dict[str, Any]], transitions: list[TransitionSpec], 
     timeout = encode_timeout_s(cumulative)
     audio_normalization = "loudnorm"
     try:
-        _run_ffmpeg(
-            command_with_normalizer("loudnorm=I=-16:TP=-1.5:LRA=11"),
-            timeout=timeout,
-            context="最终转场与音轨合成",
-        )
+        _run_ffmpeg(command_with_normalizer("loudnorm=I=-16:TP=-1.5:LRA=11"), timeout=timeout, context="最终转场与音轨合成")
     except RuntimeError as loudnorm_error:
         # 纯静音轨的响度是 -inf，部分 ffmpeg loudnorm 会产生 NaN。
         # 用不改变声道语义的动态归一化重试，仍保证完整交付。
@@ -488,8 +489,7 @@ def _compose(prepared: list[dict[str, Any]], transitions: list[TransitionSpec], 
         try:
             _run_ffmpeg(
                 command_with_normalizer("dynaudnorm=f=150:g=15:p=0.95,alimiter=limit=0.95"),
-                timeout=timeout,
-                context="最终转场与静音兼容归一化",
+                timeout=timeout, context="最终转场与静音兼容归一化",
             )
         except RuntimeError as fallback_error:
             raise RuntimeError(f"{loudnorm_error}；归一化降级也失败：{fallback_error}") from fallback_error
@@ -498,7 +498,7 @@ def _compose(prepared: list[dict[str, Any]], transitions: list[TransitionSpec], 
     return {
         "total_duration_s": round(cumulative, 3),
         "transitions": reports,
-        "audio_normalization": audio_normalization,
+        "audio_normalization": audio_normalization, "subtitle_artifacts": artifacts,
     }
 
 
@@ -508,6 +508,7 @@ def render_episode_final_edit(
     piece_specs: list[tuple[int, str, float]],
     destination: Path,
     work_dir: Path,
+    subtitle_plan: Any = None,
 ) -> dict[str, Any]:
     """尝试完成确定性最终编辑；失败信息由调用方用于回退硬拼。"""
     rows = conn.execute(
@@ -561,7 +562,7 @@ def render_episode_final_edit(
         else transition_spec("硬切")
         for previous, current in zip(ordered_shots, ordered_shots[1:])
     ]
-    compose_report = _compose(prepared, transition_specs, destination)
+    compose_report = _compose(prepared, transition_specs, destination, subtitle_plan=subtitle_plan, work_dir=work_dir)
     return {
         "ok": True,
         "prepared_shots": len(prepared),

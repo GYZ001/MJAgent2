@@ -286,3 +286,74 @@ def test_final_edit_smoke_renders_text_and_uses_incoming_transition(tmp_path: Pa
     assert report["transitions"][0]["from_shot_no"] == 1
     assert report["transitions"][0]["to_shot_no"] == 2
     assert report["boundary_report"]["runtime_blocking"] is False
+
+
+def _probe_video_duration(path: Path) -> float:
+    raw = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=duration", "-of", "json", str(path)],
+        check=True, capture_output=True, text=True, timeout=30,
+    ).stdout
+    return float(json.loads(raw)["streams"][0]["duration"])
+
+
+def _plan_for_two_shots():
+    from app.subtitles import episode
+    from app.subtitles.align import LineAlignment, ShotAlignment
+    from app.subtitles.ass import SubtitleStyle, font_family_from_file
+    from app.subtitles.cues import Cue
+
+    style = SubtitleStyle(font_family=font_family_from_file(_font_path()))
+
+    def shot_plan(shot_no: int, text: str):
+        end = 0.05 + 0.2 * len(text)
+        line = LineAlignment(
+            utterance_id="U01", text=text, status="aligned", match_ratio=1.0,
+            matched_chars=len(text), exact_chars=len(text), total_chars=len(text),
+            char_times=(), start_s=0.05, end_s=end, reason="", speaker="", delivery_kind="narration",
+        )
+        alignment = ShotAlignment(lines=(line,), extra_speech=(), asr_text=text)
+        cue = Cue(shot_no=shot_no, utterance_id="U01", text=text, start_s=0.05, end_s=end)
+        return episode.ShotSubtitlePlan(
+            shot_no=shot_no, version_id=f"v{shot_no}", cues=(cue,), alignment=alignment, cache_hit=False,
+        )
+
+    return episode.EpisodeSubtitlePlan(
+        shots={1: shot_plan(1, "你好"), 2: shot_plan(2, "再见")},
+        style=style, fonts_dir=_font_path().parent, engine_id="test", model_id="test",
+        asr_elapsed_s=0.0, asr_shots=0, cache_hits=0,
+    )
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="ffmpeg unavailable")
+def test_final_edit_burns_subtitles_with_correct_xfade_offset(tmp_path: Path) -> None:
+    """第二镜 cue 的整集偏移 = 第一镜规格化后实测时长 − xfade 时长（PRD §7 公式）；
+    实测时长独立探测已落盘的 work_dir/prepared-1.mp4，不复用 _compose 内部数字。
+    """
+    try:
+        _font_path()
+    except RuntimeError:
+        pytest.skip("test host has no configured CJK font")
+    first = _shot(1, continuity_state_out=_state())
+    second = _shot(2, transition="闪白", continuity_state_in=_state(), continuity_state_out=_state())
+    conn = _database_with_shots([first, second])
+    one, two = tmp_path / "one.mp4", tmp_path / "two.mp4"
+    _source_clip(one, "red")
+    _source_clip(two, "blue")
+    destination = tmp_path / "final.mp4"
+    work_dir = tmp_path / "work"
+    plan = _plan_for_two_shots()
+
+    report = render_episode_final_edit(
+        conn, "e", [(1, str(one), 1.0), (2, str(two), 1.0)], destination, work_dir, plan,
+    )
+
+    assert destination.is_file() and destination.stat().st_size > 0
+    xfade_duration = report["transitions"][0]["duration_s"]
+    shot1_measured = _probe_video_duration(work_dir / "prepared-1.mp4")
+    expected_offset = shot1_measured - xfade_duration
+
+    artifacts = report["subtitle_artifacts"]
+    assert artifacts is not None
+    shot2_cue = next(c for c in artifacts.cues if c.shot_no == 2)
+    assert abs(shot2_cue.start_s - (expected_offset + 0.05)) < 0.05
+    assert report["boundary_report"]["runtime_blocking"] is False

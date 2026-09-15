@@ -19,6 +19,7 @@ from app.media_pipeline.delivery_encode import (
     probe_resolution, probe_video_codec, uniform_resolution,
 )
 from app.media_urls import build_media_url
+from app.subtitles import episode as subtitle_episode
 
 
 _ACTIVE_VIDEO_JOB_STATUSES = ("queued", "running", "waiting_provider", "waiting_retry")
@@ -27,6 +28,7 @@ _CONCAT_DURATION_TOLERANCE_RATIO = 0.10
 _CONCAT_DURATION_TOLERANCE_MIN_S = 0.75
 _CONCAT_OPERATION_LEASE_S = 2 * 60 * 60
 _CONCAT_COMMAND = "delivery.concatenate"
+_TIMELINE_KEYS = ("partial", "shots_total", "included_shot_nos", "skipped_shot_nos", "missing_model_shot_nos", "skip_reasons")
 
 
 class ConcatOperationConflict(ValueError):
@@ -464,6 +466,7 @@ def _resume_concat_promotion(
         raise
     final_path.with_suffix(".stale").unlink(missing_ok=True)
     stage_path.unlink(missing_ok=True)
+    subtitle_episode.materialize_sidecars(final_path, json.loads(report_content))
     return result
 
 
@@ -589,6 +592,7 @@ def _publish_concat_output(
         atomic_copy(candidate_path, final_path)
         report_path = _edit_report_path(final_path)
         atomic_write_text(report_path, json.dumps(report, ensure_ascii=False, indent=2))
+        subtitle_episode.materialize_sidecars(final_path, report)
         final_sha256 = _media_sha256(final_path)
         report_sha256 = _media_sha256(report_path)
         result["video_url"] = _versioned_final_url(final_path)
@@ -911,7 +915,8 @@ def episode_mix_status(episode_id: str) -> dict:
         "final_is_partial": bool(
             isinstance(final_timeline, dict) and final_timeline.get("partial")
         ),
-        "final_edit_report": final_edit_report,
+        "final_edit_report": subtitle_episode.trim_report_for_projection(final_edit_report),
+        "subtitle_srt_url": subtitle_episode.srt_sidecar_url(final_path, final_edit_report),
         "shots": out,
     }
 
@@ -1025,12 +1030,12 @@ def _piece_video_args(rate: float, speed_change: bool, needs_scale: bool) -> lis
 
 def _run_concat_demuxer(
     concat_in: list[str], concat_output: Path, timeout_s: float,
-    uniform_ok: bool, audio_rate: int,
+    uniform_ok: bool, audio_rate: int, *, ass_filter: str | None = None,
 ) -> None:
-    """分辨率一致才尝试 -c copy 无损直粘；分辨率原本不一致或 -c copy 失败，都回退
-    DELIVERY_VIDEO_ARGS 全量重编码（不再用中间件参数顶替最终交付）。
+    """分辨率一致且不烧字幕才尝试 -c copy 无损直粘；否则回退 DELIVERY_VIDEO_ARGS
+    全量重编码（不再用中间件参数顶替最终交付）；ass_filter 非空时插在最前。
     """
-    if uniform_ok:
+    if uniform_ok and ass_filter is None:
         try:
             subprocess.run(
                 concat_in + ["-c", "copy", "-movflags", "+faststart", str(concat_output)],
@@ -1038,9 +1043,10 @@ def _run_concat_demuxer(
             return
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             pass
+    vf_args = ["-vf", ass_filter] if ass_filter else []
     try:
         subprocess.run(
-            concat_in + [*DELIVERY_VIDEO_ARGS, "-c:a", "aac", "-ar", str(audio_rate),
+            concat_in + [*vf_args, *DELIVERY_VIDEO_ARGS, "-c:a", "aac", "-ar", str(audio_rate),
                          "-movflags", "+faststart", str(concat_output)],
             check=True, capture_output=True, timeout=timeout_s)
     except subprocess.TimeoutExpired as exc:
@@ -1052,11 +1058,11 @@ def _run_concat_demuxer(
 
 def _draft_concat_pieces(
     piece_specs: list[tuple[int, str, float]], probe_by_shot: dict[int, dict[str, Any]],
-    final_path: Path, concat_timeout_s: float,
-) -> tuple[float, Path]:
+    final_path: Path, concat_timeout_s: float, subtitle_plan: Any = None,
+) -> tuple[float, Path, Any]:
     """逐镜音频归一（必要时视频重编码）后走 concat demuxer 拼接；不归一直接拼接
     会被按首段 timebase 解释后续音频包，混用采样率时把时长拉伸到秒级——draft 与
-    final_edit 共用同一套音频归一逻辑。返回 (total_duration_s, publish_candidate)。
+    final_edit 共用同一套音频归一逻辑。返回 (total_duration_s, publish_candidate, subtitle_artifacts)。
     """
     from app.final_edit import FINAL_AUDIO_RATE, audio_normalize_filter
 
@@ -1064,6 +1070,7 @@ def _draft_concat_pieces(
         float(probe_by_shot[no]["video_duration_s"]) / rate for no, _path, rate in piece_specs)
     vpaths = [vpath for _no, vpath, _rate in piece_specs]  # 单镜没有混分辨率可言，跳过探测
     uniform_ok = len(vpaths) <= 1 or uniform_resolution(vpaths) is not None
+    piece_durations: list[tuple[int, float]] = []
 
     with tempfile.TemporaryDirectory() as td:
         listfile = Path(td) / "list.txt"
@@ -1105,6 +1112,8 @@ def _draft_concat_pieces(
                 raise ValueError(msg) from exc
             if not prepared_path.is_file() or prepared_path.stat().st_size <= 0:
                 raise ValueError(f"镜 {shot_no} 的音视频归一处理未产出有效片段；上一版成片仍保留")
+            if subtitle_plan:
+                piece_durations.append((shot_no, float(_probe_concat_media(str(prepared_path))["video_duration_s"])))
             # concat demuxer 要求绝对路径并转义单引号
             safe = str(prepared_path).replace("'", "'\\''")
             lines.append(f"file '{safe}'")
@@ -1112,7 +1121,11 @@ def _draft_concat_pieces(
         concat_output = Path(td) / "concat.mp4"
         concat_in = ["ffmpeg", "-y", "-loglevel", "error",
                      "-f", "concat", "-safe", "0", "-i", str(listfile)]
-        _run_concat_demuxer(concat_in, concat_output, concat_timeout_s, uniform_ok, FINAL_AUDIO_RATE)
+        artifacts = subtitle_episode.write_episode_ass_sequential(subtitle_plan, piece_durations, Path(td)) if subtitle_plan else None
+        _run_concat_demuxer(
+            concat_in, concat_output, concat_timeout_s, uniform_ok, FINAL_AUDIO_RATE,
+            ass_filter=artifacts.filter_arg if artifacts else None,
+        )
         if not concat_output.is_file() or concat_output.stat().st_size <= 0:
             raise ValueError("ffmpeg 未产出有效成片，上一版成片仍保留，可检查片段后重试")
         total_dur = _validate_concat_output(
@@ -1120,7 +1133,7 @@ def _draft_concat_pieces(
         )
         publish_candidate = final_path.with_name(f".{final_path.name}.{new_id('candidate')}.tmp")
         atomic_copy(concat_output, publish_candidate)
-    return total_dur, publish_candidate
+    return total_dur, publish_candidate, artifacts
 
 
 def concatenate_episode(
@@ -1277,6 +1290,9 @@ def concatenate_episode(
     )
     concat_timeout_s = encode_timeout_s(est_total_dur)
 
+    subtitle_plan = subtitle_episode.plan_or_none(
+        conn, episode_id=episode_id, piece_specs=piece_specs,
+        probe_by_shot=probe_by_shot, manifest_items=video_delivery_manifest["items"])
     final_path = _final_video_path(ep["project_id"], ep["episode_no"])
     started_at = time.perf_counter()
     common_result = {
@@ -1315,21 +1331,10 @@ def concatenate_episode(
             with tempfile.TemporaryDirectory() as edit_td:
                 edit_dir = _P(edit_td)
                 edited_video = edit_dir / "final-edit.mp4"
-                edit_report = render_episode_final_edit(
-                    conn,
-                    episode_id,
-                    piece_specs,
-                    edited_video,
-                    edit_dir,
-                )
-                edit_report["timeline"] = {
-                    "partial": bool(skipped_shot_nos),
-                    "shots_total": len(all_shot_nos),
-                    "included_shot_nos": piece_shot_nos,
-                    "skipped_shot_nos": skipped_shot_nos,
-                    "missing_model_shot_nos": missing_model_shot_nos,
-                    "skip_reasons": skip_reasons,
-                }
+                edit_report = render_episode_final_edit(conn, episode_id, piece_specs, edited_video, edit_dir, subtitle_plan)
+                subtitle_artifacts = edit_report.pop("subtitle_artifacts", None)
+                edit_report["subtitles"] = subtitle_episode.report_section(subtitle_plan, subtitle_artifacts)
+                edit_report["timeline"] = {k: common_result[k] for k in _TIMELINE_KEYS}
                 edit_report["mode"] = "final_edit"
                 edit_report["video_delivery_manifest"] = video_delivery_manifest
                 edit_report["video_delivery_manifest_hash"] = video_delivery_manifest[
@@ -1366,7 +1371,8 @@ def concatenate_episode(
             final_edit_elapsed_s = time.perf_counter() - final_edit_started_at
             final_edit_failure = f"{type(exc).__name__}: {exc}"[:1000]
 
-    total_dur, publish_candidate = _draft_concat_pieces(piece_specs, probe_by_shot, final_path, concat_timeout_s)
+    total_dur, publish_candidate, subtitle_artifacts = _draft_concat_pieces(
+        piece_specs, probe_by_shot, final_path, concat_timeout_s, subtitle_plan)
 
     fallback_edit_report = {
         "ok": False,
@@ -1378,14 +1384,8 @@ def concatenate_episode(
         "final_edit_elapsed_s": round(final_edit_elapsed_s, 3) if final_edit_elapsed_s is not None else None,
         "elapsed_s": round(time.perf_counter() - started_at, 3),
         "runtime_blocking": False,
-        "timeline": {
-            "partial": bool(skipped_shot_nos),
-            "shots_total": len(all_shot_nos),
-            "included_shot_nos": piece_shot_nos,
-            "skipped_shot_nos": skipped_shot_nos,
-            "missing_model_shot_nos": missing_model_shot_nos,
-            "skip_reasons": skip_reasons,
-        },
+        "timeline": {k: common_result[k] for k in _TIMELINE_KEYS},
+        "subtitles": subtitle_episode.report_section(subtitle_plan, subtitle_artifacts),
         "video_delivery_manifest": video_delivery_manifest,
         "video_delivery_manifest_hash": video_delivery_manifest["manifest_hash"],
     }

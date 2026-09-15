@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 from app import config
+from app.atomic_io import atomic_write_text
 from app.db import get_conn
 from app.final_edit import FINAL_AUDIO_RATE, FINAL_FPS, _run_ffmpeg
 from app.media_exec.concat import (
@@ -27,12 +28,14 @@ from app.media_exec.concat import (
     _CONCAT_DURATION_TOLERANCE_RATIO,
     _final_video_path,
     _probe_concat_media,
+    _read_edit_report,
 )
 from app.media_pipeline.delivery_encode import (
     DELIVERY_HEIGHT, DELIVERY_VIDEO_ARGS, DELIVERY_WIDTH, canvas_filter, encode_timeout_s,
     probe_resolution,
 )
 from app.media_urls import build_media_url
+from app.subtitles.series_srt import build_series_srt
 
 
 def series_film_dir(project_id: str, episode_from: int, episode_to: int) -> Path:
@@ -48,6 +51,28 @@ def _probe_durations(paths: list[Path]) -> list[float]:
             raise RuntimeError(f"{path.name} 时长探测失败：{exc}") from exc
         durations.append(probe["video_duration_s"])
     return durations
+
+
+def _subtitle_sections(final_paths: list[Path], chapters: list[dict]) -> list[tuple[float, dict]]:
+    """各集 ``episode.edit-report.json["subtitles"]`` 按 chapter 偏移打包，供
+    ``build_series_srt`` 消费；某集没有报告或字幕关闭时该项贡献空字典（不产 cue）。"""
+    return [
+        (chapter["start_s"], (_read_edit_report(path) or {}).get("subtitles") or {})
+        for path, chapter in zip(final_paths, chapters)
+    ]
+
+
+def _write_series_srt(out_dir: Path, final_paths: list[Path], report: dict) -> None:
+    """按 report["chapters"] 偏移拼接各集字幕，非空才写 film.srt；原地补 report 两个键。"""
+    subtitle_sections = _subtitle_sections(final_paths, report["chapters"])
+    srt_text = build_series_srt(subtitle_sections)
+    report["subtitle_srt"] = "film.srt" if srt_text else None
+    report["subtitle_cues"] = sum(len((s or {}).get("cues_timeline") or []) for _offset, s in subtitle_sections)
+    srt_path = out_dir / "film.srt"
+    if srt_text:
+        atomic_write_text(srt_path, srt_text)
+    else:
+        srt_path.unlink(missing_ok=True)
 
 
 def _build_chapters(episode_nos: list[int], durations: list[float]) -> list[dict]:
@@ -214,6 +239,7 @@ def build_series_film(
             "DELIVERY_VIDEO_ARGS(h264 medium crf20) + aac + faststart"
         ),
     }
+    _write_series_srt(out_dir, final_paths, report)
     (out_dir / "film.report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8",
     )
@@ -273,6 +299,7 @@ def _film_projection(out_dir: Path) -> dict | None:
     except (OSError, ValueError):
         report = {}
     stat = film_path.stat()
+    srt_path = out_dir / "film.srt"
     return {
         "url": build_media_url(str(film_path), version=f"{stat.st_mtime_ns}-{stat.st_size}"),
         "path": str(film_path.relative_to(config.PROJECTS_DIR)),
@@ -284,6 +311,7 @@ def _film_projection(out_dir: Path) -> dict | None:
         "chapters": report.get("chapters") or [],
         "width": int(report.get("width") or 0),
         "height": int(report.get("height") or 0),
+        "subtitle_srt_url": build_media_url(str(srt_path)) if srt_path.is_file() else None,
     }
 
 

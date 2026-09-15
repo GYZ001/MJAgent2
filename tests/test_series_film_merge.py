@@ -186,3 +186,66 @@ def test_merge_is_current_keeps_judging_old_reports_by_file_fingerprints_only(pr
 
     monkeypatch.setattr(merge, "_storyboard_artifact_ids", lambda _p, _nos: {"1": None})
     assert merge.merge_is_current(project_id, 1, 1, [1]) is True
+
+
+def test_build_series_srt_offsets_cues_by_chapter_start() -> None:
+    from app.subtitles.series_srt import build_series_srt
+
+    srt = build_series_srt([
+        (0.0, {"cues_timeline": [{"shot_no": 1, "utterance_id": "U01", "text": "你好", "start_s": 1.0, "end_s": 2.0}]}),
+        (10.0, {"cues_timeline": [{"shot_no": 1, "utterance_id": "U01", "text": "再见", "start_s": 0.5, "end_s": 1.5}]}),
+    ])
+
+    assert "你好" in srt and "再见" in srt
+    assert "00:00:10,500 --> 00:00:11,500" in srt  # 第二集偏移 10s
+
+
+def test_build_series_srt_empty_when_no_cues_anywhere() -> None:
+    from app.subtitles.series_srt import build_series_srt
+
+    assert build_series_srt([(0.0, {}), (5.0, {"cues_timeline": []})]) == ""
+
+
+def _write_edit_report(final_path: Path, cues_timeline: list[dict]) -> None:
+    import json
+
+    report = {"subtitles": {"enabled": True, "cues_timeline": cues_timeline}}
+    final_path.with_name("episode.edit-report.json").write_text(
+        json.dumps(report, ensure_ascii=False), encoding="utf-8",
+    )
+
+
+def test_build_series_film_writes_film_srt_from_episode_reports(project_dir) -> None:
+    project_id = "proj-merge-srt"
+    ep1 = _final_video_path(project_id, 1)
+    ep2 = _final_video_path(project_id, 2)
+    _make_clip(ep1, duration_s=2.0, color="red")
+    _make_clip(ep2, duration_s=2.0, color="blue")
+    _write_edit_report(ep1, [{"shot_no": 1, "utterance_id": "U01", "text": "第一集台词", "start_s": 0.2, "end_s": 1.0}])
+    _write_edit_report(ep2, [{"shot_no": 1, "utterance_id": "U01", "text": "第二集台词", "start_s": 0.1, "end_s": 0.8}])
+
+    report = merge.build_series_film(project_id, 1, 2, [1, 2])
+
+    out_dir = merge.series_film_dir(project_id, 1, 2)
+    srt_path = out_dir / "film.srt"
+    assert srt_path.is_file()
+    srt_text = srt_path.read_text(encoding="utf-8")
+    assert "第一集台词" in srt_text
+    assert "第二集台词" in srt_text
+    assert report["subtitle_srt"] == "film.srt"
+    assert report["subtitle_cues"] == 2
+    projected = merge.film_for_range(project_id, 1, 2)
+    assert projected["subtitle_srt_url"] is not None
+
+
+def test_build_series_film_no_srt_when_no_episode_has_subtitles(project_dir) -> None:
+    project_id = "proj-merge-no-srt"
+    ep1 = _final_video_path(project_id, 1)
+    _make_clip(ep1, duration_s=2.0, color="red")
+
+    report = merge.build_series_film(project_id, 1, 1, [1])
+
+    assert report["subtitle_srt"] is None
+    assert not (merge.series_film_dir(project_id, 1, 1) / "film.srt").exists()
+    projected = merge.film_for_range(project_id, 1, 1)
+    assert projected["subtitle_srt_url"] is None

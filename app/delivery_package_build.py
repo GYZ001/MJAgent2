@@ -177,6 +177,12 @@ def _collect_delivery_media_files(
             "role": "final_edit_report",
             "path": final_edit_copy.relative_to(package_dir).as_posix(),
         })
+    srt_copy = _copy_if_present(str(final_source.with_name("episode.srt")), package_dir / "media" / "episode.srt")
+    if srt_copy:
+        files.append({"role": "subtitle_srt", "path": srt_copy.relative_to(package_dir).as_posix()})
+    ass_copy = _copy_if_present(str(final_source.with_name("episode.ass")), package_dir / "media" / "episode.ass")
+    if ass_copy:
+        files.append({"role": "subtitle_ass", "path": ass_copy.relative_to(package_dir).as_posix()})
     for item in readiness["videos"]:
         dest = package_dir / "media" / "shots" / f"shot-{item['shot_no']:03d}.mp4"
         copied = _copy_if_present(item.get("path"), dest)
