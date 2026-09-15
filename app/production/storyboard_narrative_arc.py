@@ -304,6 +304,16 @@ def _segment_shared_rules() -> list[str]:
     ]
 
 
+#: 2026-09-15 龙猫出爪第 2 集镜 6/7：老太太怀里的病猫被写成「三花老猫」，与已建卡的听听（三花猫）同物种同花色，
+#: 成片里观众会把它认成听听。无卡动物的形态由模型按画风设定，合法值来源：与 relevant_assets.characters 里
+#: 已建卡动物的物种/毛色不同即可。
+EXTRA_ANIMAL_DISTINCT_RULE = (
+    "本段出现的无卡动物（病患的猫狗、路人的宠物等 relevant_assets.characters 里没有的动物）写成与已建卡动物"
+    "明显不同的物种或毛色（已建卡动物的物种与毛色见 relevant_assets.characters[].appearance），并写清它的归属"
+    "（「老太太怀里的灰白色老猫」），观众不会把它认成主角。"
+)
+
+
 def phase2_segment_rules(
     *,
     continuity_rules: list[str],
@@ -333,6 +343,7 @@ def phase2_segment_rules(
         *segment_narrative_arc_rules(palette_current=palette_current, palette_previous=palette_previous,
                                      scene_change=bool((structure or {}).get("scene_change"))),
         *structure_rules(structure or {}),  # 换场/同场起幅与作者点名必拍镜头（screenplay_markers）
+        EXTRA_ANIMAL_DISTINCT_RULE,
         *continuity_memo_rules(previous_memo),
         *([staging_rule] if staging_rule else []),
     ]
