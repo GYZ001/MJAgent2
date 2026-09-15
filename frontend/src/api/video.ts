@@ -213,4 +213,18 @@ export const api_video = {
       "GET",
       `/episodes/${episodeId}/review-context`,
     ) as Promise<ReviewWallContext>,
+  /** 人工采纳某个已成功且过技术门禁的版本（POST /shots/{id}/adopt）；成片合成只用采纳版本。 */
+  shotAdoptVersion: (
+    shotId: string,
+    versionId: string,
+    reason: string,
+    qualificationVersion?: string,
+    idempotencyKey?: string,
+  ) =>
+    request("POST", `/shots/${shotId}/adopt`, {
+      version_id: versionId,
+      reason,
+      qualification_version: qualificationVersion,
+      idempotency_key: idempotencyKey,
+    }) as Promise<{ adopted: string; reason: string }>,
 };

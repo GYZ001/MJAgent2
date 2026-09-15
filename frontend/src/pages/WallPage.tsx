@@ -19,6 +19,7 @@ import { compressSegmentIndexes } from '../lib/segmentIndexes'
 import { extractReferenceImagesByVersion, shotVersionSignature } from '../lib/wallReferences'
 import GenerationReferenceGallery from '../components/GenerationReferenceGallery'
 import SegmentResourcePanel from '../components/SegmentResourcePanel'
+import AttemptList from './wall/AttemptList'
 import '../styles/WallPage.css'
 
 export { referenceImageLabel } from '../lib/bibleAssets'
@@ -765,21 +766,10 @@ function GenerationPanel({ shot, context, referenceImages, detailLoading, detail
           )}
           {selected?.provider_task_id && <p className="wall-empty-hint">供应商任务：{selected.provider_task_id}</p>}
         </div>
-        {versions.length > 1 && (
-          <div className="wall-attempt-list" aria-label="全部尝试">
-            <b>全部尝试 · {versions.length}</b>
-            {versions.map(version => (
-              <button type="button" key={version.id}
-                className={`wall-attempt-card${version.id === previewId ? ' selected' : ''}`}
-                onClick={() => setPreviewId(version.id)}>
-                <span className="wall-attempt-card-top">
-                  <b>v{version.version_no}</b>
-                  <span className={stampClassForStatus(version.status)}>{versionStatusLabel(version.status)}</span>
-                </span>
-              </button>
-            ))}
-          </div>
-        )}
+        <AttemptList shotId={shot.id} versions={versions} previewId={previewId} adoptedId={shot.adopted_version_id}
+          qualificationVersion={context?.upstream.shot_qualification_versions?.[shot.id] ?? context?.upstream.qualification_version}
+          statusLabel={versionStatusLabel} stampClass={stampClassForStatus}
+          onPreview={setPreviewId} onToast={onToast} onRefresh={onRefresh} />
       </div>
     </section>
   )

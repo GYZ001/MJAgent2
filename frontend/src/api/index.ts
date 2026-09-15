@@ -64,6 +64,7 @@ export const api = {
   episodeGenerate: videoApi.api_video.episodeGenerate,
   projectVideoCompletion: videoApi.api_video.projectVideoCompletion,
   shotGenerate: videoApi.api_video.shotGenerate,
+  shotAdoptVersion: videoApi.api_video.shotAdoptVersion,
   getReviewContext: videoApi.api_video.getReviewContext,
 
   /* ── 人物谱域 ── */
