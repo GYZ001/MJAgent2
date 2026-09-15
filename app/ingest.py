@@ -10,6 +10,7 @@ import re
 
 from app.novel.structure import (
     CHAPTER_ID_RE as CHAPTER_ID_RE,
+    CHAPTER_ORDINAL_RE,
     CHAPTER_RE as CHAPTER_RE,
     _CHAPTER_NUMERALS,
     _extract_sections,
@@ -116,7 +117,7 @@ def normalize_chapter_title(title: str) -> tuple[str, str]:
 
 
 def _chapter_ordinal(title: str) -> int | None:
-    matches = list(re.finditer(rf"第([{_CHAPTER_NUMERALS}]+)章", title or ""))
+    matches = list(CHAPTER_ORDINAL_RE.finditer(title or ""))
     return _parse_chapter_number(matches[-1].group(1)) if matches else None
 
 
@@ -144,9 +145,7 @@ def _recover_missing_unit_headings(chapters: list[dict]) -> list[dict]:
             normalized_title = ""
             for line_index, line in enumerate(lines[1:], start=1):
                 candidate = line.strip()
-                recognized = list(
-                    re.finditer(rf"第([{_CHAPTER_NUMERALS}]+)章", candidate)
-                )
+                recognized = list(CHAPTER_ORDINAL_RE.finditer(candidate))
                 if (
                     recognized
                     and _parse_chapter_number(recognized[-1].group(1)) == expected

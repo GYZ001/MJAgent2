@@ -17,8 +17,12 @@ _CHAPTER_NUMERALS = "0-9一二三四五六七八九十百千万零〇两壹贰�
 # 整部按「集」切分的作品被当成无标题正文，见 WS1 派单「跑不快的孩子」案例）；
 # 外篇是「番外」之外另一种常见叫法（《神墓》楔子内嵌「外篇——战天时代」即此）；
 # 英文 Chapter/Episode/Part/EP 供双语或译制类文本使用。
+# 序号两侧的行内空白（空格/制表/全角空格）是排版差异不是结构差异：2026-09-15
+# 《龙猫出爪》12 章全部写作「第 1 章《掌心里的猫》」，此前正则要求紧排，一章都没
+# 认出，整本书退化成 3000 字硬切。刻意不用 \s（含换行）：标题必须独占一行。
+_INLINE_WS = r"[ \t\u3000]*"
 _CHAPTER_CORE = (
-    rf"(?:第[{_CHAPTER_NUMERALS}]+[章卷回节集部幕篇]"
+    rf"(?:第{_INLINE_WS}[{_CHAPTER_NUMERALS}]+{_INLINE_WS}[章卷回节集部幕篇]"
     r"|序章|楔子|引子|前言|后记|尾声|终章|外篇|番外(?:篇)?(?:[0-9一二三四五六七八九十]+)?"
     r"|(?:Chapter|Episode|Part|EP)\s*\.?\s*\d+)"
 )
@@ -29,6 +33,8 @@ CHAPTER_RE = re.compile(
 CHAPTER_ID_RE = re.compile(
     rf"^(第[{_CHAPTER_NUMERALS}]+[章卷回节集部幕篇])(.*)$",
 )
+# 从标题里取「第 N 章」的序号；标题保持原文逐字（含空白），序号解析自己容忍空白。
+CHAPTER_ORDINAL_RE = re.compile(rf"第{_INLINE_WS}([{_CHAPTER_NUMERALS}]+){_INLINE_WS}章")
 
 # 装饰性分隔线上下夹住的短行也是标题——不少连载体作品（尤其中篇/剧本体）不用
 # 「第X章」词表，只靠分隔线标出每一部分。字符集刻意与 app.ingest.SEPARATOR_ONLY_RE

@@ -230,3 +230,36 @@ def test_real_project_titles_still_recognized_no_regression() -> None:
         m = CHAPTER_RE.match(title)
         assert m is not None, f"回归失败，未识别：{title!r}"
         assert m.group(1).strip() == title
+
+
+# ---------------------------------------------------------------------------
+# E. 序号两侧的行内空白（2026-09-15《龙猫出爪》proj_c3a66cfc115d 病灶）
+# ---------------------------------------------------------------------------
+
+def test_chapter_re_tolerates_inline_whitespace_around_ordinal() -> None:
+    """全书 12 章都写作「第 1 章《掌心里的猫》」，此前一章没认出、整本按 3000 字硬切。"""
+    for line in ("第 1 章《掌心里的猫》", "第 10 章《项圈》", "第　三　章　夜行", "第 12 章《掌心》"):
+        m = CHAPTER_RE.match(line)
+        assert m is not None, line
+        assert m.group(1).strip() == line
+    assert CHAPTER_RE.match("第\n1 章《掌心里的猫》") is None
+
+
+def test_chapter_ordinal_reads_spaced_heading() -> None:
+    from app.ingest import _chapter_ordinal
+
+    assert _chapter_ordinal("第 12 章《掌心》") == 12
+    assert _chapter_ordinal("第　三　章　夜行") == 3
+    assert _chapter_ordinal("第十二章 掌心") == 12
+
+
+def test_ingest_keeps_spaced_headings_verbatim_and_does_not_auto_split() -> None:
+    body = "（周晚刚送走一个病人，刘姐站在门口。）\n周晚：刘姐。\n刘姐：三十天。\n" * 30
+    text = "《龙猫出爪》第一季\n\n" + "".join(
+        f"第 {n} 章《{name}》\n\n【段 01｜人间·医院｜傍晚】\n{body}\n"
+        for n, name in ((1, "掌心里的猫"), (2, "听听"), (3, "交给夜里"))
+    )
+    report = ingest_novel(text.encode("utf-8"))
+    assert report["auto_split"] is False
+    assert [c["title"] for c in report["chapters"]] == ["第 1 章《掌心里的猫》", "第 2 章《听听》", "第 3 章《交给夜里》"]
+    assert all(c["content"].startswith(c["title"]) for c in report["chapters"])
