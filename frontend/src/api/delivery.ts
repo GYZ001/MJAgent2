@@ -53,6 +53,8 @@ export interface MixStatus {
   final_video_stale?: boolean;
   final_is_partial?: boolean;
   final_edit_report?: Record<string, unknown> | null;
+  /** 有字幕嵌入且生成了 srt 文件时的可下载地址（/media/...）；否则为 null/缺省。 */
+  subtitle_srt_url?: string | null;
   shots: MixShot[];
 }
 

@@ -395,3 +395,31 @@
 :where(:root[data-theme="dark"]) .delivery-records .customer-feedback {
   border-top: 1px solid var(--hairline);
 }
+.cinema-subtitle-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+.cinema-subtitle-missing {
+  display: grid;
+  gap: 8px;
+}
+.cinema-subtitle-table td,
+.cinema-subtitle-table th {
+  font-size: 12px;
+}
+.cinema-subtitle-extra summary {
+  color: var(--ink-faint);
+  font-size: 12px;
+  cursor: pointer;
+}
+.cinema-subtitle-extra ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--ink-soft);
+  font-size: 11.5px;
+}
+.cinema-subtitle-download {
+  justify-self: start;
+  text-decoration: none;
+}

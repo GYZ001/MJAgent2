@@ -109,6 +109,20 @@ export const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
     ],
   },
   {
+    id: "subtitle-burn-in",
+    title: "字幕嵌入",
+    description:
+      "控制成片合成时是否把台词账本按本地语音对齐结果烧进画面，以及字幕的字号、底边距和每行字数。",
+    affects: ["成片台", "字幕嵌入"],
+    keys: [
+      "subtitle_burn_in_enabled",
+      "subtitle_font_size",
+      "subtitle_margin_bottom",
+      "subtitle_max_chars_per_line",
+      "subtitle_show_speaker",
+    ],
+  },
+  {
     id: "storyboard-safety",
     title: "分镜台编辑保护",
     description: "控制分镜结构编辑、原文重绑定和紧急只读保护。",
@@ -155,6 +169,11 @@ export const SETTING_FIELD_IMPACTS: Record<string, string> = {
   provider_media_max_download_bytes: "参考视频发布校验允许读取的最大文件大小",
   provider_call_retention_days: "调用日志可在监制房查询的保留天数",
   error_log_retention_days: "错误记录可用于排障的保留天数",
+  subtitle_burn_in_enabled: "成片合成时是否把台词按语音对齐结果烧进画面并生成 .srt/.ass",
+  subtitle_font_size: "字幕字号（1080 宽竖屏下的像素值）",
+  subtitle_margin_bottom: "字幕距画面底部的像素距离，用于避开短视频平台底部 UI",
+  subtitle_max_chars_per_line: "字幕每行最多字数，超出按标点折行或按时间拆条",
+  subtitle_show_speaker: "字幕前是否加说话人前缀",
   storyboard_workspace_safe_readonly: "紧急情况下把分镜台切换为只读",
   storyboard_structure_edit_enabled: "是否允许增删和调整分镜结构",
   storyboard_source_rebind_enabled: "是否允许重新绑定分镜对应的原文",
