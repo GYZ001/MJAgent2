@@ -82,7 +82,7 @@ from app.production.storyboard_continuity_memo import (
     _AiContinuityMemo, ensure_travel_direction_in_prompt,
     continuity_memo_character_advisories, continuity_memo_errors, continuity_memo_payload,
 )
-from app.production.screenplay_markers import joined_source_text, required_beats_errors, segment_structure
+from app.production.screenplay_markers import joined_source_text, parse_scene_header, required_beats_errors, segment_structure
 from app.production.storyboard_overlay_text import overlay_text_errors
 from app.production.storyboard_reference_repair import strip_extra_reference_markers
 from app.production.storyboard_dialogue_extract import extract_dialogue_targets
@@ -1482,14 +1482,13 @@ def _segment_matched_timeline_anchors(
     return matched
 
 
-def _timeline_anchor_scene_time(anchors: list[dict[str, Any]]) -> str:
-    """段落锚点 -> ``shots.scene_time``：没有锚点保持空串（不兜底）；有锚点取
-    原文逐字 ``value``，多个候选按 age > year > era > relative 取最具体的一条。"""
-    if not anchors:
-        return ""
+def _timeline_anchor_scene_time(anchors: list[dict[str, Any]], source_excerpt: str) -> str:
+    """``shots.scene_time``：剧本体段头「【段 N｜地点｜时段】」的时段是逐字真源；没有段头才退到映射包锚点（整集粗粒度，人物年龄也算锚点——曾把「四十岁上下」当成每一镜的时段），按 age > year > era > relative 取最具体一条，没有锚点保持空串。"""
+    header = parse_scene_header(source_excerpt)
+    if header and header[1]:
+        return header[1]
     priority = {"age": 0, "year": 1, "era": 2, "relative": 3}
-    best = min(anchors, key=lambda a: priority.get(a.get("kind"), 9))
-    return str(best.get("value") or "")
+    return str(min(anchors, key=lambda a: priority.get(a.get("kind"), 9)).get("value") or "") if anchors else ""
 
 
 def _resolve_segment_source_binding(
@@ -1643,7 +1642,7 @@ def persist_storyboard_pack(
         segment_timeline_anchors = _segment_matched_timeline_anchors(
             timeline_by_segment, segment.source_segment_indexes,
         )
-        scene_time = _timeline_anchor_scene_time(segment_timeline_anchors)
+        scene_time = _timeline_anchor_scene_time(segment_timeline_anchors, source_excerpt)
         shot_id = new_id("shot")
         shot_uid = new_id("shotuid")
         # WS9：附加键，不覆盖既有 "beats"；供 resource_forecast 等读锚点详情。
