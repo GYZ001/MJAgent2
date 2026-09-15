@@ -79,3 +79,18 @@ def test_header_wording_variants_and_capacity_splits_are_same_scene() -> None:
     # 同一原文段拆成两段（容量拆分）：段尾的【转场】不在两半之间
     assert transition_between(SEG_05, SEG_05) == "硬切" and scene_changed(SEG_05, SEG_05) is False
     assert transition_between(SEG_05, SEG_06) == "遮挡转场"
+
+
+def test_beat_paraphrased_by_model_counts_as_shot_but_dropped_beat_does_not() -> None:
+    from types import SimpleNamespace
+
+    from app.production.screenplay_markers import beat_is_shot, required_beats_errors
+
+    beat = "格局镜：从门口升起，老街夜景，两家门面。"
+    # 2026-09-15 第 2 集第 15 段模型原话：整句二元组覆盖率 5/12，旧判据误拦
+    shot = "镜头2：全景升起，拍摄机位从周晚站立的门口向上升起，扫过整条夜晚的老街，街对面两家相邻的门面清晰可见。"
+    assert beat_is_shot(beat, shot)
+    assert not beat_is_shot(beat, "镜头1：周晚锁好店门低头掏出手机，屏幕亮起。")
+    hook = "钩子：切阿凯出租屋。屏幕上八张一模一样的卡片叠在一起。"
+    assert required_beats_errors(SimpleNamespace(prompt_text=shot), [beat, hook]) and "钩子" in required_beats_errors(SimpleNamespace(prompt_text=shot), [beat, hook])[0]
+    assert required_beats_errors(SimpleNamespace(prompt_text=shot + "镜头3：切到阿凯出租屋，屏幕上八张一模一样的卡片叠在一起。"), [beat, hook]) == []

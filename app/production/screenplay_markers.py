@@ -137,15 +137,28 @@ def structure_rules(structure: dict) -> list[str]:
     return rules
 
 
-def required_beats_errors(draft, beats: list[str]) -> list[str]:
-    """作者点名的必拍镜头必须出现在 prompt_text 里：按二元组覆盖率核对（同 textmatch 关键台词判据）。"""
+_BEAT_PHRASE_SPLIT_RE = re.compile(r"[，。；、！？：,.;!?:\s]+")
+
+
+def beat_is_shot(beat: str, prompt: str) -> bool:
+    """必拍镜头是导演指令不是台词，模型照原文写画面时会改措辞（「老街夜景」→「夜晚的老街」、「从门口升起」→
+    「机位从门口向上升起」）：按短语判定——每个短语只要有一个内容二元组出现在镜头里就算命中，过半短语命中即拍了。
+    2026-09-15 龙猫出爪第 2 集实测：整句二元组覆盖率 5/12 卡在 0.42 阈值下，模型三次重试输出一字不差，整集分镜作废。"""
     from app import textmatch
 
+    body = beat.split("：", 1)[-1]
+    phrases = [x for x in _BEAT_PHRASE_SPLIT_RE.split(body) if len(x) >= 2]
+    if not phrases:
+        return True
+    prompt_bigrams = textmatch.bigram_set(prompt)
+    hits = sum(1 for phrase in phrases if textmatch.bigram_set(phrase) & prompt_bigrams)
+    return hits * 2 >= len(phrases)
+
+
+def required_beats_errors(draft, beats: list[str]) -> list[str]:
+    """作者点名的必拍镜头必须出现在 prompt_text 里（判据见 beat_is_shot）。"""
     prompt = str(getattr(draft, "prompt_text", "") or "")
-    missing = [
-        beat for beat in beats
-        if textmatch.bigram_coverage(beat.split("：", 1)[-1], prompt) < textmatch.KEY_LINE_BIGRAM_COVERAGE
-    ]
+    missing = [beat for beat in beats if not beat_is_shot(beat, prompt)]
     if not missing:
         return []
     return [
