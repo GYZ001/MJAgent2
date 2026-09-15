@@ -55,7 +55,7 @@ def _run_ffmpeg(command: list[str], *, timeout: float, context: str) -> None:
 def transition_spec(value: str | None) -> TransitionSpec:
     transition = str(value or "硬切").strip()
     if transition in {"叠化", "声音延续+叠化", "声音先行+淡入"}:
-        return TransitionSpec("dissolve", "dissolve", 0.32, 320)
+        return TransitionSpec("dissolve", "fade", 0.32, 320)  # 叠化＝交叉叠化，对应 xfade 的 fade；xfade 的 dissolve 是噪点溶解，抽帧全是颗粒
     if transition in {"淡出淡入", "黑场", "闪黑"}:
         return TransitionSpec("dip_black", "fadeblack", 0.28, 280)
     if transition == "闪白":

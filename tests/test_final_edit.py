@@ -153,6 +153,7 @@ def test_scene_only_boundary_state_is_verified_and_scene_change_is_not_false_pos
 
 def test_reference_transition_mapping_uses_short_bounded_overlaps() -> None:
     assert transition_spec("声音延续+叠化").edit_type == "dissolve"
+    assert transition_spec("叠化").ffmpeg_name == "fade"  # xfade 的 dissolve 是噪点溶解，不是叠化
     assert transition_spec("闪白").ffmpeg_name == "fadewhite"
     assert transition_spec("硬切").duration_s <= 0.12
 
