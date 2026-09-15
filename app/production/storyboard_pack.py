@@ -82,6 +82,7 @@ from app.production.storyboard_continuity_memo import (
     _AiContinuityMemo, ensure_travel_direction_in_prompt,
     continuity_memo_character_advisories, continuity_memo_errors, continuity_memo_payload,
 )
+from app.production.screenplay_markers import joined_source_text, required_beats_errors, segment_structure
 from app.production.storyboard_overlay_text import overlay_text_errors
 from app.production.storyboard_reference_repair import strip_extra_reference_markers
 from app.production.storyboard_dialogue_extract import extract_dialogue_targets
@@ -406,7 +407,7 @@ from app.source_excerpt import SourceSegment, index_source_segments
 #: MARKER 必须跟着换版本号：旧行没有这个字段，resume 短路如果继续认旧
 #: marker，会把这些缺字段的旧行误判为"已经用新契约生成过"而不重新生成，跳过
 #: 本次真正要修的段落重复。
-STORYBOARD_PACK_VERSION = "2.4.0"
+STORYBOARD_PACK_VERSION = "2.4.1"
 
 #: Written to Shot.prompt_contract_version for every row this module writes;
 #: downstream consumers key off it to know this row's legacy per-shot fields
@@ -417,7 +418,7 @@ STORYBOARD_PACK_VERSION = "2.4.0"
 #: 没有这个字段，resume 短路必须判过期重生成。2.3.0 起改到
 #: storyboard_pack/2.3.0：新增 continuity_memo 落库字段，同一理由。2.4.0 起
 #: 改到 storyboard_pack/2.4.0：新增 source_unit_ranges 落库字段，同一理由。
-STORYBOARD_PACK_CONTRACT_MARKER = "storyboard_pack/2.4.0"
+STORYBOARD_PACK_CONTRACT_MARKER = "storyboard_pack/2.4.1"
 
 SEGMENT_DURATION_S = 15
 MIN_SHOTS_PER_SEGMENT = 2
@@ -1056,6 +1057,7 @@ async def _generate_all_segment_prompts(
         segment_paratext_hit = set(plan.source_segment_indexes) & paratext_indexes
         required_dialogue = required_dialogue_by_segment_no.get(plan.segment_no, [])
         palette_previous = beat_draft.segments[plan.segment_no - 2].palette if plan.segment_no > 1 else ""
+        structure = segment_structure(joined_source_text(segments, beat_draft.segments[plan.segment_no - 2].source_segment_indexes) if plan.segment_no > 1 else "", joined_source_text(segments, plan.source_segment_indexes))  # 换场/转场/必拍镜头（screenplay_markers）
         task_payload: dict[str, Any] = {
             "task": (
                 "为下面这一段原文和节拍写一整段可直接投喂视频生成模型的提示词（prompt_text）。"
@@ -1070,7 +1072,7 @@ async def _generate_all_segment_prompts(
                         _paratext_exclusion_rule(segment_paratext_hit) if segment_paratext_hit else None
                     ),
                     palette_current=plan.palette, palette_previous=palette_previous,
-                    previous_memo=previous_memo, staging_rule=staging_continuation_rule(staging_chain[-1][1] if staging_chain else "", previous_segment_no=plan.segment_no - 1, synopsis=plan.synopsis),
+                    previous_memo=previous_memo, staging_rule=staging_continuation_rule(staging_chain[-1][1] if staging_chain else "", previous_segment_no=plan.segment_no - 1, synopsis=plan.synopsis), structure=structure,
                 ),
                 already_delivered_dialogue_rule(delivered_lines, reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no)),
             ],
@@ -1080,15 +1082,13 @@ async def _generate_all_segment_prompts(
                 palette_current=plan.palette,
                 palette_previous=palette_previous,
             ),
-            "segment_no": plan.segment_no,
-            "synopsis": plan.synopsis,
+            "segment_no": plan.segment_no, "synopsis": plan.synopsis, **structure,
             "beats": [
                 {"beat_id": beat_id, "summary": beats_by_id[beat_id].summary}
                 for beat_id in plan.beat_ids
                 if beat_id in beats_by_id
             ],
-            "duration_s": SEGMENT_DURATION_S,
-            "shot_count_range": [MIN_SHOTS_PER_SEGMENT, MAX_SHOTS_PER_SEGMENT],
+            "duration_s": SEGMENT_DURATION_S, "shot_count_range": [MIN_SHOTS_PER_SEGMENT, MAX_SHOTS_PER_SEGMENT],
             "source_segment_indexes": plan.source_segment_indexes,
             **source_payload,
             "relevant_assets": relevant_assets,
@@ -1129,9 +1129,9 @@ async def _generate_all_segment_prompts(
                 {"role": "user", "content": json.dumps(task_payload, ensure_ascii=False)},
             ],
             model_type=_AiStoryboardSegmentDraft,
-            validate=lambda value, _req=required_dialogue, _pm=previous_memo,
+            validate=lambda value, _req=required_dialogue, _pm=previous_memo, _struct=structure,
             _st=source_payload["source_text_by_segment"], _dl=list(delivered_lines), _rv=reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no),
-            _no=plan.segment_no, _n2i=manifest_name_to_identity(payload, plan.source_segment_indexes), _sx=plan.source_segment_indexes, _ch=staging_chain, _syn=plan.synopsis, _dp=canonical_phrases(payload), _sg=staging_gate: [*ensure_travel_direction_in_prompt(value), *strip_extra_reference_markers(value, payload), *overlay_text_errors(value), *_validate_segment_draft(
+            _no=plan.segment_no, _n2i=manifest_name_to_identity(payload, plan.source_segment_indexes), _sx=plan.source_segment_indexes, _ch=staging_chain, _syn=plan.synopsis, _dp=canonical_phrases(payload), _sg=staging_gate: [*ensure_travel_direction_in_prompt(value), *strip_extra_reference_markers(value, payload), *overlay_text_errors(value), *required_beats_errors(value, _struct["required_beats"]), *_validate_segment_draft(
                 value, dialect_render_format=profile.render_format, required_dialogue=_req, name_to_identity=_n2i,
                 previous_memo=_pm, segment_source_text=_st, delivered_lines=_dl, reserved_lines=_rv, current_segment_no=_no,
             ), *generated_identity_errors(value, payload=payload, source_indexes=_sx, required_dialogue=_req, dialect=profile.render_format),
@@ -1156,6 +1156,7 @@ async def _generate_all_segment_prompts(
         )
         draft = finalize_generated_identity(draft, payload=payload, source_indexes=plan.source_segment_indexes,
                                             required_dialogue=required_dialogue, dialect=profile.render_format)
+        draft.camera_digest.transition_from_previous = structure["transition_from_previous"]  # 转场以原文标记/段头为准，不用模型自报
         camera_digest_by_segment_no[plan.segment_no] = draft.camera_digest
         by_segment_no[plan.segment_no] = draft
         delivered_lines.extend(
@@ -1229,6 +1230,7 @@ class StoryboardPackSegment(BaseModel):
     required_dialogue: list[dict[str, Any]] = Field(default_factory=list)
     #: 2.2.0 色温弧线，落库供审计核对；默认空串兼容旧行（旧行没有这个字段）。
     palette: str = ""
+    transition: str = "硬切"  # 2.4.1：上一段→本段的转场，由原文段头/【转场】标记推导（screenplay_markers），成片终剪按它渲染
     #: 2.3.0 跨段连贯性备忘（_AiContinuityMemo.model_dump），落库供审计核对；
     #: 默认空 dict 兼容旧行（旧行没有这个字段）。
     continuity_memo: dict[str, Any] = Field(default_factory=dict)
@@ -1370,10 +1372,8 @@ async def generate_storyboard_pack(
             identity_contract_fingerprint=segment_drafts[plan.segment_no].identity_contract_fingerprint,
             speech_template=segment_drafts[plan.segment_no].speech_template,
             speech_dialect=segment_drafts[plan.segment_no].speech_dialect,
-            dialogue=[
-                line.model_dump(mode="json")
-                for line in segment_drafts[plan.segment_no].dialogue
-            ],
+            dialogue=[line.model_dump(mode="json") for line in segment_drafts[plan.segment_no].dialogue],
+            transition=segment_drafts[plan.segment_no].camera_digest.transition_from_previous or "硬切",
             resources=segment_drafts[plan.segment_no].resources.model_dump(mode="json"),
             source_unit_ranges=[r.model_dump(mode="json") for r in plan.source_unit_ranges],
             # paratext_strip_notes 极罕见地非空时（见 _strip_paratext_from_beat_
@@ -1711,7 +1711,7 @@ def persist_storyboard_pack(
                 source_excerpt,
                 segment.synopsis,
                 json.dumps(dialogues, ensure_ascii=False),
-                "硬切", 0,
+                segment.transition or "硬切", 0,
                 json.dumps(
                     {
                         "storyboard_pack_segment": segment_record,

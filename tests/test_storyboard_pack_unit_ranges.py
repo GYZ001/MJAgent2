@@ -312,8 +312,10 @@ def test_contract_marker_bumps_to_2_4_0_so_stale_packs_without_unit_ranges_regen
     docstring），旧行没有这个字段，marker 不动会让 resume 短路把它们误判为
     "已经用新契约生成过"。
     """
-    assert STORYBOARD_PACK_CONTRACT_MARKER == "storyboard_pack/2.4.0"
-    assert STORYBOARD_PACK_VERSION == "2.4.0"
+    # 2.4.1（2026-09-15）：段契约新增 transition（原文段头/【转场】标记推导），载荷新增
+    # scene_change/transition_from_previous/required_beats——旧行同样不能被 resume 当成已按新契约生成。
+    assert STORYBOARD_PACK_CONTRACT_MARKER == "storyboard_pack/2.4.1"
+    assert STORYBOARD_PACK_VERSION == "2.4.1"
 
 
 

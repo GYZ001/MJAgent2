@@ -55,6 +55,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.production.storyboard_continuity_memo import _AiContinuityMemo, continuity_memo_rules
+from app.production.screenplay_markers import structure_rules
 
 
 def beat_sheet_narrative_arc_rules() -> list[str]:
@@ -151,7 +152,7 @@ def segment_narrative_arc_payload_fields(
     }
 
 
-def segment_narrative_arc_rules(*, palette_current: str, palette_previous: str) -> list[str]:
+def segment_narrative_arc_rules(*, palette_current: str, palette_previous: str, scene_change: bool = False) -> list[str]:
     """阶段二 rules[] 新增的正面陈述：首尾段含义（恒定出现）、色温渐变
     （只在本段色温与上一段不同时出现）、色温延续时禁止假渐变（只在本段
     色温与上一段相同时出现，2026-09-03 补，修「同一场戏灯光反复闪」的
@@ -164,7 +165,14 @@ def segment_narrative_arc_rules(*, palette_current: str, palette_previous: str) 
         "is_final_segment 为 true 时必须满足，不必也不应该由你自己再判断"
         "这是不是最后一段。",
     ]
-    if palette_current and palette_current != palette_previous:
+    if scene_change and palette_current:
+        # 换场（地点/时段变了，见 screenplay_markers.scene_changed）：渐变是同一场戏里情绪转折的写法，
+        # 换场直接用本段色温开画——2026-09-15《龙猫出爪》13→14 把高塔冷灰残留进清晨诊所，观众看着像串戏。
+        rules.append(
+            f"本段的色温/色调方向是「{palette_current}」。本段换了场景：画面从第一帧起就是本段自己的色温与光线，"
+            "不写上一段色调的残留或两秒过渡，换场由成片阶段的转场负责。"
+        )
+    elif palette_current and palette_current != palette_previous:
         rules.append(
             f"本段的色温/色调方向是「{palette_current}」，与上一段"
             f"「{palette_previous or '（本集第一段，没有上一段可比）'}」不同："
@@ -306,6 +314,7 @@ def phase2_segment_rules(
     palette_previous: str,
     previous_memo: _AiContinuityMemo | None,
     staging_rule: str | None,
+    structure: dict | None = None,
 ) -> list[str]:
     """汇总阶段二 task_payload["rules"] 的全部来源，从
     ``_generate_all_segment_prompts``（已在 155 行 function_lines 棘轮基线上，
@@ -321,7 +330,9 @@ def phase2_segment_rules(
         *shared_rules,
         required_dialogue_rule_text,
         *([paratext_exclusion_rule] if paratext_exclusion_rule else []),
-        *segment_narrative_arc_rules(palette_current=palette_current, palette_previous=palette_previous),
+        *segment_narrative_arc_rules(palette_current=palette_current, palette_previous=palette_previous,
+                                     scene_change=bool((structure or {}).get("scene_change"))),
+        *structure_rules(structure or {}),  # 换场/同场起幅与作者点名必拍镜头（screenplay_markers）
         *continuity_memo_rules(previous_memo),
         *([staging_rule] if staging_rule else []),
     ]
