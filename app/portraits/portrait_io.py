@@ -19,6 +19,7 @@ from app.errors import ContentGenerationError, code_ref
 from app.evidence.media import record_reference_asset
 from app.harness.types import EvidenceArtifact
 from app.portraits.card_owner import resolve_card_owner
+from app.portraits.world_era import project_world_era
 from app.portraits.portrait_insert import insert_portrait_row_or_existing
 from app.refs import _safe_name, portrait_prompt, production_appearance_anchor
 from app.schemas import Bible
@@ -320,7 +321,7 @@ async def _redraw_portrait(project_id: str, name: str, style: str, appearance: s
 async def _generate_fresh_portrait(project_id: str, name: str, style: str, appearance: str,
                                    *, ep_start: int) -> tuple[str, str]:
     """为新登场角色生成一张全新定妆照（无底图，不走图生图），落盘。返回 (落盘路径, 生成 prompt)。"""
-    prompt = portrait_prompt(style, appearance)
+    prompt = portrait_prompt(style, appearance, project_world_era(get_conn(), project_id))  # 角色无年代服饰时按世界书年代
     item = await hiagent.generate_image(
         prompt,
         size=config.REF_IMAGE_SIZE,

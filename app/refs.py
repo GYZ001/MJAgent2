@@ -176,7 +176,7 @@ def portrait_prompt(visual_style: str, anchor: str, period_costume_canonical: st
     body = production_appearance_anchor(anchor)
     period_costume = normalize_prompt_text(period_costume_canonical or "").strip()
     period_contract = (
-        f"年代服饰硬约束：{period_costume}；服装形制、面料、鞋履、束发和配饰必须符合该年代、地域与身份，禁止现代、跨时代或跨文化误植。"
+        f"年代服饰硬约束：{period_costume}；服装形制、面料、鞋履、束发和配饰必须符合该年代、地域与身份，禁止跨时代或跨文化误植。"
         if period_costume else
         "服装形制、面料、鞋履、束发和配饰必须服从角色外观锚点与世界年代，不得擅自加入现代或跨时代元素。"
     )
@@ -377,14 +377,14 @@ async def _generate_one_character_portrait(
     conn = get_conn()
     from app import portraits as _portraits
     from app.portraits.reuse_invalidation import download_or_invalidate_reuse  # portraits 反向依赖本模块，只能延迟导入
-    from app.portraits.appearance_style_guard import strip_visual_style_leak
+    from app.portraits import appearance_style_guard, world_era  # portraits 反向依赖本模块，只能延迟导入
 
     c.ref_image_path = None
     override = (c.portrait_prompt_override or "").strip()
     base_prompt = effective_portrait_prompt(
-        style, c.appearance_canonical, override, c.period_costume_canonical,
+        style, c.appearance_canonical, override, c.period_costume_canonical or world_era.world_era_from_bible_json(project["bible_json"]),
     )
-    effective_appearance, _ = strip_visual_style_leak(
+    effective_appearance, _ = appearance_style_guard.strip_visual_style_leak(
         portrait_override_appearance_anchor(c.appearance_canonical, override), style,
     )
     last_error: Exception | None = None

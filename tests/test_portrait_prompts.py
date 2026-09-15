@@ -185,3 +185,16 @@ def test_portrait_completion_merges_without_erasing_concurrent_scenes() -> None:
     assert merged["characters"][0]["ref_image_path"] == "accepted.jpg"
     assert merged["characters"][0]["appearance_canonical"] == "透明苍老人影"
     assert merged["scenes"] == bible["scenes"]
+
+
+def test_world_era_fallback_makes_costume_constraint_modern() -> None:
+    """2026-09-15《龙猫出爪》阿凯被画成古装：角色无年代服饰、世界书 era 为空。era 填了就成硬约束，
+    且措辞不再自相矛盾（旧文案「禁止现代…误植」对现代题材是反的）。"""
+    from app.portraits.world_era import world_era_from_bible_json
+
+    assert world_era_from_bible_json(json.dumps({"world": {"era": "现代都市", "visual_style_canonical": "x"}})) == "现代都市"
+    assert world_era_from_bible_json(json.dumps({"world": {"visual_style_canonical": "x"}})) == ""
+    assert world_era_from_bible_json("not json") == ""
+    prompt = portrait_prompt("国漫风", "二十岁出头的年轻男性，黑色短发，身着深灰连帽卫衣配牛仔裤", "现代都市")
+    assert "年代服饰硬约束：现代都市" in prompt
+    assert "禁止现代" not in prompt
