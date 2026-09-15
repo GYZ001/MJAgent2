@@ -431,7 +431,7 @@ def _compose(
     filters: list[str] = []
     for index in range(len(prepared)):
         filters.extend([
-            f"[{index}:v]settb=AVTB,setpts=PTS-STARTPTS[v{index}]",
+            f"[{index}:v]fps={FINAL_FPS},settb=AVTB,setpts=PTS-STARTPTS[v{index}]",  # xfade 要求恒定帧率（2026-09-15 实测 1/0 报错回退无转场拼接）
             f"[{index}:a]aresample={FINAL_AUDIO_RATE},asetpts=PTS-STARTPTS[a{index}]",
         ])
     video_label = "v0"
