@@ -47,7 +47,7 @@ B 机（8 核，4 线程）复测：见 §12 表（同一脚本、同一音频�
 **P0（本期必做）**
 1. 成片合成时把本集全部**已采纳镜头**的台词按真实发声时间烧进 `episode.mp4`；同时写出 `final/episode.srt` 与 `final/episode.ass`。
 2. 字幕文本 = 台词账本原话（逐字），不用 ASR 识别文本（它会写错同音字）。
-3. 时间戳 = 本地 ASR（sherpa-onnx + SenseVoice int8，CPU）逐字时间戳与台词逐字对齐的结果；每句台词有 `aligned | missing` 两种状态，**没在音轨里找到的台词不烧**（画面里没人说，烧上去就是界面撒谎），列进报告与成片台。
+3. 时间戳 = 本地 ASR（sherpa-onnx + SenseVoice int8，CPU）逐字时间戳与台词逐字对齐的结果（**同音等价**：用 pypinyin 无声调拼音做序列匹配，见 §5）；每句台词有 `aligned | missing` 两种状态，**没在音轨里找到的台词不烧**（画面里没人说，烧上去就是界面撒谎），列进报告与成片台。
 4. 对齐结果按「镜头版本 id + 文件 sha256」缓存，重合成不重跑 ASR。
 5. 连播成片（`film.mp4`）自然携带各集已烧字幕，流拷贝路径不受影响；并生成整片 `film.srt`。
 6. 交付包含 `.srt`；成片台显示「N/M 句已对齐、K 句未出声（镜 x、y）」与 `.srt` 下载。
@@ -55,7 +55,6 @@ B 机（8 核，4 线程）复测：见 §12 表（同一脚本、同一音频�
 8. 引擎/模型/字体缺失时，**成片失败并给出安装命令**，不静默出无字幕成片；开关关闭时合成行为与今天逐字节一致。
 
 **P1**
-- 同音字容错（`pypinyin`，纯 Python 小依赖）——提高被改写/口音台词的命中率。
 - 成片台「手动标时间」：对 `missing` 的句子填起止秒数后重合成。
 - 导出目录带 `film.srt` 硬链接；交付包带 `.ass`。
 - 说话人前缀（`名字：`）与画外音/独白的差异样式。
@@ -112,16 +111,15 @@ concatenate_episode(episode_id)
 
 1. **展开**：token → 逐字，每字继承 token 起始时间；丢弃标点与 `<|zh|>` 这类特殊 token。台词同样去标点/空白/引号，得到 `known_chars` 及每字所属 line 下标。
 2. **单调匹配**：`difflib.SequenceMatcher(None, known_chars, asr_chars, autojunk=False)`，`get_matching_blocks()` 天然单调（后一句不会对到前一句前面）。整镜一次匹配，不逐句搜索——逐句搜索会让重复短语（「师兄」出现两次）串位。
-3. **每句判定**：`match_ratio = 命中字数 / 句字数`。
-   - `len ≥ 4`：`ratio ≥ 0.70` → `aligned`；
-   - `len ≤ 3`（「是啊」「走」）：必须全命中，且位置落在前后句窗口之间（单调性保证）；
+3. **每句判定**（2026-09-14 按 B 上 3 集 77 句真实台词的独立扫描修订）：匹配在**无声调拼音序列**上做（`pypinyin.lazy_pinyin` 整句转换，利用词典读音），同音字视为命中；`match_ratio = 命中字数 / 句字数`，另记 `exact_chars`（字面相同数）供报告。
+   - `len ≥ 4`：`ratio ≥ 0.60` → `aligned`；
+   - `len ≤ 3`（「火蛇术」「是啊」）：要有一个长度 ≥ 2 的连续命中块（`len ≤ 2` 须全命中），位置由单调性保证落在前后句之间；
    - 其余 → `missing`。
-   0.70 不是拍脑袋：实测被念出的句子 98%，没被念的句子只会零星撞上同音字（预期 < 0.3），阈值取在空当中央；验收时在 ≥ 30 个真实镜头上输出 ratio 分布确认空当存在（§14）。阈值是内部常量，报告里带每句 ratio，便于后续校准，不做成设置项。
+   依据：77 句纯字面匹配的分布是 ≥0.9 有 62 句、0.7–0.9 有 12 句、0.5–0.7 有 2 句、<0.3 有 1 句；掉到 0.9 以下的几乎全是同音错字（灵石→零食、止血丹→止血蛋、妖化术→妖花树、养丹坊→养丹方），两句 0.5–0.7 的（「火蛇术！」2/3、「我出三块灵石！」4/6）都确实念了。同音等价后复扫同一批 77 句：≥0.9 有 72 句、0.7–0.9 有 3 句（都是模型小幅改词但确实念了）、0.5–0.7 只剩「火蛇术！」（2/3，连续块长 2，按短句规则 aligned）、<0.3 只有「你……你……」（结巴句，ASR 没听出来，判 missing 是对的）——念了的最低 0.67、没念的 0.0，0.60 落在空当里。阈值是内部常量，报告里带每句 ratio/exact，便于后续校准，不做成设置项。
 4. **逐字时间**：命中字取 ASR 时间；未命中字在相邻命中字之间线性插值；句尾时间 = 末字起始 + `tail`，`tail` = 本句相邻字间距中位数（实测 0.12–0.24s），上限 0.40s。
 5. **多余语音**：ASR 里连续 ≥ 6 个未匹配到任何台词的字 → `extra_speech[{text, start_s, end_s}]`，进报告不烧字幕（模型自己加戏或旁白幻听，都该让人看见）。
 6. **无音轨**：`has_audio=False` 的镜头全部 `missing`，reason=`no_audio`。
 
-同音字（P1）：`pypinyin` 取无声调拼音，同音视为命中（权重 1）；不引入时，同音字只影响 ratio 不影响定位（相邻命中字插值即可）。
 
 ## 6. 字幕切分与时间规则（`app/subtitles/cues.py`，L1）
 
@@ -133,7 +131,7 @@ concatenate_episode(episode_id)
 ## 7. 时间轴换算（`app/subtitles/timeline.py`，L1）
 
 - `draft_concat`：`offset_i = Σ_{j<i} prepared_duration_j`，`prepared_duration` 取归一后片段的 ffprobe 实测（与现有「视频流实测时长是权威」口径一致，不用名义 `duration_s`）。
-- `final_edit`：`offset_i = Σ_{j<i} prepared_duration_j − Σ_{j<i} xfade_duration_j`，与 `_compose` 的 `cumulative` 同一算式（xfade 让后一镜提前 `duration` 秒进入）。
+- `final_edit`：`offset_i = Σ_{j<i} prepared_duration_j − Σ_{j≤i} xfade_before_j`（**含第 i 段自己的入场转场**：xfade 让第 i 镜提前 `xfade_before_i` 秒进入），与 `_compose` 的 `cumulative`/`offset` 演进逐步对照过（U1 用 3 段手算验证，见 `tests/test_subtitles_timeline.py` 顶部推导）。
 - 部分合成（跳过缺镜）只换算入选镜头；转场跨缺镜时按硬切（与现有规则一致）。
 - 换算后再裁一次：`end ≤ offset_i + effective_duration_i`。
 
@@ -169,17 +167,20 @@ subtitle_alignments(
 
 文件产物（与 `episode.mp4` 同目录、同一次发布原子落盘）：`episode.ass`、`episode.srt`；连播：`film.srt`（按 `chapters[].start_s` 偏移拼接各集 srt）。
 
-`episode.edit-report.json` 新增：
+`episode.edit-report.json` 新增（落地形状，2026-09-15）：
 ```json
 "subtitles": {
-  "enabled": true, "engine_id": "sherpa-onnx/1.13.8", "model_id": "sense-voice-...-int8-2024-07-17",
+  "enabled": true, "engine_id": "sherpa-onnx/1.13.8", "model_id": "sherpa-onnx-sense-voice-…-int8-2024-07-17", "font_family": "WenQuanYi Zen Hei",
   "lines_total": 31, "lines_aligned": 29, "lines_missing": 2, "cues": 87,
-  "missing": [{"shot_no": 12, "utterance_id": "U02", "line": "……", "match_ratio": 0.12, "reason": "not_found|no_audio"}],
+  "missing": [{"shot_no": 12, "utterance_id": "U02", "line": "……", "match_ratio": 0.12, "reason": "not_found|no_audio|short_line_partial"}],
   "extra_speech": [{"shot_no": 5, "text": "……", "start_s": 3.2, "end_s": 5.9}],
-  "ass_path": "…/episode.ass", "srt_path": "…/episode.srt",
-  "cache_hits": 25, "asr_shots": 2, "asr_elapsed_s": 6.2, "font_family": "WenQuanYi Zen Hei"
+  "lines": [{"shot_no": 12, "utterance_id": "U01", "status": "aligned", "match_ratio": 0.98, "exact_chars": 41, "matched_chars": 42, "total_chars": 43, "start_s": 0.24, "end_s": 7.26}],
+  "cues_timeline": [{"shot_no": 1, "utterance_id": "U01", "text": "……", "start_s": 0.34, "end_s": 2.9}],
+  "ass_text": "…", "ass_sha256": "…", "srt_sha256": "…",
+  "cache_hits": 25, "asr_shots": 2, "asr_elapsed_s": 6.2
 }
 ```
+报告是唯一真源：`episode.srt`/`episode.ass` 边车由报告里的 `cues_timeline`/`ass_text` 幂等物化（发布与恢复流程各调一次），`episode_mix_status()` 只在边车存在且 sha256 与报告一致时给 `subtitle_srt_url`，投影给前端时剔除 `ass_text`/`cues_timeline`。
 关闭时写 `{"enabled": false}`，不写其它键。`episode_mix_status()` 已把整份报告投影给前端，无需新接口；交付包新增 `role=subtitle_srt` 文件。
 
 ## 10. 接入点清单
@@ -194,7 +195,7 @@ subtitle_alignments(
 | `app/monitoring.py` + `app/config.py` | 5 个设置键（§8）+ `subtitle_burn_in_enabled` 布尔，默认 `false` |
 | `scripts/preflight.py` | 新检查：`import sherpa_onnx`、模型目录含 `model.int8.onnx`+`tokens.txt`、CJK 字体可解析、`ffmpeg -filters` 含 `ass`；开关开而任一缺 → fail，开关关 → warn |
 | `scripts/fetch_asr_model.py`（新） | 下载/校验 sha256/用 Python `tarfile` 解压到 `data/models/sense-voice-int8/`；支持 `--from-file` 离线包与 `--url` 镜像；幂等 |
-| `requirements.txt` | `sherpa-onnx==1.13.8` |
+| `requirements.txt` | `sherpa-onnx==1.13.8`、`pypinyin==0.55.0`（MIT、零依赖、3.9 MB） |
 | 前端 `CinemaPage.tsx` | 状态卡一行摘要 + 预览面板「未出声台词」列表（镜号可点到生成台）+ `.srt` 下载按钮 |
 
 设置读取口径：`get_setting()` 非法值一律 `RuntimeError`（沿用 `subtitle_gate.enabled()` 写法），不静默回退默认。
