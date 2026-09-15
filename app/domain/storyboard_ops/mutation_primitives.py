@@ -76,6 +76,19 @@ def render_time_only_edit(changed_fields) -> bool:
     return bool(changed) and changed <= RENDER_TIME_ONLY_EDIT_FIELDS
 
 
+#: 能带进新人物称谓的字段。只改时段/场景标签/景别/运镜/时长/转场时，镜头里的人物名单原封不动，
+#: 「不允许新增未解析的人物称谓」无从谈起——分镜台自己登记的群演（entity:…）会被这条检查当成新增称谓
+#: 拒掉（2026-09-15 第 1 集第 17 镜改转场、第 2 集 6/7/13 镜改时段都被 422）。
+IDENTITY_BEARING_EDIT_FIELDS = frozenset({
+    "characters", "dialogues", "audio_timeline", "action_desc", "narration", "first_frame_desc", "last_frame_desc",
+})
+
+
+def edit_touches_identities(changed_fields) -> bool:
+    """改动是否可能带进新的人物称谓。"""
+    return bool(set(changed_fields) & IDENTITY_BEARING_EDIT_FIELDS)
+
+
 def _narrative_semantic_edit_fields(changed_fields) -> list[str]:
     return sorted(set(changed_fields) - _NARRATIVE_PRESENTATION_EDIT_FIELDS)
 

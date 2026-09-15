@@ -29,6 +29,7 @@ from app.validators import normalize_action_desc
 from fastapi import HTTPException
 
 from .mutation_primitives import (
+    edit_touches_identities,
     render_time_only_edit,
     _apply_contract_to_public_shot,
     _board_from_shot_rows,
@@ -192,7 +193,7 @@ async def edit_shot(shot_id: str, body: dict):
         project_bible = _project_bible_or_placeholder(project)
         character_changes = (
             []
-            if narrative_authority or render_time_only_edit(changed_fields)
+            if narrative_authority or not edit_touches_identities(changed_fields)
             else normalize_offbible_characters(
                 Storyboard(episode_no=ep["episode_no"], shots=[instance]),
                 project_bible,
