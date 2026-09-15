@@ -49,3 +49,23 @@ def test_narrative_clauses_are_dropped_even_when_grounded() -> None:
     # 同一句里没有句号分隔时，整句都是剧情经过
     kept2, _ = ground_appearance("青年男性，本集变为兽化形态，束发", source)
     assert kept2 == ""
+
+
+_LONGMAO_CH1 = (
+    "周晚低头看手机——爪印的光慢慢聚拢，一只掌心大的明黄色小猫从屏幕里站了起来，长长的尾巴拖出屏幕边缘，"
+    "尾尖一撮金毛，两根白色的长须。它抬头看她，琥珀色的眼睛。"
+)
+
+
+def test_creature_generic_form_is_kept_and_unbacked_accessory_dropped() -> None:
+    """2026-09-15《龙猫出爪》：主角是猫，物种/毛色/部位形态是它的「通用形态」；项圈铜铃原文没写就删。"""
+    kept, dropped = ground_appearance(
+        "体态匀称的明黄色短毛猫，尾尖缀一撮金毛，两根修长白须，琥珀色圆眼，颈间戴细黑项圈挂铜铃", _LONGMAO_CH1,
+    )
+    assert kept == "体态匀称的明黄色短毛猫，尾尖缀一撮金毛，两根修长白须，琥珀色圆眼"
+    assert dropped == ["颈间戴细黑项圈挂铜铃"]
+
+
+def test_pet_cat_generic_form_without_source_description_is_kept() -> None:
+    kept, dropped = ground_appearance("橘白相间的短毛家猫，体态圆胖毛发蓬松", "阿凯（怀里抱一只橘白猫\"馒头\"）")
+    assert dropped == [] and kept == "橘白相间的短毛家猫，体态圆胖毛发蓬松"

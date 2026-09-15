@@ -106,19 +106,19 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
 判定口径：
 {decision_contract}
 - appearance_canonical 是"固定外观锚点串"：40~60 字，只写视觉可见信息，不写性格。通用
-  形态（性别年龄感/发型发色/服装款式与颜色）原文没写处按画风（{style}）合理设定，不需要
-  举证；标志性特征（材质、图案、兽皮、饰物、法器、伤疤等）只有原文对这个角色本人确有描写才写，后端会删掉没有原文依据的子句，且要在 source_evidence 里给出
+  形态（人：性别年龄感/发型发色/服装款式与颜色；非人角色：物种/毛色毛长/体型/尾耳爪须等部位形态/眼睛颜色）原文没写处按画风（{style}）合理设定，不需要
+  举证；标志性特征（材质、图案、兽皮、饰物、项圈铃铛、法器、伤疤等）只有原文对这个角色本人确有描写才写，后端会删掉没有原文依据的子句，且要在 source_evidence 里给出
   evidence_chapter_index（取原文片段【第 N 章】块头里的数字）与 evidence_quote（支撑该
   特征的原文逐字短句，40 字以内、必须原样连续照抄，短句本身要能读出是在写这个角色
   本人，不是同段落里的其他人）；原文没有就不写，source_evidence 留空数组即可，不是缺陷。
 - appearance_canonical 只允许常规完整着装、中性站姿下可直接看见、可跨镜稳定复现的静态形态；不得写性格、欲望、气质、眼神行为、对他人的注视方式、裸体、内衣、私密身体部位或必须暴露身体才能看见的特征。
 
 先判断「{name}」指的是什么：
-- subject_kind=person：一个具体的人（可以被选角、被定妆、能出镜表演）。
+- subject_kind=person：一个能出镜表演的具体角色个体——人，或在剧情里作为角色行动、说话、被单独描写的动物 / 拟人化生物 / 灵兽 / 数字生物（宠物猫、会说话的猫、精灵）；它们同样要定妆、同样进人物谱。
 - subject_kind=organization：宗门、门派、家族、势力、商号等组织。
 - subject_kind=place：地点、建筑、区域。
 - subject_kind=object：器物、法宝、典籍、功法、丹药等物品。
-- subject_kind=other：以上都不是。
+- subject_kind=other：以上都不是（不作为角色出场的泛指动物、自然现象等）。
 - subject_kind=group：多人合称（两个老者、三名弟子）。原文能区分成员时，在 members 里逐个列出：每个成员的 source_label 必须是上面片段里逐字出现、能单独指认该成员的称呼（如「高大老者」）；原文不区分的成员不列，members 留空数组。
 人物谱只登记 person；group 本身不建卡，其成员各自建卡。组织、地点、器物即使在剧情里极其重要、也确实需要视觉一致性，
 也一律 important=false——它们属于场景库，不属于人物谱。
@@ -183,7 +183,7 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
         if important and not card_complete:
             important = False  # 外观太稀薄不足以稳定定妆 → 不建卡
         if subject_kind != CHARACTER_SUBJECT_PERSON:
-            # 不是人就不进人物谱，且这一条不受 require_identity_card 影响：
+            # 不是角色个体（人或作为角色出场的生物）就不进人物谱，且这一条不受 require_identity_card 影响：
             # 身份消歧确认了"这是一个稳定的专名"，并不等于确认了"这是一个人"。
             # 未声明 subject_kind 的旧响应同样落在这里，方向是保守的。
             important = False

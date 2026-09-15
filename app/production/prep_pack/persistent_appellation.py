@@ -172,6 +172,10 @@ async def resolve_persistent_appellation(
     # 规范名——正是"后来的代称绑回最初那张卡"。"conflict" 一律不接（同一称呼
     # 命中多个角色是真实存在的合法数据，猜一个就会制造错误归属）。
     if status not in {"added", "exists"}:
+        # 2026-09-15《龙猫出爪》主角「龙猫」在这里静默落成群演（外观核验删空 → error），
+        # 整条链路没有一行记录；失败原因必须可见，否则只能事后翻供应商调用去猜。
+        log.warning("[PERSISTENT_APPELLATION] 「%s」跨章同一人已确认但建卡未成：status=%s reason=%s",
+                    label, status or "(空)", (result or {}).get("reason") or (result or {}).get("portrait_error") or "")
         return None
     canonical_name = str((result or {}).get("name") or "").strip() or label
     return {
