@@ -82,3 +82,15 @@ def test_body_part_form_clauses_are_generic_but_adornments_still_need_evidence()
     # 人的伤疤/佩刀/兽皮照旧要原文依据（部位词 + 饰物标记 → 走核验）
     kept2, dropped2 = ground_appearance("成年黑发男子，左眉留有一道浅疤，腰间佩刀，肩披虎皮", "丁力听令后带人巡查山门。")
     assert kept2 == "成年黑发男子" and dropped2 == ["左眉留有一道浅疤", "腰间佩刀", "肩披虎皮"]
+
+
+def test_source_stated_age_in_character_intro_is_copied_when_model_dropped_it() -> None:
+    from app.portraits.appearance_grounding import complete_age, source_age_for
+
+    fragments = "人物：周晚、小李、大姐（四十岁上下，抱一只泰迪）\n小李：我妈五十岁了。"
+    assert source_age_for("大姐", fragments) == "四十岁上下"
+    assert source_age_for("小李", fragments) == ""  # 叙述里的五十岁说的是别人，不认
+    assert complete_age("留齐耳深棕短发，常怀抱一只棕色卷毛泰迪犬", "大姐", fragments) == (
+        "四十岁上下，留齐耳深棕短发，常怀抱一只棕色卷毛泰迪犬", "四十岁上下")
+    assert complete_age("二十七八岁女性，浅蓝工作服", "周晚", fragments) == ("二十七八岁女性，浅蓝工作服", "")
+    assert complete_age("中年男子，灰夹克", "大姐", fragments) == ("中年男子，灰夹克", "")

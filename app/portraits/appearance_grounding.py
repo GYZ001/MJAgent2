@@ -130,3 +130,34 @@ def ground_appearance(appearance: str, fragments: str) -> tuple[str, list[str]]:
     if not dropped:
         return text, []
     return "，".join(kept), dropped
+
+
+# 原文明确写了的年龄（闭集语法成分：数字/汉字数词 + 岁 + 上下/左右/出头/开外）是通用形态里唯一
+# 「原文写了就必须照抄」的一项——模型漏抄会把四十岁上下的大姐画成二十出头（2026-09-15 龙猫出爪第 2 集）。
+_AGE_RE = re.compile(r"[一二三四五六七八九十两\d]{1,4}(?:多|来|余)?岁(?:上下|左右|出头|开外)?")
+_AGE_SENSE_RE = re.compile(r"岁|中年|老年|老人|老者|老妇|老太|少年|少女|青年|孩童|儿童|小孩|幼")
+
+
+def source_age_for(name: str, fragments: str) -> str:
+    """剧本体人物介绍「大姐（四十岁上下，抱一只泰迪）」里紧跟角色名的括号内的年龄表达；没有就返回空串。
+
+    只认名字后面紧跟的括号：叙述句里的年龄可能在说别人（「小李：我妈五十岁了」）。"""
+    label = str(name or "").strip()
+    if not label or not fragments:
+        return ""
+    for match in re.finditer(re.escape(label) + r"[（(]([^）)]{0,60})[）)]", fragments):
+        age = _AGE_RE.search(match.group(1))
+        if age:
+            return age.group(0)
+    return ""
+
+
+def complete_age(appearance: str, name: str, fragments: str) -> tuple[str, str]:
+    """外观锚点缺年龄感而原文人物介绍写了年龄时，把原文年龄逐字补在最前面；返回 (外观, 补入的年龄)。"""
+    text = str(appearance or "").strip()
+    if not text or _AGE_SENSE_RE.search(text):
+        return text, ""
+    age = source_age_for(name, fragments)
+    if not age:
+        return text, ""
+    return f"{age}，{text}", age

@@ -18,7 +18,7 @@ from app.refs import production_appearance_anchor
 from app.schemas import Bible, Character, extract_json
 
 from ._db_probe import _has_column
-from .appearance_grounding import ground_appearance
+from .appearance_grounding import complete_age, ground_appearance
 from .bible_compat import (  # noqa: F401 -- 重新导出，见下方模块末尾的说明注释
     bible_with_pending_characters_for_text,
     bible_with_provisional_characters,
@@ -154,6 +154,7 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
             (obj.get("appearance_canonical") or "").strip()
         )
         appearance, dropped_appearance = ground_appearance(appearance, fragments)  # 标志性特征必须有原文依据，见 appearance_grounding
+        appearance, completed_age = complete_age(appearance, name, fragments)  # 原文人物介绍写了年龄就必须照抄
         if len(appearance) > APPEARANCE_MAX:
             appearance = appearance[:APPEARANCE_MAX]
         role = (obj.get("role") or "重要配角").strip() or "重要配角"
@@ -244,6 +245,7 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
             "source_evidence": verified_evidence,
             "rejected_evidence": rejected_evidence,
             "dropped_appearance": dropped_appearance,
+            "completed_age": completed_age,
             "members": verbatim_member_labels(obj.get("members"), fragments) if subject_kind == CHARACTER_SUBJECT_GROUP else [],
         }
 
