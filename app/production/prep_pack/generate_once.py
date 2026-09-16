@@ -29,6 +29,7 @@ from .contracts import (
     PREP_PACK_VERSION,
     PrepPackGateError,
 )
+from .extras_dedup import merge_card_backed_extras
 from .provenance_repair import verify_manifest_provenance_with_repair
 from .resolve_assets import _resolve_assets
 from .scene_degrade import (
@@ -367,10 +368,12 @@ async def _generate_prep_pack_once(
             + "；".join(blocking_asset_errors[:10])
         )
 
-    asset_manifest = {
+    # merge_card_backed_extras：同一实体被登记成「有卡角色 + 群演」两份时并回角色本体，
+    # 否则下游拿到两套互相矛盾的身份（见该模块 docstring 的第 4/5 集实测死锁）。
+    asset_manifest = merge_card_backed_extras({
         "characters": characters, "scenes": scenes, "props": props,
         "functional_extras": functional_extras,
-    }
+    })
     # provenance 发布前自校验（1.6.0，第25轮收口）：见
     # _prep_pack_verify_manifest_provenance 上方完整说明——每一条非空
     # anchor_phrase 必须真的逐字命中它自己 anchor_segments 指向的原文段，
