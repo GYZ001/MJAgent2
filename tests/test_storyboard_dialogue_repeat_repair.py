@@ -9,7 +9,13 @@
 """
 from __future__ import annotations
 
-from app.production.storyboard_dialogue_repeat import repeated_delivery_errors
+import pytest
+
+from app.production.storyboard_dialogue_repeat import (
+    _normalize,
+    _preempts,
+    repeated_delivery_errors,
+)
 from app.production.storyboard_dialogue_repeat_repair import (
     repair_preempted_dialogue,
     repaired_repeated_delivery_errors,
@@ -38,7 +44,7 @@ def test_real_failure_shape_is_repaired_and_original_check_passes():
     该行从本段 dialogue 中被删除。"""
     draft = _draft([("bible:李麦麦", "跟我去公司，别出声。")])
     errors = repaired_repeated_delivery_errors(
-        draft, [], current_segment_no=4, reserved=[_RESERVED_LINE],
+        draft, [], current_segment_no=4, reserved=[_RESERVED_LINE], required_texts=[],
     )
     assert errors == []
     assert draft.dialogue == []
@@ -49,7 +55,7 @@ def test_repair_keeps_unrelated_lines_and_only_drops_the_conflicting_one():
         ("bible:李麦麦", "跟我去公司，别出声。"),
         ("bible:李麦麦", "今天天气不错。"),
     ])
-    notes = repair_preempted_dialogue(draft, [_RESERVED_LINE], current_segment_no=4)
+    notes = repair_preempted_dialogue(draft, [_RESERVED_LINE], current_segment_no=4, required_texts=[])
     assert len(notes) == 1
     assert "第 5 段必保台词" in notes[0]
     assert [line.line for line in draft.dialogue] == ["今天天气不错。"]
@@ -59,7 +65,7 @@ def test_legal_dialogue_with_no_reserved_conflict_is_untouched():
     """合法输入：本段台词与后段必保台词无关——修补是空操作。"""
     draft = _draft([("bible:李麦麦", "明天九点的会我不能迟到。")])
     original = list(draft.dialogue)
-    notes = repair_preempted_dialogue(draft, [_RESERVED_LINE], current_segment_no=4)
+    notes = repair_preempted_dialogue(draft, [_RESERVED_LINE], current_segment_no=4, required_texts=[])
     assert notes == []
     assert draft.dialogue == original
 
@@ -70,7 +76,7 @@ def test_unrelated_repeat_across_earlier_segments_is_not_repaired_and_still_erro
     draft = _draft([("id_a", "它居然自己选了这个项目")])
     delivered = [(2, "id_a", "它居然自己选了这个项目")]
     errors = repaired_repeated_delivery_errors(
-        draft, delivered, current_segment_no=6, reserved=[],
+        draft, delivered, current_segment_no=6, reserved=[], required_texts=[],
     )
     assert len(errors) == 1
     assert "第 2 段" in errors[0]
@@ -82,9 +88,52 @@ def test_repair_result_matches_calling_original_checker_directly():
     （只是多了一步先删冲突台词）。"""
     draft = _draft([("id_a", "完全不相关的一句话")])
     wrapped = repaired_repeated_delivery_errors(
-        draft, [], current_segment_no=1, reserved=[_RESERVED_LINE],
+        draft, [], current_segment_no=1, reserved=[_RESERVED_LINE], required_texts=[],
     )
     direct = repeated_delivery_errors(
         [], [("id_a", "完全不相关的一句话")], current_segment_no=1, reserved=[_RESERVED_LINE],
     )
     assert wrapped == direct == []
+
+
+# 2026-09-16 龙猫出爪连播第 3、4 集整集失败的真实数据：本段自己的必保原话与
+# 后面某段的必保台词措辞相近，被判成「抢说」删掉，紧接着 quote_provenance_errors
+# 报「必保引用 QNN 须保留完整原话」——删的正是同一轮校验要求必须在的那一句。
+_REAL_DEADLOCKS = [
+    ("第4集Q09", "我写了三个月了。", (6, "我写了三个月，你看了三秒。")),
+    ("第3集Q23", "还有这个。每个月一笔，往外走，没名目。",
+     (10, "还有一笔。每个月往外走，没名目。要写进去吗？")),
+]
+
+
+@pytest.mark.parametrize("tag,own_quote,reserved", _REAL_DEADLOCKS)
+def test_own_required_quote_survives_even_when_it_looks_like_preemption(tag, own_quote, reserved):
+    """本段自己的必保原话一律不删，哪怕它确实命中了抢说判据。
+
+    判据本身仍然命中（下面的 _preempts 断言是独立观察点，证明这里不是因为
+    「判据没命中」才没删）——保护来自归属：这句话已由台账分配给本段、带着本段
+    的 quote_id，后段出现措辞相近的句子是后段的事。
+    """
+    assert _preempts(_normalize(own_quote), _normalize(reserved[1])), (
+        f"{tag}：前提失效——抢说判据没有命中，这条用例就不再覆盖真实死锁了"
+    )
+    draft = _draft([("bible:阿凯", own_quote)])
+    notes = repair_preempted_dialogue(
+        draft, [reserved], current_segment_no=2, required_texts=[own_quote],
+    )
+    assert notes == []
+    assert [line.line for line in draft.dialogue] == [own_quote]
+
+
+def test_preemption_of_someone_elses_reserved_line_is_still_repaired():
+    """保护只覆盖本段必保原话：不在 required_texts 里的抢说行照删不误。"""
+    draft = _draft([
+        ("bible:阿凯", "我写了三个月了。"),
+        ("bible:李麦麦", "跟我去公司，别出声。"),
+    ])
+    notes = repair_preempted_dialogue(
+        draft, [(6, "我写了三个月，你看了三秒。"), _RESERVED_LINE],
+        current_segment_no=2, required_texts=["我写了三个月了。"],
+    )
+    assert len(notes) == 1
+    assert [line.line for line in draft.dialogue] == ["我写了三个月了。"]

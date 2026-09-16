@@ -39,7 +39,7 @@ def test_reserved_dialogue_removal_also_removes_its_speech_token():
     draft = _AiStoryboardSegmentDraft.model_validate(CASES[1]['draft'])
     original = draft.prompt_text
     text = draft.dialogue[0].line
-    assert repair_preempted_dialogue(draft, [(3, text)], current_segment_no=2)
+    assert repair_preempted_dialogue(draft, [(3, text)], current_segment_no=2, required_texts=[])
     assert not draft.dialogue
     assert draft.prompt_text == original.replace('{{speech:U01}}', '')
     assert speech_template_errors(draft.model_dump(), require_tokens=True) == []

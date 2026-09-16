@@ -830,6 +830,7 @@ def _validate_segment_draft(
     errors.extend(dialogue_speaker_errors(draft, required_dialogue, name_to_identity or {}, segment_source_text))
     errors.extend(repaired_repeated_delivery_errors(
         draft, delivered_lines, current_segment_no=current_segment_no, reserved=reserved_lines,
+        required_texts=[str(item.get("text") or "") for item in required_dialogue],
     ))
     return errors
 
