@@ -772,3 +772,18 @@ details.pack-meta-details > :not(summary) {
 .segment-identity-review button { width: fit-content; }
 .segment-identity-review figure { display: inline-block; margin: 8px; }
 .segment-identity-review img { width: 110px; height: 140px; object-fit: contain; }
+
+/* 更换本段场景绑定（components/SegmentSceneEdit.tsx）。照 .segment-identity-review
+   的写法：只用变量取色，不硬编码，暗色主题跟着 --surface-sunken/--hairline 走。 */
+.segment-scene-edit { margin: 12px 0; }
+.segment-scene-edit-body { display: grid; gap: 12px; padding: 16px 0; }
+.segment-scene-edit-hint { margin: 0; color: var(--text-secondary); line-height: 1.7; }
+.segment-scene-edit-pick { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.segment-scene-edit-pick select { max-width: 100%; }
+.segment-scene-edit-impact {
+  border: 1px solid var(--hairline); border-radius: 8px; padding: 12px; background: var(--surface-sunken);
+}
+.segment-scene-edit-impact ul { margin: 8px 0 0; padding-left: 20px; }
+.segment-scene-edit-impact p { margin: 8px 0 0; }
+.segment-scene-edit-actions { display: flex; align-items: center; gap: 12px; }
+.segment-scene-edit-actions button { width: fit-content; }

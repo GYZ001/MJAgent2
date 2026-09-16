@@ -126,6 +126,9 @@ export const api = {
   cancelStoryboard: storyboardApi.api_storyboard.cancelStoryboard,
   setVideoModel: storyboardApi.api_storyboard.setVideoModel,
   getShotReview: storyboardApi.api_storyboard.getShotReview,
+  startShotEditSession: storyboardApi.api_storyboard.startShotEditSession,
+  previewShotEditImpact: storyboardApi.api_storyboard.previewShotEditImpact,
+  updateShot: storyboardApi.api_storyboard.updateShot,
 
   /* ── 成片与交付域 ── */
   getMixStatus: deliveryApi.getMixStatus,
