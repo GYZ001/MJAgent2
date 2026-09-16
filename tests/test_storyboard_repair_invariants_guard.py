@@ -5,10 +5,13 @@
 docstring）。两条保护都是**沉默型**的——删掉之后测试不会红成一片，只会在某次
 真实连播里重新变成整集失败，所以在这里用 AST 把它们钉死：
 
-- ``repair_preempted_dialogue``/``repaired_repeated_delivery_errors`` 的
-  ``required_texts`` 必须是 keyword-only 且**没有默认值**。给了默认值就等于
-  「漏传不报错」，保护会静默失效回到删本段必保台词的老行为
-  （CLAUDE.md：可选参数是缺陷的温床）。
+- 抢说这条链上的四个函数（修补器 ``repair_preempted_dialogue``、包装
+  ``repaired_repeated_delivery_errors``、校验 ``repeated_delivery_errors`` 与它内部的
+  ``_preemption_errors``）的 ``required_texts`` 必须是 keyword-only 且**没有默认值**。
+  给了默认值就等于「漏传不报错」，保护会静默失效回到删/拦本段必保台词的老行为
+  （CLAUDE.md：可选参数是缺陷的温床）。**四个都要管**：第一版只在修补器上加了保护，
+  台词确实留下了，却被紧随其后的 ``_preemption_errors`` 判成「抢说后段台词」——
+  死锁只是换了个位置，整集照样失败。
 - ``strip_extra_reference_markers`` 必须真的去算 ``_protected_names``。不算
   就会把有参考图角色的 @ 当群演标记剥掉，而 @ 是这些角色绑定参考图的唯一途径。
 """
@@ -16,6 +19,8 @@ from __future__ import annotations
 
 import ast
 import pathlib
+
+import pytest
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -37,14 +42,31 @@ def _kwonly_names_without_default(func: ast.FunctionDef) -> set[str]:
     }
 
 
-def test_preemption_repair_requires_explicit_required_texts() -> None:
-    for name in ("repair_preempted_dialogue", "repaired_repeated_delivery_errors"):
-        func = _function("app/production/storyboard_dialogue_repeat_repair.py", name)
-        assert "required_texts" in _kwonly_names_without_default(func), (
-            f"{name}() 的 required_texts 必须是 keyword-only 且无默认值：本段必保原话"
-            "一旦漏传，抢说修补会重新把它删掉，紧接着 quote_provenance_errors 报"
-            "「必保引用须保留完整原话」，模型逐字照录也过不了"
-        )
+_PREEMPTION_CHAIN = [
+    ("app/production/storyboard_dialogue_repeat_repair.py", "repair_preempted_dialogue"),
+    ("app/production/storyboard_dialogue_repeat_repair.py", "repaired_repeated_delivery_errors"),
+    ("app/production/storyboard_dialogue_repeat.py", "repeated_delivery_errors"),
+    ("app/production/storyboard_dialogue_repeat.py", "_preemption_errors"),
+]
+
+
+@pytest.mark.parametrize("module_path,name", _PREEMPTION_CHAIN)
+def test_preemption_chain_requires_explicit_required_texts(module_path: str, name: str) -> None:
+    func = _function(module_path, name)
+    assert "required_texts" in _kwonly_names_without_default(func), (
+        f"{name}() 的 required_texts 必须是 keyword-only 且无默认值：本段必保原话"
+        "一旦漏传，这条链上任何一环都会重新把它删掉或判红，而 quote_provenance_errors "
+        "同时要求逐字保留——模型照录也过不了"
+    )
+
+
+def test_preemption_check_skips_lines_that_are_own_required_quotes() -> None:
+    """保护必须落到校验那一环，不能只落在修补器上（第一版就是这么漏的）。"""
+    func = _function("app/production/storyboard_dialogue_repeat.py", "_preemption_errors")
+    source = ast.unparse(func)
+    assert "own" in source and "continue" in source, (
+        "_preemption_errors() 必须跳过本段必保原话；只在修补器里保护会让死锁换个位置复现"
+    )
 
 
 def test_preemption_repair_skips_lines_that_are_own_required_quotes() -> None:

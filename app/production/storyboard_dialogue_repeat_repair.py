@@ -93,6 +93,7 @@ def repaired_repeated_delivery_errors(
         [(line.speaker_identity_id, line.line) for line in draft.dialogue],
         current_segment_no=current_segment_no,
         reserved=reserved,
+        required_texts=required_texts,
     )
 
 

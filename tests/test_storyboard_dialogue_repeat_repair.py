@@ -92,6 +92,7 @@ def test_repair_result_matches_calling_original_checker_directly():
     )
     direct = repeated_delivery_errors(
         [], [("id_a", "完全不相关的一句话")], current_segment_no=1, reserved=[_RESERVED_LINE],
+        required_texts=[],
     )
     assert wrapped == direct == []
 
@@ -118,10 +119,12 @@ def test_own_required_quote_survives_even_when_it_looks_like_preemption(tag, own
         f"{tag}：前提失效——抢说判据没有命中，这条用例就不再覆盖真实死锁了"
     )
     draft = _draft([("bible:阿凯", own_quote)])
-    notes = repair_preempted_dialogue(
-        draft, [reserved], current_segment_no=2, required_texts=[own_quote],
+    # 断言落在真判据上：这一段整体能不能过。只断言「修补没删」会漏掉死锁换位置——
+    # 保留下来的那一行会被紧随其后的 _preemption_errors 判红，模型照样过不了。
+    errors = repaired_repeated_delivery_errors(
+        draft, [], current_segment_no=2, reserved=[reserved], required_texts=[own_quote],
     )
-    assert notes == []
+    assert errors == []
     assert [line.line for line in draft.dialogue] == [own_quote]
 
 
@@ -131,9 +134,10 @@ def test_preemption_of_someone_elses_reserved_line_is_still_repaired():
         ("bible:阿凯", "我写了三个月了。"),
         ("bible:李麦麦", "跟我去公司，别出声。"),
     ])
-    notes = repair_preempted_dialogue(
-        draft, [(6, "我写了三个月，你看了三秒。"), _RESERVED_LINE],
-        current_segment_no=2, required_texts=["我写了三个月了。"],
+    errors = repaired_repeated_delivery_errors(
+        draft, [], current_segment_no=2,
+        reserved=[(6, "我写了三个月，你看了三秒。"), _RESERVED_LINE],
+        required_texts=["我写了三个月了。"],
     )
-    assert len(notes) == 1
+    assert errors == []
     assert [line.line for line in draft.dialogue] == ["我写了三个月了。"]

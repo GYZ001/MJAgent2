@@ -118,11 +118,16 @@ def repeated_delivery_errors(
     *,
     current_segment_no: int,
     reserved: list[tuple[int, str]],
+    required_texts: list[str],
 ) -> list[str]:
     """本段台词若与同一说话人在更早段落已交付的台词完全相同（归一化后），阻断。
 
     只比较"完全相同"（归一化后逐字相等），不做模糊匹配——半句改写、信息
     增量属于正常的剧情推进，不该被这道闸拦下；只有原样照搬才是真的重复。
+
+    ``required_texts``（本段必保原话，必传）只豁免下面的抢说检查，不豁免上面的
+    "与更早段落完全相同"——那一条命中说明同一句原话被台账分配给了两段，是台账
+    自身的问题，在这里放行只会让成片把同一句说两遍。
     """
     by_speaker: dict[str, list[tuple[int, str]]] = {}
     for segment_no, speaker, line in delivered:
@@ -143,17 +148,29 @@ def repeated_delivery_errors(
                     "不要原样再说一遍"
                 )
                 break
-    errors.extend(_preemption_errors(current, reserved, current_segment_no=current_segment_no))
+    errors.extend(_preemption_errors(
+        current, reserved, current_segment_no=current_segment_no, required_texts=required_texts,
+    ))
     return errors
 
 
 def _preemption_errors(
     current: list[tuple[str, str]], reserved: list[tuple[int, str]], *, current_segment_no: int,
+    required_texts: list[str],
 ) -> list[str]:
-    """本段台词若是后面段落必保台词的原样、子串或改写版本，阻断。"""
+    """本段台词若是后面段落必保台词的原样、子串或改写版本，阻断。
+
+    2026-09-16：本段自己的必保原话一律豁免。这句话已由台账分配给本段、带着本段的
+    quote_id，后段出现措辞相近的句子是后段的事，不构成本段抢说；不豁免就会与
+    ``quote_provenance_errors``（要求逐字保留）构成模型无论怎么写都过不了的死锁——
+    第 3、4 集实测，删掉它报「必保引用丢失」，留着它报「抢说后段台词」，两头堵死。
+    """
+    own = {_normalize(text) for text in required_texts if _normalize(text)}
     errors: list[str] = []
     for speaker, line in current:
         normalized = _normalize(line)
+        if normalized in own:
+            continue
         for segment_no, text in reserved:
             if _preempts(normalized, _normalize(text)):
                 errors.append(
