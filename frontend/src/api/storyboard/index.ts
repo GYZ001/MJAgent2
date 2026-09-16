@@ -21,7 +21,4 @@ export const api_storyboard = {
   cancelStoryboard: methods.cancelStoryboard,
   setVideoModel: methods.setVideoModel,
   getShotReview: methods.getShotReview,
-  startShotEditSession: methods.startShotEditSession,
-  previewShotEditImpact: methods.previewShotEditImpact,
-  updateShot: methods.updateShot,
 };

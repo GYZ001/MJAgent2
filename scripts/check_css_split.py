@@ -19,7 +19,7 @@ SRC = ROOT / 'frontend' / 'src'
 PAGES = {
     'BiblePage': ['pages/BiblePage.tsx'], 'BoardPage': [
         'pages/BoardPage.tsx', 'components/StoryboardPackSegmentView.tsx',
-        'components/SegmentIdentityReview.tsx', 'components/SegmentSceneEdit.tsx',
+        'components/SegmentIdentityReview.tsx',
     ],
     'WallPage': [
         'pages/WallPage.tsx',

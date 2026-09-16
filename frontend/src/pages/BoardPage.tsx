@@ -429,14 +429,6 @@ export default function BoardPage() {
   // 后端现算的 current_* 字段。口径照抄 ScriptPage.tsx（出图中轮询项目、跑完补刷分集）。
   const { data: project, refresh: refreshProject } = useProject(projectId!, refsBusyPollInterval, 'bible')
   useRefsSettledRefresh(project, refresh)
-  // 更换本段场景绑定的可选项（components/SegmentSceneEdit.tsx）。取全项目场景库而
-  // 不是段落 resources：resources 只含本段已解析到的场景，而用户要换成的那个恰恰是
-  // 本段没解析到的——拿 resources 当候选集，这个入口就永远换不出新东西。
-  const sceneOptions = useMemo(
-    () => (project?.bible?.scenes ?? []).map(scene => ({ name: scene.name, imageUrl: scene.ref_image_url })),
-    [project],
-  )
-
   const [busy, setBusy] = useState(false)
   const [selectedShotId, setSelectedShotId] = useState<string | null>(null)
   const [onlyProblems, setOnlyProblems] = useState(false)
@@ -1020,8 +1012,7 @@ export default function BoardPage() {
             )}
             {selectedShot && (
               <StoryboardPackSegmentView key={selectedShot.id}
-                shot={selectedShot} notify={toast} project={project} onSaved={() => void refresh({ force: true })}
-                sceneOptions={sceneOptions} />
+                shot={selectedShot} notify={toast} project={project} onSaved={() => void refresh({ force: true })} />
             )}
           </section>
         </div>

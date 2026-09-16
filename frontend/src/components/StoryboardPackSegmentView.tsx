@@ -4,7 +4,6 @@ import { compressSegmentIndexes } from '../lib/segmentIndexes'
 import { storyboardPackTargetModelLabel } from '../lib/storyboardTargetModel'
 import SegmentResourcePanel from './SegmentResourcePanel'
 import SegmentIdentityReview from './SegmentIdentityReview'
-import SegmentSceneEdit, { type SceneOption } from './SegmentSceneEdit'
 
 /**
  * 分镜台唯一的段落展示（docs/STORYBOARD_PROMPT_IR_DESIGN.md 冻结契约）。
@@ -17,13 +16,11 @@ import SegmentSceneEdit, { type SceneOption } from './SegmentSceneEdit'
  * 3. 次要——shot_count/目标模型/原文段号回指/台词条数/节拍/降级角标，小字与角标，
  *    不占正文层级，用 <details> 收起可展开的长内容（台词全文、节拍摘要、素材详情）。
  */
-export default function StoryboardPackSegmentView({ shot, notify, project, onSaved, sceneOptions }: {
+export default function StoryboardPackSegmentView({ shot, notify, project, onSaved }: {
   onSaved: () => void
   shot: Shot
   project: ImageGenTaskLike | null | undefined
   notify: (message: string, error?: boolean) => void
-  /** 场景库可选项，由分镜台从 project.bible.scenes 传入；空数组时不展示更换入口。 */
-  sceneOptions: SceneOption[]
 }) {
   const segment = shot.storyboard_pack_segment
   if (!segment) {
@@ -63,11 +60,6 @@ export default function StoryboardPackSegmentView({ shot, notify, project, onSav
 
       <SegmentResourcePanel resources={segment.resources} project={project} />
       <SegmentIdentityReview shotId={shot.id} notify={notify} onSaved={onSaved} />
-      {sceneOptions.length > 0 && (
-        <SegmentSceneEdit
-          shotId={shot.id} currentSceneName={shot.scene_name || ''}
-          sceneOptions={sceneOptions} notify={notify} onSaved={onSaved} />
-      )}
 
       <section className="storyboard-pack-prompt-block">
         <div className="storyboard-pack-prompt-head">
