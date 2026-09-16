@@ -27,6 +27,25 @@
 ``veryfast -crf 14``，确保最终成片全链路只经历一次有损编码（xfade/concat
 路径此前是中间件与最终成片同一档 crf 18，两代有损）。
 
+2026-09-16 修订（交付 crf 20 → 23）：用户报「下载成片特别慢」。先量链路，
+结论是最大的可控杠杆在码率不在传输——客户端↔A（大陆↔新加坡跨境，RTT 154 ms）
+实测中位 1.3 MB/s、天花板 3.6–4.8 MB/s（受 A 出站带宽封顶），而当时《我欲封天》
+ep5 成片 601 s / 593 MB（7.89 Mbps），一集要下七分钟以上。在 B（8 核，nice 19）
+上取两部真实成片各 60 s 中段实测：
+
+| 参数              | 《我欲封天》ep5     | 《龙猫出爪》ep1     |
+|-------------------|---------------------|---------------------|
+| 源（medium crf20）| 40.1 MB / 30.6 s    | 27.1 MB             |
+| medium crf23      | 26.8 MB / 27.0 s    | 18.7 MB / 22.3 s    |
+| slow   crf23      | 25.9 MB / 38.2 s    | —                   |
+| slow   crf26      | 17.5 MB / 32.4 s    | —                   |
+
+取 ``medium crf23``：体积 −31%~−33%，用户对比三档样片后确认画质无差别。没取
+slow 是因为它只再省 3.4% 体积却多花 41% 编码时间，而 B 同时还要扛 uvicorn 与
+合成任务；crf26 省得更多但用户未选，留档不启用。存量成片一律不自动重编（那是
+二次有损），改动只对新成片生效——2026-09-16 只按用户点名把《龙猫出爪_第一季》
+前两集单独重编了一次。
+
 这些数字只在与上面机器规格相同或相近的环境下有效；换机器（尤其换 CPU 核数
 或加 GPU 编码器）必须重新跑 ``/tmp/ffbench`` 同类基准，不能直接沿用。
 """
@@ -41,7 +60,7 @@ from pathlib import Path
 DELIVERY_WIDTH = 1080
 DELIVERY_HEIGHT = 1920
 
-# 最终成片：一次性有损编码，H.264 High + medium + crf 20（依据见模块 docstring）。
+# 最终成片：一次性有损编码，H.264 High + medium + crf 23（依据见模块 docstring）。
 # 编码线程给机器留两核（2026-09-15 实测：8 核 B 合成时负载 9+，uvicorn 与 ASR 抢不到 CPU）；
 # 配合 low_priority() 把 ffmpeg/ASR 子进程 nice 到 10，后端进程的响应优先于重编码。
 ENCODE_THREADS = max(2, (os.cpu_count() or 4) - 2)
@@ -56,7 +75,7 @@ def low_priority() -> None:
 
 
 DELIVERY_VIDEO_ARGS = [
-    "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+    "-c:v", "libx264", "-preset", "medium", "-crf", "23",
     "-pix_fmt", "yuv420p", "-profile:v", "high", "-threads", str(ENCODE_THREADS),
 ]
 # 中间件（片段级归一化，非最终交付物）：近无损，避免与最终编码叠加成两代有损。
@@ -64,7 +83,8 @@ INTERMEDIATE_VIDEO_ARGS = [
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "14", "-pix_fmt", "yuv420p",
 ]
 
-# 实测 medium crf20 约 2.5 倍实时，乘 1.6 倍余量后取整。
+# 2026-09-02 在 2 核 A 上实测 medium crf20 约 2.5 倍实时，乘 1.6 倍余量后取整；
+# 2026-09-16 在 8 核 B 上实测 medium crf23 仅 0.37 倍实时，余量只多不少，沿用 4.0。
 DELIVERY_ENCODE_REALTIME_FACTOR = 4.0
 
 

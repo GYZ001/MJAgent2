@@ -353,7 +353,7 @@ def test_concatenate_episode_mixed_resolution_skips_copy_fastpath_and_scales(
     """混合分辨率源片段：快速路径不能对不同分辨率直接 -c copy——容器分辨率
     声明与真实帧分辨率不一致这件事 -c copy 完全不校验，rc=0 但花屏。必须先按
     canvas_filter 把每镜归一到同一交付画布，最终 concat 用 DELIVERY_VIDEO_ARGS
-    （medium/crf20）重编码。
+    （medium/crf23）重编码。
     """
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -384,8 +384,11 @@ def test_concatenate_episode_mixed_resolution_skips_copy_fastpath_and_scales(
     concat_cmds = [cmd for cmd in commands if "-f" in cmd and "concat" in cmd]
     assert len(concat_cmds) == 1, "分辨率不一致时不应尝试 -c copy 再回退，应直接重编码"
     assert "copy" not in concat_cmds[0]
-    assert "medium" in concat_cmds[0]
-    assert "20" in concat_cmds[0]
+    from app.media_pipeline.delivery_encode import DELIVERY_VIDEO_ARGS
+
+    for flag in ("-preset", "-crf"):
+        expected = DELIVERY_VIDEO_ARGS[DELIVERY_VIDEO_ARGS.index(flag) + 1]
+        assert concat_cmds[0][concat_cmds[0].index(flag) + 1] == expected
     normalize_cmds = [cmd for cmd in commands if "-vf" in cmd]
     assert any("lanczos" in cmd[cmd.index("-vf") + 1] for cmd in normalize_cmds)
 

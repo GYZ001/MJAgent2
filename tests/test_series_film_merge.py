@@ -14,6 +14,7 @@ import pytest
 from app import config
 from app.domain.series_ops import merge
 from app.media_exec.concat import _final_video_path
+from app.media_pipeline.delivery_encode import DELIVERY_VIDEO_ARGS
 
 _FFMPEG_AVAILABLE = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
 pytestmark = pytest.mark.skipif(not _FFMPEG_AVAILABLE, reason="ffmpeg/ffprobe unavailable")
@@ -67,11 +68,21 @@ def test_build_series_film_uses_delivery_encode_params_and_lanczos_scale(
     merge.build_series_film(project_id, 1, 2, [1, 2])
 
     command = captured["command"]
-    assert command[command.index("-preset") + 1] == "medium"
-    assert command[command.index("-crf") + 1] == "20"
+    expected_preset = DELIVERY_VIDEO_ARGS[DELIVERY_VIDEO_ARGS.index("-preset") + 1]
+    expected_crf = DELIVERY_VIDEO_ARGS[DELIVERY_VIDEO_ARGS.index("-crf") + 1]
+    assert command[command.index("-preset") + 1] == expected_preset
+    assert command[command.index("-crf") + 1] == expected_crf
     filter_complex = command[command.index("-filter_complex") + 1]
     assert "lanczos" in filter_complex
     assert captured["timeout"] == merge.encode_timeout_s(4.0)
+    # 报告里的编码描述是用户判断产出档次的唯一凭据，必须跟真实命令同源：
+    # 调 crf 时曾只改命令、报告仍写 crf20（2026-09-16）。
+    import json
+
+    report_path = merge.series_film_dir(project_id, 1, 2) / "film.report.json"
+    summary = json.loads(report_path.read_text(encoding="utf-8"))
+    assert f"crf{expected_crf}" in summary["ffmpeg_command_summary"]
+    assert expected_preset in summary["ffmpeg_command_summary"]
 
 
 def test_build_series_film_two_episodes_concatenates_and_reports_chapters(project_dir) -> None:

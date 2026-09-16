@@ -161,6 +161,20 @@ def _run_copy_concat_ffmpeg(paths: list[Path], out_path: Path, timeout_s: float)
         list_path.unlink(missing_ok=True)
 
 
+
+def _delivery_args_summary() -> str:
+    """报告里的编码描述从 DELIVERY_VIDEO_ARGS 现取，不写死。
+
+    这里曾硬编码 "h264 medium crf20"：2026-09-16 把交付 crf 调到 23 时，命令变了
+    而报告仍写 crf20——成片报告是用户判断「这份产出是什么档」的唯一凭据，撒谎比
+    没有更糟。
+    """
+    def _after(flag: str) -> str:
+        return DELIVERY_VIDEO_ARGS[DELIVERY_VIDEO_ARGS.index(flag) + 1]
+
+    return f"{_after('-c:v').removeprefix('lib')} {_after('-preset')} crf{_after('-crf')}"
+
+
 def _run_concat_ffmpeg(paths: list[Path], out_path: Path, timeout_s: float) -> None:
     cmd = ["ffmpeg", "-y"]
     for path in paths:
@@ -236,7 +250,7 @@ def build_series_film(
         "ffmpeg_command_summary": (
             "concat demuxer -c copy + faststart（各集成片流参数一致且为交付画布）" if stream_copy else
             "filter_complex concat(scale/crop/fps/aresample 归一化，lanczos) -> "
-            "DELIVERY_VIDEO_ARGS(h264 medium crf20) + aac + faststart"
+            f"DELIVERY_VIDEO_ARGS({_delivery_args_summary()}) + aac + faststart"
         ),
     }
     _write_series_srt(out_dir, final_paths, report)

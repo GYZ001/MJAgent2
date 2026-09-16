@@ -45,11 +45,19 @@ def test_encode_timeout_s_formula_between_bounds() -> None:
     assert encode_timeout_s(total) == pytest.approx(expected)
 
 
-def test_delivery_video_args_uses_medium_crf20_high_profile() -> None:
-    assert "medium" in DELIVERY_VIDEO_ARGS
-    assert "20" in DELIVERY_VIDEO_ARGS
-    assert "-profile:v" in DELIVERY_VIDEO_ARGS
-    assert "high" in DELIVERY_VIDEO_ARGS
+def test_delivery_video_args_uses_medium_crf23_high_profile() -> None:
+    """crf 23 是 2026-09-16 按下载速度实测拍板的（依据见 delivery_encode 模块 docstring）。
+
+    按 flag 取下一个元素而不是 ``"23" in args``——后者在 ``-threads 23`` 这类
+    无关位置上同样为真，是个恒真断言。
+    """
+    def after(flag: str) -> str:
+        return DELIVERY_VIDEO_ARGS[DELIVERY_VIDEO_ARGS.index(flag) + 1]
+
+    assert after("-preset") == "medium"
+    assert after("-crf") == "23"
+    assert after("-profile:v") == "high"
+    assert after("-c:v") == "libx264"
 
 
 def test_intermediate_video_args_uses_veryfast_crf14() -> None:
