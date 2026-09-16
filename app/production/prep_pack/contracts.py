@@ -203,7 +203,7 @@ from __future__ import annotations
 # stay defined in app/validators.py, unused-but-not-deleted (same "dormant,
 # not deleted" precedent as app/production/screenplay_repair.py), still
 # exercised directly by tests/test_prep_pack_coverage.py.
-PREP_PACK_VERSION = "2.0.4"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
+PREP_PACK_VERSION = "2.0.5"  # 2.0.5 见 chunk_extraction._ASSET_DECLARATION_RULES 上方；1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
 # 1.2.0: asset_manifest.characters entries carry aliases; 1.3.0: asset_manifest
 # gained functional_extras; 1.4.0: coverage_ledger gained paratext (deterministic
 # keyword/position classifier, since replaced); 1.4.1: paratext classification

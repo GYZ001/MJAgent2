@@ -5361,8 +5361,8 @@ def test_prep_pack_version_is_1_8_0():
     自己独立发起一次 strip_paratext 模型调用。是 prompt-contract 变更
     （删字段）+ ledger 判定语义变更（判据来源从模型自报换成确定性投影），
     比照 1.4.1/1.9.0 的先例推进版本号第三位，不动 schema 位（coverage_
-    ledger.paratext 自身仍是 flat [int] list）。"""
-    assert prep_pack.PREP_PACK_VERSION == "2.0.4"
+    ledger.paratext 自身仍是 flat [int] list）。2.0.5 见 chunk_extraction 规则常量上方。"""
+    assert prep_pack.PREP_PACK_VERSION == "2.0.5"
 
 
 # ---------------------------------------------------------------------------
