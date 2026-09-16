@@ -37,25 +37,32 @@ log = logging.getLogger(__name__)
 _WORD_CHAR_RE = re.compile(r"[0-9A-Za-z一-鿿]")
 
 
-def _entry_names(entry: Any, *, aliases: bool) -> set[str]:
-    """一个角色条目对外可能被 @ 点名的全部写法：正名、display_name、别名。"""
+def _entry_names(entry: Any) -> set[str]:
+    """一个角色条目真正能绑到参考图的写法：正名（identity_id 主体）与 display_name。
+
+    **不含别名。** 打包侧 ``seedance_reference_notes._related_names`` 只按
+    relatedCharacterIds/entity_name 建 @名字→@图片N 的映射，别名根本不在那张表里，
+    保护一个绑不到图的写法只会让无绑定的 @ 混进供应商请求。判据也要跟两个校验器
+    对齐：``reference_mention_errors`` 认 identity_id 主体，
+    ``final_identity_prompt_errors`` 认 display_name 或 identity_id 主体——任何一侧
+    比另一侧宽，宽的那部分就是必然发生的线上故障。实测第 5 集的角色别名里登记着
+    代词「你」，按别名保护会让 ``@你`` 这种指向群演的写法逃过剥离。
+    """
     get = entry.get if isinstance(entry, dict) else lambda key, default=None: getattr(entry, key, default)
     names = {str(get("identity_id", "") or "").split(":", 1)[-1], str(get("display_name", "") or "")}
-    if aliases:
-        names.update(str(alias or "") for alias in (get("aliases", None) or []))
     return {name.strip() for name in names if name and name.strip()}
 
 
-def _portrait_entries(draft: Any, payload: dict[str, Any] | None) -> list[tuple[Any, bool]]:
-    """本段草稿与准备包里「带参考图」的角色条目；准备包那份额外认别名。"""
+def _portrait_entries(draft: Any, payload: dict[str, Any] | None) -> list[Any]:
+    """本段草稿与准备包里「带参考图」的角色条目。"""
     entries = [
-        (character, False)
+        character
         for character in getattr(getattr(draft, "resources", None), "characters", None) or []
         if getattr(character, "portrait_id", None)
     ]
     manifest = (payload or {}).get("asset_manifest") or {}
     entries.extend(
-        (character, True)
+        character
         for character in manifest.get("characters") or []
         if isinstance(character, dict) and character.get("portrait_id")
     )
@@ -65,8 +72,8 @@ def _portrait_entries(draft: Any, payload: dict[str, Any] | None) -> list[tuple[
 def _protected_names(draft: Any, payload: dict[str, Any] | None) -> set[str]:
     """有参考图的角色名——@ 是它们绑图的唯一途径，任何情况下都不剥离。"""
     names: set[str] = set()
-    for entry, aliases in _portrait_entries(draft, payload):
-        names.update(_entry_names(entry, aliases=aliases))
+    for entry in _portrait_entries(draft, payload):
+        names.update(_entry_names(entry))
     return names
 
 

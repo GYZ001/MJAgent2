@@ -91,15 +91,27 @@ def test_extra_label_that_is_a_prefix_of_a_character_name_does_not_break_it() ->
     assert reference_mention_errors(draft.prompt_text, draft.resources) == []
 
 
-def test_alias_of_a_card_backed_character_is_protected_via_manifest() -> None:
-    """角色卡的别名也受保护：模型按原文称谓写 @小龙，不该被同名群演标签剥掉。"""
+def test_model_written_display_name_is_protected() -> None:
+    """第 4 集模型把 bible:龙猫 的 display_name 填成了原文称谓「小龙」并照此点名，
+    display_name 是 final_identity_prompt_errors 认的写法，同名群演标签不得剥它。"""
     draft = _carded_draft("镜头3：@小龙 抬爪轻点键盘边缘。", "龙猫")
-    payload = {"asset_manifest": {
-        "characters": [{"identity_id": "bible:龙猫", "portrait_id": "pt_x", "aliases": ["小龙"]}],
-        "functional_extras": [{"label": "小龙"}],
-    }}
+    draft.resources.characters[0].display_name = "小龙"
+    payload = {"asset_manifest": {"functional_extras": [{"label": "小龙"}]}}
     strip_extra_reference_markers(draft, payload)
     assert draft.prompt_text == "镜头3：@小龙 抬爪轻点键盘边缘。"
+
+
+def test_alias_only_name_is_not_protected_and_stays_strippable() -> None:
+    """别名不进受保护集合：打包侧 @名字→@图片N 只认正名/entity_name，别名绑不到图，
+    保护它只会让无绑定的 @ 混进供应商请求（第 5 集别名里就登记着代词「你」）。"""
+    draft = _carded_draft("镜头1：@你 站在门口。", "小李")
+    payload = {"asset_manifest": {
+        "characters": [{"identity_id": "bible:小李", "portrait_id": "pt_x",
+                        "display_name": "小李", "aliases": ["你"]}],
+        "functional_extras": [{"label": "你"}],
+    }}
+    strip_extra_reference_markers(draft, payload)
+    assert draft.prompt_text == "镜头1：你 站在门口。"
 
 
 def test_extra_label_followed_by_more_characters_is_left_alone() -> None:
