@@ -9,16 +9,69 @@ final_identity_prompt_errors 按规则拒绝、重试耗尽、整集失败。
 subject_kind 为 extra/crowd、或 identity_id 不是 bible: 前缀的条目）或准备包
 functional_extras 的标签，就把 @ 去掉，正文一字不改；X 不在这两个集合里（真正
 写错的人物引用）仍交给校验拦截。validate 回调里调用，永远返回空错误列表。
+
+2026-09-16（龙猫出爪连播第 3–6 集整批失败）补两条硬约束，都是实测的死锁：
+**它剥掉的 @ 正是 reference_mention_errors 下一步要求必须在的那一个**，模型第
+2、3 次重试都已照写 `@龙猫`，每次都被这里改掉再被拦下，三次预算烧完整集失败。
+
+- **有参考图的角色名永不剥离**（``_protected_names``）。第 4/5 集准备包把
+  ``bible:龙猫``（有 portrait_id）同时登记成 functional_extras 的 label「龙猫」
+  「小龙」，同一个实体两套身份，原来的实现只看 label 就动手。角色卡优先：
+  撞车时以「有参考图」为准，群演那一份登记视为重复。
+- **按最长整名匹配 + 词边界改写，不做裸 replace**（``_rewrite_markers``）。
+  第 6 集 label「王婶」是角色名「王婶的老狗」的前缀，``replace("@王婶", "王婶")``
+  把一个合法的角色引用拦腰斩成 `王婶的老狗`。现在从 @ 处取能匹配到的最长已知
+  名字，且只在名字后面确实是分隔符（标点/空格/行尾）时才剥离——「@他们的领队」
+  这种以群演标签开头、后面还连着字的引用一律不动，交给校验如实报错。
 """
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 log = logging.getLogger(__name__)
 
+#: 汉字/字母/数字算「词内字符」：剥离只在名字后面不是这类字符时发生，避免把
+#: 更长的合法名字（@王婶的老狗）按它的前缀标签（王婶）拆坏。
+_WORD_CHAR_RE = re.compile(r"[0-9A-Za-z一-鿿]")
 
-def _known_extra_names(draft: Any, payload: dict[str, Any] | None) -> list[str]:
+
+def _entry_names(entry: Any, *, aliases: bool) -> set[str]:
+    """一个角色条目对外可能被 @ 点名的全部写法：正名、display_name、别名。"""
+    get = entry.get if isinstance(entry, dict) else lambda key, default=None: getattr(entry, key, default)
+    names = {str(get("identity_id", "") or "").split(":", 1)[-1], str(get("display_name", "") or "")}
+    if aliases:
+        names.update(str(alias or "") for alias in (get("aliases", None) or []))
+    return {name.strip() for name in names if name and name.strip()}
+
+
+def _portrait_entries(draft: Any, payload: dict[str, Any] | None) -> list[tuple[Any, bool]]:
+    """本段草稿与准备包里「带参考图」的角色条目；准备包那份额外认别名。"""
+    entries = [
+        (character, False)
+        for character in getattr(getattr(draft, "resources", None), "characters", None) or []
+        if getattr(character, "portrait_id", None)
+    ]
+    manifest = (payload or {}).get("asset_manifest") or {}
+    entries.extend(
+        (character, True)
+        for character in manifest.get("characters") or []
+        if isinstance(character, dict) and character.get("portrait_id")
+    )
+    return entries
+
+
+def _protected_names(draft: Any, payload: dict[str, Any] | None) -> set[str]:
+    """有参考图的角色名——@ 是它们绑图的唯一途径，任何情况下都不剥离。"""
+    names: set[str] = set()
+    for entry, aliases in _portrait_entries(draft, payload):
+        names.update(_entry_names(entry, aliases=aliases))
+    return names
+
+
+def _known_extra_names(draft: Any, payload: dict[str, Any] | None) -> set[str]:
+    """本段已知的无图群演标签：草稿里的 extra/crowd/非 bible 条目 + 准备包 label。"""
     names: set[str] = set()
     for character in getattr(getattr(draft, "resources", None), "characters", None) or []:
         identity_id = str(getattr(character, "identity_id", "") or "")
@@ -35,7 +88,35 @@ def _known_extra_names(draft: Any, payload: dict[str, Any] | None) -> list[str]:
         label = str((extra or {}).get("label") or "").strip()
         if label:
             names.add(label)
-    return sorted(names, key=len, reverse=True)
+    return names
+
+
+def _longest_name_at(prompt: str, pos: int, candidates: list[str]) -> str:
+    """从 ``pos`` 起能匹配上的最长已知名字；``candidates`` 须按长度降序。"""
+    return next((name for name in candidates if prompt.startswith(name, pos)), "")
+
+
+def _rewrite_markers(prompt: str, extras: set[str], protected: set[str]) -> tuple[str, list[str]]:
+    """逐个 @ 决定去留：命中群演标签且后面是分隔符才剥离，其余原样保留。"""
+    candidates = sorted(extras | protected, key=len, reverse=True)
+    out: list[str] = []
+    stripped: list[str] = []
+    index = 0
+    while index < len(prompt):
+        if prompt[index] != "@":
+            out.append(prompt[index])
+            index += 1
+            continue
+        name = _longest_name_at(prompt, index + 1, candidates)
+        tail = index + 1 + len(name)
+        bounded = tail >= len(prompt) or not _WORD_CHAR_RE.match(prompt[tail])
+        if name and bounded and name in extras and name not in protected:
+            out.append(name)
+            stripped.append(name)
+        else:
+            out.append("@" + name)
+        index = tail if name else index + 1
+    return "".join(out), stripped
 
 
 def strip_extra_reference_markers(draft: Any, payload: dict[str, Any] | None = None) -> list[str]:
@@ -43,16 +124,18 @@ def strip_extra_reference_markers(draft: Any, payload: dict[str, Any] | None = N
     prompt = str(getattr(draft, "prompt_text", "") or "")
     if "@" not in prompt:
         return []
-    repaired = prompt
-    stripped: list[str] = []
-    for name in _known_extra_names(draft, payload):
-        marker = f"@{name}"
-        if marker in repaired:
-            repaired = repaired.replace(marker, name)
-            stripped.append(name)
+    extras = _known_extra_names(draft, payload)
+    protected = _protected_names(draft, payload)
+    overlap = sorted(extras & protected)
+    if overlap:
+        log.warning(
+            "[STORYBOARD_REFERENCE_REPAIR] 群演标签与有参考图的角色重名，按角色卡为准保留 @：%s",
+            "、".join(overlap),
+        )
+    repaired, stripped = _rewrite_markers(prompt, extras, protected)
     if stripped:
         draft.prompt_text = repaired
-        log.info("[STORYBOARD_REFERENCE_REPAIR] 群演上的 @ 已去掉：%s", "、".join(stripped))
+        log.info("[STORYBOARD_REFERENCE_REPAIR] 群演上的 @ 已去掉：%s", "、".join(sorted(set(stripped))))
     return []
 
 
