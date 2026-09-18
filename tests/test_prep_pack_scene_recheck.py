@@ -33,12 +33,21 @@ def test_enum_reaches_the_response_format_actually_sent() -> None:
 
     from app.production.prep_pack.schemas import _response_format
 
-    model = scene_recheck.response_model(["晚安宠物医院门口", "宠物医院前台"])
-    sent = _response_format(model, "episode_prep_pack_scene_recheck_v1")
-    blob = json.dumps(sent, ensure_ascii=False)
-    assert "enum" in blob, "enum 没进真正下发的 response_format"
-    assert "晚安宠物医院门口" in blob and "宠物医院前台" in blob
-    assert sent["json_schema"]["strict"] is True
+    def field_schema(names: list[str]) -> dict:
+        sent = _response_format(
+            scene_recheck.response_model(names), "episode_prep_pack_scene_recheck_v1")
+        assert sent["json_schema"]["strict"] is True
+        defs = sent["json_schema"]["schema"].get("$defs") or {}
+        assert defs, "动态模型必须把 mention 定义放进 $defs"
+        return next(iter(defs.values()))["properties"]["display_name"]
+
+    # 多值渲染成 enum，单值渲染成 const——断言「值域被钉死」而不是「出现了 enum 这个词」。
+    # 只认字面 enum 的话，场景库恰好只有一个条目时会误判成「约束丢了」（2026-09-18 实测）。
+    multi = field_schema(["晚安宠物医院门口", "宠物医院前台"])
+    assert multi.get("enum") == ["晚安宠物医院门口", "宠物医院前台"]
+    single = field_schema(["晚安宠物医院门口"])
+    assert single.get("const") == "晚安宠物医院门口" or single.get("enum") == ["晚安宠物医院门口"]
+    assert json.dumps(multi) and "string" == multi.get("type")
 
 
 def test_response_model_rejects_names_outside_the_library() -> None:
