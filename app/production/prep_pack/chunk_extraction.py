@@ -179,13 +179,18 @@ _ASSET_DECLARATION_RULES = """segment_indexes 判据（硬性，对 characters/s
 心理，这些编号依然属于这个场景，要一并计入它的 segment_indexes，不能因为某个编号本身没有
 复述地点就漏报；只有当情节明确转移到另一个地点、或原文本身已经写明离开/切换（例如出门、
 关门、赶路前往别处），才停止把新的编号计入这个场景、改记到新地点名下。一段原文里，人物
-所在的地点几乎总是连续的，不要把 scenes 的申报窄化成"只在地点被提到的那一句"。
+所在的地点几乎总是连续的，不要把 scenes 的申报窄化成"只在地点被提到的那一句"；
+这条同样适用于没有角色的编号——镜头留在哪里，那个地点就仍然成立。
 
-同一编号里的多个地点（仅适用于 scenes，硬性）：一个编号的画面可以同时涉及不止一个地点——
-人物站在自家店门口看向街对面、镜头从室内摇到窗外、收束镜头把整条街收进画面，都是这种情形。
-每一个真正被看见的地点都要把这个编号计入自己的 segment_indexes：不要只留一个"主场景"，
-也不要因为这个编号的场次标题只写了其中一个地点就省略其余。判断只有一条：这个地点在这个
-编号的画面里是否真的出现。
+同一编号里的多个地点（仅适用于 scenes，硬性）：一个编号的镜头可以置身于不止一个空间——
+镜头从 A 摇到 B、从 A 升起拉开到 B、人物站在 A 而画面把 B 的空间整片铺开，都是这种情形。
+每一个机位真的进入过的地点都要把这个编号计入自己的 segment_indexes：不要只留一个"主场景"，
+也不要因为这个编号的场次标题只写了其中一个地点就省略其余。
+
+判据是机位在哪，不是画面里看得见什么：摄影机在 A 的室内、画面里能望见 B 的一角（窗外的
+招牌、门上的海报、屏幕里的画面、远处的灯光），场景仍然只是 A——B 只是 A 画面里的一个元素，
+不要为它申报这个编号。人物走向 B、说起 B 而镜头没跟过去，同样不算。一句话分辨：镜头就架
+在那个地点里，算；只是从别处望见它，不算。
 
 用别处的完整写法回指同一地点（仅适用于 scenes，硬性）：本编号用省略说法指一个地点（例如
 只写"门口""店里""楼下"），而这个地点的完整写法在本次输入的另一个编号里逐字出现过时，按
@@ -275,7 +280,9 @@ async def _extract_chunk(
   "segment_indexes": [该角色真正在画面中出场的编号列表]}}；
   已登记角色名（仅供拼写对齐——如果原文本身就是这样称呼这个角色的，写法要跟登记名
   保持一致；原文没有这样称呼，就不要往上面靠）：{known_characters}；
-- scenes：本段原文中角色实际所在的场景/地点，每个给 {{"display_name": "场景名",
+- scenes：本段镜头**置身在**的场景/地点（机位在哪个空间，那个空间就是场景）——角色所在
+  的地方要报；没有角色出场的画面（格局镜、空镜、转场镜、只有景物或动物的镜头）同样要报
+  机位所在的地点，「人物：无」不等于「没有场景」，每个给 {{"display_name": "场景名",
   "suspected_true_name": "你认为的正名，不确定就填 null", "segment_indexes": [该场景实际
   在画面中出现的编号列表], "quote": "从上面 segment_indexes 任一编号原文中逐字摘录的一段
   原文（不超过约60字），要能证明这里写的就是这个地点——不得改写/概括/跨编号拼接；这个场景
@@ -290,7 +297,7 @@ async def _extract_chunk(
 原文（本段共 {len(chunk)} 个编号片段）：
 {rendered}
 """
-    return await _call_structured(
+    response = await _call_structured(
         run_id=run_id,
         step_key="episode_prep_pack_event_chain_chunk",
         iteration_no=chunk_index,
@@ -304,6 +311,16 @@ async def _extract_chunk(
             "episode_id": episode_id,
             "chunk_index": chunk_index,
         },
+    )
+    # 场景补漏：抽取这一次要同时报三类素材，场景最容易被漏（实测 EP6 段 14 的格局镜
+    # 三次里漏两次）。这里对同一个 chunk 专门再问一次，见 scene_recheck 模块文档。
+    # 延迟导入：scene_recheck 需要本模块的 _call_structured/_render_chunk，模块级
+    # 互相导入会成环。
+    from .scene_recheck import attach_scene_recheck
+
+    return await attach_scene_recheck(
+        response, chunk=chunk, chunk_index=chunk_index, episode_id=episode_id,
+        known_scenes=known_scenes, run_id=run_id,
     )
 
 
