@@ -14,20 +14,39 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from pydantic import ValidationError
+
 
 from app.production.prep_pack import scene_recheck
 
 
-def test_output_schema_pins_display_name_to_registered_scenes() -> None:
-    """合法值域由本集已登记场景推导，模型没有能力自造一个新地点。
+def test_enum_reaches_the_response_format_actually_sent() -> None:
+    """enum 必须出现在**真正下发的 response_format** 里，不是某个辅助函数的返回值。
 
-    这是 schema 层面的保证，不是提示词里的一句「请不要自己编」——后者是禁令，
-    模型换个写法就绕过去了（本仓已有 identity_id 被自造成三种前缀的先例）。
+    2026-09-18 实测的真实缺陷：第一版把 enum 放进 ``_call_structured`` 的
+    ``output_schema`` 形参，而 model_gateway 只在格式/语义修复重试时把它塞进提示词
+    文本，首次调用的请求体里压根没有——供应商侧毫无约束，而当时那条测试只验了辅助
+    函数的返回值，照样全绿。判据必须挂在「这件事成没成」上：断言走完
+    ``response_model -> _response_format`` 这条真实路径之后 enum 还在。
     """
-    schema = scene_recheck._output_schema(["晚安宠物医院门口", "宠物医院前台"])
-    name_schema = schema["properties"]["scenes"]["items"]["properties"]["display_name"]
-    assert name_schema["enum"] == ["晚安宠物医院门口", "宠物医院前台"]
-    assert schema["properties"]["scenes"]["items"]["additionalProperties"] is False
+    import json
+
+    from app.production.prep_pack.schemas import _response_format
+
+    model = scene_recheck.response_model(["晚安宠物医院门口", "宠物医院前台"])
+    sent = _response_format(model, "episode_prep_pack_scene_recheck_v1")
+    blob = json.dumps(sent, ensure_ascii=False)
+    assert "enum" in blob, "enum 没进真正下发的 response_format"
+    assert "晚安宠物医院门口" in blob and "宠物医院前台" in blob
+    assert sent["json_schema"]["strict"] is True
+
+
+def test_response_model_rejects_names_outside_the_library() -> None:
+    """动态模型本身就拒绝清单外的名字——这是 schema 层的第一道，不是唯一一道。"""
+    model = scene_recheck.response_model(["晚安宠物医院门口"])
+    model(scenes=[{"display_name": "晚安宠物医院门口", "segment_indexes": [14], "quote": "x"}])
+    with pytest.raises(ValidationError):
+        model(scenes=[{"display_name": "我自己编的地方", "segment_indexes": [14], "quote": "x"}])
 
 
 def test_prompt_separates_camera_position_from_what_is_visible() -> None:
@@ -36,7 +55,7 @@ def test_prompt_separates_camera_position_from_what_is_visible() -> None:
     删掉这个区分，EP6 段 6/9/10 那类「室内望见门口海报」的段落会重新被收进门口
     场景——实测按「拍到」判时 6 次里误收 4 次。
     """
-    prompt = scene_recheck._prompt("（原文）", ["晚安宠物医院门口"], ["- 老街：[14]"])
+    prompt = scene_recheck._prompt("（原文）", ["晚安宠物医院门口"])
     assert "摄影机置身在哪个空间" in prompt
     # 不算的情形要逐条写出来，只说「要准确」没有可执行性
     assert "窗外的招牌、门上的海报" in prompt
@@ -52,7 +71,7 @@ def test_empty_scene_library_skips_the_call_entirely() -> None:
     而本该发生的只是「这一集还没有场景库，没什么可补」。
     """
     added = asyncio.run(scene_recheck.recheck_chunk_scenes(
-        episode_id="ep1", chunk_index=1, chunk=[], known_scenes=[], declared=[], run_id=None,
+        episode_id="ep1", chunk_index=1, chunk=[], known_scenes=[], run_id=None,
     ))
     assert added == []
 
@@ -134,14 +153,30 @@ def test_recheck_drops_names_outside_the_registered_list(monkeypatch) -> None:
     segment = type("Seg", (), {"text": "（格局镜：从门口升到街道。）"})()
     added = asyncio.run(scene_recheck.recheck_chunk_scenes(
         episode_id="ep1", chunk_index=1, chunk=[(14, segment)],
-        known_scenes=["晚安宠物医院门口"], declared=[], run_id=None,
+        known_scenes=["晚安宠物医院门口"], run_id=None,
     ))
     assert added == []
 
 
-@pytest.mark.parametrize("declared,expected", [([], "（上一轮没有申报任何场景）"), ([{"display_name": "老街", "segment_indexes": [14]}], "- 老街：[14]")])
-def test_prompt_shows_what_was_already_declared(declared, expected) -> None:
-    """已申报清单要进提示词：不告诉模型「已知的是哪些」，它会把已有的再报一遍。"""
-    lines = [f"- {d['display_name']}：{sorted(d['segment_indexes'])}" for d in declared]
-    prompt = scene_recheck._prompt("（原文）", ["老街"], lines)
-    assert expected in prompt
+def test_prompt_pushes_past_the_first_match() -> None:
+    """提示词必须给出「先假定多场景、再逐个排除」的思考顺序。
+
+    2026-09-18 实测：去掉这句之后连跑 4 次全部漏报，而且失败形状完全一致——模型每次
+    都正确认出段 13 是门口，然后就收工了。它不是判错，是找到一个就停。判据说清了
+    「一个编号可以置身多个空间」还不够，得连搜索顺序一起给。
+    """
+    prompt = scene_recheck._prompt("（原文）", ["晚安宠物医院门口"])
+    assert "先假定每个编号可能有不止一个场景，再逐个排除" in prompt
+    assert "格局镜" in prompt and "转场镜" in prompt
+
+
+def test_prompt_does_not_feed_back_already_declared_names() -> None:
+    """提示词不再塞「已申报清单」——那是这轮真实漏报的根源。
+
+    抽取报原文写法「人间·医院门口」而候选清单是登记名「晚安宠物医院门口」，两套名字
+    并排摆着，模型合理地认为已经报过了，交回 {"scenes": []}。改成独立标注后没有这个
+    歧义，重复由代码做并集消化。
+    """
+    prompt = scene_recheck._prompt("（原文）", ["晚安宠物医院门口"])
+    assert "上一轮已经申报" not in prompt
+    assert "这是一次独立标注" in prompt

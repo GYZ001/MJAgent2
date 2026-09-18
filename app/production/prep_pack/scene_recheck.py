@@ -13,12 +13,18 @@
 所以把「顺带报」改成「专门问」：单一职责的调用不跟别的任务抢注意力。仓库里
 ``/shots/{id}/identity-review`` 为「发声与群演」单开复核调用是同一个先例。
 
-**合法值域用 output_schema 的 enum 钉死，不靠提示词自觉**：display_name 只能从本集
-已登记场景清单里逐字取，模型没有能力自造一个新地点名——这是 schema 层面的保证，比
-「请不要自己编」这类禁令强。已登记场景为空时直接跳过复核（空 enum 是非法 schema，
-而且那种情况本来就无从复核）。
+**合法值域用动态 model_type 的 Literal 钉死**：display_name 只能从本集已登记场景清单里
+逐字取，细节见 ``response_model``。代码里的后置过滤（enum 之外一律丢弃）照旧保留，
+两层都要有：schema 管住模型别产出，过滤管住真产出了也不落库。
+已登记场景为空时直接跳过复核（空 enum 是非法 schema，那种情况本来也无从复核）。
 
-复核结果不覆盖抽取结果，只做并集：这里只回答「还漏了哪些」，从不否定已申报的条目。
+**这里是一次独立标注，不是「补遗漏」**：2026-09-18 实测，把抽取已申报的清单塞给它看
+（原文写法「人间·医院门口：[13]」）而候选清单是登记名（「晚安宠物医院门口」），模型合理
+地认为这个地点已经报过、于是交回 ``{"scenes": []}``——它不是没看懂画面，是被两套名字
+绕住了。抽取侧有时自己对齐到登记名、有时不会，命中率就跟着摇摆。改成独立回答「每段
+机位在哪些已登记场景」之后没有这个歧义；重复由代码做并集消化，模型不必操心。
+
+复核结果不覆盖抽取结果，只做并集：从不否定已申报的条目。
 段号仍要过 ``_prep_pack_gate_segment_indexes`` 的结构闸，与抽取侧同一把尺子。
 """
 from __future__ import annotations
@@ -26,7 +32,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, create_model
 
 from app.source_excerpt import SourceSegment
 
@@ -37,52 +45,46 @@ from .schemas import _ModelSceneMention
 log = logging.getLogger(__name__)
 
 
-class _SceneRecheckMention(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    display_name: str
-    segment_indexes: list[int]
-    quote: str
+def response_model(known_scenes: list[str]) -> type[BaseModel]:
+    """按本集已登记场景动态生成响应模型，display_name 是这批名字的 Literal。
+
+    必须让 enum 落在 **model_type** 上，而不是走 ``_call_structured`` 的
+    ``output_schema`` 形参：2026-09-18 实测踩中——``output_schema`` 在
+    model_gateway 里只被塞进格式/语义修复重试的提示词文本（见该模块
+    ``structured_schema`` 的两处用法），首次调用的请求体里根本没有它，供应商侧毫无
+    约束。而 ``model_type`` 会经 ``_response_format`` 变成真正下发的
+    ``response_format.json_schema``，``model_json_schema()`` 把 Literal 渲染成 enum。
+
+    合法值域由数据推导（本集已登记场景），不是词表。
+    """
+    mention = create_model(
+        "_SceneRecheckMention",
+        __config__=ConfigDict(extra="forbid"),
+        display_name=(Literal[tuple(known_scenes)], ...),  # type: ignore[valid-type]
+        segment_indexes=(list[int], ...),
+        quote=(str, ...),
+    )
+    return create_model(
+        "_SceneRecheckResponse",
+        __config__=ConfigDict(extra="forbid"),
+        scenes=(list[mention], ...),
+    )
 
 
-class _SceneRecheckResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    scenes: list[_SceneRecheckMention]
-
-
-def _output_schema(known_scenes: list[str]) -> dict[str, Any]:
-    """把 display_name 收紧到本集已登记场景的 enum——合法值域由数据推导，不是词表。"""
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["scenes"],
-        "properties": {
-            "scenes": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["display_name", "segment_indexes", "quote"],
-                    "properties": {
-                        "display_name": {"type": "string", "enum": list(known_scenes)},
-                        "segment_indexes": {"type": "array", "items": {"type": "integer"}},
-                        "quote": {"type": "string"},
-                    },
-                },
-            },
-        },
-    }
-
-
-def _prompt(rendered: str, known_scenes: list[str], declared_lines: list[str]) -> str:
-    return f"""你在核对一集短剧的场景素材清单。原文按编号分段列在下面。
+def _prompt(rendered: str, known_scenes: list[str]) -> str:
+    return f"""你在标注一集短剧每个编号的拍摄地点。原文按编号分段列在下面。
 
 本集已登记的场景（只能从这个清单里逐字选名字，不要自造新地点）：
 {known_scenes}
 
-上一轮已经申报的场景与编号（这些是已知的，不用重复确认）：
-{chr(10).join(declared_lines) if declared_lines else "（上一轮没有申报任何场景）"}
+任务：逐个编号回答——这个编号的镜头置身在上面清单里的哪些场景。把每个场景连同它
+覆盖的编号列出来。这是一次独立标注，不用管别处报过什么，也不用回避重复。
 
-任务：逐个编号看画面里**拍到了哪些**已登记场景，只把上面**遗漏的**补出来。
+**先假定每个编号可能有不止一个场景，再逐个排除**，而不是先挑一个主场景就收工。
+一个编号只属于一个场景是常见情况，但格局镜、转场镜、从室内走到室外、镜头升起拉开
+这几类，往往同时置身两个场景——遇到这几类要专门想一遍「除了最明显的那个，机位还
+经过/停在别的地方吗」。宁可对同一个编号列两个场景并各自给出 quote，也不要因为已经
+找到一个合适的就不往下看了。
 
 判断依据只有一条：**这个编号的摄影机置身在哪个空间**。镜头在哪个地点里取景，
 那个地点就是这一段的场景。场景图是给这一镜提供环境的，判据是「机位在哪」，
@@ -111,11 +113,12 @@ def _prompt(rendered: str, known_scenes: list[str], declared_lines: list[str]) -
 不得改写或跨编号拼接"}}。
 
 判断不了就不报。漏一个只是少一张参考图，报错一个会让这段戏挂上另一个地方的
-参考图——后者要糟得多。确实没有遗漏时交回空列表 {{"scenes": []}}，那是完全正常的结果。
+参考图——后者要糟得多。某个编号确实没有任何已登记场景对得上时，就不要为它列编号。
 
 原文：
 {rendered}
 """
+
 
 
 async def recheck_chunk_scenes(
@@ -124,24 +127,19 @@ async def recheck_chunk_scenes(
     chunk_index: int,
     chunk: list[tuple[int, SourceSegment]],
     known_scenes: list[str],
-    declared: list[dict[str, Any]],
     run_id: str | None,
 ) -> list[dict[str, Any]]:
-    """返回本 chunk 补充的场景提及（已过段号结构闸）；没有遗漏时返回空列表。"""
+    """返回本 chunk 标注到的场景提及（已过段号结构闸）；标不出来时返回空列表。"""
     if not known_scenes:
         return []
     chunk_global_indexes = {index for index, _segment in chunk}
     chunk_by_index = {index: segment for index, segment in chunk}
-    declared_lines = [
-        f"- {item.get('display_name')}：{sorted(item.get('segment_indexes') or [])}"
-        for item in declared
-    ]
     response = await _call_structured(
         run_id=run_id,
         step_key="episode_prep_pack_scene_recheck",
         iteration_no=chunk_index,
-        prompt=_prompt(_render_chunk(chunk), known_scenes, declared_lines),
-        model_type=_SceneRecheckResponse,
+        prompt=_prompt(_render_chunk(chunk), known_scenes),
+        model_type=response_model(known_scenes),
         schema_name="episode_prep_pack_scene_recheck_v1",
         operation_id=f"episode_prep_pack:{episode_id}:scene_recheck:{chunk_index}",
         max_tokens=4000,
@@ -150,7 +148,6 @@ async def recheck_chunk_scenes(
             "episode_id": episode_id,
             "chunk_index": chunk_index,
         },
-        output_schema=_output_schema(known_scenes),
     )
     added: list[dict[str, Any]] = []
     for mention in response.scenes:
@@ -190,14 +187,10 @@ async def attach_scene_recheck(
     warning，原样交回抽取结果。吞的是「补漏没补成」，不是「抽取失败」——抽取自身
     的失败仍由 ``_call_structured`` 照常抛出。
     """
-    declared = [
-        {"display_name": m.display_name, "segment_indexes": list(m.segment_indexes or [])}
-        for m in (response.scenes or [])
-    ]
     try:
         added = await recheck_chunk_scenes(
             episode_id=episode_id, chunk_index=chunk_index, chunk=chunk,
-            known_scenes=known_scenes, declared=declared, run_id=run_id,
+            known_scenes=known_scenes, run_id=run_id,
         )
     except Exception:  # noqa: BLE001 - 补漏失败不阻断主流程
         log.warning("场景复核失败，本 chunk 沿用抽取结果 episode=%s chunk=%s",
