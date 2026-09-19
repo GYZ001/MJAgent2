@@ -19,7 +19,7 @@ import AcceptInvitePage from "./pages/AcceptInvitePage";
 import ForcePasswordChangePage from "./pages/ForcePasswordChangePage";
 import DecisionDialog from "./components/DecisionDialog";
 import ErrorBoundary from "./components/ErrorBoundary";
-import EpisodeCrumb from "./components/EpisodeCrumb";
+import WorkspacePlaceholder from "./components/WorkspacePlaceholder";
 import SearchField from "./components/SearchField";
 import { useFocusTrap } from "./hooks/useFocusTrap";
 import { useScrollContainment } from "./useScrollContainment";
@@ -308,6 +308,22 @@ function AppShell() {
   const [view, setView] = useState<View>(initial.view);
   const [projectId, setProjectId] = useState<string | null>(initial.projectId);
   const [episodeId, setEpisodeId] = useState<string | null>(initial.episodeId);
+  // 分集 id 是否仍在异步解析中：进项目的 useEffect 与 openSection 的二次校验都会
+  // 打这个请求，两者可能重叠，用计数器而不是布尔值，避免先结束的那次把还在跑的
+  // 那次清成 false。initial.projectId truthy 时下面的 useEffect 挂载即会发起解析，
+  // 这里据此惰性初始化，避免首帧就把“正在解析”渲染成“尚未进入具体分集”的终态文案。
+  const [episodeResolving, setEpisodeResolving] = useState<boolean>(
+    () => Boolean(initial.projectId),
+  );
+  const episodeResolveCountRef = useRef(0);
+  const beginEpisodeResolve = () => {
+    episodeResolveCountRef.current += 1;
+    setEpisodeResolving(true);
+  };
+  const endEpisodeResolve = () => {
+    episodeResolveCountRef.current = Math.max(0, episodeResolveCountRef.current - 1);
+    if (episodeResolveCountRef.current === 0) setEpisodeResolving(false);
+  };
   const [taskId, setTaskId] = useState<string | null>(initial.taskId);
   const [chapterIdx, setChapterIdx] = useState<number | null>(
     initial.chapterIdx,
@@ -661,12 +677,14 @@ function AppShell() {
   useEffect(() => {
     if (!projectId) {
       setEpisodeId(null);
+      setEpisodeResolving(false);
       return;
     }
     const location = readLocation();
     const requestedEpisodeId =
       location.projectId === projectId ? location.episodeId : null;
     let cancelled = false;
+    beginEpisodeResolve();
     // 这里只要解析出一个有效分集 id，不需要整份清单：用窗口模式取 1 条即可，
     // 千集项目下 payload 从 250KB 降到不足 1KB。
     api
@@ -679,9 +697,18 @@ function AppShell() {
       })
       .catch(() => {
         // 临时请求失败不能等同于“项目没有分集”。保留当前选择，侧栏进入工作台时会重试。
+      })
+      .finally(() => {
+        // cancelled 在这里身兼两职：既防止用过期响应纠正 episodeId，也确保下面
+        // 的清理函数不会对同一次请求重复递减计数器（谁先发生就由谁递减）。
+        if (cancelled) return;
+        cancelled = true;
+        endEpisodeResolve();
       });
     return () => {
+      if (cancelled) return;
       cancelled = true;
+      endEpisodeResolve();
     };
   }, [projectId]);
 
@@ -710,6 +737,7 @@ function AppShell() {
     go(s.key, projectId, openedWith);
 
     // 分集可能在项目打开后才生成，仍要重新校验，只是既不阻塞导航、也不拉整份清单。
+    beginEpisodeResolve();
     api
       .getProject(projectId, `view=picker&${pickerWindowParams(1, openedWith)}`)
       .then((project: Project) => {
@@ -726,6 +754,9 @@ function AppShell() {
           "分集列表加载失败，已打开工作台入口；可点击顶部的分集切换器重试",
           true,
         );
+      })
+      .finally(() => {
+        endEpisodeResolve();
       });
   };
 
@@ -1017,25 +1048,25 @@ function AppShell() {
           (episodeId ? (
             <ScriptPage key={episodeId} />
           ) : (
-            <WorkspaceEmpty label="映射台" view="script" />
+            <WorkspacePlaceholder label="映射台" view="script" resolving={episodeResolving} />
           ))}
         {view === "board" &&
           (episodeId ? (
             <BoardPage key={episodeId} />
           ) : (
-            <WorkspaceEmpty label="分镜台" view="board" />
+            <WorkspacePlaceholder label="分镜台" view="board" resolving={episodeResolving} />
           ))}
         {view === "wall" &&
           (episodeId ? (
             <WallPage key={episodeId} />
           ) : (
-            <WorkspaceEmpty label="生成台" view="wall" />
+            <WorkspacePlaceholder label="生成台" view="wall" resolving={episodeResolving} />
           ))}
         {view === "cinema" &&
           (episodeId ? (
             <CinemaPage key={episodeId} />
           ) : (
-            <WorkspaceEmpty label="成片台" view="cinema" />
+            <WorkspacePlaceholder label="成片台" view="cinema" resolving={episodeResolving} />
           ))}
         {view === "series" && projectId && <SeriesPage key={projectId} />}
         {view === "observability" && projectId && (
@@ -1230,45 +1261,6 @@ function ChangePasswordDialog({
       </form>
       </section>
     </div>
-  );
-}
-
-function WorkspaceEmpty({ label, view }: { label: string; view: View }) {
-  const { projectId, go } = useNav();
-  const titleId = useId();
-  return (
-    <>
-      <header className="desk-head">
-        <EpisodeCrumb label={label} view={view} />
-        <h1>
-          {label} <span className="sub">请选择或创建分集后进入</span>
-        </h1>
-        <hr className="rule" />
-      </header>
-      <section className="empty workspace-empty" aria-labelledby={titleId}>
-        <div className="big" aria-hidden="true">集</div>
-        <h2 id={titleId}>尚未进入具体分集</h2>
-        <p>前往分集规划检查并选择已有分集；若项目尚无分集，可在那里创建。</p>
-        <div className="workspace-empty-actions">
-          {projectId && (
-            <button
-              type="button"
-              className="btn primary"
-              onClick={() => go("episodes", projectId, null)}
-            >
-              查看分集并选择
-            </button>
-          )}
-          <button
-            type="button"
-            className="btn"
-            onClick={() => go("studio", null, null)}
-          >
-            返回项目空间
-          </button>
-        </div>
-      </section>
-    </>
   );
 }
 

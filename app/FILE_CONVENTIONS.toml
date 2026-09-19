@@ -188,7 +188,7 @@ max_lines_tests = 500
 "app/video_plan/generate.py" = 685
 "app/video_prompt_ai.py" = 543
 "app/video_supervisor/run_loop.py" = 514
-"frontend/src/App.tsx" = 1525
+"frontend/src/App.tsx" = 1511
 "frontend/src/api/projects.ts" = 398
 # 2026-08-30 +10：用户拍板"映射台/分镜台/生成台按身份实时解析当前定妆照"，
 # PrepPackCharacterAsset 新增 current_portrait_id/current_portrait_image_url
