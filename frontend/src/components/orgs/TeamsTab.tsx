@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError, type RoleRow, type TeamRow } from "../../api";
+import QueryState from "../QueryState";
 import TeamCard from "./TeamCard";
 
 /** 账号管理——「团队」标签页（EP-01 第二阶段）：建团队 + 团队内成员/角色管理。
@@ -42,13 +43,18 @@ export default function TeamsTab() {
     }
   };
 
+  // 首屏加载失败与「创建团队失败」共用一个 error state，但两者该由谁展示不同：
+  // 列表从没加载出来时必须由 QueryState 给出「加载失败 + 重试」，否则它会按空集
+  // 渲染「还没有团队，先新建团队」——把加载失败说成"这里本来就是空的"。
+  const loadFailed = !teams && !!error;
+
   const updateTeamInList = (team: TeamRow) => {
     setTeams((prev) => (prev ?? []).map((t) => (t.id === team.id ? team : t)));
   };
 
   return (
     <>
-      {error && (
+      {!loadFailed && error && (
         <div className="empty query-error" role="alert">
           <strong>操作失败</strong>
           <p>{error}</p>
@@ -67,16 +73,19 @@ export default function TeamsTab() {
         </div>
       </div>
 
-      {!teams && !error && <p className="account-admin-muted">载入中…</p>}
-      {teams && !teams.length && <p className="account-admin-muted">还没有团队，先「新建团队」。</p>}
-      <div className="account-admin-cards">
-        {(teams ?? []).map((team) => (
-          <TeamCard
-            key={team.id} team={team} roles={roles} busy={busy}
-            onChanged={updateTeamInList} onError={setError}
-          />
-        ))}
-      </div>
+      {/* error 同时承载创建失败与加载失败：首屏就没加载出来时归 QueryState（它
+          带重试），列表已有数据后的操作失败归上面那条横幅，两边互斥不重复。 */}
+      <QueryState loading={!teams && !error} error={loadFailed ? error : null} hasData={!!teams?.length}
+        objectName="团队" onRetry={() => void load()} emptyText="还没有团队，先「新建团队」。">
+        <div className="account-admin-cards">
+          {(teams ?? []).map((team) => (
+            <TeamCard
+              key={team.id} team={team} roles={roles} busy={busy}
+              onChanged={updateTeamInList} onError={setError}
+            />
+          ))}
+        </div>
+      </QueryState>
     </>
   );
 }

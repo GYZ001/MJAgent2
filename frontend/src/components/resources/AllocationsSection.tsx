@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ApiError, listQuotaAllocations, listQuotaPlans, type QuotaAllocation, type QuotaPlan } from "../../api";
+import QueryState from "../QueryState";
 import AllocationEditDialog from "./AllocationEditDialog";
 import { RESOURCE_LABELS, SCOPE_LABELS, formatResourceValue } from "./resourceLabels";
 
@@ -17,6 +18,7 @@ export default function AllocationsSection({ orgId }: { orgId: string | null }) 
 
   const reload = () => {
     if (!orgId) return;
+    setError(null); // 重试要把上一次的失败清掉，否则成功后旧错误仍挂在 state 上
     Promise.all([listQuotaAllocations(orgId), listQuotaPlans(orgId)])
       .then(([allocResp, planResp]) => {
         setAllocations(allocResp.items);
@@ -38,12 +40,13 @@ export default function AllocationsSection({ orgId }: { orgId: string | null }) 
           <button type="button" className="btn small primary" onClick={() => setEditing("new")}>新增分配</button>
         </div>
       </div>
-      {error && <p className="field-error" role="alert">{error}</p>}
-      {allocations === null && <p className="hint">正在加载…</p>}
-      {allocations?.length === 0 && <p className="hint">本组织还没有配置任何组织/团队/用户级分配，全部账号按各自档位默认额度生效。</p>}
-      {allocations?.map((item) => (
-        <AllocationRow key={item.id} item={item} plan={planById.get(item.plan_id)} onEdit={() => setEditing(item)} />
-      ))}
+      <QueryState loading={allocations === null && !error} error={error} hasData={!!allocations?.length}
+        objectName="配额分配" onRetry={reload}
+        emptyText="本组织还没有配置任何组织/团队/用户级分配，全部账号按各自档位默认额度生效。">
+        {allocations?.map((item) => (
+          <AllocationRow key={item.id} item={item} plan={planById.get(item.plan_id)} onEdit={() => setEditing(item)} />
+        ))}
+      </QueryState>
       {editing !== null && (
         <AllocationEditDialog
           allocation={editing === "new" ? null : editing}

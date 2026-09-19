@@ -3,6 +3,7 @@ import {
   ApiError, createInvitation, listInvitations, listRoles, listTeams, revokeInvitation,
   type CreatedInvitation, type InvitationRow, type RoleRow, type TeamRow,
 } from "../../api";
+import QueryState from "../QueryState";
 
 const STATUS_LABELS: Record<InvitationRow["status"], string> = {
   pending: "待接受", accepted: "已接受", revoked: "已撤销", expired: "已过期",
@@ -20,6 +21,9 @@ export default function InvitationsPanel() {
   const [busy, setBusy] = useState(false);
   const [justCreated, setJustCreated] = useState<CreatedInvitation | null>(null);
   const [copyHint, setCopyHint] = useState<string | null>(null);
+  // 首屏加载失败与「签发/撤销失败」共用一个 error state，展示方分工见下方
+  // QueryState 处注释：列表从没取回来时不能按空集渲染「还没有邀请记录」。
+  const loadFailed = !items && !!error;
 
   const reload = () => {
     listInvitations()
@@ -88,7 +92,7 @@ export default function InvitationsPanel() {
       <div className="card-heading-row">
         <h3>邀请链接</h3>
       </div>
-      {error && <p className="field-error" role="alert">{error}</p>}
+      {!loadFailed && error && <p className="field-error" role="alert">{error}</p>}
       {copyHint && <p className="hint" role="status">{copyHint}</p>}
       {justCreated && (
         <div className="empty" role="status">
@@ -129,27 +133,31 @@ export default function InvitationsPanel() {
       </div>
       <button type="button" className="btn small primary" disabled={busy} onClick={() => void submit()}>生成邀请链接</button>
 
-      <table className="data-table">
-        <thead>
-          <tr><th>用户名</th><th>团队/角色</th><th>状态</th><th>过期时间</th><th>操作</th></tr>
-        </thead>
-        <tbody>
-          {(items ?? []).map((item) => (
-            <tr key={item.id}>
-              <td>{item.username}</td>
-              <td>{item.team_name ? `${item.team_name} / ${item.role_name}` : "—"}</td>
-              <td>{STATUS_LABELS[item.status]}</td>
-              <td>{new Date(item.expires_at * 1000).toLocaleString()}</td>
-              <td>
-                {item.status === "pending" && (
-                  <button type="button" className="btn small danger" disabled={busy} onClick={() => void revoke(item)}>撤销</button>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {items && items.length === 0 && <p className="hint">还没有邀请记录。</p>}
+      {/* error 同时承载签发/撤销失败与加载失败：列表首屏就没取回来时归
+          QueryState（它带重试），否则归上面贴着表单的 field-error，两边互斥。 */}
+      <QueryState loading={!items && !error} error={loadFailed ? error : null} hasData={!!items?.length}
+        objectName="邀请链接" onRetry={reload} emptyText="还没有邀请记录。">
+        <table className="data-table">
+          <thead>
+            <tr><th>用户名</th><th>团队/角色</th><th>状态</th><th>过期时间</th><th>操作</th></tr>
+          </thead>
+          <tbody>
+            {(items ?? []).map((item) => (
+              <tr key={item.id}>
+                <td>{item.username}</td>
+                <td>{item.team_name ? `${item.team_name} / ${item.role_name}` : "—"}</td>
+                <td>{STATUS_LABELS[item.status]}</td>
+                <td>{new Date(item.expires_at * 1000).toLocaleString()}</td>
+                <td>
+                  {item.status === "pending" && (
+                    <button type="button" className="btn small danger" disabled={busy} onClick={() => void revoke(item)}>撤销</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </QueryState>
     </div>
   );
 }

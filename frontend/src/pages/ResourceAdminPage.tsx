@@ -3,6 +3,7 @@ import { ApiError, getCurrentOrg, type CurrentOrgInfo } from "../api";
 import AlertBanner from "../components/resources/AlertBanner";
 import AllocationsSection from "../components/resources/AllocationsSection";
 import TopRankingSection from "../components/resources/TopRankingSection";
+import QueryState from "../components/QueryState";
 import "../styles/ResourceAdminPage.css";
 
 /** 资源治理看板（EP-04 第二阶段）——系统管理员专属入口：预警横幅 + 配额分
@@ -18,11 +19,13 @@ export default function ResourceAdminPage() {
   const [error, setError] = useState<string | null>(null);
   const [manualOrgId, setManualOrgId] = useState("");
 
-  useEffect(() => {
+  const loadOrg = () => {
+    setError(null);
     getCurrentOrg()
       .then(setOrgInfo)
       .catch((err) => setError(err instanceof ApiError ? err.message : "加载组织信息失败"));
-  }, []);
+  };
+  useEffect(loadOrg, []);
 
   const orgId = orgInfo?.org?.id ?? (manualOrgId.trim() || null);
 
@@ -33,24 +36,25 @@ export default function ResourceAdminPage() {
         <p className="sub">用量、趋势与配额分配——只有系统管理员/组织管理员能看到这一页。</p>
         <hr className="rule" />
       </header>
-      {error && <p className="field-error" role="alert">{error}</p>}
-      {orgInfo && !orgInfo.org && (
-        <div className="resource-admin-toolbar">
-          <label>
-            组织 ID（你是系统管理员，未归属任何组织，需要手动指定要查看的组织）
-            <input value={manualOrgId} onChange={(e) => setManualOrgId(e.target.value)} placeholder="org_..." />
-          </label>
-        </div>
-      )}
-      <AlertBanner orgId={orgId} />
-      {orgId ? (
-        <>
-          <AllocationsSection orgId={orgId} />
-          <TopRankingSection />
-        </>
-      ) : (
-        orgInfo && <p className="hint">请先指定组织 ID。</p>
-      )}
+      <QueryState loading={!orgInfo && !error} error={error} hasData={!!orgInfo} objectName="组织信息" onRetry={loadOrg}>
+        {orgInfo && !orgInfo.org && (
+          <div className="resource-admin-toolbar">
+            <label>
+              组织 ID（你是系统管理员，未归属任何组织，需要手动指定要查看的组织）
+              <input value={manualOrgId} onChange={(e) => setManualOrgId(e.target.value)} placeholder="org_..." />
+            </label>
+          </div>
+        )}
+        <AlertBanner orgId={orgId} />
+        {orgId ? (
+          <>
+            <AllocationsSection orgId={orgId} />
+            <TopRankingSection />
+          </>
+        ) : (
+          <p className="hint">请先指定组织 ID。</p>
+        )}
+      </QueryState>
     </div>
   );
 }

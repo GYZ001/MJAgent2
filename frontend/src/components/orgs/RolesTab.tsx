@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError, type PermissionPoint, type RoleReferenceConflict, type RoleRow } from "../../api";
+import QueryState from "../QueryState";
 import RoleEditorDialog from "./RoleEditorDialog";
 
 /** 账号管理——「角色」标签页（EP-01 第二阶段）：内置模板只读展示 + 自定义角色
@@ -13,6 +14,9 @@ export default function RolesTab() {
   const [busy, setBusy] = useState(false);
   const [editorRole, setEditorRole] = useState<RoleRow | null>(null);
   const [creating, setCreating] = useState(false);
+  // 首屏加载失败与「新建/删除角色失败」共用一个 error state，展示方分工见下方
+  // QueryState 处注释：列表从没加载出来时不能按空集渲染「还没有可用角色」。
+  const loadFailed = !roles && !!error;
 
   const load = async () => {
     setError(null);
@@ -78,7 +82,7 @@ export default function RolesTab() {
 
   return (
     <>
-      {error && <div className="empty query-error" role="alert"><strong>操作失败</strong><p>{error}</p></div>}
+      {!loadFailed && error && <div className="empty query-error" role="alert"><strong>操作失败</strong><p>{error}</p></div>}
       {conflict && (
         <div className="empty query-error" role="alert">
           <strong>{conflict.message}</strong>
@@ -99,28 +103,32 @@ export default function RolesTab() {
         <button type="button" className="btn primary" disabled={busy} onClick={() => setCreating(true)}>新建角色</button>
       </div>
 
-      {!roles && !error && <p className="account-admin-muted">载入中…</p>}
-      <div className="account-admin-cards">
-        {(roles ?? []).map((role) => (
-          <div key={role.id} className="card role-card">
-            <div className="team-card-head">
-              <h3>{role.name}</h3>
-              <span className={`stamp ${role.builtin ? "blue" : "grey"}`}>{role.builtin ? "内置模板" : "自定义"}</span>
+      {/* error 同时承载创建/删除失败与加载失败：首屏就没加载出来时归 QueryState
+          （它带重试），列表已有数据后的操作失败归上面那条横幅，两边互斥不重复。 */}
+      <QueryState loading={!roles && !error} error={loadFailed ? error : null} hasData={!!roles?.length}
+        objectName="角色" onRetry={() => void load()} emptyText="还没有可用角色，先「新建角色」。">
+        <div className="account-admin-cards">
+          {(roles ?? []).map((role) => (
+            <div key={role.id} className="card role-card">
+              <div className="team-card-head">
+                <h3>{role.name}</h3>
+                <span className={`stamp ${role.builtin ? "blue" : "grey"}`}>{role.builtin ? "内置模板" : "自定义"}</span>
+              </div>
+              {role.description && <p className="sub">{role.description}</p>}
+              <p className="account-admin-muted">{role.permission_keys.length} 个权限点</p>
+              <div className="dialog-actions">
+                <button type="button" className="btn small ghost" disabled={busy} onClick={() => setEditorRole(role)}>
+                  {role.builtin ? "查看权限点" : "编辑权限点"}
+                </button>
+                {!role.builtin && (
+                  <button type="button" className="btn small ghost danger" disabled={busy}
+                    onClick={() => void deleteRole(role)}>删除</button>
+                )}
+              </div>
             </div>
-            {role.description && <p className="sub">{role.description}</p>}
-            <p className="account-admin-muted">{role.permission_keys.length} 个权限点</p>
-            <div className="dialog-actions">
-              <button type="button" className="btn small ghost" disabled={busy} onClick={() => setEditorRole(role)}>
-                {role.builtin ? "查看权限点" : "编辑权限点"}
-              </button>
-              {!role.builtin && (
-                <button type="button" className="btn small ghost danger" disabled={busy}
-                  onClick={() => void deleteRole(role)}>删除</button>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      </QueryState>
 
       {(creating || editorRole) && (
         <RoleEditorDialog

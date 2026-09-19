@@ -10,6 +10,7 @@ import {
 import { ProvisioningPanel, type ProvisioningPanelHandle } from "./ProvisioningPanel";
 import { TIERS, TIER_HINTS, TIER_LABELS } from "../../lib/tier";
 import { AccountCard, DeletedAccountCard, formatTime } from "../AccountCard";
+import QueryState from "../QueryState";
 import "../../styles/AccountAdminPage.css";
 
 /** 账号管理——「成员」标签页，系统管理员专属，移动端优先：每个账号一张卡片，
@@ -234,14 +235,8 @@ export default function MembersTab() {
       </div>
 
       {tab === "active" ? (
-        <>
-          {usersError && (
-            <div className="empty query-error" role="alert">
-              <strong>加载失败</strong>
-              <p>{usersError}</p>
-              <button type="button" className="btn" onClick={() => void loadUsers()}>重试</button>
-            </div>
-          )}
+        <QueryState loading={!users && !usersError} error={usersError} hasData={!!users?.length}
+          objectName="账号" onRetry={() => void loadUsers()} emptyText="还没有账号，先「创建账号」。">
           <div className="account-admin-cards">
             {(users ?? []).map((u) => (
               <AccountCard key={u.id} user={u} isSelf={u.id === myId} busy={busy}
@@ -250,26 +245,16 @@ export default function MembersTab() {
                 onSelfDeleteOpen={() => void openSelfDelete()} onGrantAddon={grantAddon} onOpenAssets={(t) => provisioningRef.current?.openAssets(t)} />
             ))}
           </div>
-          {!users && !usersError && <p className="account-admin-muted">载入中…</p>}
-          {users && !users.length && <p className="account-admin-muted">还没有账号，先「创建账号」。</p>}
-        </>
+        </QueryState>
       ) : (
-        <>
-          {deletedError && (
-            <div className="empty query-error" role="alert">
-              <strong>加载失败</strong>
-              <p>{deletedError}</p>
-              <button type="button" className="btn" onClick={() => void loadDeleted()}>重试</button>
-            </div>
-          )}
+        <QueryState loading={!deletedUsers && !deletedError} error={deletedError} hasData={!!deletedUsers?.length}
+          objectName="回收站账号" onRetry={() => void loadDeleted()} emptyText="回收站是空的。">
           <div className="account-admin-cards">
             {(deletedUsers ?? []).map((u) => (
               <DeletedAccountCard key={u.id} user={u} busy={busy} onRestore={restoreUser} />
             ))}
           </div>
-          {!deletedUsers && !deletedError && <p className="account-admin-muted">载入中…</p>}
-          {deletedUsers && !deletedUsers.length && <p className="account-admin-muted">回收站是空的。</p>}
-        </>
+        </QueryState>
       )}
 
       <p className="account-admin-tier-hint">

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ApiError, getUsageTop, type UsageResource, type UsageTopItem } from "../../api";
+import QueryState from "../QueryState";
 import { RESOURCE_LABELS, formatResourceValue } from "./resourceLabels";
 
 const RESOURCE_OPTIONS: UsageResource[] = ["token", "video_seconds", "image", "storage_bytes"];
@@ -29,12 +30,14 @@ export default function TopRankingSection() {
 
   const effectiveDimension = resource === "storage_bytes" ? "project" : dimension;
 
-  useEffect(() => {
+  const load = () => {
     setItems(null);
+    setError(null); // 重试要把上一次的失败清掉，否则成功后旧错误仍挂在 state 上
     getUsageTop(effectiveDimension, resource, 15)
       .then((data) => setItems(data.items))
       .catch((err) => setError(err instanceof ApiError ? err.message : "加载失败"));
-  }, [resource, effectiveDimension]);
+  };
+  useEffect(load, [resource, effectiveDimension]);
 
   const maxTotal = Math.max(1, ...(items || []).map((item) => totalOf(item, resource)));
 
@@ -58,23 +61,23 @@ export default function TopRankingSection() {
           </select>
         </label>
       </div>
-      {error && <p className="field-error" role="alert">{error}</p>}
-      {items === null && !error && <p className="hint">正在加载…</p>}
-      {items?.length === 0 && <p className="hint">这个组合暂时没有用量数据。</p>}
-      <div className="resource-top-list">
-        {items?.map((item) => {
-          const total = totalOf(item, resource);
-          return (
-            <div className="resource-top-row" key={keyOf(item)}>
-              <span className="resource-top-key" title={keyOf(item)}>{keyOf(item)}</span>
-              <div className="resource-top-bar">
-                <div className="resource-top-bar-fill" style={{ width: `${(total / maxTotal) * 100}%` }} />
+      <QueryState loading={items === null && !error} error={error} hasData={!!items?.length}
+        objectName="用量排行" onRetry={load} emptyText="这个组合暂时没有用量数据。">
+        <div className="resource-top-list">
+          {items?.map((item) => {
+            const total = totalOf(item, resource);
+            return (
+              <div className="resource-top-row" key={keyOf(item)}>
+                <span className="resource-top-key" title={keyOf(item)}>{keyOf(item)}</span>
+                <div className="resource-top-bar">
+                  <div className="resource-top-bar-fill" style={{ width: `${(total / maxTotal) * 100}%` }} />
+                </div>
+                <span className="resource-top-total">{formatResourceValue(resource, total)}</span>
               </div>
-              <span className="resource-top-total">{formatResourceValue(resource, total)}</span>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      </QueryState>
     </section>
   );
 }
