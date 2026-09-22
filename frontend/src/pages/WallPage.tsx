@@ -494,6 +494,7 @@ export default function WallPage() {
                 detail={detail}
                 onRefresh={refreshAll}
                 onToast={toast}
+                goToBoard={() => go('board', projectId, episodeId)}
               />
             )}
           </section>
@@ -528,13 +529,14 @@ function SegmentNavItem({ shot, selected, onSelect }: { shot: Shot; selected: bo
   )
 }
 
-function SegmentWorkbench({ shot, context, detail, onRefresh, onToast, project }: {
+function SegmentWorkbench({ shot, context, detail, onRefresh, onToast, project, goToBoard }: {
   shot: Shot
   project: ImageGenTaskLike | null
   context: ReviewWallContext | null
   detail: DetailState
   onRefresh: () => Promise<void>
   onToast: (message: string, isErr?: boolean) => void
+  goToBoard: () => void
 }) {
   const segment = shot.storyboard_pack_segment
   if (!segment) {
@@ -610,12 +612,13 @@ function SegmentWorkbench({ shot, context, detail, onRefresh, onToast, project }
         detailError={detailError}
         onRefresh={onRefresh}
         onToast={onToast}
+        goToBoard={goToBoard}
       />
     </article>
   )
 }
 
-function GenerationPanel({ shot, context, referenceImages, detailLoading, detailError, onRefresh, onToast }: {
+export function GenerationPanel({ shot, context, referenceImages, detailLoading, detailError, onRefresh, onToast, goToBoard }: {
   shot: Shot
   context: ReviewWallContext | null
   referenceImages: Record<string, ReferenceImage[]>
@@ -623,6 +626,7 @@ function GenerationPanel({ shot, context, referenceImages, detailLoading, detail
   detailError: string | null
   onRefresh: () => Promise<void>
   onToast: (message: string, isErr?: boolean) => void
+  goToBoard: () => void
 }) {
   const segment = shot.storyboard_pack_segment
   const versions = useMemo(
@@ -722,6 +726,11 @@ function GenerationPanel({ shot, context, referenceImages, detailLoading, detail
           <b>{versionStatusLabel(current.status)}</b>
           <span>{shot.pipeline?.reason_text || shot.pipeline?.blocked_reason || '请查看下方错误详情。'}</span>
           {current.error && <code>{current.error}</code>}
+          {segment && (
+            <button type="button" className="btn small" onClick={goToBoard}>
+              到分镜台修订第 {segment.segment_no} 段
+            </button>
+          )}
         </div>
       )}
       {detailError && (

@@ -114,6 +114,53 @@ def test_guidance_leaves_prompt_provider_rejected_branch_intact():
     assert "可稍后重试" not in message
 
 
+def test_guidance_never_names_interface_parameters_and_gives_reachable_paths():
+    """CLAUDE.md「拦住用户时必须给出路」：出路必须是用户在界面上能找到的位置，
+    不能是接口参数名——生成台从未把 prompt_override 接到任何控件上
+    （frontend/src/pages/WallPage.tsx 的 shotGenerate 调用第二个参数恒为
+    undefined），旧文案让用户去传一个界面上不存在的参数，是死胡同。
+
+    真正走得通的路径是分镜台的「复核说话人和群演」：保存后
+    ``identity_workspace.save_identity_candidate`` -> ``_record_identity_revision``
+    把新 ``prompt_text`` 写回 ``shots.shot_contract_json.storyboard_pack_segment``，
+    生成台「重新生成」调用的 ``enqueue_prompt.storyboard_pack_prompt_text()``
+    原样读这同一份 segment——不需要任何接口参数，这条出路在结构上确实可达。
+    """
+    from app.media_exec.job_state import CONTENT_REJECTION_MIN_TASKS, PROVIDER_CONTENT_REJECTED_KIND
+
+    assert CONTENT_REJECTION_MIN_TASKS >= 2
+    content_rejected_exc = ProviderError(
+        f"视频模型 任务失败：{REAL_COPYRIGHT_MESSAGE}",
+        raw=REAL_COPYRIGHT_MESSAGE,
+        failure=ProviderFailure.model_rejection(PROVIDER_CONTENT_REJECTED_KIND),
+    )
+    _, content_rejected_message = worker._video_model_rejection_guidance({}, content_rejected_exc)
+
+    model_rejected_exc = ProviderError(
+        f"视频模型 任务失败：{REAL_COPYRIGHT_MESSAGE}",
+        raw=REAL_COPYRIGHT_MESSAGE,
+        failure=ProviderFailure.model_rejection(ProviderFailureKind.EXECUTION_FAILED),
+    )
+    _, model_rejected_message = worker._video_model_rejection_guidance(
+        {"mode": "reference_image"}, model_rejected_exc,
+    )
+
+    technical_exc = ProviderError(
+        f"视频模型 任务失败：{REAL_COPYRIGHT_MESSAGE}",
+        raw=REAL_COPYRIGHT_MESSAGE,
+        failure=ProviderFailure.technical(ProviderFailureKind.EXECUTION_FAILED),
+    )
+    _, technical_message = worker._video_model_rejection_guidance({}, technical_exc)
+
+    forbidden_tokens = ["prompt_override", "POST ", "GET ", "PUT ", "/shots/", "/api/"]
+    for message in (content_rejected_message, model_rejected_message, technical_message):
+        for token in forbidden_tokens:
+            assert token not in message, f"文案里出现了接口层措辞 {token!r}：{message}"
+
+    assert "分镜台" in content_rejected_message
+    assert "换一个视频供应商" in content_rejected_message
+
+
 def test_guidance_returns_none_for_unrelated_technical_kind():
     """只扩展 EXECUTION_FAILED，不擅自扩大到其它 technical kind——避免超出
     已定稿方案的范围。"""
