@@ -4,6 +4,7 @@
 import * as methods from "./methods";
 
 export * from "./shot";
+export * from "./shotEditSession";
 export * from "./versions";
 export * from "./pack";
 export * from "./status";

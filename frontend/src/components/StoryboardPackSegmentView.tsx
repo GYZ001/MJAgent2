@@ -4,6 +4,7 @@ import { compressSegmentIndexes } from '../lib/segmentIndexes'
 import { storyboardPackTargetModelLabel } from '../lib/storyboardTargetModel'
 import SegmentResourcePanel from './SegmentResourcePanel'
 import SegmentIdentityReview from './SegmentIdentityReview'
+import SegmentDialogueRevision from './SegmentDialogueRevision'
 
 /**
  * 分镜台唯一的段落展示（docs/STORYBOARD_PROMPT_IR_DESIGN.md 冻结契约）。
@@ -87,6 +88,14 @@ export default function StoryboardPackSegmentView({ shot, notify, project, onSav
                 </li>
               ))}
             </ul>
+            <SegmentDialogueRevision
+              shotId={shot.id}
+              segment={segment}
+              shotDialogues={shot.dialogues}
+              expectedVersion={shot.storyboard_artifact_id}
+              notify={notify}
+              onSaved={onSaved}
+            />
           </details>
         ) : <span className="pack-meta-chip muted">无台词</span>}
         {!!beats.length && (

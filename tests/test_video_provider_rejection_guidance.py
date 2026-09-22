@@ -120,11 +120,16 @@ def test_guidance_never_names_interface_parameters_and_gives_reachable_paths():
     （frontend/src/pages/WallPage.tsx 的 shotGenerate 调用第二个参数恒为
     undefined），旧文案让用户去传一个界面上不存在的参数，是死胡同。
 
-    真正走得通的路径是分镜台的「复核说话人和群演」：保存后
-    ``identity_workspace.save_identity_candidate`` -> ``_record_identity_revision``
-    把新 ``prompt_text`` 写回 ``shots.shot_contract_json.storyboard_pack_segment``，
+    真正走得通的路径有两条，画面描述与台词各一条：
+    - 画面描述触发：分镜台的「复核说话人和群演」，保存后
+      ``identity_workspace.save_identity_candidate`` -> ``_record_identity_revision``
+      把新 ``prompt_text`` 写回 ``shots.shot_contract_json.storyboard_pack_segment``；
+    - 台词原句触发（画面描述改了也没用，台词逐字进提示词）：分镜台「台词 N 条」
+      展开区的「修订台词」（components/SegmentDialogueRevision.tsx），三步握手
+      经 ``apply_segment_dialogue_revision`` -> ``revise_segment_dialogue`` 落回
+      同一份 ``storyboard_pack_segment``。
     生成台「重新生成」调用的 ``enqueue_prompt.storyboard_pack_prompt_text()``
-    原样读这同一份 segment——不需要任何接口参数，这条出路在结构上确实可达。
+    原样读这同一份 segment——两条路都不需要任何接口参数，结构上确实可达。
     """
     from app.media_exec.job_state import CONTENT_REJECTION_MIN_TASKS, PROVIDER_CONTENT_REJECTED_KIND
 
@@ -162,6 +167,11 @@ def test_guidance_never_names_interface_parameters_and_gives_reachable_paths():
     # target_video_provider 取自 hiagent.active_provider("video")（全局），
     # 分镜台的「视频模型（本集）」是整集级且会清空本集视频产物，没有单镜换法。
     assert "视频模型（本集）" in content_rejected_message
+    # 台词原句触发时的出路必须点名「修订台词」这个真实入口（2026-09-22 上线），
+    # 不能再停留在旧文案的「只能改剧本这几句」——那句没有对应的界面操作。
+    for message in (content_rejected_message, model_rejected_message, technical_message):
+        assert "修订台词" in message
+        assert "只能改剧本" not in message
 
 
 def test_guidance_returns_none_for_unrelated_technical_kind():

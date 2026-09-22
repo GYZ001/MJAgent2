@@ -5,6 +5,9 @@ export interface Dialogue {
   speaker: string;
   line: string;
   emotion: string;
+  /** 后端 app/schemas/shot_state.py::Dialogue 有这个字段（默认 spoken_dialogue）；
+   *  台词修订要原样回传已存的值，不能在前端凭空造一个。 */
+  delivery?: string;
 }
 
 export interface ScriptScene {

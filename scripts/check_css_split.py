@@ -20,6 +20,10 @@ PAGES = {
     'BiblePage': ['pages/BiblePage.tsx'], 'BoardPage': [
         'pages/BoardPage.tsx', 'components/StoryboardPackSegmentView.tsx',
         'components/SegmentIdentityReview.tsx',
+        # 2026-09-22 台词人工修订弹窗：只在「台词 N 条」展开区触发，不登记就会被
+        # 判成「不属于任何页面」，从而要求挪进 index.css（同 SegmentIdentityReview
+        # 的先例）。
+        'components/SegmentDialogueRevision.tsx',
     ],
     'WallPage': [
         'pages/WallPage.tsx',

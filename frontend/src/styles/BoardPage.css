@@ -772,3 +772,103 @@ details.pack-meta-details > :not(summary) {
 .segment-identity-review button { width: fit-content; }
 .segment-identity-review figure { display: inline-block; margin: 8px; }
 .segment-identity-review img { width: 110px; height: 140px; object-fit: contain; }
+
+/* 台词人工修订（components/SegmentDialogueRevision.tsx）：与上面 .storyboard-pack-
+   dialogue-* 同一套视觉语言——发声者/出处是弱化小字，句子是主体。弹窗本身的宽度/
+   最大高度/滚动交给 index.css 的 .impact-dialog 承担，这里只管本组件专属版式。
+   边框用 --hairline：本文件旁边几处写的 var(--line) 全仓没有定义（grep `--line:`
+   零命中），那几处实际渲染不出边框，不要照抄。 */
+.dialogue-revision-entry {
+  margin-top: 8px;
+}
+.dialogue-revision-blocked-hint {
+  margin: 4px 0 0;
+  color: var(--ink-faint);
+  font: 400 11px/1.5 var(--ui);
+}
+.dialogue-revision-dialog {
+  display: grid;
+  gap: 14px;
+}
+.dialogue-revision-rule-hint {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--ink-soft);
+  font: 400 12px/1.6 var(--ui);
+}
+.dialogue-revision-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.dialogue-revision-card {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: #faf9f6;
+}
+.dialogue-revision-card.dirty {
+  border-color: var(--cinnabar-deep);
+  background: rgba(181, 68, 52, 0.06);
+}
+.dialogue-revision-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dialogue-revision-speaker {
+  color: var(--indigo);
+  font: 650 11px var(--ui);
+}
+.dialogue-revision-source {
+  color: var(--ink-faint);
+  font: 400 10px var(--ui);
+}
+.dialogue-revision-badge {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--cinnabar-deep);
+  color: #fff;
+  font: 600 10px var(--ui);
+}
+.dialogue-revision-textarea {
+  width: 100%;
+  min-height: 56px;
+  padding: 6px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink);
+  font: 400 12.5px/1.55 var(--ui);
+  resize: vertical;
+}
+.dialogue-revision-reason {
+  display: grid;
+  gap: 4px;
+  color: var(--ink-soft);
+  font: 500 12px var(--ui);
+}
+.dialogue-revision-reason input {
+  padding: 6px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  font: 400 12.5px var(--ui);
+}
+@media (max-width: 640px) {
+  .dialogue-revision-card-head {
+    flex-wrap: wrap;
+  }
+}
+:where(:root[data-theme="dark"]) .dialogue-revision-card {
+  background: var(--surface-sunken);
+}
+:where(:root[data-theme="dark"]) .dialogue-revision-card.dirty {
+  background: rgba(181, 68, 52, 0.14);
+}
