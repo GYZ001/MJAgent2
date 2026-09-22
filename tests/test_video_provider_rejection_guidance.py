@@ -158,7 +158,10 @@ def test_guidance_never_names_interface_parameters_and_gives_reachable_paths():
             assert token not in message, f"文案里出现了接口层措辞 {token!r}：{message}"
 
     assert "分镜台" in content_rejected_message
-    assert "换一个视频供应商" in content_rejected_message
+    # 「换供应商」必须说清它只有整集切换这一种形态，否则又是一条走不到的路：
+    # target_video_provider 取自 hiagent.active_provider("video")（全局），
+    # 分镜台的「视频模型（本集）」是整集级且会清空本集视频产物，没有单镜换法。
+    assert "视频模型（本集）" in content_rejected_message
 
 
 def test_guidance_returns_none_for_unrelated_technical_kind():
