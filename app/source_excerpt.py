@@ -112,12 +112,41 @@ def index_source_segments(
     *,
     max_chars: int = 900,
 ) -> list[SourceSegment]:
-    """Create stable, exhaustive source units without asking the model for offsets."""
+    """Create stable, exhaustive source units without asking the model for offsets.
+
+    The paragraph-splitting regex's trailing lookahead is ``\\n\\s*\\n|\\s*\\Z``
+    (not the narrower ``\\n\\s*\\n|\\Z``): a paragraph must end on a non-
+    whitespace char (the pattern's mandatory trailing ``\\S``), so when the
+    *source text itself* ends in exactly zero or one trailing newline (or
+    bare trailing spaces with no newline at all -- anything short of a full
+    blank-line separator), the bare ``\\Z`` alternative could never align
+    with that \\S-ending requirement and the whole last paragraph silently
+    vanished (``"hello\\n"`` -> ``[]``; a 3-paragraph chapter ending in a
+    single ``\\n`` -> only the first 2 paragraphs indexed). ``\\s*\\Z`` lets
+    the lookahead consume that harmless trailing whitespace before hitting
+    the real end of string. This is provably a no-op for any source that
+    does NOT end in whitespace -- the added ``\\s*`` only ever matches the
+    empty string there -- so it cannot move a single byte of any segment
+    for the (overwhelmingly common) case of already-trimmed source text;
+    see tests/test_source_excerpt_trailing_whitespace.py for the byte-for-
+    byte regression comparison against the pre-fix regex.
+
+    Known, deliberately-unfixed quirk: a one-character paragraph merges into
+    the next one (e.g. ``"a\\n\\nb"`` indexes as a single segment ``"a\\n\\nb"``,
+    not two) because the optional ``(?:.*?\\S)?`` group is tried greedily
+    before the engine ever considers stopping right after the leading
+    ``\\S``. Do not "fix" this: existing storyboard/prep-pack artifacts
+    reference segments by this function's current segment_id/offset
+    numbering, and changing the split points here would silently shift
+    which SRC#### id and which (start_offset, end_offset) every later
+    paragraph in an affected document gets -- corrupting already-stored
+    references instead of just the newly-observed trailing-whitespace bug.
+    """
     raw = source or ""
     if not raw.strip():
         return []
     spans: list[tuple[int, int]] = []
-    for match in re.finditer(r"\S(?:.*?\S)?(?=\n\s*\n|\Z)", raw, flags=re.S):
+    for match in re.finditer(r"\S(?:.*?\S)?(?=\n\s*\n|\s*\Z)", raw, flags=re.S):
         start, end = match.span()
         text = raw[start:end].strip()
         if not text:
