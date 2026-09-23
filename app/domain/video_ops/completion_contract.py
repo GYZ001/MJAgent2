@@ -372,7 +372,16 @@ def preview_video_completion_repair_route(episode_id: str):
     """只读：预演遗留 Supervisor 的收口动作。"""
     _episode_or_404(episode_id)
     from app.video_supervisor import preview_video_completion_repair
-    return preview_video_completion_repair(episode_id)
+    try:
+        return preview_video_completion_repair(episode_id)
+    except ValueError as exc:
+        # 回滚必须是异常处理器的第一条语句：get_conn() 复用与
+        # preview_video_completion_repair 相同的线程/任务局部连接。这条路径目前
+        # 是纯只读预演，但统一兜底不依赖逐次确认，避免以后加了写入而漏补。
+        conn = get_conn()
+        if conn.in_transaction:
+            conn.rollback()
+        raise HTTPException(404, str(exc)) from exc
 
 @router.post("/episodes/{episode_id}/video-completion/repair")
 def repair_video_completion_route(episode_id: str, body: dict | None = None):

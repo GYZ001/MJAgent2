@@ -14,6 +14,7 @@ from app.domain.common import (
     router,
 )
 from app.narrative_blueprint import BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD
+from fastapi import HTTPException
 
 from .activation import _screenplay_blueprint_budget_projection
 from .status_snapshot import _screenplay_cast_impact
@@ -118,4 +119,13 @@ def _screenplay_generation_preflight(episode_id: str):
 @router.post("/episodes/{episode_id}/screenplay/preflight")
 def screenplay_generation_preflight(episode_id: str):
     """返回首次生成的只读输入预检，不创建任务。"""
-    return _screenplay_generation_preflight(episode_id)
+    try:
+        return _screenplay_generation_preflight(episode_id)
+    except ValueError as exc:
+        # 回滚必须是异常处理器的第一条语句：get_conn() 复用与
+        # _screenplay_generation_preflight 相同的线程/任务局部连接。这条路径目前
+        # 是纯读预检，但统一兜底不依赖逐次确认，避免以后加了写入而漏补。
+        conn = get_conn()
+        if conn.in_transaction:
+            conn.rollback()
+        raise HTTPException(404, str(exc)) from exc

@@ -37,6 +37,14 @@ async def create_episode_video_generation_plan(
             "status": "BLOCKED_UPSTREAM_CONTRACT",
             "blockers": exc.issues,
         }) from exc
+    except ValueError as exc:
+        # 回滚必须是异常处理器的第一条语句：generate_episode_plan 内部用
+        # get_conn() 复用这条路由的线程/任务局部连接，兜底撤销任何半途写入，
+        # 不依赖逐次确认这条路径当前是否真的有写入。
+        conn = get_conn()
+        if conn.in_transaction:
+            conn.rollback()
+        raise HTTPException(404, str(exc)) from exc
     return plan.model_dump(mode="json")
 
 @router.get("/episodes/{episode_id}/video-generation-plan")
@@ -103,28 +111,38 @@ def reconcile_episode_video_generation_plan(
     payload = body or {}
     shot_id = payload.get("shot_id")
     version_id = payload.get("adopted_version_id")
-    if shot_id:
-        row = conn.execute(
-            "SELECT adopted_version_id FROM shots WHERE id=? AND episode_id=?",
-            (shot_id, episode_id),
-        ).fetchone()
-        if not row:
-            raise HTTPException(404, "镜头不存在")
-        adopted = version_id or row["adopted_version_id"]
-        if not adopted:
-            raise HTTPException(409, "该镜头尚未采用视频")
-        result = reconcile_adopted_revision(shot_id, adopted, conn=conn)
-        conn.commit()
-        return result
-    results = []
-    for row in conn.execute(
-        """SELECT id,adopted_version_id FROM shots
-           WHERE episode_id=? AND adopted_version_id IS NOT NULL ORDER BY shot_no""",
-        (episode_id,),
-    ).fetchall():
-        results.append(reconcile_adopted_revision(
-            row["id"], row["adopted_version_id"], conn=conn,
-        ))
+    try:
+        if shot_id:
+            row = conn.execute(
+                "SELECT adopted_version_id FROM shots WHERE id=? AND episode_id=?",
+                (shot_id, episode_id),
+            ).fetchone()
+            if not row:
+                raise HTTPException(404, "镜头不存在")
+            adopted = version_id or row["adopted_version_id"]
+            if not adopted:
+                raise HTTPException(409, "该镜头尚未采用视频")
+            result = reconcile_adopted_revision(shot_id, adopted, conn=conn)
+            conn.commit()
+            return result
+        results = []
+        for row in conn.execute(
+            """SELECT id,adopted_version_id FROM shots
+               WHERE episode_id=? AND adopted_version_id IS NOT NULL ORDER BY shot_no""",
+            (episode_id,),
+        ).fetchall():
+            results.append(reconcile_adopted_revision(
+                row["id"], row["adopted_version_id"], conn=conn,
+            ))
+    except ValueError as exc:
+        # 回滚必须是异常处理器的第一条语句：整集循环逐镜调用
+        # reconcile_adopted_revision 共用同一个 conn，最后才统一 commit；第 N 镜
+        # 抛业务冲突（计划已过期/采用版本不属于该镜头/指针不一致等 7 处判据）时，
+        # 前 N-1 镜已写入但未提交的内容必须先撤销，不能留在这条线程/任务局部、
+        # 会被后续请求复用的连接上。
+        if conn.in_transaction:
+            conn.rollback()
+        raise HTTPException(409, str(exc)) from exc
     conn.commit()
     return {
         "episode_id": episode_id,
