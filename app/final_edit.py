@@ -21,10 +21,12 @@ from app.media_pipeline.delivery_encode import (
     DELIVERY_HEIGHT as FINAL_HEIGHT, low_priority, DELIVERY_VIDEO_ARGS, DELIVERY_WIDTH as FINAL_WIDTH,
     INTERMEDIATE_VIDEO_ARGS, canvas_filter, encode_timeout_s, scale_box, scale_px,
 )
+# 逐段响度测量与 FINAL_AUDIO_RATE 的真源是 app.media_pipeline.loudness（draft_concat
+# 与本模块共用，见该模块 docstring）；本文件不再自己定义，避免两份常量/两份滤镜拼装逻辑。
+from app.media_pipeline.loudness import FINAL_AUDIO_RATE, audio_normalize_filter, clip_loudness_report
 from app.schemas import Shot
 
 FINAL_FPS = 24
-FINAL_AUDIO_RATE = 48_000
 
 _FONT_CANDIDATES = (
     "/System/Library/Fonts/Supplemental/Songti.ttc", "/System/Library/Fonts/Hiragino Sans GB.ttc",
@@ -130,24 +132,6 @@ def _probe_media(path: str) -> dict[str, Any]:
             for stream in streams
         ),
     }
-
-
-def audio_normalize_filter(*, atempo_rate: float | None, duration_s: float) -> str:
-    """ffmpeg 音频滤镜链，draft_concat 与 render_episode_final_edit 共用。
-
-    统一重采样到 FINAL_AUDIO_RATE、清零 PTS，再用 apad+atrim 把音轨精确对齐到
-    `duration_s`（调用方传入的权威时长——通常是该镜视频流的实测时长，必要时
-    已按倍速折算）。两条路径共用同一份逻辑，不允许只有一条做对，另一条假设
-    「模型视频没有音轨」而放任音频原样直粘。
-    """
-    parts: list[str] = []
-    if atempo_rate is not None and abs(atempo_rate - 1.0) > 1e-6:
-        parts.append(f"atempo={atempo_rate:.6f}")
-    parts.append(f"aresample={FINAL_AUDIO_RATE}")
-    parts.append("asetpts=PTS-STARTPTS")
-    parts.append(f"apad=whole_dur={duration_s:.6f}")
-    parts.append(f"atrim=duration={duration_s:.6f}")
-    return ",".join(parts)
 
 
 def _font_path() -> Path:
@@ -256,6 +240,25 @@ def _text_window(shot: Shot, source_duration_s: float, playback_rate: float) -> 
     return round(start, 3), round(end, 3)
 
 
+def _clip_audio_plan(
+    source_path: str, has_audio: bool, *, shot_no: int, rate: float,
+    effective_duration: float, extra_input_index: int,
+) -> tuple[list[str], str, dict[str, Any]]:
+    """逐镜音频输入与滤镜规划：真音轨测量响度按增益归一，合成静音固定 0dB。"""
+    loudness_report = clip_loudness_report(source_path, has_audio, shot_no=shot_no)
+    if not has_audio:
+        extra_inputs = [
+            "-f", "lavfi", "-t", f"{effective_duration:.3f}",
+            "-i", f"anullsrc=channel_layout=stereo:sample_rate={FINAL_AUDIO_RATE}",
+        ]
+        silent_filter = audio_normalize_filter(atempo_rate=None, duration_s=effective_duration)
+        return extra_inputs, f"[{extra_input_index}:a]{silent_filter}[aout]", loudness_report
+    real_filter = audio_normalize_filter(
+        atempo_rate=rate, duration_s=effective_duration, gain_db=loudness_report["gain_db"],
+    )
+    return [], f"[0:a]{real_filter}[aout]", loudness_report
+
+
 def _prepare_clip(
     source_path: str,
     destination: Path,
@@ -308,22 +311,12 @@ def _prepare_clip(
     else:
         filters.append("[base]format=yuv420p[vout]")
 
-    audio_input_index = 0
-    if not probe["has_audio"]:
-        audio_input_index = 2 if text_window else 1
-        inputs += [
-            "-f", "lavfi", "-t", f"{effective_duration:.3f}",
-            "-i", f"anullsrc=channel_layout=stereo:sample_rate={FINAL_AUDIO_RATE}",
-        ]
-    if probe["has_audio"]:
-        filters.append(
-            f"[0:a]{audio_normalize_filter(atempo_rate=rate, duration_s=effective_duration)}[aout]"
-        )
-    else:
-        filters.append(
-            f"[{audio_input_index}:a]"
-            f"{audio_normalize_filter(atempo_rate=None, duration_s=effective_duration)}[aout]"
-        )
+    extra_inputs, audio_filter, loudness_report = _clip_audio_plan(
+        source_path, probe["has_audio"], shot_no=shot.shot_no, rate=rate,
+        effective_duration=effective_duration, extra_input_index=2 if text_window else 1,
+    )
+    inputs += extra_inputs
+    filters.append(audio_filter)
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     command = [
@@ -348,6 +341,7 @@ def _prepare_clip(
         "path": str(destination),
         "duration_s": prepared_probe["video_duration_s"] or effective_duration,
         "text_insert": text_report,
+        "loudness": loudness_report,
     }
 
 
@@ -570,5 +564,6 @@ def render_episode_final_edit(
         "text_warnings": text_warnings,
         "text_failures": text_failures,
         "boundary_report": boundary_report(ordered_shots),
+        "clip_loudness": [item["loudness"] for item in prepared],
         **compose_report,
     }

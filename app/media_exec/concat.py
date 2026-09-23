@@ -1057,18 +1057,18 @@ def _run_concat_demuxer(
 def _draft_concat_pieces(
     piece_specs: list[tuple[int, str, float]], probe_by_shot: dict[int, dict[str, Any]],
     final_path: Path, concat_timeout_s: float, subtitle_plan: Any = None,
-) -> tuple[float, Path, Any]:
+) -> tuple[float, Path, Any, list[dict[str, Any]]]:
     """逐镜音频归一（必要时视频重编码）后走 concat demuxer 拼接；不归一直接拼接
-    会被按首段 timebase 解释后续音频包，混用采样率时把时长拉伸到秒级——draft 与
-    final_edit 共用同一套音频归一逻辑。返回 (total_duration_s, publish_candidate, subtitle_artifacts)。
+    会被按首段 timebase 解释后续音频包混用采样率时拉伸到秒级——draft 与 final_edit 共用同一套音频归一+响度增益逻辑（app.media_pipeline.loudness）。
     """
-    from app.final_edit import FINAL_AUDIO_RATE, audio_normalize_filter
+    from app.media_pipeline.loudness import FINAL_AUDIO_RATE, audio_normalize_filter, clip_loudness_report
 
     measured_total_dur = sum(
         float(probe_by_shot[no]["video_duration_s"]) / rate for no, _path, rate in piece_specs)
     vpaths = [vpath for _no, vpath, _rate in piece_specs]  # 单镜没有混分辨率可言，跳过探测
     uniform_ok = len(vpaths) <= 1 or uniform_resolution(vpaths) is not None
     piece_durations: list[tuple[int, float]] = []
+    clip_loudness: list[dict[str, Any]] = []
 
     with tempfile.TemporaryDirectory() as td:
         listfile = Path(td) / "list.txt"
@@ -1089,8 +1089,10 @@ def _draft_concat_pieces(
                 ]
                 audio_label = "1:a"
             video_args = _piece_video_args(rate, speed_change, not uniform_ok)
+            clip_loudness.append(clip_loudness_report(vpath, has_audio, shot_no=shot_no))
             audio_filter = audio_normalize_filter(
                 atempo_rate=rate if (speed_change and has_audio) else None, duration_s=effective_duration,
+                gain_db=clip_loudness[-1]["gain_db"],
             )
             prepare_cmd = [
                 "ffmpeg", "-y", "-loglevel", "error", *inputs,
@@ -1131,7 +1133,7 @@ def _draft_concat_pieces(
         )
         publish_candidate = final_path.with_name(f".{final_path.name}.{new_id('candidate')}.tmp")
         atomic_copy(concat_output, publish_candidate)
-    return total_dur, publish_candidate, artifacts
+    return total_dur, publish_candidate, artifacts, clip_loudness
 
 
 def concatenate_episode(
@@ -1368,7 +1370,7 @@ def concatenate_episode(
             final_edit_elapsed_s = time.perf_counter() - final_edit_started_at
             final_edit_failure = f"{type(exc).__name__}: {exc}"[:1000]
 
-    total_dur, publish_candidate, subtitle_artifacts = _draft_concat_pieces(
+    total_dur, publish_candidate, subtitle_artifacts, clip_loudness = _draft_concat_pieces(
         piece_specs, probe_by_shot, final_path, concat_timeout_s, subtitle_plan)
 
     fallback_edit_report = {
@@ -1385,6 +1387,7 @@ def concatenate_episode(
         "subtitles": subtitle_episode.report_section(subtitle_plan, subtitle_artifacts),
         "video_delivery_manifest": video_delivery_manifest,
         "video_delivery_manifest_hash": video_delivery_manifest["manifest_hash"],
+        "audio_normalization": "per_clip_linear", "clip_loudness": clip_loudness,  # 如实标出，不借用 _compose 的 "loudnorm"
     }
     result = {
         "total_duration_s": round(total_dur, 1),

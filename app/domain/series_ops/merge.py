@@ -22,7 +22,8 @@ from pathlib import Path
 from app import config
 from app.atomic_io import atomic_write_text
 from app.db import get_conn
-from app.final_edit import FINAL_AUDIO_RATE, FINAL_FPS, _run_ffmpeg
+from app.final_edit import FINAL_FPS, _run_ffmpeg
+from app.media_pipeline.loudness import FINAL_AUDIO_RATE  # 真源已从 app.final_edit 搬到这里，不借道转手
 from app.media_exec.concat import (
     _CONCAT_DURATION_TOLERANCE_MIN_S,
     _CONCAT_DURATION_TOLERANCE_RATIO,
