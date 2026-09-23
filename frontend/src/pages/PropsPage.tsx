@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, type PropItem } from '../api'
 import { useNav, useProject } from '../App'
 import PrepSubnav from '../components/PrepSubnav'
-import QueryState from '../components/QueryState'
+import QueryState from '../components/QueryState'; import StaleRefreshBanner from '../components/StaleRefreshBanner'
 import SearchField from '../components/SearchField'
 import { SINGLE_ROW_ASSET_PAGE, useFillPageSize } from '../hooks/useFillPageSize'
 import { usePrepListState } from '../hooks/usePrepListState'
@@ -113,6 +113,8 @@ export default function PropsPage() {
         <h1>物件库 <span className="sub">关键道具的规范外观与参考图，随分镜固定传给视频生成</span></h1>
         <hr className="rule" />
       </header>
+      {/* 已有 p 后台轮询失败不再被早退 QueryState 吞掉，见 StaleRefreshBanner 注释 */}
+      <StaleRefreshBanner error={error} onRetry={refresh} objectName="物件库" />
 
       <section className="card scene-library">
         <h3>道具参考图

@@ -12,7 +12,7 @@ import {
   type ShotVersion,
 } from '../api'
 import { ItemTaskTimer } from '../components/TaskTimer'
-import QueryState from '../components/QueryState'
+import QueryState from '../components/QueryState'; import StaleRefreshBanner from '../components/StaleRefreshBanner'
 import { compactShotStage } from '../shotStatus'
 import { refsBusyPollInterval, type ImageGenTaskLike } from '../lib/bibleAssets'
 import { reconcileProviderTasksAndReport, reusedReasonLabel } from '../lib/providerTaskRecovery'
@@ -382,12 +382,8 @@ export default function WallPage() {
 
   const bulkEstimate = useMemo(() => bulkGenerateEstimate(shots), [shots])
 
-  if (error && !ep) {
-    return <QueryState loading={false} error={error} status={status} hasData={false} objectName="生成台">{null}</QueryState>
-  }
-  if (!ep) {
-    return <QueryState loading={loading !== false} error={null} hasData={false} objectName="生成台">{null}</QueryState>
-  }
+  if (error && !ep) return <QueryState loading={false} error={error} status={status} hasData={false} objectName="生成台">{null}</QueryState>
+  if (!ep) return <QueryState loading={loading !== false} error={null} hasData={false} objectName="生成台">{null}</QueryState>
 
   const selectedSummary = shots.find(shot => shot.id === selectedShotId) ?? null
   const counts = segmentPhaseCounts(shots)
@@ -410,6 +406,8 @@ export default function WallPage() {
         <h1>生成台 <span className="sub">《{ep.title}》 · 按 15 秒片段生成参考图视频</span></h1>
         <hr className="rule" />
       </header>
+      {/* 已有 ep 后台轮询失败不再被早退 QueryState 吞掉，见 StaleRefreshBanner 注释 */}
+      <StaleRefreshBanner error={error} onRetry={refresh} objectName="生成台" />
 
       <section className="card wall-summary" aria-label="本集生成概览">
         <div className="wall-summary-row">

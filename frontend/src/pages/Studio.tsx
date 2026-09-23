@@ -3,6 +3,7 @@ import { api, Project } from '../api'
 import { useNav, usePoll } from '../App'
 import QueryState from '../components/QueryState'
 import { RecycleBinDialog } from '../components/RecycleBinDialog'
+import StaleRefreshBanner from '../components/StaleRefreshBanner'
 import VisualStyleDialog from '../components/VisualStyleDialog'
 import { useRecycleBin } from '../hooks/useRecycleBin'
 import { useVisualStyleDialog } from '../hooks/useVisualStyleDialog'
@@ -45,6 +46,10 @@ export default function Studio() {
   const importHelpId = useId()
   const uploading = importStage === 'uploading' || importStage === 'creating'
   const emptyProjectList = !loading && !error && projects?.length === 0
+  // usePoll 每 6s 轮询一次项目列表，失败不清空 projects；已有数据后再失败的
+  // error 不能被下面 QueryState 的 hasData 分支吞掉（同 orgs/resources 各面板，
+  // 2c96b89c）——首屏失败仍交给 QueryState 自己的错误态处理。
+  const projectsLoadFailed = !projects && !!error
   const importVisible = showImport || emptyProjectList
   const observabilityIntent = new URLSearchParams(window.location.search).get('intent') === 'observability'
 
@@ -339,14 +344,9 @@ export default function Studio() {
         />
       </section>}
 
-      <QueryState
-        loading={loading}
-        error={error}
-        hasData={Boolean(projects?.length)}
-        objectName="项目"
-        emptyText="书房尚空。请在上方导入区选择一份 TXT 或 EPUB，创建第一个项目。"
-        onRetry={refresh}
-      >
+      <StaleRefreshBanner error={projectsLoadFailed ? null : error} onRetry={refresh} objectName="项目" />
+      <QueryState loading={loading} error={projectsLoadFailed ? error : null} hasData={Boolean(projects?.length)}
+        objectName="项目" emptyText="书房尚空。请在上方导入区选择一份 TXT 或 EPUB，创建第一个项目。" onRetry={refresh}>
         {projects?.length ? (
         <section className="project-section">
           <div className="section-heading">

@@ -8,7 +8,7 @@ import SearchField from '../components/SearchField'
 import GenerationParamsDialog from '../components/GenerationParamsDialog'
 import ImageCompareModal from '../components/ImageCompareModal'
 import PrepSubnav from '../components/PrepSubnav'
-import QueryState from '../components/QueryState'
+import QueryState from '../components/QueryState'; import StaleRefreshBanner from '../components/StaleRefreshBanner'
 import DecisionDialog from '../components/DecisionDialog'
 import OperationError from '../components/OperationError'
 import WorldbuildingStatus, { worldbuildingRunning } from '../components/WorldbuildingStatus'
@@ -115,8 +115,7 @@ export default function ScenesPage() {
   }, [generating, refreshProgress])
 
   if (error && !p) return <QueryState loading={false} error={error} status={status} hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
-  if (loading && !p) return <QueryState loading hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
-  if (!p) return <QueryState loading hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
+  if (!p) return <QueryState loading hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState> // 原 `loading && !p` 分支是 `!p` 真子集且 JSX 逐字相同，并入不改变行为
 
   // 同步锁：连点两次时第二次直接报错，而不是静默吞掉——静默吞掉会让用户以为
   // 第二次点击也生效了，实际什么都没发生。act() 自己吃掉这个错误转成 toast；
@@ -189,6 +188,7 @@ export default function ScenesPage() {
         <h1>场景库 <span className="sub">管理视频生成所需的场景参考图</span></h1>
         <hr className="rule" />
       </header>
+      <StaleRefreshBanner error={error} onRetry={refresh} objectName="场景库" />
 
       <section className="card">
         <h3>场景图素材库

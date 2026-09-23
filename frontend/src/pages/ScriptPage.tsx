@@ -15,6 +15,7 @@ import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 import { ScreenplayStatusStamp } from '../components/ProductionStatusStamp'
 import QueryState from '../components/QueryState'
 import OperationError from '../components/OperationError'
+import StaleRefreshBanner from '../components/StaleRefreshBanner'
 import PrepPackPreviewDialog from '../components/script/PrepPackPreviewDialog'
 import PrepPackDiscoverySummary from '../components/script/PrepPackDiscoverySummary'
 import PortraitPlaceholder from '../components/PortraitPlaceholder'; import SceneReferencePlaceholder from '../components/SceneReferencePlaceholder'
@@ -412,15 +413,8 @@ export default function ScriptPage() {
 
   if (!ep) {
     return (
-      <QueryState
-        loading={loading} error={error}
-        status={status}
-        hasData={false}
-        objectName="映射台"
-        loadingText="正在加载映射台与本集状态…"
-        emptyText="未找到可展示的映射数据，请刷新后重试。"
-        onRetry={() => void refresh()}
-      >
+      <QueryState loading={loading} error={error} status={status} hasData={false} objectName="映射台"
+        loadingText="正在加载映射台与本集状态…" emptyText="未找到可展示的映射数据，请刷新后重试。" onRetry={() => void refresh()}>
         {null}
       </QueryState>
     )
@@ -492,6 +486,10 @@ export default function ScriptPage() {
         <hr className="rule" />
       </header>
 
+      {/* useScriptEpisode 内部走 usePoll，已有 ep 后台轮询失败不清空数据；
+          error 此前只喂给上面的早退 QueryState，ep 到手后就再没人看，
+          见 StaleRefreshBanner 顶部注释与 orgs/resources 各面板 2c96b89c。 */}
+      <StaleRefreshBanner error={error} onRetry={() => void refresh()} objectName="映射台" />
       <section className="card script-toolbar">
         <div className="screenplay-primary-row">
           <div className="screenplay-state-copy">

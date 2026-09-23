@@ -36,3 +36,21 @@ describe('摄影类画风在导入面板给出可见提示，非摄影类不提�
     expect(source).toContain('或改选其它画风')
   })
 })
+
+// usePoll 每 6s 轮询一次项目列表（不像 useProject/useEpisode 那样随业务状态
+// 停轮询），失败不清空 projects；已有数据后再失败的 error 此前只传给了
+// QueryState，会被它的 hasData 分支无条件吞掉（同 orgs/resources 各面板
+// 2c96b89c 修的那类问题）。无组件渲染测试基建（同 BiblePage.test.ts 顶部
+// 注释），继续用源码静态扫描守住接线不回归。
+describe('已有项目列表时后台轮询刷新失败不得被吞', () => {
+  it('QueryState 的 error 由 projectsLoadFailed 门控，不是原始 error 直传', () => {
+    expect(source).toMatch(/const projectsLoadFailed = !projects && !!error/)
+    expect(source).toMatch(/<QueryState[^>]*error=\{projectsLoadFailed \? error : null\}/)
+  })
+
+  it('QueryState 之外单独渲染 StaleRefreshBanner，已有数据时展示刷新失败信号', () => {
+    expect(source).toMatch(
+      /<StaleRefreshBanner error=\{projectsLoadFailed \? null : error\} onRetry=\{refresh\} objectName="项目" \/>/,
+    )
+  })
+})

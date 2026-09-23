@@ -1,6 +1,7 @@
 import { useNav } from '../App'
 import QueryState from '../components/QueryState'
 import OperationError from '../components/OperationError'
+import StaleRefreshBanner from '../components/StaleRefreshBanner'
 import SeriesTaskPlanner from './series/SeriesTaskPlanner'
 import SeriesTaskBar from './series/SeriesTaskBar'
 import SeriesTaskList from './series/SeriesTaskList'
@@ -52,6 +53,10 @@ function SeriesTaskListView({ projectId }: { projectId: string }) {
         <h1>连播台 <span className="sub">按每 N 集切分成任务，勾选后批量执行 · {seriesConcurrencyPhrase(queue.concurrency)}</span></h1>
         <hr className="rule" />
       </header>
+      {/* list 走 usePoll（见 useSeriesTaskListState.ts），队列跑动时持续轮询；轮询
+          失败不清空 list.data，已有数据后再失败的 error 不能被上面 QueryState 的
+          hasData 分支吞掉（同 orgs/resources 各面板，2c96b89c）。 */}
+      <StaleRefreshBanner error={list.error} onRetry={() => void list.refresh({ force: true })} objectName="连播任务列表" />
       <p className="series-intro">
         全项目共 {episodes.total} 集（第 {episodes.min_no}-{episodes.max_no} 集），已生成 {totals.all} 个连播任务：
         未开始 {totals.idle}、排队 {totals.queued}、执行中 {totals.running}、已完成 {totals.succeeded}、

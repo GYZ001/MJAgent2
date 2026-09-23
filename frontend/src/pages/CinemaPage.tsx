@@ -3,7 +3,7 @@ import { api, DeliveryPackageRecord, DeliveryReadiness, MixStatus, MixResult } f
 import { useEpisode, useNav, usePoll } from '../App'
 import EpisodeCrumb from '../components/EpisodeCrumb'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
-import QueryState from '../components/QueryState'
+import QueryState from '../components/QueryState'; import StaleRefreshBanner from '../components/StaleRefreshBanner'
 import DecisionDialog from '../components/DecisionDialog'
 import OperationError from '../components/OperationError'
 import { deliveryWarningLabel } from './cinema/deliveryLabels'
@@ -413,6 +413,8 @@ export default function CinemaPage() {
         <h1>成片台 <span className="sub">预览成片、完成交付检查并沉淀可追溯记录</span></h1>
         <hr className="rule" />
       </header>
+      {/* 已有 ep 后台轮询失败不再被早退 QueryState 吞掉，见 StaleRefreshBanner 注释 */}
+      <StaleRefreshBanner error={error} onRetry={() => void refreshEpisode()} objectName="成片台" />
 
       {mix ? (
         <>

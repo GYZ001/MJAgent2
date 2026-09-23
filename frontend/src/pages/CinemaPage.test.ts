@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
   canConcatenateMix,
@@ -12,6 +14,8 @@ import {
   reconcileMixStatus,
 } from './CinemaPage'
 import type { MixStatus } from '../api'
+
+const source = readFileSync(fileURLToPath(new URL('./CinemaPage.tsx', import.meta.url)), 'utf-8')
 
 describe('成片可合成条件', () => {
   it('任意一个真实视频已完成就允许合成当前片段', () => {
@@ -161,5 +165,17 @@ describe('成片台审核按钮禁用原因', () => {
       '画面和声音已复验',
       '',
     )).toBe('')
+  })
+})
+
+// useEpisode 内部走 usePoll，已有 ep 后再轮询失败不清空 ep；error 此前只喂给
+// 早退的 `<QueryState hasData={false}>` 分支，ep 到手后就再没人看（2026-09-23
+// 补丁，同 orgs/resources 各面板 2c96b89c）。mixError/deliveryError 已经各自有
+// 独立横幅（见 419/600 行附近），本页无组件渲染测试基建，改用源码静态扫描
+// 守住 ep 这条的接线不回归。
+describe('成片台——已有 ep 时后台轮询刷新失败不得被吞', () => {
+  it('QueryState 早退分支之外单独渲染 StaleRefreshBanner，接的是同一个 error/refreshEpisode', () => {
+    expect(source).toMatch(/import StaleRefreshBanner from '\.\.\/components\/StaleRefreshBanner'/)
+    expect(source).toMatch(/<StaleRefreshBanner error=\{error\} onRetry=\{\(\) => void refreshEpisode\(\)\} objectName="成片台" \/>/)
   })
 })

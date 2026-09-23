@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import QueryState from './QueryState'
+import StaleRefreshBanner from './StaleRefreshBanner'
 import type { DeletedProject } from '../api'
 
 /**
@@ -48,6 +49,12 @@ export function RecycleBinDialog(props: RecycleBinDialogProps) {
     return () => window.removeEventListener("keydown", onKey)
   }, [onClose])
 
+  // 首屏加载失败与「已有列表后台轮询刷新失败」分工同 orgs/resources 各面板
+  // （2c96b89c）：前者交给 QueryState（它带重试），后者不能被 QueryState 的
+  // hasData 分支吞掉——useRecycleBin 用 usePoll，轮询失败不清空 deletedProjects，
+  // error 却原样往下传，不单独处理就会悄悄停在过期列表上不再提示。
+  const deletedLoadFailed = !deletedProjects && !!deletedError
+
   return (
     <div
       className="dialog-backdrop"
@@ -67,9 +74,10 @@ export function RecycleBinDialog(props: RecycleBinDialogProps) {
         >关闭</button>
       </div>
       <p className="dialog-hint">24 小时保留期内可随时恢复；到期或手动彻底删除后不可恢复</p>
+      <StaleRefreshBanner error={deletedLoadFailed ? null : deletedError} onRetry={onRefresh} objectName="回收站项目" />
       <QueryState
         loading={deletedLoading}
-        error={deletedError}
+        error={deletedLoadFailed ? deletedError : null}
         hasData={deletedCount > 0}
         objectName="回收站项目"
         emptyText="回收站是空的。"

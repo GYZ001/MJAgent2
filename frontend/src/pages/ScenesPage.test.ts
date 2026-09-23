@@ -117,3 +117,14 @@ describe('场景主图与附加视角状态', () => {
     expect(sceneUsability(scene, false)).toBe('unavailable')
   })
 })
+
+// useProject 内部走 usePoll，已有 p 后再轮询失败不清空 p；error 此前只喂给早退的
+// `<QueryState hasData={false}>` 分支，p 到手后就再没人看（2026-09-23 补丁，同
+// orgs/resources 各面板 2c96b89c）。无组件渲染测试基建（同 BiblePage.test.ts 顶
+// 部注释），继续用源码静态扫描守住接线不回归。
+describe('场景库——已有数据时后台轮询刷新失败不得被吞', () => {
+  it('QueryState 早退分支之外单独渲染 StaleRefreshBanner，接的是同一个 error/refresh', () => {
+    expect(source).toMatch(/import QueryState from '\.\.\/components\/QueryState'; import StaleRefreshBanner from '\.\.\/components\/StaleRefreshBanner'/)
+    expect(source).toMatch(/<StaleRefreshBanner error=\{error\} onRetry=\{refresh\} objectName="场景库" \/>/)
+  })
+})

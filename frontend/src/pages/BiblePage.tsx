@@ -6,7 +6,7 @@ import { useNav, usePoll, useProject } from '../App'
 import SearchField from '../components/SearchField'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 import GenerationParamsDialog from '../components/GenerationParamsDialog'
-import QueryState from '../components/QueryState'
+import QueryState from '../components/QueryState'; import StaleRefreshBanner from '../components/StaleRefreshBanner'
 import PrepSubnav from '../components/PrepSubnav'
 import { SINGLE_ROW_ASSET_PAGE, useFillPageSize } from '../hooks/useFillPageSize'
 import { useFocusTrap } from '../hooks/useFocusTrap'
@@ -881,6 +881,8 @@ export default function BiblePage() {
         <h1>人物谱 <span className="sub">角色资产与定妆版本中心 · 保持跨镜头、跨分集一致</span></h1>
         <hr className="rule" />
       </header>
+      {/* 已有 p 后台轮询失败不再被早退 QueryState 吞掉，见 StaleRefreshBanner 注释 */}
+      <StaleRefreshBanner error={error} onRetry={refresh} objectName="人物谱" />
 
       <section className="card">
         <h3>原著 <span className="hint">{(p.novel_chars / 10000).toFixed(1)} 万字 · {p.chapter_count ?? p.chapters?.length ?? 0} 章</span></h3>

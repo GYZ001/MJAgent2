@@ -3,6 +3,7 @@ import { api } from '../../api'
 import type { SeriesTaskDetail as SeriesTaskDetailType } from '../../api'
 import QueryState from '../../components/QueryState'
 import OperationError from '../../components/OperationError'
+import StaleRefreshBanner from '../../components/StaleRefreshBanner'
 import SeriesProgressBoard from './SeriesProgressBoard'
 import SeriesFilmPlayer from './SeriesFilmPlayer'
 import { seriesTaskProgressLabel, seriesTaskStatusLabel, seriesTaskStatusTone, seriesTaskTitle } from './seriesTaskText'
@@ -49,6 +50,10 @@ export default function SeriesTaskDetail({ projectId, taskId }: { projectId: str
         <hr className="rule" />
       </header>
       <button type="button" className="btn" onClick={() => go('series', projectId)}>← 返回任务列表</button>
+      {/* data 走 usePoll，任务运行/排队时持续轮询；轮询失败不清空 data，已有数据
+          后再失败的 error 不能被上面 QueryState 的 hasData 分支吞掉（同
+          orgs/resources 各面板，2c96b89c）。 */}
+      <StaleRefreshBanner error={error} onRetry={() => void refresh({ force: true })} objectName="连播任务详情" />
       <section className="series-task-detail-meta card">
         <span className={`stamp ${seriesTaskStatusTone(data.status)}`}>{seriesTaskStatusLabel(data.status)}</span>
         <span>{seriesTaskProgressLabel(data)}</span>
