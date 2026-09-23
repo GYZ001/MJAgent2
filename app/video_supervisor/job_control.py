@@ -65,7 +65,7 @@ def _reconcile_terminal_continuity_blocks(
             """UPDATE jobs
                SET status='waiting_human', pipeline_stage=?, stage_status='blocked',
                    reason_code='VIDEO_CHAIN_ANCHOR_BLOCKED', reason_text=?, error=?,
-                   lease_owner=NULL, lease_expires_at=NULL, updated_at=?, stage_updated_at=?
+                   lease_owner=NULL, lease_expires_at=NULL, video_slot_active=0, updated_at=?, stage_updated_at=?
                WHERE id=? AND status IN ('queued','waiting','waiting_retry')""",
             (media_stages.STAGE_WAITING_HUMAN, message, message, now(), now(), row["id"]),
         )
@@ -73,7 +73,7 @@ def _reconcile_terminal_continuity_blocks(
             continue
         if row["version_id"]:
             conn.execute(
-                """UPDATE shot_versions SET status='waiting_human', error=?
+                """UPDATE shot_versions SET status='waiting_human', error=?, video_slot_active=0
                    WHERE id=? AND status IN ('queued','running','waiting_retry')""",
                 (message, row["version_id"]),
             )

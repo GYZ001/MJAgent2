@@ -15,6 +15,7 @@ import { ItemTaskTimer } from '../components/TaskTimer'
 import QueryState from '../components/QueryState'
 import { compactShotStage } from '../shotStatus'
 import { refsBusyPollInterval, type ImageGenTaskLike } from '../lib/bibleAssets'
+import { reconcileProviderTasksAndReport, reusedReasonLabel } from '../lib/providerTaskRecovery'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
 import { extractReferenceImagesByVersion, shotVersionSignature } from '../lib/wallReferences'
 import GenerationReferenceGallery from '../components/GenerationReferenceGallery'
@@ -221,20 +222,6 @@ function newIdemKey(prefix: string): string {
   return `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`
 }
 
-/** reused=true 时的诚实文案——不再说"输入未变化"，那句话从未真正比较过输入。
- *  按服务端回传的 reused_reason 如实转述命中记录的真实状态。 */
-function reusedReasonLabel(reason?: ReusedReason): string {
-  switch (reason) {
-    case 'succeeded':
-      return '已有交付版本，未重新生成'
-    case 'stuck_needs_human':
-      return '现有任务卡在需要人工处理，未提交新任务；请核对供应商任务状态'
-    case 'in_flight':
-    default:
-      return '已有任务在处理中，未重复提交'
-  }
-}
-
 type DetailState =
   | { status: 'idle' }
   | { status: 'loading'; shotId: string }
@@ -347,7 +334,7 @@ export default function WallPage() {
       if (failed.length || stuck.length) {
         const segments = [`已提交 ${okCount} 段生成请求`]
         if (stuck.length) {
-          segments.push(`${stuck.length} 段卡在需要人工处理，未提交（请在对应镜头核对供应商任务状态）`)
+          segments.push(`${stuck.length} 段卡在需要人工处理，未提交（请打开对应镜头，点击「核对供应商任务状态」）`)
         }
         if (failed.length) {
           segments.push(
@@ -689,6 +676,12 @@ export function GenerationPanel({ shot, context, referenceImages, detailLoading,
     }
   }
 
+  // 卡在 waiting_human 的任务给用户一个真实入口去核对（CLAUDE.md「拦住用户时必须给出路」）；
+  // 接口只读多、不新建供应商任务，允许与「生成」并发，不占用 submitting 互斥锁。
+  const runReconcileProviderTasks = () => {
+    void reconcileProviderTasksAndReport(shot.episode_id, onToast).then(onRefresh)
+  }
+
   const technical = parseTechnicalValidation(selected?.technical_validation_json)
   // 快照里没有这条版本 = 参考图「还不知道」（轮询先于详情看到新尝试），不是
   // 「一张都没带」；按加载中处理，等详情到位再判，绝不据此报「参考图缺失」。
@@ -730,6 +723,9 @@ export function GenerationPanel({ shot, context, referenceImages, detailLoading,
             <button type="button" className="btn small" onClick={goToBoard}>
               到分镜台修订第 {segment.segment_no} 段
             </button>
+          )}
+          {current.status === 'waiting_human' && (
+            <button type="button" className="btn small" onClick={runReconcileProviderTasks}>核对供应商任务状态</button>
           )}
         </div>
       )}

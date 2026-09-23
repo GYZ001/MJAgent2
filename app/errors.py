@@ -127,6 +127,16 @@ def _extract_message(exc: BaseException | None) -> str:
     if exc is None:
         return ""
     detail = getattr(exc, "detail", None)  # FastAPI HTTPException
+    if isinstance(detail, dict):
+        # 仓库约定：手写 dict 型 detail 一律带 "message" 中文字段（如
+        # QuotaExceeded／各 HTTPException(detail={...})），取它而不是
+        # str(dict) 的 Python repr——后者会把 {'code': ..., 'message': ...}
+        # 原样糊给用户看。取不到（少数不带 message 的技术性 detail）才退回
+        # str(detail) 的既有行为。
+        message = detail.get("message")
+        if isinstance(message, str) and message:
+            return message
+        return str(detail)
     if detail is not None:
         return detail if isinstance(detail, str) else str(detail)
     return str(exc)
