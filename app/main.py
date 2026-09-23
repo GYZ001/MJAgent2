@@ -337,9 +337,25 @@ async def _on_http_exception(request: Request, exc: HTTPException):
 
 @app.exception_handler(Exception)
 async def _on_unhandled(request: Request, exc: Exception):
+    """未经命令总线、路由自己也没捕获的异常兜底。
+
+    2026-09-23 用户拍板：ValueError（含子类，如 json.JSONDecodeError/
+    UnicodeDecodeError/pydantic.ValidationError）统一转 409，口径对齐命令
+    总线 call_guarded 的 ``except ValueError`` -> invalid_state(409)。
+    errors.classify() 已有 http_status==409 分支（服务总线产生的 CON-409
+    记录），这里只改传入的 http_status，不新增分类分支。
+
+    回滚必须是第一条语句（CLAUDE.md）：get_conn() 是本请求线程/任务局部
+    连接，被下面 log_error/note_error_id 读写之前必须先撤销半途写入，
+    否则会污染被后续请求复用的同一连接。
+    """
+    conn = get_conn()
+    if conn.in_transaction:
+        conn.rollback()
     ctx = await _request_context(request)
+    http_status = 409 if isinstance(exc, ValueError) else 500
     rec = errors.log_error(
-        exc, action=f"{request.method} {request.url.path}", context=ctx, http_status=500,
+        exc, action=f"{request.method} {request.url.path}", context=ctx, http_status=http_status,
     )
     note_error_id(rec.error_id)
     return _error_json(rec)
