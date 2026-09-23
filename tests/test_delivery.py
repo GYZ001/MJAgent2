@@ -332,9 +332,9 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
     artifact_before = repository.get_artifact(package["artifact_id"])
 
     feedback = delivery.add_customer_feedback(
-        "e", message="第二镜节奏可更紧", created_by="customer", rating=3, request_revision=True,
+        "e", message="第二镜节奏可更紧", created_by="customer", rating=3,
     )
-    assert feedback["revision_run_id"]
+    assert "revision_run_id" not in feedback
     assert repository.get_artifact(package["artifact_id"])["content_hash"] == artifact_before["content_hash"]
     assert any(item["evaluator_name"] == "customer_feedback" for item in repository.get_evaluations(package["artifact_id"]))
 

@@ -1402,34 +1402,27 @@ def add_customer_feedback(
     created_by: str,
     issue_code: str | None = None,
     rating: int | None = None,
-    request_revision: bool = False,
 ) -> dict[str, Any]:
+    """记录一条客户反馈。只做记录——不再建修订 run（2026-09-23 退场：那条
+    ``workflow_type="delivery_revision"`` 的 run 从没有执行者推进过，也没有
+    GET 展示过，永远停在 CREATED，还会被 ``scripts/deploy/in_flight_on_b.py``
+    当成"在途"挡住生产部署）。需要修改本集内容，走分镜台/生成台的既有流程，
+    不是这里。"""
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     if not ep or not ep["delivery_artifact_id"]:
         raise ValueError("本集尚无可关联的交付 Artifact")
     if rating is not None and not 1 <= int(rating) <= 5:
         raise ValueError("rating 必须在 1~5")
-    revision_run_id = None
-    if request_revision:
-        revision_run_id = repository.create_run(
-            workflow_type="delivery_revision",
-            scope_type="episode",
-            scope_id=episode_id,
-            input_fingerprint=fingerprint(ep["delivery_artifact_id"], message, issue_code),
-            requested_by=created_by,
-            trigger_type="customer_feedback",
-            policy_snapshot={"source_delivery_artifact_id": ep["delivery_artifact_id"]},
-        )
     feedback_id = new_id("feedback")
     conn.execute(
         """INSERT INTO customer_feedback(
                id, episode_id, artifact_id, issue_code, rating, message, created_by,
                revision_run_id, created_at
-           ) VALUES(?,?,?,?,?,?,?,?,?)""",
+           ) VALUES(?,?,?,?,?,?,?,NULL,?)""",
         (
             feedback_id, episode_id, ep["delivery_artifact_id"], issue_code, rating,
-            message.strip(), created_by, revision_run_id, now(),
+            message.strip(), created_by, now(),
         ),
     )
     repository.create_evaluation(
@@ -1449,7 +1442,7 @@ def add_customer_feedback(
         ),
     )
     conn.commit()
-    return {"feedback_id": feedback_id, "revision_run_id": revision_run_id}
+    return {"feedback_id": feedback_id}
 
 
 # app.db.init_db() no longer imports this module directly (P0-3 dependency

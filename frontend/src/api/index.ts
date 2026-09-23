@@ -135,6 +135,7 @@ export const api = {
   concatenateEpisode: deliveryApi.concatenateEpisode,
   createDeliveryPackage: deliveryApi.createDeliveryPackage,
   submitCustomerFeedback: deliveryApi.submitCustomerFeedback,
+  getCustomerFeedback: deliveryApi.getCustomerFeedback,
   downloadDeliveryFile: deliveryApi.downloadDeliveryFile,
 
   /* ── 项目/分集聚合域 ── */

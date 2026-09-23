@@ -120,11 +120,26 @@ export function createDeliveryPackage(
   return mutate("POST", `/episodes/${episodeId}/delivery/package`, body);
 }
 
+export interface CustomerFeedbackRecord {
+  id: string;
+  created_at: number;
+  created_by: string;
+  message: string;
+  rating: number | null;
+}
+
+/** 2026-09-23 起 request_revision 已退场：反馈只做记录，不创建修订任务
+ *  （那条 workflow_run 从没有执行者推进过，也没有界面展示过，还会挡生产部署）。
+ *  需要修改本集内容，请到分镜台或生成台处理。 */
 export function submitCustomerFeedback(
   episodeId: string,
-  body: { message: string; created_by: string; request_revision: boolean },
+  body: { message: string; created_by: string },
 ) {
   return mutate("POST", `/episodes/${episodeId}/customer-feedback`, body);
+}
+
+export function getCustomerFeedback(episodeId: string): Promise<CustomerFeedbackRecord[]> {
+  return get(`/episodes/${episodeId}/customer-feedback`);
 }
 
 /** 交付候选质检报告/归档包下载——CinemaPage.tsx::downloadDeliveryFile。

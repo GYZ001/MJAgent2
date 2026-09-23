@@ -1638,34 +1638,34 @@ def recover_delivery_tasks() -> int:
 
 @router.post("/episodes/{episode_id}/customer-feedback")
 async def create_customer_feedback(episode_id: str, body: dict = Body(...)):
+    # 修订任务已退场（2026-09-23）：仍传 request_revision=true 须显式拒绝，不静默 no-op。
+    if body.get("request_revision"):
+        raise HTTPException(422, "修订任务已退场，反馈只做记录；如需修改本集内容，请到分镜台或生成台处理。")
     from app.capabilities.dispatch import ui_route
-    routed = await ui_route(
-        "delivery.submit_feedback",
-        {
-            "episode_id": episode_id,
-            "package_id": body.get("package_id"),
-            "feedback": body.get("message") or body.get("feedback") or "",
-            "request_revision": bool(body.get("request_revision", True)),
-        },
-    )
+    routed = await ui_route("delivery.submit_feedback", {
+        "episode_id": episode_id, "package_id": body.get("package_id"),
+        "feedback": body.get("message") or body.get("feedback") or "",
+    })
     if routed is not None:
         return routed
     from app.delivery import add_customer_feedback
-
     message = str(body.get("message") or "").strip()
     if not message:
         raise HTTPException(400, "反馈内容不能为空")
     try:
         return add_customer_feedback(
-            episode_id,
-            message=message,
-            created_by=current_actor_name("customer"),
-            issue_code=body.get("issue_code"),
-            rating=body.get("rating"),
-            request_revision=bool(body.get("request_revision")),
-        )
+            episode_id, message=message, created_by=current_actor_name("customer"),
+            issue_code=body.get("issue_code"), rating=body.get("rating"))
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@router.get("/episodes/{episode_id}/customer-feedback")
+def list_customer_feedback(episode_id: str):
+    from app.evaluations.customer_feedback import recent_customer_feedback
+    if not get_conn().execute("SELECT 1 FROM episodes WHERE id=?", (episode_id,)).fetchone():
+        raise HTTPException(404, "剧集不存在")
+    return recent_customer_feedback(episode_id)
 
 
 @router.post("/benchmarks")

@@ -349,10 +349,14 @@ class DeliveryReviewInput(StandardCommandInput):
 
 
 class DeliveryFeedbackInput(StandardCommandInput):
+    """``request_revision`` 已退场（2026-09-23）：修订任务从没有执行者推进过、
+    也没有 GET 展示过，建的 run 永远停在 CREATED 还会挡生产部署。字段整体移除
+    ——``StandardCommandInput`` 的 ``extra="forbid"`` 会让仍传它的调用方直接
+    422，而不是静默吞掉这个参数。"""
+
     episode_id: str
     package_id: str | None = None
     feedback: str
-    request_revision: bool = True
 
 
 class RunControlInput(StandardCommandInput):

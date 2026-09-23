@@ -9,6 +9,7 @@ import OperationError from '../components/OperationError'
 import { deliveryWarningLabel } from './cinema/deliveryLabels'
 import SubtitlePanel from './cinema/SubtitlePanel'
 import { subtitleSummaryLine } from './cinema/subtitleSummary'
+import CustomerFeedbackPanel from './cinema/CustomerFeedbackPanel'
 import "../styles/CinemaPage.css";
 import { isConcatAccepted, useConcatWatch } from './cinema/concatWatch'
 
@@ -155,7 +156,7 @@ export function deliveryReviewDisabledReason(
 }
 
 export default function CinemaPage() {
-  const { episodeId, toast } = useNav()
+  const { episodeId, toast, go, projectId } = useNav()
   const { data: ep, error, status, loading, refresh: refreshEpisode } = useEpisode(episodeId!, 'cinema')
   const [mix, setMix] = useState<MixStatus | null>(null)
   const [mixBusy, setMixBusy] = useState(false)
@@ -168,9 +169,6 @@ export default function CinemaPage() {
   const [reviewer, setReviewer] = useState('')
   const [reason, setReason] = useState('')
   const [acceptedRisk, setAcceptedRisk] = useState('')
-  const [feedback, setFeedback] = useState('')
-  const [feedbackBusy, setFeedbackBusy] = useState(false)
-  const [feedbackConfirmOpen, setFeedbackConfirmOpen] = useState(false)
   const [downloadBusy, setDownloadBusy] = useState<string | null>(null)
   const [reviewDecision, setReviewDecision] = useState<DeliveryDecision | null>(null)
   const [activeTab, setActiveTab] = useState<CinemaTab>('preview')
@@ -400,25 +398,6 @@ export default function CinemaPage() {
       toast((e as Error).message, true)
     } finally {
       setDeliveryBusy(false)
-    }
-  }
-
-  const submitCustomerFeedback = async () => {
-    const message = feedback.trim()
-    if (!message) return
-    setFeedbackBusy(true)
-    try {
-      await api.submitCustomerFeedback(ep.id, {
-        message,
-        created_by: reviewer.trim() || 'customer',
-        request_revision: true,
-      })
-      setFeedback('')
-      toast('反馈已回流，并创建修订任务')
-    } catch (e) {
-      toast((e as Error).message, true)
-    } finally {
-      setFeedbackBusy(false)
     }
   }
 
@@ -782,22 +761,13 @@ export default function CinemaPage() {
               ) : (
                 <div className="delivery-records-empty">暂无交付记录，请先通过交付检查并生成交付候选。</div>
               )}
-              <div className="customer-feedback">
-                <input disabled={feedbackBusy}
-                  aria-label={feedbackBusy ? '客户反馈，暂不可用：正在提交并创建修订任务' : '客户反馈'}
-                  value={feedback} onChange={event => setFeedback(event.target.value)}
-                  placeholder="输入客户反馈；确认后创建新的修订任务" />
-                <button className="btn primary small" disabled={feedbackBusy || !feedback.trim()}
-                  aria-label={feedbackBusy
-                    ? '提交客户反馈，暂不可用：正在创建修订任务'
-                    : !feedback.trim()
-                      ? '提交客户反馈，暂不可用：请先填写反馈内容'
-                      : '预览客户反馈影响并发起修订'}
-                  onClick={event => {
-                    dialogTriggerRef.current = event.currentTarget
-                    setFeedbackConfirmOpen(true)
-                  }}>{feedbackBusy ? '提交中…' : '提交并发起修订'}</button>
-              </div>
+              <CustomerFeedbackPanel
+                episodeId={ep.id}
+                episodeNo={ep.episode_no}
+                reviewer={reviewer}
+                toast={toast}
+                onNavigateToBoard={() => go('board', projectId, ep.id)}
+              />
             </section>
           )}
 
@@ -854,27 +824,6 @@ export default function CinemaPage() {
               onConfirm={() => {
                 setPackageConfirmOpen(false)
                 void createDeliveryPackage()
-              }}
-            />
-          )}
-
-          {feedbackConfirmOpen && (
-            <DecisionDialog
-              title="提交客户反馈并发起修订？"
-              summary={`第 ${ep.episode_no} 集 · ${feedback.trim()}`}
-              message="确认后会保存这条反馈并创建新的修订任务，供制作人员后续处理。"
-              details={[
-                '不会立即重新生成图片、视频，也不占用生成时长',
-                '当前成片、已交付快照和既有审核记录不会被覆盖',
-                '反馈提交成功后会清空本次输入',
-              ]}
-              confirmLabel="确认提交并创建修订任务"
-              cancelLabel="返回修改反馈"
-              returnFocus={dialogTriggerRef.current}
-              onClose={() => setFeedbackConfirmOpen(false)}
-              onConfirm={() => {
-                setFeedbackConfirmOpen(false)
-                void submitCustomerFeedback()
               }}
             />
           )}

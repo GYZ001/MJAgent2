@@ -193,17 +193,12 @@ async def submit_feedback(args: I.DeliveryFeedbackInput) -> CommandResult:
 
     if not (args.feedback or "").strip():
         return failed("反馈内容不能为空", error_code="invalid_input")
-    body = {
-        "message": args.feedback,
-        "created_by": "agent",
-        "request_revision": args.request_revision,
-    }
+    body = {"message": args.feedback, "created_by": "agent"}
     outcome = await call_guarded(orch_api.create_customer_feedback, args.episode_id, body=body)
     if isinstance(outcome, CommandResult):
         return outcome
     return succeeded(
-        "客户反馈已记录" + ("，已创建修订 Run" if outcome.get("revision_run_id") else ""),
+        "客户反馈已记录（不创建修订任务）",
         data=outcome,
-        run_id=outcome.get("revision_run_id"),
         resource_uris=[f"manju://episodes/{args.episode_id}/delivery"],
     )
