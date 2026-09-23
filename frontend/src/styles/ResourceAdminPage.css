@@ -80,12 +80,6 @@
   color: var(--ink);
 }
 
-.resource-stat-tile .r-limit {
-  font-size: 12px;
-  color: var(--ink-faint);
-  margin-top: 2px;
-}
-
 .resource-meter {
   margin-top: 8px;
   height: 6px;

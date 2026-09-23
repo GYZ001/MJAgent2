@@ -30,7 +30,7 @@ export default function ResourceAdminPage() {
   const orgId = orgInfo?.org?.id ?? (manualOrgId.trim() || null);
 
   return (
-    <div className="account-admin">
+    <div>
       <header className="desk-head">
         <h1>资源</h1>
         <p className="sub">用量、趋势与配额分配——只有系统管理员/组织管理员能看到这一页。</p>

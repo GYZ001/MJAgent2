@@ -6,7 +6,7 @@ import LocalLoginPolicySection from "../components/sso/LocalLoginPolicySection";
  *  AccountAdminPage 的标签页拆分同一思路，只是这里不需要标签切换）。 */
 export default function SsoAdminPage() {
   return (
-    <div className="account-admin">
+    <div>
       <header className="desk-head">
         <h1>身份接入</h1>
         <p className="sub">企业单点登录（SSO）配置——只有系统管理员能看到这一页。</p>

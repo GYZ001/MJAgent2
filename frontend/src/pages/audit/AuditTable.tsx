@@ -65,7 +65,7 @@ export function AuditTable({ items }: { items: AuditEvent[] }) {
                   </td>
                   <td>
                     <b>{item.event_label || item.event}</b>
-                    {item.event_label && <div className="audit-event-code mono">{item.event}</div>}
+                    {item.event_label && <div className="audit-event-code audit-mono">{item.event}</div>}
                   </td>
                   <td><span className={`stamp ${outcomeClass(item.outcome)}`}>{outcomeLabel(item.outcome)}</span></td>
                   <td>{item.username || "未登录"}</td>

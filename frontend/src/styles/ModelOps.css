@@ -1,5 +1,5 @@
 /* 模型中心管理面板（EP-05 §8）：健康度表 / 用途绑定链 / 备用模型横幅。
-   复用既有 .model-modal-*/.btn 等类（见 MonitorPage.css），这里只补它们
+   复用既有 .model-modal-* 与 .btn 等类（见 MonitorPage.css），这里只补它们
    没有覆盖到的新元素，不重复定义弹窗基础样式。 */
 
 .model-ops-panel {
@@ -178,4 +178,58 @@ tr.model-ops-state-circuit_open {
 
 .model-ops-chain-disabled {
   opacity: 0.5;
+}
+
+/* 暗色覆盖：py scripts/check_dark_theme.py --emit 的换算公式对本文件里每处
+   亮色专属色值（警示条底色、状态徽标、优先级链卡片）逐条生成，人工核对后原样
+   贴入——数值与 BoardPage.css 的 .board-sync-banner（同色相 amber 警示条）、
+   MonitorPage.css 的 tr.model-ops-state-circuit_open 同类换算是同一族色板，
+   不是另起一套配色。 */
+:where(:root[data-theme="dark"]) .model-ops-banner {
+  border: 1px solid rgba(216, 176, 100, 0.36);
+  background: rgba(216, 184, 100, 0.18);
+}
+:where(:root[data-theme="dark"]) .model-ops-banner-missing {
+  color: #e69994;
+}
+:where(:root[data-theme="dark"]) .model-ops-table th,
+:where(:root[data-theme="dark"]) .model-ops-table td {
+  border-bottom: 1px solid var(--hairline);
+}
+:where(:root[data-theme="dark"]) .model-ops-state-badge.model-ops-state-healthy {
+  background: rgba(100, 216, 133, 0.18);
+  color: #94e6a6;
+}
+:where(:root[data-theme="dark"]) .model-ops-state-badge.model-ops-state-degraded {
+  background: rgba(216, 167, 100, 0.18);
+  color: #e6bf94;
+}
+:where(:root[data-theme="dark"]) .model-ops-state-badge.model-ops-state-circuit_open {
+  background: rgba(216, 112, 100, 0.18);
+  color: #e69994;
+}
+:where(:root[data-theme="dark"]) .model-ops-state-badge.model-ops-state-half_open {
+  background: rgba(100, 132, 216, 0.18);
+  color: #94a9e6;
+}
+:where(:root[data-theme="dark"]) tr.model-ops-state-circuit_open {
+  background: var(--surface-sunken);
+}
+:where(:root[data-theme="dark"]) .model-ops-purpose-row {
+  border: 1px solid var(--hairline);
+}
+:where(:root[data-theme="dark"]) .model-ops-purpose-row.model-ops-purpose-fallback {
+  border-color: rgba(216, 176, 100, 0.36);
+}
+:where(:root[data-theme="dark"]) .model-ops-flag-danger {
+  background: rgba(216, 112, 100, 0.18);
+  color: #e69994;
+}
+:where(:root[data-theme="dark"]) .model-ops-flag-warning {
+  background: rgba(216, 167, 100, 0.18);
+  color: #e6bf94;
+}
+:where(:root[data-theme="dark"]) .model-ops-flag-active {
+  background: rgba(100, 216, 133, 0.18);
+  color: #94e6a6;
 }

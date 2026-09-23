@@ -32,6 +32,10 @@ PAGES = {
         # WallPage 既有的 .wall-attempt-issue/.wall-empty-hint 告警样式）。不登记
         # 就会被判成"不属于任何页面"，同 ScriptPage/AccountAdminPage 的先例。
         'components/GenerationReferenceGallery.tsx',
+        # AttemptList.tsx 拆到 pages/wall/ 下（只有 WallPage.tsx 一个消费方）。
+        # 不登记会让 .wall-attempt-* 系列选择器被计入「共享」，本页样式表随之
+        # 被误判。
+        'pages/wall/',
     ],
     'ScriptPage': [
         'pages/ScriptPage.tsx',
@@ -41,7 +45,14 @@ PAGES = {
         'components/script/',
     ],
     'ScenesPage': ['pages/ScenesPage.tsx'], 'MonitorPage': ['pages/MonitorPage.tsx', 'pages/monitor/'],
-    'CinemaPage': ['pages/CinemaPage.tsx'], 'ReaderPage': ['pages/ReaderPage.tsx'],
+    'CinemaPage': [
+        'pages/CinemaPage.tsx',
+        # 字幕面板等拆到 pages/cinema/ 下（SubtitlePanel.tsx 等，只有
+        # CinemaPage.tsx 一个消费方）。不登记会让 .cinema-subtitle-* 选择器被
+        # 计入「共享」，本页样式表随之被误判。
+        'pages/cinema/',
+    ],
+    'ReaderPage': ['pages/ReaderPage.tsx'],
     'SeriesPage': [
         'pages/SeriesPage.tsx',
         # 2026-09-01 新增连播台：区间选择/进度板/播放器拆到 pages/series/ 下的
@@ -54,6 +65,14 @@ PAGES = {
         # 贴着前端 400 行上限）。卡片的 .account-card* 选择器随之搬家，
         # 不登记就会被判成「共享/全局」而要求挪进 index.css。
         'components/AccountCard.tsx',
+        # 成员/角色/团队/安全四个 tab 拆到 components/orgs/ 下（AccountAdminPage.tsx
+        # 只 import MembersTab/TeamsTab/RolesTab/SecurityTab，无其它页面引用）；
+        # HandoverDialog.tsx/ImportDialog.tsx 是顶层组件，但只被
+        # components/orgs/ProvisioningPanel.tsx 引入。整块目录 + 这两个文件不登记，
+        # 它们的 className（.account-admin-bar/.import-dialog*/
+        # .account-admin-fail-notice* 等）会被计入「共享」，连带让本页样式表一大片
+        # 选择器被误判成「不属于本页」。
+        'components/orgs/', 'components/HandoverDialog.tsx', 'components/ImportDialog.tsx',
     ],
     'OperationAuditPage': [
         'pages/OperationAuditPage.tsx',
@@ -62,15 +81,64 @@ PAGES = {
         # 的先例）。
         'pages/audit/',
     ],
+    'ResourceAdminPage': [
+        # 2026-09-12 新增资源管理页：告警横幅/额度分配/排行拆到 components/resources/
+        # 下的独立文件，只有 ResourceAdminPage.tsx 一个消费方。这个键此前整体缺失
+        # （连页面本体都没登记），styles/ResourceAdminPage.css 会先撞上「没有对应的
+        # 懒加载页面」，登记后两个子问题都解决：页面本体的选择器有了归属，
+        # components/resources/ 的 className 也不再被计入「共享」。
+        'pages/ResourceAdminPage.tsx', 'components/resources/',
+    ],
+    # EpisodesPage 没有自己的 styles/EpisodesPage.css（全部样式留在 index.css），
+    # 此前干脆没登记——但它唯一的子组件 ProjectCollaboratorsPanel.tsx 复用了
+    # AccountAdminPage.css 的 .account-admin-muted 工具类，不登记就让这个类名
+    # 被判成「共享」，反过来把 AccountAdminPage.css 里所有 .account-admin-muted
+    # 规则打成「不属于本页」。登记后 EpisodesPage.tsx/该组件的 className 有了
+    # 明确归属，不再误伤 AccountAdminPage.css。
+    'EpisodesPage': ['pages/EpisodesPage.tsx', 'components/ProjectCollaboratorsPanel.tsx'],
+}
+
+# CSS 文件名不总是等于「懒加载页面」这个假设的例外：styles/<name>.css 通常由
+# pages/<name>.tsx 直接 import，但 ModelOps.css 是模型运营面板专用样式，由嵌套在
+# MonitorPage 分包深处的 pages/monitor/models/ModelOpsPanel.tsx import（没有
+# pages/ModelOps.tsx 这个文件）。归属仍然是 MonitorPage——pages/monitor/ 已经整
+# 目录登记，选择器的「归属」判定不需要特殊处理；这张表只解决 main() 两处必须
+# 落到具体路径的查找：用哪个键去问 PAGES、用哪个文件核对 import 语句。
+CSS_OWNER = {
+    'ModelOps': ('MonitorPage', 'pages/monitor/models/ModelOpsPanel.tsx'),
 }
 CLS_RE = re.compile(r'className=(?:"([^"]*)"|\{`([^`]*)`\}|\{([^}]*)\})', re.S)
+# className={...}（第三组）捕的是任意 JS 表达式，不是纯字符串——
+# `className={r.action === "error" ? "import-row-error" : undefined}` 这种三元
+# 表达式里，裸标识符 r/undefined 会被下面的候选类名正则一并当成类名。只在这一组
+# 里先抠出真正的字符串/模板字面量再分词；第一、二组本来就是纯文本，不需要这一步。
+STR_LIT_RE = re.compile(r'"([^"]*)"|\'([^\']*)\'|`([^`]*)`')
+
+def _raw_class_text(m):
+    """CLS_RE 命中的一处 className，抠出真正装类名/前缀的原始文本。"""
+    if m.group(3) is not None:
+        return ' '.join(next(g for g in sm.groups() if g is not None)
+                         for sm in STR_LIT_RE.finditer(m.group(3)))
+    return m.group(1) or m.group(2) or ''
 
 def _class_sets(text):
     out = []
     for m in CLS_RE.finditer(text):
-        raw = m.group(1) or m.group(2) or m.group(3) or ''
-        toks = set(re.findall(r'[a-zA-Z][\w-]*', raw))
+        toks = set(re.findall(r'[a-zA-Z][\w-]*', _raw_class_text(m)))
         if toks: out.append(toks)
+    return out
+
+# 模板字符串拼出的类名，如 `model-ops-state-${row.state}`：静态前缀是
+# "model-ops-state-"，后缀要跑起来才知道。_class_sets 的分词会把整个
+# "model-ops-state-${row" 之类的残片一起吞进类名集合，但那不是真类名，
+# 也接不上 CSS 侧 `.model-ops-state-healthy` 这样的具体选择器——见 owner()
+# 里的用法：真类名前缀命中这里登记的静态前缀，才算这一页用到。
+DYNAMIC_PREFIX_RE = re.compile(r'([a-zA-Z][\w-]*-)\$\{')
+
+def _dynamic_prefixes(text):
+    out = set()
+    for m in CLS_RE.finditer(text):
+        out |= set(DYNAMIC_PREFIX_RE.findall(_raw_class_text(m)))
     return out
 
 ALL = {p: p.read_text(encoding='utf-8') for p in SRC.rglob('*')
@@ -89,12 +157,16 @@ def _expand_entry(entry):
 
 PAGE_FILES = {n: set().union(*(_expand_entry(r) for r in f)) for n, f in PAGES.items()}
 PAGE_CLS = {}
+PAGE_PREFIXES = {}
 for name, files in PAGE_FILES.items():
     toks = set()
+    prefixes = set()
     for p, text in ALL.items():
         if str(p) in files:
             for s in _class_sets(text): toks |= s
+            prefixes |= _dynamic_prefixes(text)
     PAGE_CLS[name] = toks
+    PAGE_PREFIXES[name] = prefixes
 SHARED = set()
 for p, text in ALL.items():
     if not any(str(p) in f for f in PAGE_FILES.values()):
@@ -106,8 +178,14 @@ for p, text in ALL.items():
 
 # 纯状态修饰词：到处都在用，但从不单独承载样式，不该左右归属判定。
 # `.prep-roster-name-btn.selected` 的归属由 .prep-roster-name-btn 决定。
+# "warn" 同属此类：index.css 里 `.mc-reject.warn`/`.cinema-tabs button > i.warn`/
+# `.material-card figcaption span.warn` 等全局既有先例，从没有哪条规则单独以
+# `.warn` 自身承载样式——ResourceAdminPage.css 的 `.resource-alert-row.warn`/
+# `.resource-meter-fill.warn` 与 CinemaPage 的 `i.warn` 都是同一个「警示态」
+# 修饰词分别接在各自的基础类上，两页各管各的基础类，不该因为共用这个状态词
+# 就把彼此判成「共享/全局」。
 STATE_TOKENS = frozenset({
-    "selected", "active", "open", "expanded", "disabled", "busy", "current",
+    "selected", "active", "open", "expanded", "disabled", "busy", "current", "warn",
 })
 
 
@@ -121,6 +199,12 @@ def owner(selector):
         if c in SHARED: return None
         hit = [p for p, s in PAGE_CLS.items()
                if c in s or any(c.startswith(x + '-') or x.startswith(c + '-') for x in s)]
+        if not hit:
+            # 静态分词没接上：多半是模板字符串拼出来的类名（见
+            # DYNAMIC_PREFIX_RE），退一步看这个类名是不是落在某页登记过的
+            # 动态前缀之下。
+            hit = [p for p, pre in PAGE_PREFIXES.items()
+                   if any(c.startswith(x) for x in pre)]
         if not hit: return None
         owners |= set(hit)
     return owners.pop() if len(owners) == 1 else None
@@ -218,12 +302,15 @@ def main() -> int:
     problems = 0
     for path in sorted(styles_dir.glob("*.css")):
         page = path.stem
-        if page not in PAGES:
+        owner_page, importer_rel = page, f"pages/{page}.tsx"
+        if page in CSS_OWNER:
+            owner_page, importer_rel = CSS_OWNER[page]
+        elif page not in PAGES:
             print(f"css-split: styles/{path.name} 没有对应的懒加载页面，删掉或补进 PAGES")
             problems += 1
             continue
 
-        tsx = SRC / "pages" / f"{page}.tsx"
+        tsx = SRC / importer_rel
         if f'styles/{page}.css' not in tsx.read_text(encoding="utf-8"):
             print(f"css-split: {tsx.name} 没有 import 自己的样式表，这一页会掉样式")
             problems += 1
@@ -233,7 +320,7 @@ def main() -> int:
             if not occ.selector:
                 continue
             who = owner(occ.selector)
-            if who != page:
+            if who != owner_page:
                 strays.append((occ.line, occ.selector, who))
         if strays:
             problems += len(strays)

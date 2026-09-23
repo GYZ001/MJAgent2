@@ -10319,3 +10319,10 @@ a.segres-thumb-empty {
   align-items: center;
   margin-top: 10px;
 }
+/* 从 styles/AccountAdminPage.css 搬来的：本组件（ProjectCollaboratorsPanel，
+   EpisodesPage 专属）与 AccountAdminPage 自己的弹窗/标签页都在用这个类，是真
+   跨页复用，按 py scripts/check_css_split.py 的判据不能留在任一页的分包样式表里。 */
+.account-admin-muted {
+  color: var(--ink-faint);
+  font-size: 12px;
+}
