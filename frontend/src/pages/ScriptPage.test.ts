@@ -37,8 +37,8 @@ const rebuildProduction = {
 }
 
 describe('screenplayResumeActionLabel', () => {
-  it('uses the backend baseline rebuild label', () => {
-    expect(screenplayResumeActionLabel(rebuildProduction)).toBe('按新合同重建剧本')
+  it('normalizes the legacy 剧本 wording in the backend-provided mode label (P2-2)', () => {
+    expect(screenplayResumeActionLabel(rebuildProduction)).toBe('按新合同重建映射包')
   })
 
   it('keeps the compatibility label only for older responses', () => {
@@ -63,7 +63,7 @@ describe('ScreenplayResumeButton', () => {
       onResume,
     })
 
-    expect(renderToStaticMarkup(button)).toContain('按新合同重建剧本')
+    expect(renderToStaticMarkup(button)).toContain('按新合同重建映射包')
     button.props.onClick()
 
     expect(onResume).toHaveBeenCalledOnce()

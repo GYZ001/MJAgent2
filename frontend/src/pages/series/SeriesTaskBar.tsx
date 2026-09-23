@@ -1,5 +1,5 @@
 import type { SeriesQueueState, SeriesTaskSummary } from '../../api'
-import { seriesBatchAvailability, seriesQueueStatusText } from './seriesTaskText'
+import { seriesBatchAvailability, seriesBatchEnqueueHint, seriesQueueStatusText } from './seriesTaskText'
 
 /** 队列状态条 + 批量操作条：暂停/继续队列、当前在跑哪个任务、队列剩余数、队列
  *  带 stop_reason 时展示原文并给「继续队列」（失败不再自动停队，2026-09-04）；批量按钮按勾选集合的
@@ -52,7 +52,7 @@ export default function SeriesTaskBar({
               disabled={busy || availability.enqueueDisabled}
               onClick={onEnqueueSelected}
             >
-              串行执行选中
+              批量执行选中
             </button>
             <button type="button" className="btn" disabled={busy || availability.cancelDisabled} onClick={onCancelSelected}>
               取消选中
@@ -61,10 +61,7 @@ export default function SeriesTaskBar({
               打包导出选中
             </button>
           </div>
-          <p className="series-batch-hint">
-            按勾选顺序串行执行，一次只跑一个任务。已完成的任务会被跳过——它们的成片已经在盘上；
-            要重做请先去成片台/生成台重跑对应的集，成片一变这里就会重新判为可执行。
-          </p>
+          <p className="series-batch-hint">{seriesBatchEnqueueHint(queue.concurrency)}</p>
         </div>
       )}
     </section>

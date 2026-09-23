@@ -7,6 +7,7 @@ import SeriesTaskList from './series/SeriesTaskList'
 import SeriesExportPanel from './series/SeriesExportPanel'
 import SeriesTaskDetail from './series/SeriesTaskDetail'
 import { SERIES_PAGE_SIZE, useSeriesTaskListState } from './series/useSeriesTaskListState'
+import { seriesConcurrencyPhrase } from './series/seriesTaskText'
 import '../styles/SeriesPage.css'
 
 /** 连播台入口：按 useNav().taskId 分流（路由 /projects/{pid}/series/{taskId}，见
@@ -48,7 +49,7 @@ function SeriesTaskListView({ projectId }: { projectId: string }) {
     <>
       <header className="desk-head">
         <div className="crumb">漫剧案头 / 连播台</div>
-        <h1>连播台 <span className="sub">按每 N 集切分成任务，勾选后批量串行执行</span></h1>
+        <h1>连播台 <span className="sub">按每 N 集切分成任务，勾选后批量执行 · {seriesConcurrencyPhrase(queue.concurrency)}</span></h1>
         <hr className="rule" />
       </header>
       <p className="series-intro">

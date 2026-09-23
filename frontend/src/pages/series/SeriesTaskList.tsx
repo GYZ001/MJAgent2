@@ -6,6 +6,7 @@ import {
   formatFilmSize,
   seriesTaskProgressLabel,
   seriesTaskProgressPercent,
+  seriesTaskStartAvailability,
   seriesTaskStatusLabel,
   seriesTaskStatusTone,
   seriesTaskTitle,
@@ -31,7 +32,7 @@ function SeriesTaskRow({
   onRequestDelete: () => void
 }) {
   const hasGap = task.missing_episode_nos.length > 0
-  const canStart = task.status !== 'running' && task.status !== 'queued' && !hasGap
+  const startAvailability = seriesTaskStartAvailability(task)
   const canDelete = DELETABLE_STATUSES.has(task.status)
   const percent = seriesTaskProgressPercent(task.steps_done, task.steps_total)
   const title = seriesTaskTitle(task)
@@ -65,7 +66,13 @@ function SeriesTaskRow({
           : '尚无成片'}
       </td>
       <td className="series-task-actions">
-        <button type="button" className="btn small primary" disabled={!canStart || starting} onClick={onStart}>
+        <button
+          type="button"
+          className="btn small primary"
+          disabled={startAvailability.disabled || starting}
+          title={starting ? undefined : startAvailability.reason ?? undefined}
+          onClick={onStart}
+        >
           {starting ? '启动中…' : '开始'}
         </button>
         <button type="button" className="btn small" onClick={onView}>查看</button>

@@ -48,11 +48,18 @@ export function seriesTaskProgressPercent(stepsDone: number, stepsTotal: number)
   return Math.max(0, Math.min(100, Math.round((stepsDone / stepsTotal) * 100)))
 }
 
-/** 进度定位文案：正在跑第几集第几步 / 排第几位 / 终态归类，列表与详情共用。 */
+/** 进度定位文案：正在跑第几集第几步 / 排第几位 / 终态归类，列表与详情共用。
+ *  merge（合成连播成片）单独判：orchestrator.py 在全部集跑完后把
+ *  current_episode_no 置 null、current_stage 置 'merge'（见 orchestrator.py
+ *  102-113 行）——不加这一支的话会落进最后的 return '尚未开始'，跟同屏的
+ *  「执行中」状态灯、接近 100% 的步骤计数正面矛盾（P1-7）。 */
 export function seriesTaskProgressLabel(
   task: Pick<SeriesTaskSummary, 'status' | 'current_episode_no' | 'current_stage' | 'queue_position'>
     & { running_episode_nos?: number[] },
 ): string {
+  if (task.status === 'running' && task.current_stage === 'merge') {
+    return SERIES_STAGE_LABEL.merge
+  }
   if (task.status === 'running' && task.current_episode_no != null) {
     const stage = task.current_stage ? SERIES_STAGE_LABEL[task.current_stage] : '处理中'
     const running = task.running_episode_nos ?? []
@@ -88,16 +95,65 @@ export function seriesBatchAvailability(selected: SeriesTaskSummary[]): SeriesBa
   }
 }
 
-/** 队列状态条文案：连续失败停队 > 手动暂停 > 正在跑 > 空闲，优先级从高到低。 */
+/** 队列状态条文案：连续失败停队 > 手动暂停 > 正在跑 > 空闲，优先级从高到低。
+ *  2026-09-04 起同项目可并行跑多个任务（见 app/domain/series_ops/queue.py
+ *  queue_concurrency，缺省 3）；running_task_ids 是后端已下发的并行任务 id
+ *  列表，缺失（老响应）时退回只看 running_task_id 单值，行为与此前一致。 */
 export function seriesQueueStatusText(queue: SeriesQueueState): string {
   if (queue.stop_reason) return `已连续失败自动暂停：${queue.stop_reason}`
   if (queue.paused) return '队列已暂停'
-  if (queue.running_task_id) {
-    return queue.queued_count > 0
-      ? `正在执行 ${queue.running_task_id}，还有 ${queue.queued_count} 个排队`
-      : `正在执行 ${queue.running_task_id}`
+  const runningIds = queue.running_task_ids ?? (queue.running_task_id ? [queue.running_task_id] : [])
+  if (runningIds.length > 0) {
+    const running = runningIds.length > 1
+      ? `正在并行执行 ${runningIds.length} 个任务`
+      : `正在执行 ${runningIds[0]}`
+    return queue.queued_count > 0 ? `${running}，还有 ${queue.queued_count} 个排队` : running
   }
   return queue.queued_count > 0 ? `队列中还有 ${queue.queued_count} 个待执行` : '队列空闲'
+}
+
+/** 批量执行提示：真实并行数取自 queue.concurrency（设置台配置与账号配额上限
+ *  取更紧的一个，后端已算好生效值——见 queue.py::queue_snapshot 的注释「界面
+ *  显示的并行数必须是真正生效的那个值」）。旧文案「按勾选顺序串行执行，一次
+ *  只跑一个任务」与实际默认并行 3 不符（P1-6）。concurrency 缺失（老响应）或
+ *  ≤1 时退回不宣称具体数字的中性表述，不编造并行数。 */
+export function seriesBatchEnqueueHint(concurrency: number | undefined): string {
+  const parallelText = concurrency != null && concurrency > 1
+    ? `最多同时执行 ${concurrency} 个任务，其余按勾选顺序排队`
+    : '按勾选顺序排队执行'
+  return `${parallelText}。已完成的任务会被跳过——它们的成片已经在盘上；`
+    + '要重做请先去成片台/生成台重跑对应的集，成片一变这里就会重新判为可执行。'
+}
+
+/** 页头副标题里的并行提示（<span className="sub"> 放不下 seriesBatchEnqueueHint
+ *  那句长文案，另给一个短语）；判据与 seriesBatchEnqueueHint 一致——concurrency
+ *  缺失或 ≤1 时不编造具体数字。旧副标题「勾选后批量串行执行」与实际默认并行 3
+ *  不符（P1-6 续，SeriesPage.tsx 页头 + SeriesTaskBar.tsx 按钮两处同一措辞）。 */
+export function seriesConcurrencyPhrase(concurrency: number | undefined): string {
+  return concurrency != null && concurrency > 1
+    ? `最多同时执行 ${concurrency} 个任务`
+    : '按顺序执行'
+}
+
+export interface SeriesTaskStartAvailability {
+  disabled: boolean
+  reason: string | null
+}
+
+/** 单任务「开始」按钮可用性（P2-5）：运行中/排队中/区间缺集时禁用（沿用既有
+ *  判据）；新增一档——已完成且成片未过期时同样禁用：这种情况点击后端会判定
+ *  skipped 静默返回 200（SeriesTaskEnqueueResult.skipped），此前按钮不禁用、
+ *  用户点了却没有任何反馈。film_stale=true 时成片已过期，仍允许重新执行。 */
+export function seriesTaskStartAvailability(
+  task: Pick<SeriesTaskSummary, 'status' | 'missing_episode_nos' | 'film_stale'>,
+): SeriesTaskStartAvailability {
+  if (task.status === 'running') return { disabled: true, reason: '任务正在执行中' }
+  if (task.status === 'queued') return { disabled: true, reason: '任务已在队列中排队' }
+  if (task.missing_episode_nos.length > 0) return { disabled: true, reason: '区间内缺集，需先补齐分集规划' }
+  if (task.status === 'succeeded' && !task.film_stale) {
+    return { disabled: true, reason: '已完成且成片未过期，无需重新执行' }
+  }
+  return { disabled: false, reason: null }
 }
 
 export function validateGroupSize(groupSize: number): { ok: boolean; reason?: string } {
@@ -149,4 +205,16 @@ export function formatFilmSize(bytes: number): string {
  *  不像 formatFilmSize 那样按量级自适应单位。 */
 export function formatGB(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`
+}
+
+/** 入队响应里的 skipped 列表 → 中文提示（P2-5 续）：此前批量/单任务入队接口
+ *  对已完成且未过期的任务返回 skipped，静默 200，界面从不读这个字段，用户点了
+ *  却什么反馈都看不到。空数组返回 null，调用方据此判断要不要弹 toast；多个
+ *  任务命中同一原因（如都是"已完成，成片未过期"）时去重，不重复念叨同一句话。 */
+export function seriesSkippedToastMessage(
+  skipped: { task_id: string; reason: string }[],
+): string | null {
+  if (skipped.length === 0) return null
+  const reasons = Array.from(new Set(skipped.map(s => s.reason)))
+  return `已跳过 ${skipped.length} 个任务：${reasons.join('；')}`
 }

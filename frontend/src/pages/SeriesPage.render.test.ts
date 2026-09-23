@@ -87,7 +87,10 @@ const task = (overrides: Partial<SeriesTaskSummary> = {}): SeriesTaskSummary => 
 })
 
 const listResponse = (overrides: Partial<SeriesTaskListResponse> = {}): SeriesTaskListResponse => ({
-  queue: { paused: false, running_task_id: null, queued_count: 0, stop_reason: null },
+  // concurrency: 3 与后端默认值一致（app/domain/series_ops/concurrency.py
+  // series_queue_concurrency 缺省 3）——用真实默认值而不是省略字段，测试才能
+  // 覆盖"页头如实展示并行数"这条真实路径，不是只测缺省 undefined 的兜底分支。
+  queue: { paused: false, running_task_id: null, queued_count: 0, stop_reason: null, concurrency: 3 },
   totals: { all: 3, idle: 3, queued: 0, running: 0, succeeded: 0, failed: 0, cancelled: 0 },
   episodes: { total: 30, min_no: 1, max_no: 30 },
   max_span: 10,
@@ -120,6 +123,17 @@ describe('连播任务列表页渲染', () => {
     const serialized = JSON.stringify(renderer.toJSON())
     expect(serialized).toContain('第 1-10 集')
     expect(serialized).toContain('第 11-20 集')
+    await act(async () => { renderer.unmount() })
+  })
+
+  // P1-6 回归：页头副标题此前硬编码「批量串行执行」，与后端默认并行 3 个任务
+  // 的真实行为不符。这里用真实默认值（concurrency: 3，见 listResponse 注释）
+  // 断言页头如实展示"最多同时执行 3 个任务"，不再声称串行。
+  it('页头副标题按 queue.concurrency 如实展示并行数，不再声称"串行"', async () => {
+    const renderer = await renderPage()
+    const serialized = JSON.stringify(renderer.toJSON())
+    expect(serialized).toContain('最多同时执行 3 个任务')
+    expect(serialized).not.toContain('串行')
     await act(async () => { renderer.unmount() })
   })
 
@@ -160,7 +174,8 @@ describe('连播任务列表页渲染', () => {
     await act(async () => { checkbox.props.onChange() })
     const serialized = JSON.stringify(renderer.toJSON())
     expect(serialized).toContain('已选 1 个')
-    expect(serialized).toContain('串行执行选中')
+    expect(serialized).toContain('批量执行选中')
+    expect(serialized).not.toContain('串行')
     await act(async () => { renderer.unmount() })
   })
 

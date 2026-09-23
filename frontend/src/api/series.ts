@@ -63,9 +63,13 @@ export interface SeriesTaskFilmDetail extends SeriesTaskFilm {
 export interface SeriesQueueState {
   paused: boolean;
   running_task_id: string | null;
+  /** 并行执行落地后新增（2026-09-04）：当前并行在跑的全部任务 id。可能缺失（老响应）。 */
+  running_task_ids?: string[];
   queued_count: number;
   /** 连续失败自动停队时的中文原文；正常状态为 null。 */
   stop_reason: string | null;
+  /** 项目当前生效的并行上限（设置台配置与账号配额取更紧的一个）。可能缺失（老响应）。 */
+  concurrency?: number;
 }
 
 export interface SeriesTaskTotals {

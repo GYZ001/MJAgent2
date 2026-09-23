@@ -2,14 +2,17 @@ import type { PrepPackCharacterAsset, PrepPackSceneAsset } from '../../api'
 
 /**
  * 新发现 vs 索引历史资源的统计口径：provenance.method === 'discovery' 是后端
- * 对"这一集里首次发现、当场建卡 + 生成定妆照"的确定性标记（见
+ * 对"这一集里首次发现、当场建卡"的确定性标记（见
  * app/production/prep_pack/resolve_assets.py 的 method="discovery" 赋值，
- * 角色 463 行、场景 714 行；app/production/prep_pack/discovery.py 106 行
- * `_discover_new_characters` 的调用链最终会跑到 app.portraits.ensure_cards_for_text(
- * generate_portraits=True)，是真的建卡+出图，不是只做文本标记）。其余取值
- * （direct/alias/resolution/resolution_forward/candidate_verdict/
- * alias_inherited）都是命中人物谱/场景库里已有条目，即"索引历史资源"——映射台
- * 一次点击里这两件事自动一起做，不需要用户分两步分别触发。
+ * 角色 463 行、场景 714 行）。app/production/prep_pack/discovery.py 148 行
+ * `_discover_new_characters` 的调用链会跑到 app.portraits.ensure_cards_for_text(
+ * generate_portraits=False)——只建卡，不在映射台内联出图；定妆照/场景图由
+ * app/domain/screenplay_ops/background_portraits.py::start_background_portraits
+ * 在映射包发布后另起后台任务生成（实测出图占映射台约三分之二供应商时间，
+ * 解耦后用户按下"映射"不必再干等）。其余取值（direct/alias/resolution/
+ * resolution_forward/candidate_verdict/alias_inherited）都是命中人物谱/场景库
+ * 里已有条目，即"索引历史资源"——映射台一次点击里这两件事自动一起做，不需要
+ * 用户分两步分别触发。
  */
 function isNewlyDiscovered(item: { provenance?: { method?: string } }): boolean {
   return item.provenance?.method === 'discovery'
@@ -48,7 +51,7 @@ export default function PrepPackDiscoverySummary({
     <p className="prep-discovery-summary" role="status">
       {characters.length > 0 && (
         <span className="prep-discovery-summary-item">
-          人物：新发现 {newCharacterCount} 位（已建卡 · 已生成定妆照） · 索引历史 {knownCharacterCount} 位
+          人物：新发现 {newCharacterCount} 位（已建卡 · 定妆照后台生成中） · 索引历史 {knownCharacterCount} 位
         </span>
       )}
       {scenes.length > 0 && (

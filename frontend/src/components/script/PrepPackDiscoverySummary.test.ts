@@ -85,4 +85,20 @@ describe('PrepPackDiscoverySummary', () => {
     expect(html).toContain('新发现 0 位')
     expect(html).toContain('索引历史 1 位')
   })
+
+  // P1-2 回归（界面承诺必须与实际行为一致）：app/production/prep_pack/discovery.py
+  // 148 行以 generate_portraits=False 调用建卡——出图已解耦到映射包发布后的
+  // 后台任务（background_portraits.py），映射台返回时定妆照还没生成。旧文案
+  // 「已生成定妆照」断言了一件尚未发生的事，这里断言它不再出现，换成如实的
+  // 「后台生成中」。
+  it('describes portrait generation as an async background step, not something already done', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackDiscoverySummary, {
+      characters: [
+        { identity_id: 'bible:a', display_name: '甲', provenance: { method: 'discovery' } } as any,
+      ],
+      scenes: [],
+    }))
+    expect(html).not.toContain('已生成定妆照')
+    expect(html).toContain('定妆照后台生成中')
+  })
 })

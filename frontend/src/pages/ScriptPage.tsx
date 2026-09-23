@@ -54,10 +54,10 @@ export function prepPackStatusMessage(message: string): string {
 export function screenplayResumeActionLabel(
   production: ScreenplayProduction | null | undefined,
 ): string {
-  if (production?.mode_label) return production.mode_label
-  return production?.can_resume_baseline
+  if (production?.mode_label) return prepPackStatusMessage(production.mode_label)
+  return prepPackStatusMessage(production?.can_resume_baseline
     ? '继续首版场次生成'
-    : '继续完整剧本校验'
+    : '继续完整剧本校验')
 }
 
 export function screenplayResumeOutcomeSummary(
@@ -528,7 +528,7 @@ export default function ScriptPage() {
         <div className="screenplay-secondary-row">
           {!screenplayTaskActive && (ep.screenplay || packRaw || canResumeFlow) && (
             <button className="btn ghost danger" disabled={busy} onClick={deleteCurrentScreenplay}>
-              {(ep.screenplay || packRaw) ? '删除当前映射包' : '删除失败映射包'}
+              {(ep.screenplay || packRaw) ? '删除当前映射包' : ep.screenplay_production?.stage_stop_reason === 'paused' ? '删除已停止的映射包' : '删除失败映射包'}
             </button>
           )}
           <span className="screenplay-row-spacer" />

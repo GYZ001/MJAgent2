@@ -31,9 +31,12 @@ export default function EpisodeBatchConfirmDialog({
       impact: totalEpisodes
         ? '将清空当前全部分集及其映射包、分镜、视频和交付记录，再按原著重新建立分集。'
         : '将依据原著章节创建分集，不会启动映射包、分镜或视频生成。',
+      // 分集规划是纯规则拆章（按章节标题切分），不调用任何模型；重新规划真正
+      // 的代价是清空旧数据——若其中含已生成视频，那部分视频额度不会退回
+      // （不产出新视频不退款，见 app/quota.py 的额度记账口径）。
       cost: totalEpisodes
-        ? '重新规划会调用文本模型，占用会员时长；旧任务已消耗的时长不会退回。'
-        : '分集规划会调用文本模型，占用会员时长。',
+        ? '不调用任何模型，不产生费用；但会清空已生成的视频，其消耗的视频额度不会退回。'
+        : '按章节规则直接生成分集，不调用任何模型，不产生费用。',
       confirm: totalEpisodes ? '确认清空并重新分集' : '确认开始分集',
       danger: totalEpisodes > 0,
     }
@@ -42,7 +45,7 @@ export default function EpisodeBatchConfirmDialog({
         title: '批量生成待办映射包？',
         count: `${screenplayTodoCount} 集`,
         impact: '只处理待生成、失败或需要修订的映射包；已完成且无需重建的映射包不会重复生成。',
-        cost: '每集会调用文本模型，占用会员时长；失败不会覆盖已完成映射包。',
+        cost: '每集会调用文本模型；文本调用不产生费用，也不消耗视频额度。失败不会覆盖已完成映射包。',
         confirm: '确认生成待办映射包',
         danger: false,
       }
@@ -50,7 +53,7 @@ export default function EpisodeBatchConfirmDialog({
         title: '批量生成待办分镜？',
         count: `${storyboardTodoCount} 集`,
         impact: '只处理映射包已就绪或可从恢复点继续的分集；不会自动确认分镜，也不会启动付费视频。',
-        cost: '逐集调用文本模型，占用会员时长。',
+        cost: '逐集调用文本模型；文本调用不产生费用，也不消耗视频额度。',
         confirm: '确认生成待办分镜',
         danger: false,
       }
@@ -65,7 +68,7 @@ export default function EpisodeBatchConfirmDialog({
           <div><dt>项目</dt><dd>{projectName}</dd></div>
           <div><dt>本次范围</dt><dd>{content.count}</dd></div>
           <div><dt>执行影响</dt><dd>{content.impact}</dd></div>
-          <div><dt>时长占用</dt><dd>{content.cost}</dd></div>
+          <div><dt>费用与额度</dt><dd>{content.cost}</dd></div>
         </dl>
         <div className="dialog-actions">
           <button className="btn" type="button" disabled={busy}
