@@ -11,6 +11,36 @@ from app.db import get_conn
 _CONFIRMED_EPISODE_STATUSES = frozenset({"confirmed", "generating", "done", "mixed"})
 
 
+def human_override_marker(technical: dict[str, Any]) -> dict[str, Any] | None:
+    """从技术校验证据里取出人工越过标记，供交付检查（app.delivery）与本文件
+    的采纳权威校验共用同一份判据（2026-09-15 用户拍板「人工采纳最高优先
+    级」：有可播放视频即可人工采纳，质量判定只留痕）。只信任结构完整的标
+    记——越过的 issue code 列表非空、操作人非空——两者都由
+    app.domain.video_ops.adopt._persist_human_override 在人工采纳时原子写
+    入，缺一不算数，避免半写坏数据被当成有效越过。"""
+    marker = technical.get("human_override")
+    if isinstance(marker, dict) and marker.get("overridden_issue_codes") and marker.get("by"):
+        return marker
+    return None
+
+
+def _shot_provider_rejection_detail(db, shot_id: str) -> str | None:
+    """跳过原因优先给供应商拒收具体原文：镜头一旦被判定确定性拒绝，
+    jobs.reason_text 已经带着供应商原文与处理指引（见
+    app/media_exec/job_state.py::_video_model_rejection_guidance），比这里
+    "缺少已采纳的有效视频权威" 的通用文案有用得多。只在镜头从未被采纳时查——
+    已采纳但权威链另有问题（Artifact 失效/内容漂移）时，那个更具体的异常
+    文本才是准确原因，不能被旧任务的拒收记录覆盖。"""
+    row = db.execute(
+        """SELECT reason_text FROM jobs
+             WHERE shot_id=? AND kind='video'
+               AND reason_text IS NOT NULL AND reason_text != ''
+             ORDER BY updated_at DESC LIMIT 1""",
+        (shot_id,),
+    ).fetchone()
+    return str(row["reason_text"]) if row and row["reason_text"] else None
+
+
 def _adopted_video_authority_row_query(episode_id: str, db) -> list[Any]:
     return db.execute(
         """SELECT s.id AS shot_id,s.shot_no,s.adopted_version_id,
@@ -77,7 +107,7 @@ def _adopted_video_authority_for_row(row, *, conn) -> dict[str, Any]:
         or technical_evaluation is None
         or technical_evaluation["status"] != "passed"
         or int(technical_evaluation["hard_gate_passed"] or 0) != 1
-    ):
+    ) and human_override_marker(technical) is None:
         raise ValueError(f"镜 {row['shot_no']} 的视频技术门禁未通过")
     try:
         actual_artifact_hash = evidence_repository.content_hash(
@@ -156,7 +186,11 @@ def current_partial_adopted_video_delivery_manifest(
         except ValueError as exc:
             shot_no = int(row["shot_no"])
             skipped_shot_nos.append(shot_no)
-            skip_reasons[str(shot_no)] = str(exc)
+            detail = (
+                _shot_provider_rejection_detail(db, str(row["shot_id"]))
+                if not row["adopted_version_id"] else None
+            )
+            skip_reasons[str(shot_no)] = detail or str(exc)
     if not items:
         raise ValueError(
             "本集当前没有任何镜头具备已采纳且通过技术校验的有效视频，无法合成；"

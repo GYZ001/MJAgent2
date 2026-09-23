@@ -55,6 +55,29 @@ def _settle_waiting_human(conn, version, overridden: list[str]) -> None:
         conn.execute("UPDATE shot_versions SET status='succeeded', error=NULL WHERE id=?", (version["id"],))
 
 
+def _persist_human_override(conn, version_id: str, technical: dict, overridden: list[str], reason: str) -> None:
+    """人工越过质量判定时的留痕：只在 technical_validation_json 里新增
+    human_override 子对象，不改写 passed/issues 等生成时原值——那些是证据，
+    交付质量报告要能如实转述"人工越过、原技术校验说了什么"（CLAUDE.md
+    「User-Facing Behavior」）。app.downstream_authority.human_override_marker
+    是这份标记的唯一读取判据，字段名不得单独改动。"""
+    if not overridden:
+        return
+    conn.execute(
+        "UPDATE shot_versions SET technical_validation_json=? WHERE id=?",
+        (
+            json.dumps(
+                {**technical, "human_override": {
+                    "overridden_issue_codes": overridden,
+                    "by": current_actor_name(), "at": now(), "reason": reason,
+                }},
+                ensure_ascii=False,
+            ),
+            version_id,
+        ),
+    )
+
+
 def _assert_candidate_not_stale(version_id: str) -> dict:
     """候选证据若已被级联标记 stale，在这里拦下并给中文出路，不让底层英文 ValueError 透传。
 
@@ -110,6 +133,7 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
     reason = str(body.get("reason") or "").strip()
     if len(reason) < 4:
         raise HTTPException(422, "请填写有效的采用理由（至少 4 个字，说明质量、成本或版本比较）")
+    _persist_human_override(conn, version_id, technical, overridden, reason)
     evidence_repository.commit_artifact(
         None,
         artifact["id"],

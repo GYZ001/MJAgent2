@@ -57,3 +57,36 @@ def test_broken_file_cannot_be_adopted_even_by_human(tmp_path, monkeypatch) -> N
     with pytest.raises(HTTPException) as exc:
         api._adopt_version_core("s1", {"version_id": "v1", "reason": "人工选定这一版", "human_override": True})
     assert "不可用" in str(exc.value.detail)
+
+
+def test_human_override_persists_marker_without_mutating_original_evidence(tmp_path, monkeypatch) -> None:
+    """留痕：越过标记写进 technical_validation_json 的 human_override 子对象，
+    passed/issues 等生成时原值原样保留（那是证据，交付质量报告要如实转述）。"""
+    conn = _setup(monkeypatch, tmp_path, status="succeeded", technical=_GATED)
+    api._adopt_version_core(
+        "s1", {"version_id": "v1", "reason": "生成台预览时人工选定 v1", "human_override": True},
+    )
+    technical = json.loads(
+        conn.execute("SELECT technical_validation_json FROM shot_versions WHERE id='v1'").fetchone()[0]
+    )
+    assert technical["passed"] is False
+    assert technical["issues"] == json.loads(_GATED)["issues"]
+    override = technical["human_override"]
+    assert override["overridden_issue_codes"] == ["subtitle_overlay"]
+    assert override["by"]
+    assert override["reason"] == "生成台预览时人工选定 v1"
+    assert override["at"]
+
+
+def test_declined_human_override_leaves_no_marker(tmp_path, monkeypatch) -> None:
+    """反向：采纳被拒时（人工越过一个结构性/文件级问题）不会留下 human_override
+    标记——没有发生的越过不能留痕，留痕要跟真实发生的动作对齐。"""
+    conn = _setup(monkeypatch, tmp_path, status="succeeded", technical=_BROKEN)
+    with pytest.raises(HTTPException):
+        api._adopt_version_core(
+            "s1", {"version_id": "v1", "reason": "人工选定这一版", "human_override": True},
+        )
+    technical = json.loads(
+        conn.execute("SELECT technical_validation_json FROM shot_versions WHERE id='v1'").fetchone()[0]
+    )
+    assert "human_override" not in technical

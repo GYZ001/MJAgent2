@@ -9,6 +9,7 @@ import OperationError from '../components/OperationError'
 import { deliveryWarningLabel } from './cinema/deliveryLabels'
 import SubtitlePanel from './cinema/SubtitlePanel'
 import { subtitleSummaryLine } from './cinema/subtitleSummary'
+import { autoAdoptedSummary, finalSkipSummary } from './cinema/mixTimelineSummary'
 import CustomerFeedbackPanel from './cinema/CustomerFeedbackPanel'
 import "../styles/CinemaPage.css";
 import { isConcatAccepted, useConcatWatch } from './cinema/concatWatch'
@@ -67,29 +68,6 @@ export function finalEditStatusLabel(report: Record<string, unknown>): string {
 }
 
 /**
- * 部分合成是主流程：任意一镜没有可用的已采纳视频（从没生成、生成中、生成
- * 失败、或采纳指向已失效/未过技术校验的版本）都会被透明跳过，不拖垮整份
- * 成片。跳过不能只在一次性 toast 里一闪而过——用户随时刷新页面回来查看时，
- * 仍要能看到"本次成片跳过了第几镜、为什么"，不能让人误以为拿到的是完整
- * 成片。返回 null 表示没有镜头被跳过（即完整成片，无需展示）。
- */
-export function finalSkipSummary(report: Record<string, unknown> | null | undefined): string | null {
-  const timeline = report && typeof report === 'object' ? (report as Record<string, unknown>).timeline : null
-  if (!timeline || typeof timeline !== 'object') return null
-  const skipped = (timeline as Record<string, unknown>).skipped_shot_nos
-  if (!Array.isArray(skipped) || skipped.length === 0) return null
-  const reasonsRaw = (timeline as Record<string, unknown>).skip_reasons
-  const reasons = reasonsRaw && typeof reasonsRaw === 'object' ? (reasonsRaw as Record<string, unknown>) : {}
-  const detail = skipped
-    .map(no => {
-      const reason = reasons[String(no)]
-      return typeof reason === 'string' && reason ? `第 ${no} 镜（${reason}）` : `第 ${no} 镜`
-    })
-    .join('、')
-  return `本次成片跳过了${skipped.length}个镜头，其余镜头正常合成：${detail}。补齐后重新合成即可自动补全。`
-}
-
-/**
  * 状态轮询只更新真正变化的字段，并保护已经展示的整集成品。
  *
  * 合成请求完成与较早发出的状态请求可能交错返回；较早响应中的空 URL 不应把
@@ -109,10 +87,10 @@ export function reconcileMixStatus(previous: MixStatus | null, incoming: MixStat
   return JSON.stringify(previous) === JSON.stringify(next) ? previous : next
 }
 
-// 原文移至 cinema/deliveryLabels.ts（CinemaPage.tsx 基线 931 行不能再涨，见
-// CLAUDE.md「架构与文件规范」）；这里保留导出路径，CinemaPage.test.ts 仍从
-// './CinemaPage' 导入 deliveryWarningLabel。
-export { deliveryWarningLabel }
+// 原文移至 cinema/deliveryLabels.ts、cinema/mixTimelineSummary.ts（CinemaPage.tsx
+// 基线 931 行不能再涨，见 CLAUDE.md「架构与文件规范」）；这里保留导出路径，
+// CinemaPage.test.ts 仍从 './CinemaPage' 导入 deliveryWarningLabel/finalSkipSummary。
+export { deliveryWarningLabel, finalSkipSummary }
 
 export function deliveryCheckLabel(value: string): string {
   return value
@@ -466,6 +444,9 @@ export default function CinemaPage() {
                 {subtitleSummaryLine(mix.final_edit_report) && (
                   <span>{subtitleSummaryLine(mix.final_edit_report)}</span>
                 )}
+                {autoAdoptedSummary(mix.final_edit_report) && (
+                  <span role="status">{autoAdoptedSummary(mix.final_edit_report)}</span>
+                )}
               </div>
             </div>
             <div className="cinema-progress" aria-label="成片准备进度">
@@ -767,6 +748,8 @@ export default function CinemaPage() {
                 reviewer={reviewer}
                 toast={toast}
                 onNavigateToBoard={() => go('board', projectId, ep.id)}
+                onNavigateToReadiness={() => activateTab('readiness')}
+                hasDeliveryCandidate={packages.length > 0}
               />
             </section>
           )}

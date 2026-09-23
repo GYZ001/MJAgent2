@@ -587,7 +587,7 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
     video_delivery_manifest: dict[str, Any] | None = None
     video_manifest_error: str | None = None
     try:
-        from app.downstream_authority import current_adopted_video_delivery_manifest
+        from app.downstream_authority import current_adopted_video_delivery_manifest, human_override_marker
 
         video_delivery_manifest = current_adopted_video_delivery_manifest(
             episode_id,
@@ -734,7 +734,7 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
                 version_row=dict(version),
             )
             item.update({
-                "ready": bool(technical.get("passed")),
+                "ready": bool(technical.get("passed")) or human_override_marker(technical) is not None,
                 "path": version["video_path"],
                 "artifact_id": version["artifact_id"],
                 "technical": technical,
@@ -795,6 +795,12 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
         qa = item.get("qa") or {}
         for message in qa.get("issues") or []:
             warnings.append({"shot_no": item["shot_no"], "code": "MEDIA_QUALITY", "message": message})
+        override = human_override_marker(item.get("technical") or {})
+        if override:
+            warnings.append({
+                "shot_no": item["shot_no"], "code": "HUMAN_OVERRIDE_QUALITY",
+                "message": f"第 {item['shot_no']} 镜为人工越过质量判定采纳（原技术校验：{'、'.join(override.get('overridden_issue_codes') or []) or '未知问题'} 未通过）",
+            })
     return {
         "episode_id": episode_id,
         "project_id": ep["project_id"],

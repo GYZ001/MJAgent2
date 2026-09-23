@@ -8,10 +8,15 @@ interface CustomerFeedbackPanelProps {
   reviewer: string
   toast: (msg: string, isErr?: boolean) => void
   onNavigateToBoard: () => void
+  onNavigateToReadiness: () => void
+  hasDeliveryCandidate: boolean
 }
 
-export function feedbackSubmitDisabledReason(busy: boolean, feedback: string): string {
+export function feedbackSubmitDisabledReason(
+  busy: boolean, feedback: string, hasDeliveryCandidate: boolean,
+): string {
   if (busy) return '正在提交上一条反馈'
+  if (!hasDeliveryCandidate) return '先生成交付候选后才能记录反馈'
   if (!feedback.trim()) return '请先填写反馈内容'
   return ''
 }
@@ -30,6 +35,7 @@ export function formatFeedbackTime(value: number): string {
  */
 export default function CustomerFeedbackPanel({
   episodeId, episodeNo, reviewer, toast, onNavigateToBoard,
+  onNavigateToReadiness, hasDeliveryCandidate,
 }: CustomerFeedbackPanelProps) {
   const [feedback, setFeedback] = useState('')
   const [feedbackBusy, setFeedbackBusy] = useState(false)
@@ -65,7 +71,7 @@ export default function CustomerFeedbackPanel({
     }
   }
 
-  const disabledReason = feedbackSubmitDisabledReason(feedbackBusy, feedback)
+  const disabledReason = feedbackSubmitDisabledReason(feedbackBusy, feedback, hasDeliveryCandidate)
 
   return (
     <div className="customer-feedback">
@@ -76,6 +82,15 @@ export default function CustomerFeedbackPanel({
           去分镜台修订本集
         </button>
       </p>
+      {!hasDeliveryCandidate && (
+        <p className="hint" role="status">
+          本集尚无交付候选，先生成交付候选后才能记录反馈。
+          {' '}
+          <button type="button" className="btn ghost small" onClick={onNavigateToReadiness}>
+            去生成交付候选
+          </button>
+        </p>
+      )}
       {listError && <p className="hint" role="alert">反馈记录加载失败：{listError}</p>}
       {items.length > 0 && (
         <ul>

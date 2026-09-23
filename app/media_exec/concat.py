@@ -19,7 +19,7 @@ from app.media_pipeline.delivery_encode import (
     probe_resolution, probe_video_codec, uniform_resolution,
 )
 from app.media_urls import build_media_url
-from app.media_exec import concat_state  # noqa: E402 —— 与 subtitle_episode 同组
+from app.media_exec import concat_auto_adopt, concat_state  # noqa: E402 —— 与 subtitle_episode 同组
 from app.subtitles import episode as subtitle_episode
 
 
@@ -29,7 +29,7 @@ _CONCAT_DURATION_TOLERANCE_RATIO = 0.10
 _CONCAT_DURATION_TOLERANCE_MIN_S = 0.75
 _CONCAT_OPERATION_LEASE_S = 2 * 60 * 60
 _CONCAT_COMMAND = "delivery.concatenate"
-_TIMELINE_KEYS = ("partial", "shots_total", "included_shot_nos", "skipped_shot_nos", "missing_model_shot_nos", "skip_reasons")
+_TIMELINE_KEYS = ("partial", "shots_total", "included_shot_nos", "skipped_shot_nos", "missing_model_shot_nos", "skip_reasons", "auto_adopted_shot_nos")
 
 
 class ConcatOperationConflict(ValueError):
@@ -822,7 +822,7 @@ def _auto_adopt_playable_candidates_before_mix(episode_id: str) -> dict[str, Any
                 shot_id,
                 {
                     "version_id": candidate["id"],
-                    "reason": "成片合成时自动采纳该镜最新的成功技术校验候选（此前未人工采纳）",
+                    "reason": f"{concat_auto_adopt.AUTO_ADOPT_REASON_MARKER}（此前未人工采纳）",
                     "idempotency_key": f"auto-adopt-mix:{episode_id}:{shot_id}:{candidate['id']}",
                 },
             )
@@ -1296,13 +1296,13 @@ def concatenate_episode(
     final_path = _final_video_path(ep["project_id"], ep["episode_no"])
     started_at = time.perf_counter()
     common_result = {
-        "shots": len(piece_specs),
-        "ffmpeg_missing": False,
+        "shots": len(piece_specs), "ffmpeg_missing": False,
         "shots_total": len(all_shot_nos),
         "shots_skipped": len(skipped_shot_nos), "skipped_shot_nos": skipped_shot_nos,
         "missing_model_shot_nos": missing_model_shot_nos,
         "skip_reasons": skip_reasons,
         "included_shot_nos": piece_shot_nos,
+        "auto_adopted_shot_nos": concat_auto_adopt.auto_adopted_shot_nos(conn, shot_id_by_no, piece_shot_nos),
         "partial": bool(skipped_shot_nos),
         "final_video_stale": False,
         "fallback_shots_created": 0,
