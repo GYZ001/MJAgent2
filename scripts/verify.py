@@ -332,6 +332,7 @@ def _full_commands(*, live_integration: bool = False) -> list[tuple[list[str], P
         (_layers_check_command(), ROOT),
         (_file_conventions_check_command(), ROOT),
         ([sys.executable, "scripts/check_write_across_await.py"], ROOT),
+        ([sys.executable, "scripts/check_structure_ratchets.py"], ROOT),
         ([sys.executable, "-m", "compileall", "-q", "app"], ROOT),
         ([sys.executable, "-m", "pytest", "-q"], ROOT),
         ([_npm(), "run", "build"], FRONTEND),

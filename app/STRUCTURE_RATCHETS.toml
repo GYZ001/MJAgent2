@@ -1,0 +1,424 @@
+# 结构棘轮基线：CLAUDE.md「Code Architecture Norms」两条结构红线的执行闸门。
+# 由 scripts/check_structure_ratchets.py 读取；只能人工调低，不许为了让改动过关
+# 而调大——机制与 app/WRITE_ACROSS_AWAIT_BASELINE.txt / app/FILE_CONVENTIONS.toml
+# 同构。口径细节见该脚本的模块 docstring。
+#
+# [root_files]：app/ 根目录（不含子包）允许存在的散文件白名单快照。出现名单外的
+# 新文件即失败（提示放进包）；名单里的文件已不在根目录（改名/拆包/删除）也失败
+# （提示删除这一行）。
+#
+# [lazy_import_undocumented]：app/**/*.py 函数体内（含嵌套块，不含模块顶层）的
+# `import app.*` / `from app... import ...` / 相对导入（`from . import x`、
+# `from .x import y`——在 app 包内静态等价于 app.*，相对导入不可能跨出 app 顶层
+# 包）里，没有说明注释（同行行尾 `# ...` 或紧邻上一行整行 `# ...`）的条数，按
+# 文件计。某文件实测超过这里记的数字即失败并报行号；未登记的新文件一律按 0 计
+# （新增延迟导入必须当场写注释）。
+
+[root_files]
+files = [
+    "app/__init__.py",
+    "app/api.py",
+    "app/artifacts.py",
+    "app/atomic_io.py",
+    "app/benchmarks.py",
+    "app/character_policy.py",
+    "app/chat_response_probe.py",
+    "app/compiler.py",
+    "app/config.py",
+    "app/continuity.py",
+    "app/db.py",
+    "app/db_schema.py",
+    "app/delivery.py",
+    "app/delivery_package_build.py",
+    "app/delivery_package_publish.py",
+    "app/delivery_package_replay.py",
+    "app/downstream_authority.py",
+    "app/episode_target.py",
+    "app/errors.py",
+    "app/final_edit.py",
+    "app/generation_concurrency.py",
+    "app/hiagent.py",
+    "app/identity_adjudication.py",
+    "app/identity_authority.py",
+    "app/identity_contracts.py",
+    "app/image_providers.py",
+    "app/ingest.py",
+    "app/local_session.py",
+    "app/main.py",
+    "app/media_urls.py",
+    "app/minimax_h3.py",
+    "app/model_capabilities.py",
+    "app/model_migration.py",
+    "app/model_registry.py",
+    "app/model_runtime_profile.py",
+    "app/monitor_audit_buffer.py",
+    "app/monitoring.py",
+    "app/multiview.py",
+    "app/narrative_outline.py",
+    "app/narrative_outline_finalize.py",
+    "app/narrative_outline_identity.py",
+    "app/narrative_outline_index.py",
+    "app/narrative_outline_nodes.py",
+    "app/narrative_outline_prep.py",
+    "app/narrative_outline_project.py",
+    "app/narrative_outline_state.py",
+    "app/narrative_priority.py",
+    "app/narrative_repair.py",
+    "app/novel_formats.py",
+    "app/planning.py",
+    "app/provider_task_clearance.py",
+    "app/provider_task_scope.py",
+    "app/provider_task_zero_cost.py",
+    "app/provider_task_zero_cost_api.py",
+    "app/quota.py",
+    "app/quota_addon.py",
+    "app/quota_expiry.py",
+    "app/quota_project.py",
+    "app/quota_scope.py",
+    "app/quota_tiers.py",
+    "app/recovery.py",
+    "app/refs.py",
+    "app/rejected_media.py",
+    "app/renderability.py",
+    "app/renderability_score.py",
+    "app/repair_router.py",
+    "app/scene_contract.py",
+    "app/scenes.py",
+    "app/screenplay_retry_authority.py",
+    "app/seedance.py",
+    "app/source_chapters.py",
+    "app/source_excerpt.py",
+    "app/source_facts.py",
+    "app/source_paratext.py",
+    "app/spoken_contract.py",
+    "app/storyboard_authority.py",
+    "app/storyboard_control.py",
+    "app/storyboard_supervisor.py",
+    "app/storyboard_workspace.py",
+    "app/system_api.py",
+    "app/system_health.py",
+    "app/task_registry.py",
+    "app/text_providers.py",
+    "app/textmatch.py",
+    "app/video_command_operations.py",
+    "app/video_control.py",
+    "app/video_cost_model.py",
+    "app/video_crop.py",
+    "app/video_issues.py",
+    "app/video_playback.py",
+    "app/video_prompt_ai.py",
+    "app/video_prompt_payload.py",
+    "app/video_prompt_profiles.py",
+    "app/video_providers.py",
+    "app/video_repair_router.py",
+    "app/visual_styles.py",
+    "app/worker.py",
+]
+
+[lazy_import_undocumented]
+"app/agent/resources.py" = 1
+"app/artifacts.py" = 2
+"app/audit/export.py" = 1
+"app/audit/retention.py" = 3
+"app/auth/admin_api.py" = 4
+"app/auth/api.py" = 1
+"app/authz/catalog.py" = 1
+"app/authz/resolve.py" = 1
+"app/capabilities/bus.py" = 2
+"app/capabilities/catalog.py" = 2
+"app/capabilities/dispatch.py" = 4
+"app/capabilities/handlers/bible.py" = 9
+"app/capabilities/handlers/delivery.py" = 11
+"app/capabilities/handlers/episode.py" = 1
+"app/capabilities/handlers/project.py" = 7
+"app/capabilities/handlers/run.py" = 2
+"app/capabilities/handlers/scene.py" = 5
+"app/capabilities/handlers/screenplay.py" = 16
+"app/capabilities/handlers/series.py" = 7
+"app/capabilities/handlers/storyboard.py" = 6
+"app/capabilities/handlers/system.py" = 12
+"app/capabilities/handlers/video.py" = 25
+"app/capabilities/preflight.py" = 11
+"app/compiler.py" = 10
+"app/completion_grant/ledger.py" = 1
+"app/completion_grant/qualification.py" = 5
+"app/completion_grant/reconcile.py" = 2
+"app/continuity.py" = 2
+"app/db.py" = 4
+"app/delivery.py" = 4
+"app/delivery_package_build.py" = 4
+"app/delivery_package_publish.py" = 6
+"app/delivery_package_replay.py" = 8
+"app/domain/account_deletion.py" = 9
+"app/domain/bible_ops/edit.py" = 4
+"app/domain/bible_ops/manual_character.py" = 1
+"app/domain/bible_ops/nominate.py" = 1
+"app/domain/bible_ops/portrait_candidates.py" = 1
+"app/domain/bible_ops/precheck.py" = 5
+"app/domain/bible_ops/refs_generation.py" = 5
+"app/domain/bible_ops/scene_assets.py" = 2
+"app/domain/bible_ops/scene_bible_prep.py" = 2
+"app/domain/bible_ops/scene_edit.py" = 1
+"app/domain/bible_ops/scene_refs.py" = 5
+"app/domain/bible_ops/style_and_drafts.py" = 1
+"app/domain/bible_ops/task_run.py" = 2
+"app/domain/bible_ops/view_redo.py" = 4
+"app/domain/common.py" = 9
+"app/domain/orchestration_ops/stale_run_finalize.py" = 1
+"app/domain/projects/bible_attachments.py" = 1
+"app/domain/projects/create.py" = 7
+"app/domain/projects/detail.py" = 2
+"app/domain/projects/downgrade.py" = 1
+"app/domain/projects/episode_delete.py" = 2
+"app/domain/projects/lifecycle.py" = 9
+"app/domain/projects/listing.py" = 2
+"app/domain/review_wall.py" = 6
+"app/domain/screenplay_ops/activation.py" = 7
+"app/domain/screenplay_ops/background_portraits.py" = 2
+"app/domain/screenplay_ops/batch.py" = 5
+"app/domain/screenplay_ops/cast_impact_estimate.py" = 1
+"app/domain/screenplay_ops/character_discovery.py" = 3
+"app/domain/screenplay_ops/delete.py" = 2
+"app/domain/screenplay_ops/edit.py" = 11
+"app/domain/screenplay_ops/guarded.py" = 3
+"app/domain/screenplay_ops/preflight.py" = 2
+"app/domain/screenplay_ops/prep_pack_stage_snapshot.py" = 1
+"app/domain/screenplay_ops/repair.py" = 8
+"app/domain/screenplay_ops/run_owner.py" = 1
+"app/domain/screenplay_ops/start_resume.py" = 6
+"app/domain/screenplay_ops/status_snapshot.py" = 6
+"app/domain/screenplay_ops/task_body.py" = 12
+"app/domain/screenplay_ops/task_recovery.py" = 5
+"app/domain/series_ops/queue.py" = 1
+"app/domain/series_ops/routes_exports.py" = 1
+"app/domain/series_ops/routes_tasks.py" = 6
+"app/domain/series_ops/stages.py" = 15
+"app/domain/storyboard_ops/clear_apply.py" = 4
+"app/domain/storyboard_ops/clear_preview.py" = 3
+"app/domain/storyboard_ops/edit_shot.py" = 9
+"app/domain/storyboard_ops/episode_detail.py" = 15
+"app/domain/storyboard_ops/evidence.py" = 8
+"app/domain/storyboard_ops/mutation_primitives.py" = 9
+"app/domain/storyboard_ops/resume_state.py" = 4
+"app/domain/storyboard_ops/scene_projection.py" = 2
+"app/domain/storyboard_ops/shot_edit_session.py" = 3
+"app/domain/storyboard_ops/spoken_contract.py" = 6
+"app/domain/storyboard_ops/staleness.py" = 1
+"app/domain/storyboard_ops/start_resume.py" = 9
+"app/domain/storyboard_ops/status_snapshot.py" = 2
+"app/domain/storyboard_ops/structure.py" = 6
+"app/domain/storyboard_ops/task_body.py" = 15
+"app/domain/storyboard_ops/task_recovery.py" = 4
+"app/domain/storyboard_ops/task_run.py" = 11
+"app/domain/storyboard_ops/video_model.py" = 5
+"app/domain/video_ops/adopt.py" = 7
+"app/domain/video_ops/capability.py" = 5
+"app/domain/video_ops/clear.py" = 12
+"app/domain/video_ops/completion_contract.py" = 7
+"app/domain/video_ops/completion_core.py" = 10
+"app/domain/video_ops/completion_resume.py" = 1
+"app/domain/video_ops/confirm_episode.py" = 15
+"app/domain/video_ops/confirmation_eval.py" = 15
+"app/domain/video_ops/confirmation_gate.py" = 15
+"app/domain/video_ops/generate.py" = 15
+"app/domain/video_ops/misc.py" = 3
+"app/domain/video_ops/plan.py" = 7
+"app/domain/video_ops/project_queue_complete.py" = 5
+"app/domain/video_ops/project_queue_core.py" = 2
+"app/domain/video_ops/project_queue_run.py" = 2
+"app/domain/video_ops/reference_images.py" = 2
+"app/domain/video_ops/resume_episode.py" = 2
+"app/downstream_authority.py" = 4
+"app/evidence/media.py" = 3
+"app/generation_concurrency.py" = 2
+"app/harness/model_gateway.py" = 3
+"app/harness/model_gateway_failover.py" = 9
+"app/hiagent.py" = 21
+"app/identity_adjudication.py" = 9
+"app/image_providers.py" = 2
+"app/loops/base.py" = 1
+"app/main.py" = 5
+"app/mcp/resources.py" = 20
+"app/mcp/tools.py" = 1
+"app/media_exec/authority.py" = 8
+"app/media_exec/checkpoints.py" = 1
+"app/media_exec/concat.py" = 11
+"app/media_exec/dispatch.py" = 8
+"app/media_exec/enqueue.py" = 17
+"app/media_exec/enqueue_context.py" = 18
+"app/media_exec/enqueue_persist.py" = 9
+"app/media_exec/enqueue_prompt.py" = 13
+"app/media_exec/input_boundary.py" = 1
+"app/media_exec/input_first_frame_last.py" = 12
+"app/media_exec/input_reference.py" = 11
+"app/media_exec/input_video_mode.py" = 10
+"app/media_exec/job_recovery.py" = 9
+"app/media_exec/job_state.py" = 2
+"app/media_exec/prompt_dialect_guard.py" = 1
+"app/media_exec/reference_pool_gate.py" = 15
+"app/media_exec/run_job.py" = 13
+"app/media_exec/run_job_errors.py" = 1
+"app/media_exec/run_job_errors_provider.py" = 5
+"app/media_exec/run_job_steps.py" = 20
+"app/media_exec/worker_lifecycle.py" = 3
+"app/media_exec/worker_loop.py" = 1
+"app/media_pipeline/reference_store.py" = 3
+"app/media_pipeline/retry_policy.py" = 4
+"app/media_pipeline/scheduler.py" = 3
+"app/media_pipeline/status.py" = 1
+"app/minimax_h3.py" = 5
+"app/model_migration.py" = 3
+"app/model_registry.py" = 2
+"app/models_registry/api.py" = 1
+"app/models_registry/binding_migration.py" = 7
+"app/models_registry/keyprovider.py" = 1
+"app/models_registry/migration.py" = 10
+"app/models_registry/routing.py" = 6
+"app/models_registry/video_confirmation.py" = 1
+"app/monitor_audit_buffer.py" = 4
+"app/monitoring.py" = 3
+"app/multiview.py" = 6
+"app/narrative/authority.py" = 1
+"app/narrative/storyboard_validate_context.py" = 1
+"app/narrative/storyboard_validate_shot_capacity.py" = 1
+"app/narrative_outline_identity.py" = 1
+"app/narrative_priority.py" = 3
+"app/narrative_repair.py" = 10
+"app/observability/api.py" = 5
+"app/observability/lock_pressure.py" = 1
+"app/observability/machine_watermark.py" = 1
+"app/observability/metrics.py" = 2
+"app/orchestration/api.py" = 50
+"app/orchestration/media_scheduler.py" = 2
+"app/orgs/api.py" = 1
+"app/payments/crypto_rsa.py" = 1
+"app/payments/reconcile.py" = 3
+"app/payments/routes.py" = 1
+"app/payments/wechat.py" = 1
+"app/planning.py" = 1
+"app/portraits/_identity_tokens.py" = 1
+"app/portraits/card_aliases.py" = 2
+"app/portraits/cards.py" = 1
+"app/portraits/discovery.py" = 1
+"app/portraits/discovery_fragments.py" = 1
+"app/portraits/discovery_resample.py" = 2
+"app/portraits/identity_promotions.py" = 1
+"app/portraits/portrait_drift.py" = 3
+"app/portraits/portrait_io.py" = 4
+"app/portraits/portrait_lookup.py" = 1
+"app/portraits/resolution_apply_screenplay.py" = 2
+"app/portraits/resolution_errors.py" = 1
+"app/portraits/reuse_invalidation.py" = 1
+"app/portraits/structural_coverage_ensure.py" = 2
+"app/production/certificate.py" = 6
+"app/production/patch.py" = 6
+"app/production/prep_pack/asset_lookup.py" = 1
+"app/production/prep_pack/discovery.py" = 3
+"app/production/prep_pack/generate_once.py" = 1
+"app/production/prep_pack/persistent_appellation.py" = 1
+"app/production/prep_pack/true_name.py" = 1
+"app/production/publish.py" = 15
+"app/production/revision.py" = 18
+"app/production/screenplay_authority.py" = 23
+"app/production/screenplay_document.py" = 1
+"app/production/screenplay_markers.py" = 1
+"app/production/screenplay_repair/checkpoint_recovery.py" = 8
+"app/production/screenplay_repair/dialogue_chain_repair.py" = 8
+"app/production/screenplay_repair/dialogue_source_alignment.py" = 3
+"app/production/screenplay_repair/llm_field_patch.py" = 8
+"app/production/screenplay_repair/narrative_graph_dialogue.py" = 2
+"app/production/screenplay_repair/narrative_patch_ops.py" = 3
+"app/production/screenplay_repair/preflight.py" = 4
+"app/production/screenplay_repair/qa.py" = 8
+"app/production/screenplay_repair/revalidate_resume.py" = 8
+"app/production/storyboard_beat_sheet_repair.py" = 6
+"app/production/storyboard_capacity_normalize.py" = 1
+"app/production/storyboard_dialects.py" = 1
+"app/production/storyboard_pack.py" = 10
+"app/production/storyboard_prop_assets.py" = 1
+"app/provider_task_clearance.py" = 2
+"app/provisioning/handover.py" = 1
+"app/provisioning/importer.py" = 1
+"app/provisioning/invitations.py" = 1
+"app/quota_policy/storage.py" = 2
+"app/quota_policy/usage_query.py" = 4
+"app/quota_project.py" = 3
+"app/recovery.py" = 24
+"app/refs.py" = 9
+"app/rejected_media.py" = 1
+"app/renderability.py" = 3
+"app/scenes.py" = 9
+"app/screenplay_ir/compile_setup.py" = 1
+"app/screenplay_ir/models_event.py" = 1
+"app/screenplay_scene_shards/envelope_generate.py" = 1
+"app/screenplay_scene_shards/review_prompt.py" = 2
+"app/seedance.py" = 7
+"app/source_paratext.py" = 1
+"app/spoken_contract.py" = 1
+"app/sso/provision.py" = 1
+"app/stages/bible_generate.py" = 2
+"app/stages/blueprint_checkpoint.py" = 3
+"app/stages/blueprint_generate_entry.py" = 3
+"app/stages/blueprint_generate_sharded.py" = 3
+"app/stages/blueprint_ownership_repair.py" = 3
+"app/stages/blueprint_repair.py" = 3
+"app/stages/blueprint_semantic_review_cache.py" = 3
+"app/stages/blueprint_semantic_review_consensus.py" = 6
+"app/stages/blueprint_semantic_review_repair.py" = 3
+"app/stages/blueprint_semantic_review_reviewer.py" = 4
+"app/stages/blueprint_semantic_review_round.py" = 2
+"app/stages/blueprint_shard_structure.py" = 1
+"app/stages/cognition.py" = 1
+"app/stages/common.py" = 1
+"app/stages/ir_snapshot.py" = 1
+"app/stages/screenplay_source.py" = 1
+"app/storyboard_authority.py" = 3
+"app/storyboard_supervisor.py" = 20
+"app/storyboard_workspace.py" = 7
+"app/system_api.py" = 41
+"app/system_health.py" = 2
+"app/text_providers.py" = 1
+"app/validators/bible_validate.py" = 2
+"app/validators/outline_capacity.py" = 2
+"app/validators/outline_dialogue.py" = 1
+"app/validators/resource_forecast.py" = 1
+"app/validators/screenplay_ledger.py" = 1
+"app/validators/screenplay_validate.py" = 2
+"app/validators/storyboard_core.py" = 2
+"app/validators/storyboard_delivery.py" = 1
+"app/video_crop.py" = 1
+"app/video_issues.py" = 6
+"app/video_modes/asset_lookup.py" = 5
+"app/video_modes/continuity_tail.py" = 1
+"app/video_modes/keyframe_contract.py" = 5
+"app/video_modes/mode_selection.py" = 3
+"app/video_modes/prop_references.py" = 1
+"app/video_modes/reference_assemble.py" = 3
+"app/video_modes/reference_generate.py" = 3
+"app/video_modes/reference_prompt.py" = 2
+"app/video_modes/seedance_pack.py" = 1
+"app/video_modes/seedance_reference_notes.py" = 1
+"app/video_plan/capability_snapshot.py" = 4
+"app/video_plan/generate.py" = 4
+"app/video_plan/normalize.py" = 2
+"app/video_plan/planner_contract.py" = 1
+"app/video_plan/prev_frame_reference.py" = 1
+"app/video_plan/release_manifest.py" = 4
+"app/video_plan/shot_row.py" = 2
+"app/video_plan/submission_authority.py" = 2
+"app/video_plan/validate.py" = 1
+"app/video_prompt_profiles.py" = 1
+"app/video_providers.py" = 5
+"app/video_supervisor/adoption.py" = 1
+"app/video_supervisor/assets.py" = 8
+"app/video_supervisor/authority.py" = 3
+"app/video_supervisor/checkpoint.py" = 2
+"app/video_supervisor/closeout.py" = 1
+"app/video_supervisor/coverage.py" = 2
+"app/video_supervisor/dispatch.py" = 5
+"app/video_supervisor/job_control.py" = 3
+"app/video_supervisor/ops.py" = 4
+"app/video_supervisor/resilience.py" = 2
+"app/video_supervisor/run_loop.py" = 1
+"app/video_supervisor/storyboard_repair.py" = 9
+"app/video_supervisor/watchdog.py" = 6
