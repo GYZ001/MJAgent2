@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from app.db import get_conn
 from .source_coverage import storyboard_source_coverage_gap
+from .storyboard_adaptation import current_storyboard_adaptation
 from app.domain.common import (
     _episode_or_404,
     _project_bible_or_placeholder,
@@ -323,6 +324,17 @@ def create_storyboard_confirmation_preview(episode_id: str) -> dict:
         hard_errors.insert(0, coverage_gap)
     hard_errors = list(dict.fromkeys(hard_errors))
     warnings = list(dict.fromkeys(evaluation.warnings))
+    # 短剧节奏档非阻断提示：如实告知本集按改编留档删减了多少原文，出路是
+    # 分镜台『本集删减』面板——不影响 hard_gates，只在留档存在且真有删减时附加。
+    adaptation = current_storyboard_adaptation(conn, episode_id)
+    if adaptation is not None and adaptation.get("adaptation_mode") == "short_drama":
+        dropped_spans = adaptation.get("dropped_source_spans") or []
+        if dropped_spans:
+            chars = sum(int(span.get("chars") or 0) for span in dropped_spans)
+            warnings.append(
+                f"本集按短剧节奏删减 {len(dropped_spans)} 处原文（{chars} 字），"
+                "详见分镜台『本集删减』"
+            )
     payload = {
         "contract_version": "storyboard-confirm.v3",
         "episode_id": episode_id,

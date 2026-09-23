@@ -184,3 +184,5 @@ from .misc import (
     repair_stale_assets as repair_stale_assets,
     stale_assets_preview as stale_assets_preview,
 )
+
+from . import storyboard_adaptation as storyboard_adaptation  # 注册 GET /episodes/{id}/storyboard-adaptation 路由

@@ -22,6 +22,12 @@
 不适用的情形一律不拦（fail open 只对"这条管线不产出绑定"成立）：本集一条绑定
 都没有时返回 ``None``——老版逐镜叙事契约与历史 plan-null 兼容分集不写
 ``storyboard_source_bindings``，拿它们当缺口会把一整类分集永久判不过。
+
+短剧节奏档新增第四类不计区间：分镜台生成时声明的 ``dropped_source_spans``
+（见 ``storyboard_adaptation.current_storyboard_adaptation``），与标题/空行/
+副文本一样喂给 ``_subtract``。只在当前留档 ``adaptation_mode=="short_drama"``
+时生效；偏移越界（原文被改短导致旧留档失效）的区间一律当作未声明，不截断
+迁就——忠实档与无留档的分集逐字节保持本判据原有行为，判据仍是零容忍。
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ import re
 from app.source_excerpt import chapter_title_segment_ids, index_source_segments
 from app.source_paratext import cached_chapter_paratext_offsets
 from .source_binding_spans import complete_pack_bindings
+from .storyboard_adaptation import current_storyboard_adaptation
 
 Interval = tuple[int, int]
 
@@ -142,13 +149,32 @@ def _content_gaps(content: str, intervals: list[Interval]) -> tuple[int, list[st
     return count, samples
 
 
-def _chapter_gap(conn, project_id: str, chapter_idx: int, bindings) -> tuple[int, int, list[str]]:
-    """一章的 (原文总字数, 未覆盖的正文字数, 摘录)。"""
+def _declared_drop_regions(spans: list[dict], content_length: int) -> list[Interval]:
+    """短剧节奏档声明的删减区间，过滤越界/非法的——原文被改短后旧留档的
+    偏移可能失效，fail closed：无效区间不予采信、不截断迁就，交由正常缺口
+    判定去拦（不许"该删减区间无效"之后还接着算出一段部分生效的区间）。"""
+    regions: list[Interval] = []
+    for span in spans:
+        try:
+            start = int(span.get("start_offset"))
+            stop = int(span.get("end_offset"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if start < 0 or stop <= start or stop > content_length:
+            continue
+        regions.append((start, stop))
+    return _merged(regions)
+
+
+def _chapter_gap(
+    conn, project_id: str, chapter_idx: int, bindings, declared_spans: list[dict] | None = None,
+) -> tuple[int, int, list[str], int]:
+    """一章的 (原文总字数, 未覆盖的正文字数, 摘录, 短剧档声明删减且已生效的字数)。"""
     row = conn.execute(
         "SELECT * FROM chapters WHERE project_id=? AND idx=?", (project_id, chapter_idx),
     ).fetchone()
     if row is None:
-        return 0, 0, []
+        return 0, 0, [], 0
     content = row["content"] or ""
     spans = [
         (int(b["start_offset"] or 0), int(b["end_offset"] or 0))
@@ -158,8 +184,32 @@ def _chapter_gap(conn, project_id: str, chapter_idx: int, bindings) -> tuple[int
     gaps = _complement(len(content), _merged(spans))
     project = conn.execute("SELECT name FROM projects WHERE id=?", (project_id,)).fetchone()
     gaps = _subtract(gaps, _structural_regions(content, row["title"], row, project["name"] if project else None))
+    declared_chars = 0
+    if declared_spans:
+        regions = _declared_drop_regions(declared_spans, len(content))
+        if regions:
+            before, _ = _content_gaps(content, gaps)
+            gaps = _subtract(gaps, regions)
+            after, _ = _content_gaps(content, gaps)
+            declared_chars = before - after
     uncovered, samples = _content_gaps(content, gaps)
-    return len(content), uncovered, samples
+    return len(content), uncovered, samples, declared_chars
+
+
+def _declared_drop_spans_by_chapter(conn, episode_id: str) -> dict[int, list[dict]]:
+    """当前留档若是短剧节奏档，按 ``chapter_idx`` 分组它声明的删减区间；
+    忠实档/无留档返回空字典——调用方据此逐字节保持原判据（见模块 docstring）。"""
+    adaptation = current_storyboard_adaptation(conn, episode_id)
+    if adaptation is None or adaptation.get("adaptation_mode") != "short_drama":
+        return {}
+    grouped: dict[int, list[dict]] = {}
+    for span in adaptation.get("dropped_source_spans") or []:
+        try:
+            idx = int(span.get("chapter_idx"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        grouped.setdefault(idx, []).append(span)
+    return grouped
 
 
 def storyboard_source_coverage_gap(conn, episode_id: str) -> str | None:
@@ -183,20 +233,26 @@ def storyboard_source_coverage_gap(conn, episode_id: str) -> str | None:
     if not bindings:
         return None
     bindings = complete_pack_bindings(conn, row, bindings)
+    declared_by_chapter = _declared_drop_spans_by_chapter(conn, episode_id)
     uncovered = 0
     source_total = 0
     samples: list[str] = []
+    declared_chars = 0
     for chapter_idx in chapter_indexes:
-        length, missing, chapter_samples = _chapter_gap(conn, row["project_id"], chapter_idx, bindings)
+        length, missing, chapter_samples, chapter_declared = _chapter_gap(
+            conn, row["project_id"], chapter_idx, bindings, declared_by_chapter.get(chapter_idx),
+        )
         source_total += length
         uncovered += missing
         samples.extend(chapter_samples)
+        declared_chars += chapter_declared
     if uncovered <= 0:
         return None
     shown = "、".join(f"「{sample}」" for sample in samples[:GAP_SAMPLE_LIMIT])
+    declared_note = f"另有已按短剧节奏声明删减的 {declared_chars} 字不计入缺口；" if declared_chars else ""
     return (
         f"分镜没有覆盖整集原文：{source_total} 字里有 {uncovered} 字"
         f"（{uncovered * 100 // max(1, source_total)}%）的剧情正文没有任何镜头对应"
-        f"（章节标题、空行与已判定的副文本不计），例如 {shown}；"
+        f"（章节标题、空行与已判定的副文本不计），例如 {shown}；{declared_note}"
         "按现在这批镜头生成出来的成片会漏掉这部分剧情；请回分镜台重做本集分镜。"
     )
