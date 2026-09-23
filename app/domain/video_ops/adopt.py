@@ -18,6 +18,7 @@ from app.domain.review_wall import (
     _review_assert_shot_positive,
     _review_write_audit,
 )
+from app.evidence import media as media_evidence
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation
 from fastapi import HTTPException
@@ -54,6 +55,30 @@ def _settle_waiting_human(conn, version, overridden: list[str]) -> None:
         conn.execute("UPDATE shot_versions SET status='succeeded', error=NULL WHERE id=?", (version["id"],))
 
 
+def _assert_candidate_not_stale(version_id: str) -> dict:
+    """候选证据若已被级联标记 stale，在这里拦下并给中文出路，不让底层英文 ValueError 透传。
+
+    成因（已核实）：本镜分镜内容在候选生成之后又被编辑保存时，``edit_shot.py`` 会为该镜头
+    提交一个新的 storyboard_shot 产物，supersede 旧版本；``evidence/repository.py`` 的
+    supersede/stale 级联会把旧版本谱系下的所有下游产物（含已经生成好、引用旧分镜为 parent
+    的视频候选）一并标记 stale，防止用户采纳一段画面依据已经作废的分镜。``commit_artifact``
+    对 stale 产物只会抛 ``ValueError("stale artifact cannot be committed")``，命令总线的
+    通用 ValueError 兜底会把这句英文原样透给界面。
+    """
+    try:
+        artifact = media_evidence.record_video_candidate(version_id)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(409, f"候选证据创建失败：{exc}") from exc
+    if artifact.get("status") == "stale":
+        raise HTTPException(
+            409,
+            "这条候选画面依据的分镜已经过期：生成之后，本镜的分镜内容被重新编辑保存过，"
+            "系统已把这条候选标记为不可采纳，避免画面和当前分镜对不上。"
+            "请点击「重新生成」按当前分镜生成新的候选后再采纳（会消耗视频额度）。",
+        )
+    return artifact
+
+
 def _adopt_version_core(shot_id: str, body: dict) -> dict:
     """人工采用视频版本的领域逻辑，供 REST 路由与 ``video.adopt_version`` Command Handler 共用。"""
     from app.video_playback import normalize_playback_rate
@@ -67,12 +92,7 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
     conn = get_conn()
     v = conn.execute("SELECT * FROM shot_versions WHERE id=? AND shot_id=?", (version_id, shot_id)).fetchone()
     human_override = _assert_version_adoptable(v, body)
-    from app.evidence import media as media_evidence
-
-    try:
-        artifact = media_evidence.record_video_candidate(version_id)
-    except (OSError, ValueError) as exc:
-        raise HTTPException(409, f"候选证据创建失败：{exc}") from exc
+    artifact = _assert_candidate_not_stale(version_id)
     technical = json.loads(v["technical_validation_json"] or "{}")
     if not technical:
         refreshed = conn.execute(
