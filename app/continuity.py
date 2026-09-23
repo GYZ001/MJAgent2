@@ -566,7 +566,7 @@ def normalize_board_continuity(board: Storyboard) -> None:
             shot.continuity_mode = "scene_change"
             shot.continuity_from_prev = False
             if shot.transition == "硬切":
-                from app.validators import default_scene_transition
+                from app.validators.primitives import default_scene_transition  # 真源；经 validators 门面反向 import 会成环
                 shot.transition = default_scene_transition(prev, shot)
         else:
             if shot.continuity_mode == "scene_change":

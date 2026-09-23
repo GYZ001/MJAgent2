@@ -38,8 +38,8 @@ from pydantic import BaseModel, ConfigDict, create_model
 
 from app.source_excerpt import SourceSegment
 
-from .chunk_extraction import _call_structured, _render_chunk
-from .chunking import _prep_pack_gate_segment_indexes
+from .chunking import _prep_pack_gate_segment_indexes, _render_chunk
+from .model_call import _call_structured
 from .schemas import _ModelSceneMention
 
 log = logging.getLogger(__name__)

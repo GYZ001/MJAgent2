@@ -56,7 +56,6 @@ from app.production.storyboard_beat_sheet_repair import (
     restore_undroppable_lines,
 )
 from app.production.storyboard_segment_ranges import (
-    _AiSourceUnitRange,
     _PARATEXT_PLACEHOLDER_TEXT,
     kept_line_unit_binding_errors,
     reassign_kept_lines_to_covering_segments,
@@ -73,16 +72,10 @@ class _AiBeat(BaseModel):
     segment_indexes: list[int] = Field(min_length=1)
 
 
-class _AiSegmentPlan(BaseModel):
-    segment_no: int
-    synopsis: str
-    source_segment_indexes: list[int] = Field(min_length=1)
-    beat_ids: list[str] = Field(default_factory=list)
-    #: 2.2.0 色温弧线：开放词汇，不设枚举；默认空串兼容模型截断导致的漏填。
-    palette: str = ""
-    #: 2.4.0：这一段对它引用的每个非 paratext 原文段号声明的句单元范围，
-    #: 每个 source_segment_index 恰好一条；校验见 segment_unit_range_errors。
-    source_unit_ranges: list[_AiSourceUnitRange] = Field(default_factory=list)
+#: 挪到 storyboard_beat_sheet_schemas（叶子）打破与 storyboard_beat_sheet_repair
+#: 的循环 import；`as` 自别名保持 `from .storyboard_beat_sheet import _AiSegmentPlan`
+#: 这条全仓既有用法不变，真源与字段说明见该模块。
+from app.production.storyboard_beat_sheet_schemas import _AiSegmentPlan as _AiSegmentPlan
 
 
 class _AiBeatSheetDraft(BaseModel):
@@ -376,8 +369,8 @@ async def _generate_beat_sheet(
     )
 
 
-#: 弃置只对语气词/寒暄这类短句成立；有说话人、正文超过这个字数的整句台词不是那三类。
-DROPPABLE_MAX_CHARS = 4
+#: 同 _AiSegmentPlan，挪到 storyboard_beat_sheet_schemas 打破与 repair 兄弟模块的循环 import。
+from app.production.storyboard_beat_sheet_schemas import DROPPABLE_MAX_CHARS as DROPPABLE_MAX_CHARS
 
 
 def undroppable_quote_errors(dropped: list, quotes: list[DialogueQuote]) -> list[str]:

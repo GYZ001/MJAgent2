@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.production.storyboard_beat_sheet_schemas import DROPPABLE_MAX_CHARS, _AiSegmentPlan
 from app.production.storyboard_segment_ranges import _AiSourceUnitRange, split_source_units
 
 
@@ -163,7 +164,6 @@ def restore_undroppable_lines(draft: Any, quotes: list[Any], source_segments: li
     它的原文段就留在 dropped_lines，由 undroppable_quote_errors 报「新增段落」。
     2026-09-05 我欲封天第 3 集：Q22「我爹是财主……」被弃置，三次重试仍打回。"""
     from app.production.storyboard_dialogue_ledger import _AiKeptLine
-    from app.production.storyboard_beat_sheet import DROPPABLE_MAX_CHARS
     from app.production.storyboard_segment_ranges import quote_unit_index
 
     by_id = {q.quote_id: q for q in quotes}
@@ -224,8 +224,6 @@ def append_segments_for_uncovered_sources(
     synopsis 只写「按原文补齐」的事实，不编内容——阶段二读的是该段原文，不是这句概括。
     只对"有必保台词却无段覆盖"的原文段动手（判据从数据来），paratext 段不补。
     2026-09-05 第 2 集：三次重试模型都没补段，整集失败。"""
-    from app.production.storyboard_beat_sheet import _AiSegmentPlan
-    from app.production.storyboard_segment_ranges import _AiSourceUnitRange, split_source_units
     _ = quotes  # 判据不再依赖必保台词：任何非副文本原文段没有段覆盖，交付门禁都会拦（2026-09-05 第 4 集尾段无台词被漏排）
     covered = {i for p in draft.segments for i in p.source_segment_indexes}
     needed = [i for i in range(1, len(source_segments) + 1) if i not in covered and i not in paratext_indexes]

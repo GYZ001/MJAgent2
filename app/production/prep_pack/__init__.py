@@ -54,17 +54,7 @@ from .asset_lookup import (
     match_scene_name,
 )
 from .chunk_extraction import (
-    _begin_step,
-    _call_structured,
     _extract_chunk,
-    _finish_step,
-    _run_async_step,
-    _run_sync_step,
-    bind_trace,
-    current_trace,
-    get_contract,
-    nullcontext,
-    transition_step,
 )
 from .chunking import (
     SourceSegment,
@@ -123,6 +113,13 @@ from .generate_once import (
     assert_prep_pack_coverage_complete,
     chapter_title_segment_indexes,
     get_conn,
+)
+from .model_call import (
+    _begin_step,
+    _call_structured,
+    _finish_step,
+    _run_async_step,
+    _run_sync_step,
 )
 from .provenance import (
     _PREP_PACK_QUOTATION_MARKS,
