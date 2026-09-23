@@ -26,7 +26,7 @@ from fastapi import HTTPException
 
 from app import config
 from app import quota_tiers
-from app.db import new_id, now
+from app.db_primitives import new_id, now
 from app.orgs import store as orgs_store
 from app.quota_policy import schema
 from app.quota_policy.schema import DIMENSIONS

@@ -19,7 +19,7 @@ import sqlite3
 
 from fastapi import HTTPException
 
-from app.db import now
+from app.db_primitives import now
 
 #: 不进 TIER_TABLE（不随周期重置），单独用 quota_ledger 的
 #: resource=ADDON_RESOURCE 记账。

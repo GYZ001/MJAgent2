@@ -13,7 +13,7 @@ import sqlite3
 
 from fastapi import HTTPException
 
-from app.db import new_id, now
+from app.db_primitives import new_id, now
 from app.quota_policy import schema
 from app.quota_policy.schema import DIMENSIONS as DIMENSIONS
 

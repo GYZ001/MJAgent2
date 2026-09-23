@@ -332,7 +332,16 @@ def _assert_review_dependency_fence(job, version_id: str, write_point: str) -> N
             }, ensure_ascii=False))
         return
     try:
-        from app.api import _review_upstream_snapshot
+        # 直接从真源导入，不再借道 app.api 门面转手（CLAUDE.md「再导出门面
+        # 不得再长，且必须从真源导出」）。必须保持函数内延迟导入，改成模块
+        # 级已实测会炸循环导入：app.media_exec.authority(模块级)
+        # -> app.domain.review_wall -> app.domain.__init__ -> .common
+        # -> app.domain.common -> app.worker -> app.media_exec(包 __init__)
+        # -> .run_job -> .authority——回到本模块自身，此时它仍在初始化中，
+        # 后续名字未定义，ImportError（`python -c "import app.media_exec.
+        # authority"`/`import app.media_exec`/`import app.api` 三条入口均
+        # 复现，只有 app.worker/app.main 因warm-up顺序凑巧未触发）。
+        from app.domain.review_wall import _review_upstream_snapshot
         current = _review_upstream_snapshot(episode_id)
     except Exception as exc:  # qualification service errors are fail-closed
         raise ReviewDependencyFence(

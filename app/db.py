@@ -2903,12 +2903,12 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
     conn.commit()
 
 
-def new_id(prefix: str) -> str:
-    return f"{prefix}_{uuid.uuid4().hex[:12]}"
-
-
-def now() -> float:
-    return time.time()
+# 真源在 app/db_primitives/__init__.py（零依赖叶子模块，架构复测点名的 db↔quota↔…
+# 循环团缓解手段之一，见 app/LAYERS.toml::app.db_primitives 与该模块文档字
+# 符串）；这里显式 re-export，本文件其余 120+ 个调用方继续用
+# ``from app.db import new_id, now`` 不受影响（CLAUDE.md「再导出门面……必须
+# 从真源导出」，写 ``as`` 而不是借道某个恰好 import 了它的子模块转手）。
+from app.db_primitives import new_id as new_id, now as now
 
 
 def rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:

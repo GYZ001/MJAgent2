@@ -49,7 +49,7 @@ import sqlite3
 
 from fastapi import HTTPException
 
-from app.db import now
+from app.db_primitives import now
 from app.quota_addon import (
     ADDON_RESOURCE,
     addon_video_seconds_balance,

@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 
 from app import config, db
-from app.db import new_id, now
+from app.db_primitives import new_id, now
 from app.quota_policy import schema
 
 DEFAULT_SAMPLE_TIMEOUT_S = 90.0

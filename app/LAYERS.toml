@@ -117,6 +117,13 @@ allowed_exceptions = []
                 # sessions/api/admin_api 碰 db，2026-08-30 用更具体的 key
                 # 覆盖到 2（见下方新增 L2 持久化，及本文件末尾变更说明）
 "app.db_schema" = 1  # 待建（docs 方案 2.1）
+"app.db_primitives" = 1  # 2026-09-23 新增：从 app.db 抽出 new_id/now 两个零依赖
+                         # 叶子函数（只 import time/uuid），供 app.db 再导出 +
+                         # app.quota/app.quota_addon/app.quota_policy.{plans,
+                         # storage,allocation}/app.orgs.store 直接导入，缓解
+                         # db↔quota↔quota_addon↔… 循环团（见 app.quota 等模块
+                         # 旁的注释）——不放 app/ 根目录散文件，新建包，与
+                         # app.identity_fold/app.novel 同一先例
 
 # ---- L2 持久化：可依赖 L0-L1 ----
 "app.db" = 2
