@@ -46,8 +46,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app import hiagent
-from app.generation_concurrency import run_with_provider_call_slot
-from app.harness.undelivered_replay import replay_undelivered
+from app.harness import model_gateway_tools
 from app.db import get_setting
 from app.errors import ContentGenerationError
 from app.schemas import Bible
@@ -354,20 +353,25 @@ def _gate_feedback_message(errors: str) -> dict:
 
 
 async def _chat_with_tools(messages: list[dict], tools: list[dict], **kwargs: Any) -> hiagent.AssistantTurn:
-    """Phase A 唯一的网关出口。tests/conftest.py 的 autouse 桩替换的是这个名字，
-    不是 ``hiagent.chat_with_tools`` 本体——后者有自己的契约测试
-    （tests/test_chat_with_tools.py、test_reasoning_token_budget.py）测的就是真函数，
-    全局替换会让它们静默测到桩子。
+    """Phase A 唯一的网关出口，经 ``app.harness.model_gateway_tools.chat_with_tools``
+    统一走选路/限流/并发槽位/未送达重放（脚手架细节见该模块 docstring）。这里不再
+    手搓槽位包装——2026-09-06 第 5 轮 30 集映射台同时起时工具对话绕过槽位直打
+    供应商，网关在突发负载下用「内容审核」话术回绝、28 集映射台整台失败（同一
+    步骤同时段 36 次照常通过，证明不是内容问题）；2026-09-06 第 11 轮第 23 集
+    工具对话 read 超时 300s 一次就整台失败，修的是未送达重放。两条历史教训现在
+    都在网关入口内落地，不在这里重复实现。
 
-    必须过供应商请求槽位（settings.text_generation_concurrency）：2026-09-06 第 5 轮
-    30 集映射台同时起，这里的工具对话绕过槽位直打 HiAgent，网关在突发负载下用
-    「内容审核」话术 + content_filter 回绝，28 集映射台整台失败；同一步骤同时段
-    36 次照常通过，证明不是内容问题。"""
-    # 未送达/未处理（read 超时 0 字、流中断、网关信封）按网关同一条退避表重放，退避睡在槽位之外
-    # （2026-09-06 第 11 轮第 23 集：工具对话 read 超时 300s 一次就整台失败）。
-    return await replay_undelivered(
-        lambda: run_with_provider_call_slot(lambda: hiagent.chat_with_tools(messages, tools, **kwargs)),
-        call_meta=kwargs.get("call_meta"),
+    显式传 ``provider=hiagent.active_provider("text")``：供应商适配层的工具对话
+    函数本身没有 provider 覆盖入口，历来都是取全局默认文本 provider，不跟随
+    映射台的分环节模型覆盖；这里显式传参保持这一行为不变，不因为改走网关就
+    悄悄开始跟随 stage_text_provider（见迁移报告）。
+
+    tests/conftest.py 的 autouse 桩替换的是这个名字，不是供应商适配层的真函数——
+    后者有自己的契约测试（tests/test_chat_with_tools.py、
+    test_reasoning_token_budget.py）测的就是真函数，全局替换会让它们静默测到
+    桩子。"""
+    return await model_gateway_tools.chat_with_tools(
+        messages, tools, provider=hiagent.active_provider("text"), **kwargs
     )
 
 
