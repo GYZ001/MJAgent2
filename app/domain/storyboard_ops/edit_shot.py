@@ -31,7 +31,7 @@ from fastapi import HTTPException
 from .mutation_primitives import (
     apply_segment_dialogue_revision,
     edit_touches_identities,
-    render_time_only_edit,
+    stage_edit_media_cleanup,
     _apply_contract_to_public_shot,
     _board_from_shot_rows,
     _narrative_semantic_edit_fields,
@@ -340,10 +340,7 @@ async def edit_shot(shot_id: str, body: dict):
     # 正式镜头、证据、下游失效索引和编辑会话必须在同一事务收口。
     previous_artifact_id = shot["storyboard_artifact_id"]
     contract_version = get_contract("storyboard").version
-    from app.artifacts import (
-        flush_media_cleanup_outbox,
-        stage_shot_artifact_cleanup,
-    )
+    from app.artifacts import flush_media_cleanup_outbox
 
     conn.execute("BEGIN IMMEDIATE")
     cleanup_outbox_id = None
@@ -419,7 +416,7 @@ async def edit_shot(shot_id: str, body: dict):
             "UPDATE shots SET storyboard_artifact_id=? WHERE id=?",
             (manual_artifact["id"], shot_id),
         )
-        invalidated = {} if render_time_only_edit(changed_fields) else stage_shot_artifact_cleanup(conn, shot_id)  # 只改转场不清视频
+        invalidated = stage_edit_media_cleanup(conn, shot_id, shot, changed_fields)
         cleanup_outbox_id = invalidated.get("outbox_id")
         conn.execute(
             "UPDATE episodes SET status='scripted', storyboard_warning=NULL WHERE id=?",

@@ -7,7 +7,9 @@ from __future__ import annotations
 import json
 
 from app import errors
+from app.artifacts import stage_shot_artifact_cleanup
 from app.db import new_id
+from app.evidence.dialogue_revision_retention import dialogue_revision_preserved_version
 from app.schemas import (
     EpisodeScreenplay,
     Shot,
@@ -74,6 +76,23 @@ def render_time_only_edit(changed_fields) -> bool:
     """改动字段全部属于成片阶段字段（且至少改了一项）。"""
     changed = set(changed_fields)
     return bool(changed) and changed <= RENDER_TIME_ONLY_EDIT_FIELDS
+
+
+def stage_edit_media_cleanup(conn, shot_id, shot, changed_fields) -> dict:
+    """edit_shot 保存落库后的媒体失效分支；从 edit_shot.py 抽出——该文件单函数已在
+    FILE_CONVENTIONS.toml 的 function_lines 棘轮基线上，原地加分支会超线。
+
+    转场只改成片阶段字段，不清视频；台词修订额外保留 1 个旧版本供生成台对照，其余
+    候选照旧硬删——用户 2026-09-23 拍板：视频额度不可恢复，不能无条件全删；机器
+    磁盘有限，每镜最多保留 1 个。「是否台词修订」与「保留哪一版」统一交给
+    dialogue_revision_preserved_version 判定：它会在本函数所在的调用方事务内现查
+    shots.adopted_version_id，不信 shot 参数里可能是 BEGIN IMMEDIATE 之前读到的
+    旧值（返工修的竞态：连续两次修订会把上一次保留的版本当普通候选一并删掉）。
+    """
+    if render_time_only_edit(changed_fields):
+        return {}
+    preserve_version_id = dialogue_revision_preserved_version(conn, shot_id, shot, changed_fields)
+    return stage_shot_artifact_cleanup(conn, shot_id, preserve_version_id=preserve_version_id)
 
 
 #: 能带进新人物称谓的字段。只改时段/场景标签/景别/运镜/时长/转场时，镜头里的人物名单原封不动，

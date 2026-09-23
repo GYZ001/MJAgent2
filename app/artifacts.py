@@ -14,6 +14,7 @@ from pathlib import Path
 from app import config
 from app.atomic_io import atomic_write_text
 from app.db import get_conn, new_id, now, rows_to_dicts
+from app.evidence.dialogue_revision_retention import apply_dialogue_revision_retention
 
 _CLEAR_TERMINAL_RUN_STATES = {
     "SUCCEEDED", "FAILED", "CANCELLED", "COMPLETED", "PARTIAL",
@@ -848,6 +849,7 @@ def stage_shot_artifact_cleanup(
     shot_id: str,
     *,
     active_storyboard_run_id: str | None = None,
+    preserve_version_id: str | None = None,  # 台词修订：保留这一版为 stale，不删文件
 ) -> dict:
     """Invalidate one shot in the caller transaction and defer file deletion."""
     shot = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
@@ -884,7 +886,7 @@ def stage_shot_artifact_cleanup(
     ).fetchall()
     files: list[str] = []
     for version in versions:
-        if not version["video_path"]:
+        if version["id"] == preserve_version_id or not version["video_path"]:
             continue
         video_path = Path(version["video_path"])
         files.extend([
@@ -909,15 +911,13 @@ def stage_shot_artifact_cleanup(
     )
     _delete_shot_reference_records(conn, shot_id)
     conn.execute("DELETE FROM video_boundary_assets WHERE shot_id=?", (shot_id,))
-    conn.execute("DELETE FROM shot_versions WHERE shot_id=?", (shot_id,))
+    apply_dialogue_revision_retention(conn, shot_id, preserve_version_id)
     conn.execute("DELETE FROM shot_scenes WHERE shot_id=?", (shot_id,))
     conn.execute("DELETE FROM jobs WHERE shot_id=?", (shot_id,))
     conn.execute(
-        """UPDATE shots
-              SET adopted_version_id=NULL,approved_scene_id=NULL,
-                  approved_head_scene_id=NULL,approved_tail_scene_id=NULL,
-                  scene_status='none',mode_plan=NULL
-            WHERE id=?""",
+        """UPDATE shots SET adopted_version_id=NULL,approved_scene_id=NULL,
+               approved_head_scene_id=NULL,approved_tail_scene_id=NULL,
+               scene_status='none',mode_plan=NULL WHERE id=?""",
         (shot_id,),
     )
     invalidate_episode_delivery_authority(conn, shot["episode_id"])
@@ -951,7 +951,7 @@ def stage_shot_artifact_cleanup(
     )
     return {
         "shot_id": shot_id,
-        "videos": len(versions),
+        "videos": sum(1 for v in versions if v["id"] != preserve_version_id),
         "references": references,
         "outbox_id": outbox_id,
         "cleanup_execution_token": execution_token,

@@ -11,18 +11,24 @@ import { api, type ShotVersion } from '../../api'
 
 export type AttemptAdoptability = { adoptable: boolean; reason: string }
 
+/** status='stale' 时没有专属文案（如台词修订保留）就用这句兜底——不能不提示，
+ *  否则用户看不出这一版为什么点不动。 */
+const STALE_FALLBACK_REASON = '该版本依据的分镜内容已被修订，仅供对照，不可采纳'
+
 function newIdemKey(prefix: string): string {
   const rand = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : Math.random().toString(16).slice(2)
   return `${prefix}:${rand}`
 }
 
 /** 人工采纳是最高优先级（2026-09-15 用户拍板）：有可播放视频就能采纳，字幕闸门这类质量判定
- *  只作提示不拦人；没有视频文件的（失败/生成中）才不能采纳。 */
+ *  只作提示不拦人；没有视频文件的（失败/生成中）才不能采纳。stale（台词修订/身份复核保留的
+ *  历史版本，2026-09-23 用户拍板）永远不可采纳——它依据的分镜内容已经作废。 */
 export function attemptAdoptability(
-  version: Pick<ShotVersion, 'id' | 'status' | 'video_url'>,
+  version: Pick<ShotVersion, 'id' | 'status' | 'video_url' | 'error'>,
   adoptedId: string | null | undefined,
 ): AttemptAdoptability {
   if (version.id === adoptedId) return { adoptable: false, reason: '已是采纳版本' }
+  if (version.status === 'stale') return { adoptable: false, reason: version.error || STALE_FALLBACK_REASON }
   if (!version.video_url) return { adoptable: false, reason: '该版本没有可播放的视频，只能查看记录，不能采纳' }
   return { adoptable: true, reason: '' }
 }
@@ -78,26 +84,32 @@ export default function AttemptList({
     }
   }
 
-  if (versions.length <= 1) return null
+  // 正常只有 1 个版本时不值得展示选择列表；但那 1 个如果是 stale（台词修订保留的
+  // 历史版本），必须照样露出来——否则用户在生成台完全看不到它，也不知道为什么
+  // 不能采纳（2026-09-23 用户拍板：生成台候选列表要能看到保留版本）。
+  if (versions.length === 0) return null
+  if (versions.length === 1 && versions[0].status !== 'stale') return null
   return (
     <div className="wall-attempt-list" aria-label="全部尝试">
       <b>全部尝试 · {versions.length}</b>
       <small>点选哪个版本预览，成片就采纳哪个</small>
       {versions.map(version => {
         const isAdopted = version.id === adoptedId
+        const isStale = version.status === 'stale'
         return (
           <button type="button" key={version.id}
             className={`wall-attempt-card${version.id === previewId ? ' selected' : ''}${isAdopted ? ' adopted' : ''}`}
             aria-pressed={version.id === previewId}
-            aria-label={`v${version.version_no}，${statusLabel(version.status)}${isAdopted ? '，已采纳' : ''}`}
+            aria-label={`v${version.version_no}，${isStale ? '已过期，仅供对照，不可采纳' : statusLabel(version.status)}${isAdopted ? '，已采纳' : ''}`}
             disabled={adopting != null}
             onClick={() => void select(version)}>
             <span className="wall-attempt-card-top">
               <b>v{version.version_no}</b>
-              <span className={stampClass(version.status)}>{statusLabel(version.status)}</span>
+              <span className={stampClass(version.status)}>{isStale ? '已过期' : statusLabel(version.status)}</span>
               {isAdopted && <span className="stamp ok">已采纳</span>}
               {adopting === version.id && <span className="stamp">采纳中…</span>}
             </span>
+            {isStale && <small>{version.error || STALE_FALLBACK_REASON}</small>}
           </button>
         )
       })}

@@ -194,8 +194,10 @@ export default function SegmentDialogueRevision({
           >
             <h3 id={titleId}>修订本段台词</h3>
             <p className="dialogue-revision-rule-hint">
-              只改措辞，不能增删条数、不能改发声者；原句会留档供溯源；保存后本段已生成的视频与参考图将被
-              <b>永久删除、无法恢复</b>，具体数量以下方预览为准。
+              只改措辞，不能增删条数、不能改发声者；原句会留档供溯源。保存后：修订前采用的
+              视频（没有采用版本时为上次修订保留的旧版）会转为<b>过期保留</b>（每镜最多 1 个，
+              仅供对照、不可再采纳）；其余候选视频与参考图将被<b>永久删除、无法恢复</b>；
+              具体数量以下方预览为准，保存后需重新生成本段。
             </p>
             {error && (
               <p className="field-error" role="alert">
@@ -230,7 +232,7 @@ export default function SegmentDialogueRevision({
                 校验并预览影响
               </button>
               <button type="button" className="btn danger" disabled={!canSave} onClick={() => void runSave()}>
-                确认删除并保存
+                确认保存
               </button>
             </div>
           </section>
@@ -248,6 +250,12 @@ function DialogueRevisionBody({ segment, lines, dirtyFlags, busy, onChangeLine, 
   onChangeLine: (index: number, value: string) => void
   previewResult: ShotEditImpactChanged | null
 }) {
+  // 删除数/保留数一律读后端算好的值（app/domain/storyboard_ops/shot_edit_session.py
+  // 与保存路径共用同一个 dialogue_revision_preserved_version 判据），前端不重新推算——
+  // 前端猜的话，「没有采用版本但有上一次修订保留版本」这类分支必然猜错（CLAUDE.md
+  // 「界面承诺必须与实际行为一致」）。
+  const deletedVideoCount = previewResult?.by_artifact_type['视频版本'] ?? 0
+  const retainedVideoCount = previewResult?.by_artifact_type['保留视频版本'] ?? 0
   return (
     <>
       <ul className="dialogue-revision-list">
@@ -275,12 +283,13 @@ function DialogueRevisionBody({ segment, lines, dirtyFlags, busy, onChangeLine, 
           <b>影响预览</b>
           <ul>
             <li>参考图将被永久删除 {previewResult.by_artifact_type['参考图'] ?? 0} 项</li>
-            <li>视频版本将被永久删除 {previewResult.by_artifact_type['视频版本'] ?? 0} 项</li>
+            <li>候选视频版本将被永久删除 {deletedVideoCount} 项</li>
+            {retainedVideoCount > 0 && <li>视频版本将转为过期保留 {retainedVideoCount} 项（仅供对照，不可再采纳）</li>}
             <li>证据链下游会失效 {previewResult.by_artifact_type['证据链'] ?? 0} 项</li>
           </ul>
-          {previewResult.paid_media_invalidated && (
+          {deletedVideoCount > 0 && (
             <p>
-              本段已生成的视频版本（{previewResult.by_artifact_type['视频版本'] ?? 0} 个）将被
+              本段候选视频版本（{deletedVideoCount} 个）将被
               <b>永久删除，无法恢复</b>。
             </p>
           )}

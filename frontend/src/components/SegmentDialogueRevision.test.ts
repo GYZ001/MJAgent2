@@ -49,12 +49,18 @@ const STORED_DIALOGUES = [
 ]
 
 const SESSION = { edit_session_token: 'tok-1', baseline_artifact_id: 'art-1', baseline_content_hash: 'hash-1', lease_expires_at: 999 }
-const PREVIEW = {
+// 删除数/保留数都是后端 dialogue_revision_video_counts 算好的值（本组件不再自己推算），
+// 两份夹具分别对应「没有可保留的版本」与「有 1 个转过期保留」两种后端返回形状。
+const PREVIEW_NO_RETAINED = {
   unchanged: false as const, changed_fields: ['dialogues'], normalized_changes: {},
   baseline_artifact_id: 'art-1', baseline_content_hash: 'hash-1', requires_reconfirm: true,
   paid_media_invalidated: true, stale_descendant_ids: ['d1', 'd2'], stale_count: 2,
-  by_artifact_type: { 参考图: 1, 视频版本: 2, 证据链: 2 },
+  by_artifact_type: { 参考图: 1, 视频版本: 2, 保留视频版本: 0, 证据链: 2 },
   preview_token: 'ptok-1', preview_expires_at: 999,
+}
+const PREVIEW_WITH_RETAINED = {
+  ...PREVIEW_NO_RETAINED,
+  by_artifact_type: { 参考图: 1, 视频版本: 1, 保留视频版本: 1, 证据链: 2 },
 }
 
 function mount(segment: StoryboardPackSegment) {
@@ -63,7 +69,8 @@ function mount(segment: StoryboardPackSegment) {
   let view!: TestRenderer.ReactTestRenderer
   act(() => {
     view = TestRenderer.create(createElement(SegmentDialogueRevision, {
-      shotId: 's1', segment, shotDialogues: STORED_DIALOGUES, expectedVersion: 'art-1', notify, onSaved,
+      shotId: 's1', segment, shotDialogues: STORED_DIALOGUES, expectedVersion: 'art-1',
+      notify, onSaved,
     }))
   })
   return { view, notify, onSaved }
@@ -109,28 +116,28 @@ describe('段落没有台词模板（旧产物）', () => {
 })
 
 describe('预览与保存的两段式门禁', () => {
-  it('改过一句但还没预览时，确认删除并保存保持禁用', async () => {
+  it('改过一句但还没预览时，确认保存按钮保持禁用', async () => {
     vi.mocked(startShotEditSession).mockResolvedValue(SESSION)
     const { view } = mount(SEGMENT)
     await openDialog(view)
-    expect(findButtons(view, '确认删除并保存')[0].props.disabled).toBe(true)
+    expect(findButtons(view, '确认保存')[0].props.disabled).toBe(true)
     setReason(view, '供应商合规拒收')
     editLine(view, 0, '那根线越来越粗了。')
-    expect(findButtons(view, '确认删除并保存')[0].props.disabled).toBe(true)
+    expect(findButtons(view, '确认保存')[0].props.disabled).toBe(true)
     act(() => view.unmount())
   })
 
-  it('预览通过后再改一句，预览作废、确认删除并保存重新变禁用', async () => {
+  it('预览通过后再改一句，预览作废、确认保存按钮重新变禁用', async () => {
     vi.mocked(startShotEditSession).mockResolvedValue(SESSION)
-    vi.mocked(previewShotEditImpact).mockResolvedValue(PREVIEW)
+    vi.mocked(previewShotEditImpact).mockResolvedValue(PREVIEW_NO_RETAINED)
     const { view } = mount(SEGMENT)
     await openDialog(view)
     setReason(view, '供应商合规拒收')
     editLine(view, 0, '那根线越来越粗了。')
     await clickButton(view, '校验并预览影响')
-    expect(findButtons(view, '确认删除并保存')[0].props.disabled).toBe(false)
+    expect(findButtons(view, '确认保存')[0].props.disabled).toBe(false)
     editLine(view, 1, '还不是时机。')
-    expect(findButtons(view, '确认删除并保存')[0].props.disabled).toBe(true)
+    expect(findButtons(view, '确认保存')[0].props.disabled).toBe(true)
     act(() => view.unmount())
   })
 })
@@ -138,14 +145,14 @@ describe('预览与保存的两段式门禁', () => {
 describe('409 防护：保存的 patch 必须与预览的 changes 逐字相同', () => {
   it('PUT 的 dialogues 与 POST 的 changes.dialogues 深度相等', async () => {
     vi.mocked(startShotEditSession).mockResolvedValue(SESSION)
-    vi.mocked(previewShotEditImpact).mockResolvedValue(PREVIEW)
+    vi.mocked(previewShotEditImpact).mockResolvedValue(PREVIEW_NO_RETAINED)
     vi.mocked(updateShot).mockResolvedValue({ ok: true, artifact_id: 'art-2', impact: {} })
     const { view, notify, onSaved } = mount(SEGMENT)
     await openDialog(view)
     setReason(view, '供应商合规拒收')
     editLine(view, 0, '那根线越来越粗了。')
     await clickButton(view, '校验并预览影响')
-    await clickButton(view, '确认删除并保存')
+    await clickButton(view, '确认保存')
 
     const previewCall = vi.mocked(previewShotEditImpact).mock.calls[0]
     const updateCall = vi.mocked(updateShot).mock.calls[0]
@@ -167,20 +174,24 @@ describe('409 防护：保存的 patch 必须与预览的 changes 逐字相同',
   })
 })
 
-describe('P0：确认框措辞与实际删除行为一致', () => {
-  it('打开即可见的规则提示说的是永久删除，不是「失效」', async () => {
+describe('P0：确认框措辞与实际删除行为一致（2026-09-23 返工：计数一律读后端，不前端推算）', () => {
+  it('静态规则提示不依赖是否有采用版本——组件已经不接收 adoptedVersionId，写成如实的通用表述', async () => {
     vi.mocked(startShotEditSession).mockResolvedValue(SESSION)
     const { view } = mount(SEGMENT)
     await openDialog(view)
     const hint = view.root.findAll(n => n.props.className === 'dialogue-revision-rule-hint')[0]
-    expect(textOf(hint)).toContain('永久删除、无法恢复')
-    expect(textOf(hint)).not.toContain('失效')
+    const text = textOf(hint)
+    expect(text).toContain('过期保留')
+    expect(text).toContain('每镜最多 1 个')
+    expect(text).toContain('不可再采纳')
+    expect(text).toContain('永久删除、无法恢复')
+    expect(text).not.toContain('失效')
     act(() => view.unmount())
   })
 
-  it('预览影响改用「将被永久删除」，付费视频提示带上具体版本数', async () => {
+  it('后端预览给出保留视频版本=0 时：全部计入删除，不出现「过期保留」行', async () => {
     vi.mocked(startShotEditSession).mockResolvedValue(SESSION)
-    vi.mocked(previewShotEditImpact).mockResolvedValue(PREVIEW)
+    vi.mocked(previewShotEditImpact).mockResolvedValue(PREVIEW_NO_RETAINED)
     const { view } = mount(SEGMENT)
     await openDialog(view)
     setReason(view, '供应商合规拒收')
@@ -190,20 +201,40 @@ describe('P0：确认框措辞与实际删除行为一致', () => {
     const impact = view.root.findAll(n => n.props.className === 'review-impact danger')[0]
     const text = textOf(impact)
     expect(text).toContain('参考图将被永久删除 1 项')
-    expect(text).toContain('视频版本将被永久删除 2 项')
+    expect(text).toContain('候选视频版本将被永久删除 2 项')
     // 证据链下游只是标 stale、不删记录（app/evidence/repository.py），措辞不能跟着改。
     expect(text).toContain('证据链下游会失效 2 项')
-    expect(text).toContain('本段已生成的视频版本（2 个）将被')
+    expect(text).not.toContain('过期保留')
+    expect(text).toContain('本段候选视频版本（2 个）将被')
     expect(text).toContain('永久删除，无法恢复')
     act(() => view.unmount())
   })
 
-  it('确认按钮文案体现后果，不再是中性的「确认保存」', async () => {
+  it('后端预览给出保留视频版本=1 时：直接显示后端算好的删除数/保留数，组件不再自己相减', async () => {
+    vi.mocked(startShotEditSession).mockResolvedValue(SESSION)
+    vi.mocked(previewShotEditImpact).mockResolvedValue(PREVIEW_WITH_RETAINED)
+    const { view } = mount(SEGMENT)
+    await openDialog(view)
+    setReason(view, '供应商合规拒收')
+    editLine(view, 0, '那根线越来越粗了。')
+    await clickButton(view, '校验并预览影响')
+
+    const impact = view.root.findAll(n => n.props.className === 'review-impact danger')[0]
+    const text = textOf(impact)
+    // PREVIEW_WITH_RETAINED 夹具：视频版本=1（后端已扣掉保留项）、保留视频版本=1。
+    expect(text).toContain('候选视频版本将被永久删除 1 项')
+    expect(text).toContain('视频版本将转为过期保留 1 项')
+    expect(text).toContain('仅供对照，不可再采纳')
+    expect(text).toContain('本段候选视频版本（1 个）将被')
+    act(() => view.unmount())
+  })
+
+  it('确认按钮文案是中性的「确认保存」——保存不再必然等于「全删」', async () => {
     vi.mocked(startShotEditSession).mockResolvedValue(SESSION)
     const { view } = mount(SEGMENT)
     await openDialog(view)
-    expect(findButtons(view, '确认保存').length).toBe(0)
-    expect(findButtons(view, '确认删除并保存').length).toBe(1)
+    expect(findButtons(view, '确认保存').length).toBe(1)
+    expect(findButtons(view, '确认删除并保存').length).toBe(0)
     act(() => view.unmount())
   })
 })

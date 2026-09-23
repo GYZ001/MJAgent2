@@ -9,6 +9,7 @@ import json
 from app.db import get_conn
 from app.domain.common import router
 from app.evidence import repository as evidence_repository
+from app.evidence.dialogue_revision_retention import dialogue_revision_video_counts
 from fastapi import HTTPException
 
 from .mutation_primitives import (
@@ -79,12 +80,10 @@ def preview_shot_edit_impact(shot_id: str, body: dict):
             "changed_fields": [],
             "message": "结构化内容没有变化，不会创建新版本或失效下游",
         }
-    version_count = int(conn.execute(
-        "SELECT COUNT(*) AS c FROM shot_versions WHERE shot_id=?", (shot_id,),
-    ).fetchone()["c"])
-    scene_count = int(conn.execute(
-        "SELECT COUNT(*) AS c FROM shot_scenes WHERE shot_id=?", (shot_id,),
-    ).fetchone()["c"])
+    version_count = int(conn.execute("SELECT COUNT(*) FROM shot_versions WHERE shot_id=?", (shot_id,)).fetchone()[0])
+    scene_count = int(conn.execute("SELECT COUNT(*) FROM shot_scenes WHERE shot_id=?", (shot_id,)).fetchone()[0])
+    deleted_video_count, retained_video_count = dialogue_revision_video_counts(
+        conn, shot_id, shot, changed_fields, version_count)
     descendants: list[dict] = []
     if shot.get("storyboard_artifact_id"):
         descendants = evidence_repository.get_lineage(shot["storyboard_artifact_id"]).get("descendants") or []
@@ -95,12 +94,13 @@ def preview_shot_edit_impact(shot_id: str, body: dict):
         "baseline_artifact_id": session.get("baseline_artifact_id"),
         "baseline_content_hash": session["baseline_content_hash"],
         "requires_reconfirm": True,
-        "paid_media_invalidated": bool(version_count or scene_count),
+        "paid_media_invalidated": bool(deleted_video_count or scene_count),
         "stale_descendant_ids": [str(item["id"]) for item in descendants if item.get("status") != "stale"],
         "stale_count": len(descendants),
         "by_artifact_type": {
             "参考图": scene_count,
-            "视频版本": version_count,
+            "视频版本": deleted_video_count,
+            "保留视频版本": retained_video_count,
             "证据链": len(descendants),
         },
         "revalidation_shots": sorted({max(1, int(shot["shot_no"]) - 1), int(shot["shot_no"]), int(shot["shot_no"]) + 1}),
