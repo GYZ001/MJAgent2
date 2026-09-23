@@ -5,6 +5,7 @@ maps each resulting chapter to exactly one episode without an LLM.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import shutil
@@ -115,10 +116,54 @@ def _raise_replan_active_work(blockers: dict[str, Any]) -> None:
     })
 
 
-async def run_regex_plan(project_id: str) -> None:
-    """Replace a project's plan with one episode per regex-split chapter."""
-    conn = get_conn()
-    committed = False
+def _insert_regex_plan_episodes(conn, project_id: str, chapters: list[dict]) -> None:
+    """按章节顺序整体替换本项目的剧集行；从 ``_replace_regex_plan`` 拆出纯粹是
+    为了单函数不超 50 代码行，不是独立的事务边界——调用方已持有 ``BEGIN
+    IMMEDIATE`` 写锁，这里不再自行开事务/提交。"""
+    conn.execute("DELETE FROM episodes WHERE project_id=?", (project_id,))
+    for episode_no, chapter in enumerate(chapters, start=1):
+        conn.execute(
+            "INSERT INTO episodes(id, project_id, episode_no, title, hook, cliffhanger, synopsis, "
+            "source_chapters, target_duration_s, status, created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?, 'planned', ?)",
+            (
+                new_id("ep"), project_id, episode_no,
+                chapter["title"] or f"第{chapter['idx']}章", "", "",
+                chapter_preview(chapter["content"]), json.dumps([chapter["idx"]]),
+                config.EPISODE_TARGET_DEFAULT_S, now(),
+            ),
+        )
+    conn.execute(
+        "UPDATE projects SET plan_status='ready', plan_error=NULL, key_timeline='[]', "
+        "status='planned' WHERE id=?", (project_id,)
+    )
+
+
+def _finalize_regex_plan_failure(conn, project_id: str, exc: Exception) -> None:
+    """两条失败分支共用的收尾：调用方已经把 ``conn.rollback()`` 作为异常处理器
+    第一条语句执行过，这里只负责把 plan_status 写回 failed 并独立提交——这条
+    UPDATE 不属于被回滚的那个事务。"""
+    if isinstance(exc, ReplanActiveWorkError):
+        message = (
+            "重新分集未执行：检测到仍可继续或正在运行的下游任务。"
+            "请先在对应工作台或任务中心结束、取消任务后重试；原分集和媒体均已保留。"
+        )
+    else:
+        # Episode inserts and the final project status share one transaction.
+        # Never expose a failed plan together with a partial episode list.
+        message = errors.record_and_format(
+            exc, action="plan_generate", context={"project_id": project_id}
+        )
+    conn.execute(
+        "UPDATE projects SET plan_status='failed', plan_error=? WHERE id=?",
+        (message, project_id),
+    )
+    conn.commit()
+
+
+def _replace_regex_plan(conn, project_id: str) -> bool:
+    """一次 ``BEGIN IMMEDIATE`` 事务内校验没有下游在跑、再整体替换分集。
+    返回是否提交成功；失败时已经把 plan_status 写回 failed 并各自提交。"""
     try:
         chapters = rows_to_dicts(conn.execute(
             "SELECT * FROM chapters WHERE project_id=? ORDER BY idx", (project_id,)
@@ -135,51 +180,18 @@ async def run_regex_plan(project_id: str) -> None:
         blockers = replan_blockers(conn, project_id)
         if blockers["blocked"]:
             raise ReplanActiveWorkError(blockers)
-        conn.execute("DELETE FROM episodes WHERE project_id=?", (project_id,))
-        for episode_no, chapter in enumerate(chapters, start=1):
-            conn.execute(
-                "INSERT INTO episodes(id, project_id, episode_no, title, hook, cliffhanger, synopsis, "
-                "source_chapters, target_duration_s, status, created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?, 'planned', ?)",
-                (
-                    new_id("ep"), project_id, episode_no,
-                    chapter["title"] or f"第{chapter['idx']}章", "", "",
-                    chapter_preview(chapter["content"]), json.dumps([chapter["idx"]]),
-                    config.EPISODE_TARGET_DEFAULT_S, now(),
-                ),
-            )
-        conn.execute(
-            "UPDATE projects SET plan_status='ready', plan_error=NULL, key_timeline='[]', "
-            "status='planned' WHERE id=?", (project_id,)
-        )
+        _insert_regex_plan_episodes(conn, project_id, chapters)
         conn.commit()
-        committed = True
-    except ReplanActiveWorkError:
+        return True
+    except Exception as exc:  # noqa: BLE001 -- task failures (incl. ReplanActiveWorkError) must be persisted for the UI
         conn.rollback()
-        conn.execute(
-            "UPDATE projects SET plan_status='failed', plan_error=? WHERE id=?",
-            (
-                "重新分集未执行：检测到仍可继续或正在运行的下游任务。"
-                "请先在对应工作台或任务中心结束、取消任务后重试；原分集和媒体均已保留。",
-                project_id,
-            ),
-        )
-        conn.commit()
-    except Exception as exc:  # noqa: BLE001 -- task failures must be persisted for the UI
-        # Episode inserts and the final project status share one transaction.
-        # Never expose a failed plan together with a partial episode list.
-        conn.rollback()
-        public = errors.record_and_format(
-            exc, action="plan_generate", context={"project_id": project_id}
-        )
-        conn.execute(
-            "UPDATE projects SET plan_status='failed', plan_error=? WHERE id=?",
-            (public, project_id),
-        )
-        conn.commit()
-    if not committed:
-        return
+        _finalize_regex_plan_failure(conn, project_id, exc)
+        return False
 
+
+def _cleanup_regex_plan_episode_media(conn, project_id: str) -> None:
+    """数据库替换已提交后才清理旧集媒体目录；失败不影响新分集本身，只在项目
+    上追加一句可重试的提示。"""
     episode_dir = config.PROJECTS_DIR / project_id / "episodes"
     if not episode_dir.exists():
         return
@@ -200,6 +212,33 @@ async def run_regex_plan(project_id: str) -> None:
             ),
         )
         conn.commit()
+
+
+def _run_regex_plan_sync(project_id: str) -> None:
+    """``run_regex_plan`` 的同步重活本体，离开事件循环线程执行（照抄
+    ``app/capabilities/handlers/delivery.py::_concatenate_in_thread`` 的写法）。
+    此前这个函数整段是 ``async def`` 但体内一次 ``await`` 都没有——协程一旦被
+    ``task_registry.spawn`` 调度就会不间断跑到底，等价于把「整项目分集替换
+    事务 + 递归 rmtree」直接焊在事件循环线程上，与 2026-09-15 合成冻结后端
+    122 秒同一类根因。
+
+    连接归属：``get_conn()`` 在这个工作线程里没有正在运行的 asyncio task，走
+    线程本地分支，拿到的是**这个线程自己的连接**；调用方 ``run_regex_plan``
+    在进入线程前没有任何数据库动作，不存在"调用方连接遗留未提交写"的问题。
+    这条连接从获取到最终提交/回滚全程只在本函数（及其拆出的 helper）内使用。
+    """
+    conn = get_conn()
+    if _replace_regex_plan(conn, project_id):
+        _cleanup_regex_plan_episode_media(conn, project_id)
+
+
+async def run_regex_plan(project_id: str) -> None:
+    """Replace a project's plan with one episode per regex-split chapter.
+
+    整个函数体是同步的 DB 事务 + 文件清理，``await asyncio.to_thread`` 把它
+    移出事件循环线程；实现与连接归属见 ``_run_regex_plan_sync``。
+    """
+    await asyncio.to_thread(_run_regex_plan_sync, project_id)
 
 
 def recover_plan_tasks() -> int:

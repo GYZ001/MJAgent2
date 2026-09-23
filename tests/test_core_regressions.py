@@ -637,7 +637,7 @@ def test_observability_log_retention_keeps_active_calls() -> None:
 
 
 def test_regex_planner_creates_exactly_one_episode_per_chapter(monkeypatch) -> None:
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:", check_same_thread=False)  # run_regex_plan 现在跑在 asyncio.to_thread 的工作线程里，见 _run_regex_plan_sync
     conn.row_factory = sqlite3.Row
     conn.executescript(
         """
@@ -677,7 +677,7 @@ def test_regex_planner_creates_exactly_one_episode_per_chapter(monkeypatch) -> N
 def test_regex_replan_skips_existing_title_only_duplicate_and_cleans_media(
     tmp_path, monkeypatch,
 ) -> None:
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(
         """
@@ -737,7 +737,7 @@ def test_regex_replan_skips_existing_title_only_duplicate_and_cleans_media(
 def test_regex_planner_rolls_back_to_old_plan_and_keeps_media(
     tmp_path, monkeypatch,
 ) -> None:
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(
         """

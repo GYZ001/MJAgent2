@@ -1,6 +1,7 @@
 """项目回收站生命周期：软删除、恢复、彻底清理（单个/全部/到期自动）。"""
 from __future__ import annotations
 
+import asyncio
 import shutil
 
 from fastapi import HTTPException
@@ -123,33 +124,30 @@ async def _restore_project_core(project_id: str) -> dict:
     return {"restored": project_id}
 
 
-async def _purge_project_core(project_id: str) -> dict:
-    """彻底清理：只对已在回收站的项目生效，物理删除数据库行与磁盘产物。
+def _purge_project_sync(project_id: str) -> dict[str, int]:
+    """彻底清理的同步重活：数据库删除事务 + ``shutil.rmtree``，离开事件循环线程
+    执行（照抄 ``app/capabilities/handlers/delivery.py::_concatenate_in_thread``
+    的写法——2026-09-15 实测过同类同步重活焊在事件循环线程上会冻结整个后端
+    122 秒；这里是整项目 DB 删除事务 + 递归 rmtree + 逐镜头文件删除，同一类风险）。
 
-    破坏性操作的原子性：数据库删除全部提交成功之后才执行 ``shutil.rmtree``；
+    连接归属：这里调用 ``get_conn()`` 时没有正在运行的 asyncio task（本函数由
+    ``asyncio.to_thread`` 派到一个独立工作线程执行），``get_conn()`` 走的是
+    线程本地分支，拿到的是**这个工作线程自己的连接**，与调用方
+    ``_purge_project_core`` 在事件循环上持有的 task 连接不是同一条。调用方
+    进入这个线程前只做过只读查询和各自内部已提交/回滚的对账调用
+    （``reconcile_project_provider_tasks_for_clear``、
+    ``assert_provider_tasks_clearable``——两者内部各自 ``BEGIN IMMEDIATE``/
+    ``commit``/``rollback``，返回时不留未提交的写），task 连接上没有遗留状态；
+    本函数也完全不读那条连接，事务从这里的 ``conn`` 重新开始，自己提交或
+    回滚（回滚是异常处理器第一条语句）。
+
+    原子性与改动前一致：数据库删除全部提交成功之后才执行 ``shutil.rmtree``；
     数据库提交失败（异常/回滚）时磁盘上一个文件都不会被动。反过来的顺序
     （先删文件）一旦中途失败，会把仍在数据库里的行指向已经消失的文件——
     比"删除慢了一步但数据完好"更危险。
     """
-    from app.completion_grant import (
-        assert_provider_tasks_clearable,
-        prepare_provider_tasks_for_clear,
-        reconcile_project_provider_tasks_for_clear,
-    )
+    from app.completion_grant import prepare_provider_tasks_for_clear
 
-    project = _deleted_project_or_404(project_id)
-    provider_reconciliation = await reconcile_project_provider_tasks_for_clear(
-        project_id,
-        conn=get_conn(),
-        evidence_source="project_purge_terminal_reconcile",
-    )
-    assert_provider_tasks_clearable(
-        project_id=project_id,
-        conn=get_conn(),
-    )
-    # 软删除时已经取消过一轮；这里再取消一次是防御性的（例如用户在软删除后
-    # 短暂恢复、又发起新任务、又再次软删除的场景），不是重复劳动的赘余。
-    cancelled_tasks = await task_registry.cancel_project(project_id)
     conn = get_conn()
     try:
         prepare_provider_tasks_for_clear(
@@ -182,6 +180,36 @@ async def _purge_project_core(project_id: str) -> dict:
             conn.rollback()
         raise
     shutil.rmtree(config.PROJECTS_DIR / project_id, ignore_errors=True)
+    return evidence_removed
+
+
+async def _purge_project_core(project_id: str) -> dict:
+    """彻底清理：只对已在回收站的项目生效，物理删除数据库行与磁盘产物。
+
+    取消在途任务这段 await 留在事件循环上；实际的数据库删除事务与
+    ``shutil.rmtree`` 是同步重活，交给 ``_purge_project_sync`` 在
+    ``asyncio.to_thread`` 派生的独立线程里跑——连接归属与原子性说明见该
+    函数 docstring。
+    """
+    from app.completion_grant import (
+        assert_provider_tasks_clearable,
+        reconcile_project_provider_tasks_for_clear,
+    )
+
+    project = _deleted_project_or_404(project_id)
+    provider_reconciliation = await reconcile_project_provider_tasks_for_clear(
+        project_id,
+        conn=get_conn(),
+        evidence_source="project_purge_terminal_reconcile",
+    )
+    assert_provider_tasks_clearable(
+        project_id=project_id,
+        conn=get_conn(),
+    )
+    # 软删除时已经取消过一轮；这里再取消一次是防御性的（例如用户在软删除后
+    # 短暂恢复、又发起新任务、又再次软删除的场景），不是重复劳动的赘余。
+    cancelled_tasks = await task_registry.cancel_project(project_id)
+    evidence_removed = await asyncio.to_thread(_purge_project_sync, project_id)
     return {
         "purged": project_id,
         "name": project["name"],
