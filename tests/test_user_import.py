@@ -130,6 +130,14 @@ def test_four_way_classification_and_apply(client: TestClient, admin_headers: di
     # error 行没有被创建成账号。
     assert "huaishu" not in users
 
+    # create 行里的 team/role 不只是回显字段，真的写进了 team_members。
+    membership = conn.execute(
+        "SELECT role_id FROM team_members WHERE team_id=? AND user_id=?",
+        (team_id, users["zhangsan"]["id"]),
+    ).fetchone()
+    assert membership is not None, "CSV 里指定了 team/role 的 create 行必须落 team_members"
+    assert membership["role_id"] == viewer_role["id"]
+
 
 def test_duplicate_username_in_batch_is_error_for_all_occurrences(client: TestClient, admin_headers: dict):
     text = (

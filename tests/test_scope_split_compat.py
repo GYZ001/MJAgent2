@@ -13,7 +13,6 @@ import asyncio
 import pytest
 
 from app.capabilities.loader import ensure_catalog_loaded
-from app.capabilities.registry import get_registry
 from app.mcp import auth as mcp_auth
 from app.mcp import tools as mcp_tools
 from app.mcp.errors import ForbiddenError
