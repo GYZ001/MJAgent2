@@ -18,6 +18,7 @@ from app.novel_formats import (
 )
 from app.orgs import schema as orgs_schema
 from app.orgs import store as orgs_store
+from app.project_settings import ASPECT_RATIOS
 
 
 async def _read_novel_upload(file: UploadFile) -> tuple[str, bytes]:
@@ -142,12 +143,40 @@ def _creation_ownership(conn) -> tuple[str, str]:
     return _creation_owner_user_id(), _creation_org_id()
 
 
+def _resolved_creation_aspect_ratio(aspect_ratio: str | None) -> str:
+    """新建项目的画幅：请求值或默认 "9:16"；非法值 422（与 120 字项目名同一口径，
+    不走 app.project_settings.update_project_settings 的 ValueError/409——那是
+    「改已存在项目」的口径，创建流程里的输入校验一律 422）。"""
+    resolved = aspect_ratio or "9:16"
+    if resolved not in ASPECT_RATIOS:
+        raise HTTPException(422, f"不支持的画幅：{resolved}")
+    return resolved
+
+
+def _novel_import_outcome(project_id: str, filename: str, report: dict) -> dict:
+    """导入结果摘要：project_id + 章节统计 + 来源格式，供落库前占位与幂等回执共用。"""
+    return {
+        "project_id": project_id,
+        "ingestion": {
+            key: report[key]
+            for key in (
+                "total_chars",
+                "removed_lines",
+                "chapter_count",
+                "deduplicated_stub_chapters",
+                "auto_split",
+            )
+        } | {"source_format": novel_file_suffix(filename).lstrip(".").upper()},
+    }
+
+
 def _create_project_core(
     name: str | None,
     filename: str,
     raw: bytes,
     *,
     import_token_hash: str | None = None,
+    aspect_ratio: str | None = None,
 ) -> dict:
     """导入小说的领域逻辑，供 REST 路由与 ``project.import_novel`` Command Handler 共用。"""
     if not raw:
@@ -166,23 +195,12 @@ def _create_project_core(
     project_name = (name or "").strip() or fallback_name
     if len(project_name) > 120:
         raise HTTPException(422, "项目名称不能超过 120 个字符")
+    resolved_aspect_ratio = _resolved_creation_aspect_ratio(aspect_ratio)
     if import_token_hash:
         existing = _novel_import_receipt(import_token_hash)
         if existing is not None:
             return existing
-    outcome = {
-        "project_id": project_id,
-        "ingestion": {
-            key: report[key]
-            for key in (
-                "total_chars",
-                "removed_lines",
-                "chapter_count",
-                "deduplicated_stub_chapters",
-                "auto_split",
-            )
-        } | {"source_format": novel_file_suffix(filename).lstrip(".").upper()},
-    }
+    outcome = _novel_import_outcome(project_id, filename, report)
     try:
         if conn.in_transaction:
             conn.commit()
@@ -193,9 +211,11 @@ def _create_project_core(
         ).fetchone()["c"]
         quota.check_project_slot(conn, owner_user_id, active_count=int(active_projects))
         conn.execute(
-            "INSERT INTO projects(id, name, status, novel_chars, created_at, owner_user_id, org_id) "
-            "VALUES(?,?,'ingested',?,?,?,?)",
-            (project_id, project_name, report["total_chars"], now(), owner_user_id, org_id))
+            "INSERT INTO projects(id, name, status, novel_chars, created_at, owner_user_id, org_id, "
+            "adaptation_mode, aspect_ratio, ai_label_enabled) "
+            "VALUES(?,?,'ingested',?,?,?,?,'short_drama',?,0)",
+            (project_id, project_name, report["total_chars"], now(), owner_user_id, org_id,
+             resolved_aspect_ratio))
         # ingest_novel 已经算好本章的小节边界（app.novel.structure._extract_sections），
         # 装在 ch["paratext_json"] 里；此前这里没写这一列，小节信息落地即丢——见
         # app/source_paratext.py::chapter_paratext_offsets 的合并写入注释。
@@ -244,6 +264,7 @@ async def create_project(
     name: str = Form(...),
     file: UploadFile = File(...),
     style_name: str | None = Form(default=None),
+    aspect_ratio: str | None = Form(default=None),
 ):
     """页面上传入口：内部换发 attachment_token 后统一走 Command Bus，与 Agent/MCP 同一实现。"""
     from app.capabilities.attachments import store_upload
@@ -257,6 +278,7 @@ async def create_project(
             "attachment_token": token,
             "name": name,
             "style_name": style_name,
+            "aspect_ratio": aspect_ratio,
             "idempotency_key": f"novel-import:{token}",
         },
         initiator="ui",
@@ -269,6 +291,7 @@ async def create_project_from_attachment(
     attachment_token: str = Body(...),
     name: str | None = Body(default=None),
     style_name: str | None = Body(default=None),
+    aspect_ratio: str | None = Body(default=None),
 ):
     """用已上传的附件令牌导入小说，确保批准前后的命令参数保持不变。"""
     from app.capabilities.dispatch import dispatch, respond_ui
@@ -279,6 +302,7 @@ async def create_project_from_attachment(
             "attachment_token": attachment_token,
             "name": name,
             "style_name": style_name,
+            "aspect_ratio": aspect_ratio,
             # The one-time attachment token is unique for this import. Reusing
             # it as the command key makes response-loss retries replay-safe.
             "idempotency_key": f"novel-import:{attachment_token}",

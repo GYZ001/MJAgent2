@@ -402,6 +402,10 @@ EPISODE_TARGET_DEFAULT_S = 50
 EPISODE_TARGET_STEP_S = 10  # 用户输入是最低节奏参考；生成后只允许按实际容量向上扩展
 # 常用建议值仅供 UI 快捷输入，不构成合法值上限。
 EPISODE_TARGET_CHOICES = tuple(range(EPISODE_TARGET_MIN_S, 181, EPISODE_TARGET_STEP_S))
+# 短剧档单集目标时长，约 6 段 × 15 秒；依据：抖音单集 ≤3 分钟、建议 1 分 30 秒
+# （docs/AI批量成片对标小云雀人工_差距分析与迭代方案_2026-09-23.md G6）。不复用
+# EPISODE_TARGET_MIN_S——那是剧本生成前的下限、不设上限，语义相反（本值是目标值）。
+SHORT_DRAMA_TARGET_DURATION_S = 90
 # 口播预算（纯文字、不计标点）：5 秒 18 字，按每 5 秒 18 字线性换算到 VIDEO_DURATION_MAX_S
 # （当前 15 秒 54 字）。超过 VIDEO_DURATION_MAX_S 所能承载的口播仍必须拆镜，不能靠延长
 # duration_s 合并不同节拍。

@@ -15,6 +15,9 @@ class ProjectImportNovelInput(StandardCommandInput):
     #: 世界观判定按 DEFAULT_VISUAL_STYLE_NAME 兜底。2026-08-31 用户拍板：画风
     #: 选择挪到导入项目时一次性定下，人物谱/场景库不再提供换风格入口。
     style_name: str | None = None
+    #: 画幅（"9:16"/"16:9"）；省略时按 app.project_settings.ASPECT_RATIOS 默认
+    #: "9:16"。2026-09-23 新增：项目级设置三项之一，见 app.project_settings。
+    aspect_ratio: str | None = None
 
 
 class ProjectDeleteInput(StandardCommandInput):
@@ -31,6 +34,17 @@ class ProjectPurgeInput(StandardCommandInput):
 
 class ProjectPurgeAllInput(StandardCommandInput):
     pass
+
+
+class ProjectUpdateSettingsInput(StandardCommandInput):
+    """项目设置部分更新（2026-09-23 新增）：改编强度档位/画幅/AI 标识，三字段皆可选，
+    只更新传了的字段。合法值集合见 app.project_settings（ADAPTATION_MODES/ASPECT_RATIOS）。
+    """
+
+    project_id: str
+    adaptation_mode: str | None = None
+    aspect_ratio: str | None = None
+    ai_label_enabled: bool | None = None
 
 
 class AccountSelfDeleteInput(StandardCommandInput):

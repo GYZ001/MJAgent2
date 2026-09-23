@@ -1839,6 +1839,9 @@ MIGRATIONS = (
            updated_at REAL NOT NULL,
            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
        )""",
+    "ALTER TABLE projects ADD COLUMN adaptation_mode TEXT NOT NULL DEFAULT 'faithful'",  # 改编强度档位：faithful=忠实（存量默认，行为不变）/short_drama=短剧节奏（新建项目默认，2026-09-23 用户拍板）
+    "ALTER TABLE projects ADD COLUMN aspect_ratio TEXT NOT NULL DEFAULT '9:16'",  # 画幅：9:16/16:9，存量与新建都默认 9:16
+    "ALTER TABLE projects ADD COLUMN ai_label_enabled INTEGER NOT NULL DEFAULT 0",  # AI 生成内容标识，存量与新建都默认关闭
 )
 
 

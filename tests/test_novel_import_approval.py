@@ -417,7 +417,11 @@ def test_create_project_rolls_back_partial_rows(monkeypatch) -> None:
             -- 同理：建项目现在显式写入组织归属（见
             -- app/domain/projects/create.py:_creation_org_id，修组织维度悄悄
             -- 失效的缺口），缺这列同样会把 OperationalError 误判成"回滚生效"。
-            org_id TEXT
+            org_id TEXT,
+            -- 同理：2026-09-23 新增项目级设置三列（见 app/domain/projects/
+            -- create.py:_create_project_core 的 INSERT 与 app.project_settings），
+            -- 缺这三列同样会把 OperationalError 误判成"回滚生效"。
+            adaptation_mode TEXT, aspect_ratio TEXT, ai_label_enabled INTEGER
         );
         CREATE TABLE chapters(
             id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -46,7 +46,7 @@ async def import_novel(args: I.ProjectImportNovelInput) -> CommandResult:
                 args.name,
                 filename,
                 raw,
-                import_token_hash=token_hash,
+                import_token_hash=token_hash, aspect_ratio=args.aspect_ratio,
             )
         except BaseException:
             attachments.release(args.attachment_token)
@@ -178,3 +178,25 @@ async def purge_all_deleted_projects(args: I.ProjectPurgeAllInput) -> CommandRes
         + (f"，{len(outcome['failed'])} 个失败待重试" if outcome["failed"] else ""),
         data=outcome,
     )
+
+
+async def update_settings(args: I.ProjectUpdateSettingsInput) -> CommandResult:
+    """更新项目设置（改编强度档位/画幅/AI 标识）；同 ``series.*`` handler 写法：
+    直接调用同名 REST 路由函数，``ui_route`` 在 Handler 执行期短路返回 None。"""
+    # 延迟导入：app.domain.* 与本文件其余 handler 一律 `from app import api` 延迟
+    # 导入同一顾虑——app.domain 包 __init__ 是大再导出门面，模块级导入会与
+    # app.capabilities.handlers 成环。
+    from app.domain.projects import listing as project_listing
+
+    outcome = await call_guarded(
+        project_listing.set_project_settings,
+        args.project_id,
+        {
+            "adaptation_mode": args.adaptation_mode,
+            "aspect_ratio": args.aspect_ratio,
+            "ai_label_enabled": args.ai_label_enabled,
+        },
+    )
+    if isinstance(outcome, CommandResult):
+        return outcome
+    return succeeded("项目设置已更新", data=outcome)

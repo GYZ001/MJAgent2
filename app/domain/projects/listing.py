@@ -1,7 +1,7 @@
 """项目/回收站列表、按段文本模型设置、单章节正文读取。"""
 from __future__ import annotations
 
-from fastapi import HTTPException
+from fastapi import Body, HTTPException
 
 from app.db import get_conn, now, rows_to_dicts
 from app.domain.common import (
@@ -11,6 +11,7 @@ from app.domain.common import (
     router,
 )
 from app.domain.projects.constants import PROJECT_RECYCLE_BIN_RETENTION_S
+from app.project_settings import update_project_settings
 
 
 def _listing_owner_scope() -> str | None:
@@ -34,7 +35,8 @@ def list_projects():
     owner = _listing_owner_scope()
     if owner is not None:
         rows = rows_to_dicts(conn.execute(
-            "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at "
+            "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at, "
+            "adaptation_mode, aspect_ratio, ai_label_enabled "
             "FROM projects WHERE deleted_at IS NULL AND owner_user_id=? ORDER BY created_at DESC",
             (owner,),
         ).fetchall())
@@ -44,7 +46,8 @@ def list_projects():
         # see every project; the marker inside the SQL text is what
         # tests/test_project_ownership_query_guard.py actually looks for.
         rows = rows_to_dicts(conn.execute(
-            "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at "
+            "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at, "
+            "adaptation_mode, aspect_ratio, ai_label_enabled "
             "FROM projects -- ALL_OWNERS: system admin / internal caller\n"
             "WHERE deleted_at IS NULL ORDER BY created_at DESC").fetchall())
     _recover_orphan_bible_dicts(conn, rows)
@@ -132,6 +135,51 @@ def set_project_text_models(project_id: str, body: dict):
     )
     conn.commit()
     return {"project_id": project_id, **updates}
+
+
+@router.put("/projects/{project_id}/settings")
+async def set_project_settings(project_id: str, body: dict = Body(...)):
+    """项目设置部分更新：改编强度档位（faithful/short_drama）/ 画幅（9:16/16:9）/
+    AI 标识开关；body 只需带想改的字段。REST 路由与 ``project.update_settings``
+    Command Handler 共用（``ui_route`` 短路复用，见 ``app.orchestration.api.
+    set_project_engine`` 同款写法：Handler 执行期经 ``in_handler()`` 短路回本函数
+    直接跑领域逻辑，不二次进入 Command Bus）。
+    """
+    # 延迟导入：app.capabilities.dispatch 经 bus/catalog 反向 import 本包（命令
+    # 注册会 import app.capabilities.handlers.project，它又 import 本模块），
+    # 模块级导入会成环，与 app.orchestration.api.set_project_engine 同一顾虑。
+    from app.capabilities.dispatch import ui_route
+
+    body = _as_body_dict(body)
+    routed = await ui_route(
+        "project.update_settings",
+        {
+            "project_id": project_id,
+            "adaptation_mode": body.get("adaptation_mode"),
+            "aspect_ratio": body.get("aspect_ratio"),
+            "ai_label_enabled": body.get("ai_label_enabled"),
+        },
+    )
+    if routed is not None:
+        return routed
+    _project_or_404(project_id)  # 归属校验：Command Handler 直调路径没有 HTTP 边界的 require_project_owner_access
+    conn = get_conn()
+    try:
+        result = update_project_settings(
+            conn, project_id,
+            adaptation_mode=body.get("adaptation_mode"),
+            aspect_ratio=body.get("aspect_ratio"),
+            ai_label_enabled=body.get("ai_label_enabled"),
+        )
+    except LookupError as exc:
+        # 回滚必须是异常处理器的第一条语句（CLAUDE.md）：update_project_settings
+        # 里的 UPDATE 即便命中 0 行也会在这条连接上开出隐式事务，必须先撤销，
+        # 否则这条连接会带着悬空事务被复用（下一条写入或全局错误处理器）。
+        if conn.in_transaction:
+            conn.rollback()
+        raise HTTPException(404, f"项目不存在：{project_id}") from exc
+    conn.commit()
+    return {"project_id": project_id, **result}
 
 
 @router.get("/projects/{project_id}/chapters/{idx}")
