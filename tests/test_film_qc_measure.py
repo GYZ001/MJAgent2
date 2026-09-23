@@ -17,6 +17,14 @@ scripts/film_qc_measure.py 落地写成，脚本不存在时应当收集失败�
 配套一份手写的最小 edit-report.json（3 镜、2 个零重叠硬切接缝），验证分段
 重建；另一个测试不给 edit-report，断言分段指标是 None 而不是被均分编造出来
 的假数字。
+
+2026-09-23 补充：另有一个两段样本（段1=2s响+1s静音尾巴共3s，段2=3s响无静音）
+驱动 test_loudness_range_vs_seam_jump_measure_different_things——验证「分段
+响度极差」（主指标）与「接缝 0.4s 电平差」（辅助指标）在「静默收尾接对白
+开口」这种真实场景下会给出不同结论：极差应 ≤1 LU（ebur128 gate 掉静音尾巴
+后两段整体响度接近，实测 0.4 LU），接缝差应 ≥6dB（前后正好一静一响，实测
+7.2dB——AAC 硬切接缝本身有编解码器固有的边界重建误差，即便前段是纯静音，
+接缝前 0.4s 窗口也测不出理论上的极端落差，这是实测校准后的真实量级）。
 """
 from __future__ import annotations
 
@@ -58,27 +66,53 @@ def _synthesize(path: Path) -> None:
     subprocess.run(cmd, check=True, capture_output=True, timeout=60)
 
 
-def _write_edit_report(mp4_path: Path, *, total_duration_s: float) -> None:
-    """最小 edit-report：3 镜、2 个零重叠硬切接缝——与 _synthesize 的直接拼接一致
-    （没有 xfade，所以 transitions[].duration_s 如实写 0）。
+def _write_edit_report(mp4_path: Path, *, total_duration_s: float, n_shots: int = 3) -> None:
+    """最小 edit-report：n_shots 镜、n_shots-1 个零重叠硬切接缝——与合成时的直接
+    拼接一致（没有 xfade，所以 transitions[].duration_s 如实写 0）。
     """
     report = {
         "total_duration_s": total_duration_s,
-        "timeline": {"included_shot_nos": [1, 2, 3]},
+        "timeline": {"included_shot_nos": list(range(1, n_shots + 1))},
         "transitions": [
-            {"from_shot_no": 1, "to_shot_no": 2, "edit_type": "cut", "duration_s": 0.0},
-            {"from_shot_no": 2, "to_shot_no": 3, "edit_type": "cut", "duration_s": 0.0},
+            {"from_shot_no": i, "to_shot_no": i + 1, "edit_type": "cut", "duration_s": 0.0}
+            for i in range(1, n_shots)
         ],
         "video_delivery_manifest": {
-            "items": [
-                {"shot_no": 1, "adopted_version_id": "ver_1"},
-                {"shot_no": 2, "adopted_version_id": "ver_2"},
-                {"shot_no": 3, "adopted_version_id": "ver_3"},
-            ]
+            "items": [{"shot_no": i, "adopted_version_id": f"ver_{i}"} for i in range(1, n_shots + 1)]
         },
     }
     report_path = mp4_path.with_name(mp4_path.stem + ".edit-report.json")
     report_path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+
+
+def _synthesize_silence_tail(path: Path) -> None:
+    """两段样本：段1=2s(-8dBFS正弦)+1s静音尾巴(共3s)，段2=3s(-8dBFS正弦，无静音)。
+    用来证明「分段响度极差」与「接缝电平差」测的是不同的东西：ebur128 积分响度会
+    gate 掉静音尾巴，两段整体响度应接近相等；但接缝正卡在段1静音尾巴与段2开口之间，
+    电平差必然很大——这正是主会话真实成片验收发现的失真场景（静默收尾接对白开口）。
+    两段时长刻意相等（3s/3s）让 estimate_segment_bounds 的代数估计天然精确，不
+    依赖 scdet 纠正；tone 时长选 2s（非最短的 1s）是实测校准值，给 ebur128 积分
+    响度更多稳定样本、避开过渡帧的边界稀释效应，换来更大的测试余量。
+    """
+    filter_complex = (
+        "[1:a]volume=-8dB[t1];[3:a]volume=-8dB[t2];"
+        "[t1][2:a]concat=n=2:v=0:a=1[a0];"
+        "[0:v][a0][4:v][t2]concat=n=2:v=1:a=1[v][a]"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-f", "lavfi", "-i", "testsrc2=s=64x64:r=24:d=3.0",
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2.0",
+        "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono:d=1.0",
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3.0",
+        "-f", "lavfi", "-i", "testsrc2=s=64x64:r=24:d=3.0",
+        "-filter_complex", filter_complex,
+        "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "96k",
+        str(path),
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, timeout=60)
 
 
 @pytest.fixture(scope="module")
@@ -164,3 +198,36 @@ def test_refine_bounds_with_cuts_snaps_within_tolerance() -> None:
     assert bounds[1]["start"] == 2.0
     assert bounds[1]["end"] == 4.0
     assert bounds[2]["start"] == 4.0
+
+
+@pytest.fixture(scope="module")
+def equal_loudness_fixture(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    d = tmp_path_factory.mktemp("film_qc_loudness_fixture")
+    mp4 = d / "episode.mp4"
+    _synthesize_silence_tail(mp4)
+    _write_edit_report(mp4, total_duration_s=6.0, n_shots=2)
+    return mp4
+
+
+def test_loudness_range_vs_seam_jump_measure_different_things(equal_loudness_fixture: Path) -> None:
+    """2026-09-23 主会话真实成片验收发现：静默收尾接对白开口时，接缝电平差巨大但
+    两段整体响度其实一致——分段响度极差（主指标）与接缝电平差（辅助指标）必须给出
+    不同结论，不能只看接缝差就判"音量不一致"。
+    """
+    from scripts.film_qc_measure import SEAM_JUMP_NOTE, measure_episode
+
+    result = measure_episode(
+        equal_loudness_fixture,
+        edit_report_path=equal_loudness_fixture.with_name("episode.edit-report.json"),
+        srt_path=None,
+    )
+
+    segs = result["segments"]
+    assert segs is not None and "error" not in segs
+    assert segs["n_segments"] == 2
+    assert segs["loudness_range_lu"] is not None
+    assert segs["loudness_range_lu"] <= 1.0
+
+    jump = segs["seam_jumps"][0]["jump_db"]
+    assert jump is not None and abs(jump) >= 6.0
+    assert segs["seam_jump_note"] == SEAM_JUMP_NOTE

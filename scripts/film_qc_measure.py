@@ -1,44 +1,39 @@
 #!/usr/bin/env python3
 """成片客观质检：可重复、可跨批次对比的量化测量工具。
 
-背景：2026-09-23 一个只读子任务在生产机上用 ffmpeg 手工量了 5 部成片（脚本与
-日志在 A 机 /tmp/mjscan_a2/），发现接缝音量跳变 12~28 dB、开场静止等问题。手
-工测量不可复用；本脚本固化同一套口径，供后续每批迭代对同一集重跑、逐项对比。
+背景：2026-09-23 只读子任务手工量了 5 部成片（脚本日志在 A 机 /tmp/mjscan_a2/），
+发现接缝音量跳变 12~28dB、开场静止；同日主会话用真实成片验收又发现接缝电平差
+受内容影响不能单独判音量。本脚本固化口径，供后续每批迭代对同一集重跑、逐项对比。
 
-口径来源（均取自上面那次手工测量，不是另拍的脑袋）：freezedetect 默认
-n=-50dB:d=1.0（ffmpeg 内置默认 -60dB 在真实样本上几乎测不出静止，对比见
-/tmp/mjscan_a2/*_freeze50.log vs *_freeze60.log）；silencedetect 默认
--35dB/0.8s；接缝窗口前后各 0.4s，跳变判定阈值 6dB（本次任务书面约定）；跳变
-用 volumedetect 的 mean_volume（dBFS）差值而非 LUFS——手工测量的「12~28dB」
-就是这样测出来的（fengtian_ep2 实测 28.0dB），同口径才能跨批次比出有没有变好。
+口径：freezedetect 默认 n=-50dB:d=1.0（ffmpeg 内置 -60dB 几乎测不出静止，对比见
+/tmp/mjscan_a2/*_freeze50.log vs *_freeze60.log）；silencedetect 默认-35dB/0.8s；
+接缝窗口前后各0.4s、跳变阈值6dB（书面约定，volumedetect mean_volume dBFS 差值，
+非 LUFS）；分段音量一致性以 loudness_range_stats() 的极差/标准差为主指标，接缝
+跳变只作受内容影响的辅助信号，见 SEAM_JUMP_NOTE。
 
-分段重建（需 edit-report.json）：video_delivery_manifest.items 不落盘每镜真
-实渲染时长（只有 shot_no/version/hash 等溯源字段，2026-09-23 对照生产真实
-JSON 与 app/downstream_authority.py 源码确认过），无法精确复原。改用「探测到
-的总时长 + 各接缝 transitions[].duration_s（xfade 重叠量）」反解单镜等长估计
-值 D，再用同一次解码测到的 scdet 真实切点在容差内纠正每个接缝（见
-estimate_segment_bounds / refine_bounds_with_cuts）。5 部真实成片核对：各镜
-实际渲染时长完全一致，纯代数估计误差约 30ms/镜；有 scdet 命中时优先信 scdet。
-没有 edit-report.json 时不做任何猜测，分段类指标全部为 None。
+分段重建（需 edit-report.json）：video_delivery_manifest.items 不落盘每镜真实
+渲染时长（查源码 app/downstream_authority.py 确认），无法精确复原，改用「探测
+总时长 + Σ接缝 transitions[].duration_s(xfade重叠)」反解等长估计值+scdet 就近
+纠正（见 estimate_segment_bounds/refine_bounds_with_cuts）；无 edit-report.json
+时分段类指标全部 None，不猜测。
 
-用法示例（路径按实际替换）：
-    # A 机本地
+用法示例：
     .venv/bin/python scripts/film_qc_measure.py /tmp/mjfix_w10/lm4.mp4 \\
         --edit-report /tmp/mjfix_w10/lm4.edit-report.json --srt /tmp/mjfix_w10/lm4.srt \\
         --json /tmp/mjfix_w10/lm4.qc.json
-
-    # 生产机（经 ssh mjb）：加 --nice 避免和在途生成任务抢 CPU
+    # 生产机经 ssh mjb，加 --nice 避免抢占在途生成任务 CPU：
     ssh mjb "cd /root/MJAgent2 && .venv/bin/python scripts/film_qc_measure.py \\
         projects/proj_f4c8ca4a5775/episodes/4/final/episode.mp4 --nice --json /tmp/lm4.qc.json"
 
-退出码：0 = 正常完成（个别子项可能仍带 error 字段）；2 = 输入不可读或 ffprobe
-本身失败（连规格都拿不到，视为致命）。
+退出码：0=正常完成（个别子项可能仍带 error 字段）；2=输入不可读或 ffprobe 本身
+失败（连规格都拿不到，视为致命）。
 """
 from __future__ import annotations
 
 import argparse
 import json
 import re
+import statistics
 import subprocess
 import sys
 from pathlib import Path
@@ -53,6 +48,9 @@ SEAM_JUMP_THRESHOLD_DB = 6.0
 OPENING_WINDOW_S = 3.0
 BOUNDARY_SNAP_TOLERANCE_S = 1.0
 DEFAULT_TIMEOUT_S = 600.0
+# 2026-09-23 真实成片验收：接缝电平差受内容影响(静默→对白天然大)，不能单独判音量；
+# 主指标见 loudness_range_stats()。
+SEAM_JUMP_NOTE = "接缝前后0.4秒电平差（受内容影响：静默→对白也会很大，只作辅助，不单独判音量不一致）"
 
 EXIT_OK = 0
 EXIT_INPUT_ERROR = 2
@@ -112,8 +110,7 @@ def _try(label: str, fn: Any, *args: Any, **kwargs: Any) -> Any:
 # 规格（ffprobe）
 
 def build_spec(probe: dict[str, Any]) -> dict[str, Any]:
-    """规格口径：时长取 format.duration；分辨率/帧率/码率取首条视频流；采样率/
-    声道数取首条音频流；字段缺失保留 None，不猜测。"""
+    """规格口径：时长取format.duration；分辨率/帧率/码率取首条视频流，采样率/声道取首条音频流；缺失保留None不猜测。"""
     fmt = probe.get("format") or {}
     streams = probe.get("streams") or []
     vs = next((s for s in streams if s.get("codec_type") == "video"), None)
@@ -136,8 +133,7 @@ def build_spec(probe: dict[str, Any]) -> dict[str, Any]:
 
 # 视频类：scdet + freezedetect + blackdetect 合并一次解码
 
-def run_video_filters(path: Path, *, freeze_noise: str, freeze_duration: float,
-                       nice: bool, timeout: float) -> str:
+def run_video_filters(path: Path, *, freeze_noise: str, freeze_duration: float, nice: bool, timeout: float) -> str:
     """一次解码测剪切/静止/黑场，避免三项各自解码一遍整片。"""
     vf = f"scdet,freezedetect=n={freeze_noise}:d={freeze_duration},blackdetect"
     args = ["ffmpeg", "-hide_banner", "-i", str(path), "-vf", vf, "-f", "null", "-"]
@@ -162,9 +158,8 @@ def parse_black_events(text: str) -> list[dict[str, float]]:
             for a, b, c in _BLACK_RE.findall(text)]
 
 def merge_contiguous_freeze(events: list[dict[str, float]], gap_s: float = 0.05) -> list[dict[str, float]]:
-    """首尾相接（间隙 ≤gap_s）的冻结事件合并成一段，口径沿用手工测量脚本
-    measure.py::merge_contiguous；不合并会系统性低估「最长一段」（真实样本：
-    longmao_ep4 开场连续 4.08s 静止被 ffmpeg 吐成 3 条，不合并「最长」读成 1.6s）。"""
+    """首尾相接（间隙 ≤gap_s）的冻结事件合并成一段——不合并会系统性低估「最长一段」
+    （真实样本：连续 4.08s 静止被 ffmpeg 吐成 3 条，不合并「最长」读成 1.6s）。"""
     if not events:
         return []
     ev = sorted(events, key=lambda e: e["start"])
@@ -188,8 +183,7 @@ def freeze_summary(events: list[dict[str, float]], total_duration_s: float) -> d
         "opening_frozen": opening > 0, "opening_frozen_s": round(opening, 3),
     }
 
-def _measure_cuts_freeze_black(path: Path, duration_s: float, freeze_noise: str,
-                                freeze_duration: float, nice: bool, timeout: float) -> dict[str, Any]:
+def _measure_cuts_freeze_black(path: Path, duration_s: float, freeze_noise: str, freeze_duration: float, nice: bool, timeout: float) -> dict[str, Any]:
     text = run_video_filters(path, freeze_noise=freeze_noise, freeze_duration=freeze_duration,
                               nice=nice, timeout=timeout)
     cuts = parse_scdet_cuts(text)
@@ -204,8 +198,7 @@ def _measure_cuts_freeze_black(path: Path, duration_s: float, freeze_noise: str,
 
 # 音频类：silencedetect + ebur128 合并一次解码
 
-def run_audio_filters(path: Path, *, silence_db: float, silence_dur: float,
-                       nice: bool, timeout: float) -> str:
+def run_audio_filters(path: Path, *, silence_db: float, silence_dur: float, nice: bool, timeout: float) -> str:
     """一次解码测静音/响度，避免两项各自解码一遍整片。"""
     af = f"silencedetect=n={silence_db}dB:d={silence_dur},ebur128=peak=true"
     args = ["ffmpeg", "-hide_banner", "-i", str(path), "-af", af, "-f", "null", "-"]
@@ -228,8 +221,7 @@ def parse_loudness(text: str) -> dict[str, float | None]:
     return {"integrated_lufs": last(_LOUD_I_RE), "lra_lu": last(_LOUD_LRA_RE),
             "true_peak_dbfs": last(_LOUD_PEAK_RE)}
 
-def _measure_audio(path: Path, duration_s: float, silence_db: float, silence_dur: float,
-                    nice: bool, timeout: float) -> dict[str, Any]:
+def _measure_audio(path: Path, duration_s: float, silence_db: float, silence_dur: float, nice: bool, timeout: float) -> dict[str, Any]:
     text = run_audio_filters(path, silence_db=silence_db, silence_dur=silence_dur,
                               nice=nice, timeout=timeout)
     silence = parse_silence_events(text)
@@ -252,8 +244,7 @@ def load_edit_report(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
 
-def estimate_segment_bounds(edit_report: dict[str, Any],
-                             probed_duration_s: float) -> list[dict[str, Any]] | None:
+def estimate_segment_bounds(edit_report: dict[str, Any], probed_duration_s: float) -> list[dict[str, Any]] | None:
     """从 edit-report 反推每段起止估计值，算法见文件头 docstring「分段重建」节；
     结构不自洽（接缝数应等于镜头数-1）时返回 None，不强行猜测。"""
     items = ((edit_report.get("video_delivery_manifest") or {}).get("items")) or []
@@ -275,11 +266,9 @@ def estimate_segment_bounds(edit_report: dict[str, Any],
     bounds[-1]["end"] = round(probed_duration_s, 3)
     return bounds
 
-def refine_bounds_with_cuts(bounds: list[dict[str, Any]], cuts: list[float],
-                             tolerance_s: float) -> None:
-    """原地用 scdet 实测切点校正每个内部接缝（不动首段起点/末段终点）。每个接缝独
-    立找最近切点，容差内才采纳——避免镜头内部剪辑点被误当成整镜边界；找不到就保留
-    代数估计值。"""
+def refine_bounds_with_cuts(bounds: list[dict[str, Any]], cuts: list[float], tolerance_s: float) -> None:
+    """原地用 scdet 实测切点校正每个内部接缝：独立找最近切点，容差内才采纳（避免
+    镜头内部剪辑点被误当整镜边界），找不到就保留代数估计值。"""
     if not cuts:
         return
     for i in range(len(bounds) - 1):
@@ -300,8 +289,7 @@ def assign_cuts_to_segments(cuts: list[float], bounds: list[dict[str, Any]]) -> 
                 break
     return counts
 
-def segment_integrated_loudness(path: Path, start: float, duration: float,
-                                 *, nice: bool, timeout: float) -> float | None:
+def segment_integrated_loudness(path: Path, start: float, duration: float, *, nice: bool, timeout: float) -> float | None:
     """单段 ebur128 积分响度——独立小窗口解码，不计入「尽量少遍历」的整片扫描约束。"""
     dur = max(0.3, duration)
     args = ["ffmpeg", "-hide_banner", "-ss", f"{start:.3f}", "-i", str(path),
@@ -309,8 +297,7 @@ def segment_integrated_loudness(path: Path, start: float, duration: float,
     text = _run_text(args, nice=nice, timeout=timeout)
     return parse_loudness(text)["integrated_lufs"]
 
-def window_mean_volume(path: Path, start: float, duration: float,
-                        *, nice: bool, timeout: float) -> float | None:
+def window_mean_volume(path: Path, start: float, duration: float, *, nice: bool, timeout: float) -> float | None:
     """[start, start+duration) 窗口内 volumedetect 的均值电平（dBFS）。"""
     args = ["ffmpeg", "-hide_banner", "-ss", f"{max(0.0, start):.3f}", "-i", str(path),
             "-t", f"{duration:.3f}", "-af", "volumedetect", "-f", "null", "-"]
@@ -318,8 +305,7 @@ def window_mean_volume(path: Path, start: float, duration: float,
     m = _MEAN_VOL_RE.search(text)
     return float(m.group(1)) if m else None
 
-def seam_jumps(path: Path, bounds: list[dict[str, Any]], *, window_s: float,
-                nice: bool, timeout: float) -> list[dict[str, Any]]:
+def seam_jumps(path: Path, bounds: list[dict[str, Any]], *, window_s: float, nice: bool, timeout: float) -> list[dict[str, Any]]:
     """逐接缝测「前 window_s 秒」与「后 window_s 秒」的电平差（dB），口径见文件头。"""
     out = []
     for i in range(len(bounds) - 1):
@@ -332,8 +318,15 @@ def seam_jumps(path: Path, bounds: list[dict[str, Any]], *, window_s: float,
                      "jump_db": jump})
     return out
 
-def _measure_segments(path: Path, report: dict[str, Any], cuts_list: list[float],
-                       duration_s: float, nice: bool, timeout: float) -> dict[str, Any] | None:
+def loudness_range_stats(bounds: list[dict[str, Any]]) -> tuple[float | None, float | None]:
+    """各段 integrated LUFS 的极差(max-min)与标准差——判"音量是否一致"的主指标，比
+    接缝 0.4s 电平差更可信（那个受内容影响，见 SEAM_JUMP_NOTE）；无有效值给 None 不给 0。"""
+    values = [b["integrated_lufs"] for b in bounds if b.get("integrated_lufs") is not None]
+    if not values:
+        return None, None
+    return round(max(values) - min(values), 2), round(statistics.pstdev(values), 2)
+
+def _measure_segments(path: Path, report: dict[str, Any], cuts_list: list[float], duration_s: float, nice: bool, timeout: float) -> dict[str, Any] | None:
     bounds = estimate_segment_bounds(report, duration_s)
     if not bounds:
         return None
@@ -343,11 +336,14 @@ def _measure_segments(path: Path, report: dict[str, Any], cuts_list: list[float]
         seg["n_cuts_inside"] = cut_counts.get(seg["shot_no"], 0)
         seg["integrated_lufs"] = segment_integrated_loudness(
             path, seg["start"], seg["end"] - seg["start"], nice=nice, timeout=timeout)
+    loudness_range_lu, loudness_stdev_lu = loudness_range_stats(bounds)
     jumps = seam_jumps(path, bounds, window_s=SEAM_WINDOW_S, nice=nice, timeout=timeout)
     big = [j for j in jumps if j["jump_db"] is not None and abs(j["jump_db"]) >= SEAM_JUMP_THRESHOLD_DB]
     max_abs = max((abs(j["jump_db"]) for j in jumps if j["jump_db"] is not None), default=0.0)
     return {
-        "n_segments": len(bounds), "bounds": bounds, "seam_jumps": jumps,
+        "n_segments": len(bounds), "bounds": bounds,
+        "loudness_range_lu": loudness_range_lu, "loudness_stdev_lu": loudness_stdev_lu,
+        "seam_jumps": jumps, "seam_jump_note": SEAM_JUMP_NOTE,
         "seam_jump_count_ge_threshold": len(big), "seam_jump_max_abs_db": round(max_abs, 1),
     }
 
@@ -386,8 +382,7 @@ def measure_episode(
     silence_db: float = DEFAULT_SILENCE_NOISE_DB, silence_duration: float = DEFAULT_SILENCE_DURATION_S,
     nice: bool = False, timeout: float = DEFAULT_TIMEOUT_S,
 ) -> dict[str, Any]:
-    """跑全部量测；单项失败记 error 字段、不影响其它项（ffprobe 本身失败除外，直
-    接抛 QcError 由调用方转成退出码 2）。"""
+    """跑全部量测；单项失败记 error 字段不影响其它项（ffprobe 失败除外，抛 QcError）。"""
     probe = ffprobe_json(video_path, nice=nice, timeout=timeout)
     spec = build_spec(probe)
     duration_s = spec["duration_s"]
@@ -429,21 +424,27 @@ def _print_summary_cn(result: dict[str, Any]) -> None:
         print(f"切点 {cfb['scdet_cuts_total']} 个，ASL {cfb['asl_s']}s；"
               f"冻结共 {fr['total_s']}s（最长 {fr['longest_s']}s，占比 {fr['ratio']}），开场3秒{opening}；"
               f"黑场 {cfb['blackdetect']['total_s']}s")
+    segs = result.get("segments")
+    if segs and "error" not in segs and segs.get("loudness_range_lu") is not None:
+        range_txt = f"{segs['loudness_range_lu']}LU(标准差{segs['loudness_stdev_lu']}LU)"
+    else:
+        range_txt = "N/A"
     audio = result.get("audio") or {}
     if "error" in audio:
         print(f"静音/响度：测量失败——{audio['error']}")
     else:
         sil, loud = audio["silence"], audio["loudness"]
-        print(f"静音共 {sil['total_s']}s（{sil['count']} 段）；整体响度 I={loud['integrated_lufs']}LUFS "
-              f"LRA={loud['lra_lu']} 真峰={loud['true_peak_dbfs']}dBFS")
-    segs = result.get("segments")
+        print(f"响度极差(分段,主指标) {range_txt}；整体 I={loud['integrated_lufs']}LUFS "
+              f"LRA={loud['lra_lu']} 真峰={loud['true_peak_dbfs']}dBFS；"
+              f"静音共 {sil['total_s']}s（{sil['count']} 段）")
     if segs is None:
         print("分段指标：无 edit-report，不给分段指标")
     elif "error" in segs:
         print(f"分段指标：测量失败——{segs['error']}")
     else:
-        print(f"分段 {segs['n_segments']} 段；接缝跳变≥{SEAM_JUMP_THRESHOLD_DB}dB 的有 "
-              f"{segs['seam_jump_count_ge_threshold']} 处，最大跳变 {segs['seam_jump_max_abs_db']}dB")
+        print(f"分段 {segs['n_segments']} 段；{SEAM_JUMP_NOTE}，"
+              f"≥{SEAM_JUMP_THRESHOLD_DB}dB 的有 {segs['seam_jump_count_ge_threshold']} 处，"
+              f"最大 {segs['seam_jump_max_abs_db']}dB")
     subs = result.get("subtitles")
     if subs is None:
         print("字幕：无 srt")
@@ -456,8 +457,7 @@ def _print_summary_cn(result: dict[str, Any]) -> None:
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="成片客观质检：可重复、可跨批次对比的量化测量。")
     parser.add_argument("video", type=Path, help="episode.mp4 路径")
-    parser.add_argument("--edit-report", type=Path, default=None,
-                         help="episode.edit-report.json 路径；缺省探测同目录同名文件")
+    parser.add_argument("--edit-report", type=Path, default=None, help="episode.edit-report.json 路径；缺省探测同目录同名文件")
     parser.add_argument("--srt", type=Path, default=None, help="episode.srt 路径；缺省探测同目录同名文件")
     parser.add_argument("--json", type=Path, default=None, help="写出 JSON 结果到此路径")
     parser.add_argument("--nice", action="store_true", help="子进程加 nice -n 19（生产机上用）")
