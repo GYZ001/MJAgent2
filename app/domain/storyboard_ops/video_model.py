@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import json
+
 from app import worker
 from app.db import get_conn
 from app.domain.common import (
@@ -19,6 +21,26 @@ def _episode_target_video_model(ep) -> str:
 
     raw = str(ep["target_video_model"] or "").strip()
     return raw if raw in video_providers.registered_providers() else "hiagent"
+
+
+def _dialect_stale_fields(conn, episode_id: str, target: str, current: str) -> dict:
+    """切换只改 ``episodes.target_video_model``，不碰已持久化的分镜段
+    ``prompt_text``——如实报告本集还有多少 2.x 段仍是旧方言，不自动重新生成
+    分镜（见 app.media_exec.prompt_dialect_guard 同一份 fail-closed 判据）。"""
+    from app.production.storyboard_dialects import dialect_literal_for_target_video_model
+
+    expected = dialect_literal_for_target_video_model(target)
+    stale = 0
+    for row in conn.execute(
+        "SELECT shot_contract_json FROM shots WHERE episode_id=?", (episode_id,),
+    ).fetchall():
+        segment = (json.loads(row["shot_contract_json"] or "{}") or {}).get("storyboard_pack_segment")
+        if segment and segment.get("target_model") != expected:
+            stale += 1
+    fields = {"storyboard_dialect_stale": stale > 0, "stale_segment_count": stale}
+    if stale:
+        fields["message"] = f"分镜提示词仍是 {current} 写法，需在分镜台重新生成本集分镜后才能生成视频"
+    return fields
 
 @router.post("/episodes/{episode_id}/video-model")
 async def set_episode_video_model(episode_id: str, body: dict | None = None):
@@ -45,10 +67,7 @@ async def set_episode_video_model(episode_id: str, body: dict | None = None):
     target = str(body.get("target_video_model") or "").strip()
     options = video_providers.registered_providers()
     if target not in options:
-        raise HTTPException(
-            422,
-            f"未知视频模型：{target or '(空)'}；可选：{'、'.join(sorted(options))}",
-        )
+        raise HTTPException(422, f"未知视频模型：{target or '(空)'}；可选：{'、'.join(sorted(options))}")
     ep = _episode_or_404(episode_id)
     current = _episode_target_video_model(ep)
     if target == current:
@@ -105,4 +124,5 @@ async def set_episode_video_model(episode_id: str, body: dict | None = None):
     return {
         "episode_id": episode_id, "target_video_model": target,
         "changed": True, "cleared_videos": cleared_videos,
+        **_dialect_stale_fields(conn, episode_id, target, current),
     }

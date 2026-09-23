@@ -117,6 +117,12 @@ export type VideoModelSwitchResult = {
   changed: boolean;
   cleared_videos: number;
   target_video_model: string;
+  // 切换只改 episodes.target_video_model，不碰已持久化的分镜段 prompt_text——
+  // 后端 app/domain/storyboard_ops/video_model.py::_dialect_stale_fields 如实
+  // 报告本集分镜提示词是否仍是旧方言写的，不自动重新生成分镜。
+  storyboard_dialect_stale?: boolean;
+  stale_segment_count?: number;
+  message?: string;
 };
 
 // 供应商付费任务尚未终态时的清空阻塞（app/completion_grant.py

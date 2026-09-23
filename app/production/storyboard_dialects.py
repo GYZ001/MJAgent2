@@ -345,6 +345,19 @@ def _dialect_for_target_video_model(target_video_model: str) -> tuple[VideoPromp
     return profile, "seedance_2", SEEDANCE_DIALECT_INSTRUCTIONS
 
 
+def dialect_literal_for_target_video_model(target_video_model: str) -> str:
+    """公开只读查询：视频供应商 key 对应的分镜提示词方言字面值（"seedance_2" |
+    "minimax_h3"）。
+
+    复用 ``_dialect_for_target_video_model`` 同一份供应商→方言解析，只取字面值，
+    供 app.media_exec（入队守卫）与 app.domain.storyboard_ops（切换接口的陈旧
+    提示）比较「段落持久化的方言」与「当前/目标供应商的方言」时使用，不在各自
+    调用方再抄一份映射表。
+    """
+    _, target_model_literal, _ = _dialect_for_target_video_model(target_video_model)
+    return target_model_literal
+
+
 def render_montage_beat_shots(beats: list[MontageBeat], *, duration_s: int) -> str:
     """Render the deterministic "镜头1（约0-Xs）……镜头2……" skeleton for a
     montage-form segment's ``beats``, splitting ``duration_s`` evenly.

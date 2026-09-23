@@ -48,8 +48,9 @@ def resolve_target_video_profile() -> tuple[str | None, str | None, Any, str]:
 
 
 def load_video_binding_context(conn, shot_id: str, target_video_provider: str | None):
-    """加载镜头/分集/项目行；校验 Harness 开关与本集视频模型绑定一致性。"""
+    """加载镜头/分集/项目行；校验 Harness 开关、本集视频模型绑定与分镜提示词方言。"""
     from .enqueue import _row_value
+    from .prompt_dialect_guard import dialect_mismatch_error
 
     shot_row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
     if not shot_row:
@@ -66,10 +67,14 @@ def load_video_binding_context(conn, shot_id: str, target_video_provider: str | 
     if not video_providers.same_family(episode_bound_provider, target_video_provider):
         raise ValueError(
             f"[VIDEO_MODEL_BINDING_MISMATCH] 本集绑定的视频模型是 {episode_bound_provider}，"
-            f"当前生效模型是 {target_video_provider or '(未配置)'}"
-            "（两者提示词方言不兼容，不能混投）；"
-            "请在分镜台切换回本集绑定的模型，或先在模型中心把生效模型切到该值再重试"
+            f"当前生效模型是 {target_video_provider or '(未配置)'}；生成视频要同时满足两个"
+            "条件：①生效模型与本集绑定模型同属一个供应商族，②本集分镜提示词是按生效模型的"
+            f"方言写的。请在模型中心把生效模型切换为 {episode_bound_provider}，或在分镜台把"
+            f"本集绑定模型切到 {target_video_provider or '目标模型'} 并重新生成本集分镜后再试"
         )
+    dialect_error = dialect_mismatch_error(shot_row, target_video_provider or "")
+    if dialect_error:
+        raise ValueError(dialect_error)
     return shot_row, ep, project
 
 

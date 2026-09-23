@@ -18,6 +18,7 @@ import { storyboardTaskNotice } from '../lib/productionNotices'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
 import { needsCharacterImage } from '../lib/segmentIdentity'
 import { refsBusyPollInterval } from '../lib/bibleAssets'
+import { videoModelSwitchToast } from '../lib/videoModelSwitchCopy'
 import StageTextModelPicker from '../components/StageTextModelPicker'
 import "../styles/BoardPage.css";
 
@@ -749,9 +750,7 @@ export default function BoardPage() {
       })
       setVideoModelConfirm(null)
       if (result.changed) {
-        toast(result.cleared_videos
-          ? `已切换为 ${videoModelLabel(result.target_video_model)}，清空了 ${result.cleared_videos} 个旧方言视频`
-          : `已切换为 ${videoModelLabel(result.target_video_model)}`)
+        toast(videoModelSwitchToast(result, videoModelLabel))
       }
       await refresh({ force: true })
     } catch (caught) {
