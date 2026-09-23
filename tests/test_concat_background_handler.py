@@ -40,12 +40,12 @@ class _FakeWorker:
 
 
 def _patch(monkeypatch, fake: _FakeWorker) -> None:
-    from app import worker
     from app import downstream_authority
+    from tests.conftest import patch_worker_everywhere
 
     for name in ("_auto_adopt_playable_candidates_before_mix", "claim_concat_operation", "release_concat_operation",
                  "concatenate_episode", "get_conn", "ConcatOperationConflict", "ConcatOperationInProgress"):
-        monkeypatch.setattr(worker, name, getattr(fake, name))
+        patch_worker_everywhere(monkeypatch, name, getattr(fake, name))
     monkeypatch.setattr(downstream_authority, "verify_current_storyboard_release_authority", lambda episode_id, conn=None: {"r": 1})
     monkeypatch.setattr(downstream_authority, "current_partial_adopted_video_delivery_manifest", lambda episode_id, conn=None: {"items": []})
 

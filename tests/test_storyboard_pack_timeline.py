@@ -3,7 +3,10 @@
 
 覆盖：
 1. ``_segment_matched_timeline_anchors``/``_timeline_anchor_scene_time`` 两个
-   纯函数（去重合并、kind 优先级、无锚点时保持空串）。
+   纯函数（去重合并、kind 优先级、无锚点时保持空串）。``_timeline_anchor_scene_time``
+   2026-09-15 起加了 ``source_excerpt`` 形参：剧本体段头「【段 N｜地点｜时段】」的时段
+   是逐字真源，优先于锚点；段头不存在或没写时段才退到锚点。这里只覆盖「没有段头」
+   分支下的原有两条意图，段头优先分支见 ``tests/test_storyboard_scene_time_from_header.py``。
 2. ``persist_storyboard_pack`` 端到端：payload 带 timeline 时 scene_time 写入
    逐字锚点值，storyboard_pack_segment.timeline_anchors 携带完整锚点详情；
    payload 不带 timeline（旧数据/未接线路径）时行为不变，scene_time 仍是空串。
@@ -35,7 +38,7 @@ def test_segment_matched_timeline_anchors_empty_when_no_coverage():
 
 
 def test_timeline_anchor_scene_time_empty_without_anchors():
-    assert _timeline_anchor_scene_time([]) == ""
+    assert _timeline_anchor_scene_time([], "少年推门而入。") == ""
 
 
 def test_timeline_anchor_scene_time_prefers_age_over_era():
@@ -43,7 +46,19 @@ def test_timeline_anchor_scene_time_prefers_age_over_era():
         {"kind": "era", "value": "东汉末年"},
         {"kind": "age", "value": "八岁"},
     ]
-    assert _timeline_anchor_scene_time(anchors) == "八岁"
+    assert _timeline_anchor_scene_time(anchors, "少年推门而入。") == "八岁"
+
+
+def test_timeline_anchor_scene_time_header_without_time_segment_falls_back_to_anchor():
+    """段头存在但没写时段（只有「段 N｜地点」两段，``parse_scene_header`` 返回的
+    时段是空串）时不能短路成空串，仍要退到锚点按 age > era 取值——体现新形参
+    ``source_excerpt`` 只在段头真的写了时段时才优先，不是「有没有段头」。"""
+    anchors = [
+        {"kind": "era", "value": "东汉末年"},
+        {"kind": "age", "value": "八岁"},
+    ]
+    excerpt = "【段 3｜人间·老街】\n阿凯推门而入。"
+    assert _timeline_anchor_scene_time(anchors, excerpt) == "八岁"
 
 
 def _isolated_db(tmp_path, monkeypatch) -> None:
