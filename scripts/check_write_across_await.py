@@ -10,12 +10,37 @@
 判据只看语法结构，不猜运行时；漏报（SQL 不是字面量、连接经函数传递）是已知盲区，
 但凡报出来的都是真实的「写锁跨 await」。存量走 ``app/WRITE_ACROSS_AWAIT_BASELINE.txt``
 棘轮（一行一个 ``路径::函数``，只减不增），新增即拒。
+
+辅助函数是否「泄漏写者」（写了但不 commit/rollback）、是否「委托提交者」（写完转手
+给另一个以 commit 收尾的函数）不能只按裸函数名判断——全仓大量同名辅助函数（每包一份
+的 ``ensure_tables_on_connection``、写事务回调闭包的通用命名 ``operation``）会把裸名
+匹配的结论错误传染到不相干的调用点。调用点解析（import 关系、``__init__.py``/
+``app/worker.py`` 式门面再导出、委托提交识别）拆在同目录 ``write_await_resolution.py``
+——单纯是体量原因（本文件曾经超过 CLAUDE.md 的 500 行上限），排查记录见该文件头部。
 """
 from __future__ import annotations
 
 import ast
 import sys
 from pathlib import Path
+
+# 保证无论以什么方式加载本文件（直接跑脚本、``importlib.util.spec_from_file_location``
+# 动态加载、subprocess 里用相对/绝对路径跑），同目录的 write_await_resolution 都能被
+# import 到——不依赖当前工作目录，也不依赖调用方有没有把 scripts/ 加进 sys.path。
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
+from write_await_resolution import (  # noqa: E402  # 必须在上面的 sys.path 补丁之后
+    _NOT_A_FUNCTION as _NOT_A_FUNCTION,
+    _NotAFunction as _NotAFunction,
+    _ResolutionContext as _ResolutionContext,
+    _Scope as _Scope,
+    _follow_reexport as _follow_reexport,
+    _functions as _functions,
+    _is_trailing_commit as _is_trailing_commit,
+    _resolve_call as _resolve_call,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "app"
@@ -76,16 +101,50 @@ _CLOSERS = {"commit", "rollback"}
 class _FunctionScan(ast.NodeVisitor):
     """按源码顺序扫一个函数体（不进入嵌套函数），维护「有未提交写」状态。
 
-    写的来源两种：本函数里的字面量写语句；或调用了「自身含未提交写」的辅助函数
-    （``leaky``，第一遍扫描得到）。任何 ``commit()``/``rollback()`` 调用都视为关闭。
+    写的来源两种：本函数里的字面量写语句；或调用了「自身含未提交写」的辅助函数。
+    关闭的来源两种：本函数里直接调用 ``commit()``/``rollback()``（按裸名，不认收发
+    是否同一个连接）；或调用了「自身以无条件 commit 收尾」的委托提交函数。两种调用
+    都先按 import 关系解析成 (模块路径, 函数名)：解析出确凿结果就用 ``qualified_leaky``
+    / ``qualified_committers`` 精确匹配。解析不了时两边不对称——开：退回按裸名匹配
+    ``flat_leaky``（不放过任何真隐患，代价是过度保守）；关：解析不了就**不**当作
+    关闭（「谁提交了」必须证据确凿，误判关闭会放过真隐患，比误判泄漏危险）。
     """
 
-    def __init__(self, leaky: set[str]) -> None:
-        self.leaky = leaky
+    def __init__(
+        self, *, flat_leaky: set[str], qualified_leaky: set[tuple[Path, str]],
+        qualified_committers: set[tuple[Path, str]], scope: _Scope,
+    ) -> None:
+        self.flat_leaky = flat_leaky
+        self.qualified_leaky = qualified_leaky
+        self.qualified_committers = qualified_committers
+        self.scope = scope
         self.open = False
         self.wrote = False
         self.closed = False
         self.hits: list[int] = []
+
+    def _resolution_for(self, node: ast.AST) -> tuple[Path, str] | _NotAFunction | None:
+        return _resolve_call(node, self.scope) if isinstance(node, ast.Call) else None
+
+    def _opens_write(
+        self, node: ast.AST, call_name: str | None, resolved: tuple[Path, str] | _NotAFunction | None,
+    ) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        if _is_write_call(node):
+            return True
+        if call_name is None or call_name in _CLOSERS:
+            return False
+        if resolved is None:
+            return call_name in self.flat_leaky  # 解析不了，按原裸名逻辑保守兜底
+        if resolved is _NOT_A_FUNCTION:
+            return False
+        return resolved in self.qualified_leaky
+
+    def _closes_write(self, call_name: str | None, resolved: tuple[Path, str] | _NotAFunction | None) -> bool:
+        if call_name in _CLOSERS:
+            return True
+        return isinstance(resolved, tuple) and resolved in self.qualified_committers
 
     def generic_visit(self, node: ast.AST) -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
@@ -93,37 +152,43 @@ class _FunctionScan(ast.NodeVisitor):
         if isinstance(node, ast.Await) and self.open:
             self.hits.append(node.lineno)
         name = _called_name(node)
-        if _is_write_call(node) or (name in self.leaky and name not in _CLOSERS):
+        resolved = self._resolution_for(node)
+        if self._opens_write(node, name, resolved):
             self.open = True
             self.wrote = True
-        if name in _CLOSERS:
+        if self._closes_write(name, resolved):
             self.open = False
             self.closed = True
         super().generic_visit(node)
 
 
-def _functions(tree: ast.AST):
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            yield node
+def _leaky_writers(trees: dict[Path, ast.AST], ctx: _ResolutionContext) -> tuple[set[str], set[tuple[Path, str]]]:
+    """第一遍：含写语句（字面量、或调用已知泄漏者）但从不 commit/rollback 的函数。
 
-
-def _leaky_writers(trees: dict[Path, ast.AST]) -> set[str]:
-    """第一遍：含写语句（字面量或调用已知泄漏者）但从不 commit/rollback 的函数名；
-    传递闭包最多迭代 3 轮，够覆盖「helper 调 helper」的常见深度。"""
-    leaky: set[str] = set()
+    按模块限定名收敛出 ``qualified``；解析不了的调用点并行喂给按裸名收敛的
+    ``flat``（给 ``scan_tree`` 终扫时的保守兜底用——``flat`` 恒为 ``qualified``
+    涉及名字的超集，精确匹配只会让「解析得了」的调用点更精确，不会让「解析不了」
+    的调用点漏判）。传递闭包最多迭代 3 轮，够覆盖「helper 调 helper」的常见深度。
+    """
+    flat: set[str] = set()
+    qualified: set[tuple[Path, str]] = set()
     for _ in range(3):
-        before = len(leaky)
-        for tree in trees.values():
+        before = (len(flat), len(qualified))
+        for path, tree in trees.items():
             for fn in _functions(tree):
-                scan = _FunctionScan(leaky)
+                scope = ctx.scope_for(path, fn)
+                scan = _FunctionScan(
+                    flat_leaky=flat, qualified_leaky=qualified,
+                    qualified_committers=ctx.qualified_committers, scope=scope,
+                )
                 for stmt in fn.body:
                     scan.visit(stmt)
                 if scan.wrote and not scan.closed:
-                    leaky.add(fn.name)
-        if len(leaky) == before:
+                    flat.add(fn.name)
+                    qualified.add((path, fn.name))
+        if (len(flat), len(qualified)) == before:
             break
-    return leaky
+    return flat, qualified
 
 
 def scan_tree(root: Path = APP) -> list[str]:
@@ -131,13 +196,18 @@ def scan_tree(root: Path = APP) -> list[str]:
         path: ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for path in sorted(root.rglob("*.py"))
     }
-    leaky = _leaky_writers(trees)
+    ctx = _ResolutionContext(trees, ROOT)
+    flat_leaky, qualified_leaky = _leaky_writers(trees, ctx)
     found: list[str] = []
     for path, tree in trees.items():
         for fn in _functions(tree):
             if not isinstance(fn, ast.AsyncFunctionDef):
                 continue
-            scan = _FunctionScan(leaky)
+            scope = ctx.scope_for(path, fn)
+            scan = _FunctionScan(
+                flat_leaky=flat_leaky, qualified_leaky=qualified_leaky,
+                qualified_committers=ctx.qualified_committers, scope=scope,
+            )
             for stmt in fn.body:
                 scan.visit(stmt)
             if scan.hits:
