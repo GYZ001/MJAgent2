@@ -52,7 +52,6 @@ def test_legacy_unbound_storyboard_checkpoint_is_not_resumable(storyboard_db):
         phase="WAITING_HUMAN",
         input_versions={},
     ))
-
     assert _storyboard_has_persisted_work("e1") is False
 
 
@@ -78,7 +77,6 @@ def test_storyboard_checkpoint_requires_current_screenplay_and_bible(storyboard_
             "bible_artifact_id": "bible-current",
         },
     ))
-
     assert _storyboard_has_persisted_work("e1") is True
 
 
@@ -1595,6 +1593,8 @@ def test_stale_edit_session_is_rejected_without_borrowing_new_version(storyboard
         workspace.require_edit_session(session["edit_session_token"], "s1")
     assert caught.value.status_code == 409
     assert caught.value.detail["code"] == "STALE_EDIT_BASELINE"
+    message = caught.value.detail["message"]  # 前端没有「迁移草稿」接口，文案不能承诺
+    assert "迁移草稿" not in message and "本地草稿仍保留" in message
 
 
 def test_source_binding_only_accepts_authorized_contiguous_range(storyboard_db):

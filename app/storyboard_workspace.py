@@ -481,7 +481,7 @@ def require_edit_session(token: str | None, shot_id: str) -> dict[str, Any]:
         _inc("storyboard_stale_edit_blocked_total", episode_id=row["episode_id"], shot_id=shot_id)
         raise HTTPException(409, {
             "code": "STALE_EDIT_BASELINE",
-            "message": "编辑期间出现了新版本，发布已冻结；请对比最新版后迁移草稿",
+            "message": "编辑期间出现了新版本，发布已冻结；本地草稿仍保留，请核对内容后重新获取编辑基线再试",
             "baseline_artifact_id": row["baseline_artifact_id"],
             "current_artifact_id": shot["storyboard_artifact_id"],
             "baseline_hash": row["baseline_content_hash"],

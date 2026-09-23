@@ -1,5 +1,5 @@
 import { useId, useState } from 'react'
-import type { Dialogue, StoryboardPackSegment } from '../api'
+import { ApiError, type Dialogue, type StoryboardPackSegment } from '../api'
 import {
   previewShotEditImpact, startShotEditSession, updateShot,
   type ShotEditImpactChanged, type ShotEditSessionStart,
@@ -69,6 +69,7 @@ export default function SegmentDialogueRevision({
   const [previewedPatch, setPreviewedPatch] = useState<DialoguePatchLine[] | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [errorCode, setErrorCode] = useState<string | null>(null)
   const titleId = useId()
 
   function closeDialog() {
@@ -85,27 +86,41 @@ export default function SegmentDialogueRevision({
     setLines(prev => prev.map((line, i) => (i === index ? value : line)))
     invalidatePreview()
   }
+  function captureError(err: unknown) {
+    setError(err instanceof Error ? err.message : String(err))
+    setErrorCode(err instanceof ApiError ? err.code ?? null : null)
+  }
+
+  /** 起草/重新换取编辑租约：只负责拿 session，绝不清空已输入的台词与修订原因。
+   *  租约过期或撞上新基线（app/storyboard_workspace.py::require_edit_session 的
+   *  两种 409）之后，靠这个函数原地重试——草稿必须原样保留，不能逼用户重新走
+   *  openDialog() 从 segment 原文重置。 */
+  async function acquireSession() {
+    invalidatePreview()
+    setBusy(true)
+    setError(null)
+    setErrorCode(null)
+    try {
+      setSession(await startShotEditSession(shotId))
+    } catch (err) {
+      captureError(err)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   async function openDialog() {
     setOpenState(true)
     setLines(segment.dialogue.map(d => d.line))
     setReason('')
-    setError(null)
-    invalidatePreview()
-    setBusy(true)
-    try {
-      setSession(await startShotEditSession(shotId))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
+    await acquireSession()
   }
 
   async function runPreview() {
     if (!session) return
     setBusy(true)
     setError(null)
+    setErrorCode(null)
     try {
       const patch = buildDialoguePatch(segment, lines, shotDialogues)
       const result = await previewShotEditImpact(shotId, {
@@ -120,7 +135,7 @@ export default function SegmentDialogueRevision({
         setPreviewedPatch(patch)
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      captureError(err)
       invalidatePreview()
     } finally {
       setBusy(false)
@@ -131,6 +146,7 @@ export default function SegmentDialogueRevision({
     if (!session || !previewResult || !previewedPatch || !reason.trim()) return
     setBusy(true)
     setError(null)
+    setErrorCode(null)
     try {
       const body: Record<string, unknown> = {
         dialogues: previewedPatch,
@@ -145,7 +161,7 @@ export default function SegmentDialogueRevision({
       onSaved()
       closeDialog()
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      captureError(err)
     } finally {
       setBusy(false)
     }
@@ -178,9 +194,20 @@ export default function SegmentDialogueRevision({
           >
             <h3 id={titleId}>修订本段台词</h3>
             <p className="dialogue-revision-rule-hint">
-              只改措辞，不能增删条数、不能改发声者；原句会留档供溯源；保存会让本段已生成的视频与参考图失效。
+              只改措辞，不能增删条数、不能改发声者；原句会留档供溯源；保存后本段已生成的视频与参考图将被
+              <b>永久删除、无法恢复</b>，具体数量以下方预览为准。
             </p>
-            {error && <p className="field-error" role="alert">{error}</p>}
+            {error && (
+              <p className="field-error" role="alert">
+                {error}
+                {errorCode === 'STALE_EDIT_BASELINE' && '（本地草稿仍保留；该镜头在此期间有新内容变化，请核对无误后再继续，避免覆盖他人改动）'}
+              </p>
+            )}
+            {error && !busy && (
+              <button type="button" className="text-action" onClick={() => void acquireSession()}>
+                重新获取编辑租约
+              </button>
+            )}
             {!session && busy && <p className="dialogue-revision-blocked-hint">正在准备编辑会话…</p>}
             {session && (
               <DialogueRevisionBody
@@ -203,7 +230,7 @@ export default function SegmentDialogueRevision({
                 校验并预览影响
               </button>
               <button type="button" className="btn danger" disabled={!canSave} onClick={() => void runSave()}>
-                确认保存
+                确认删除并保存
               </button>
             </div>
           </section>
@@ -247,11 +274,16 @@ function DialogueRevisionBody({ segment, lines, dirtyFlags, busy, onChangeLine, 
         <div className="review-impact danger">
           <b>影响预览</b>
           <ul>
-            <li>参考图会失效 {previewResult.by_artifact_type['参考图'] ?? 0} 项</li>
-            <li>视频版本会失效 {previewResult.by_artifact_type['视频版本'] ?? 0} 项</li>
-            <li>证据链下游 {previewResult.by_artifact_type['证据链'] ?? 0} 项</li>
+            <li>参考图将被永久删除 {previewResult.by_artifact_type['参考图'] ?? 0} 项</li>
+            <li>视频版本将被永久删除 {previewResult.by_artifact_type['视频版本'] ?? 0} 项</li>
+            <li>证据链下游会失效 {previewResult.by_artifact_type['证据链'] ?? 0} 项</li>
           </ul>
-          {previewResult.paid_media_invalidated && <p>本段已生成的付费视频产物会失效。</p>}
+          {previewResult.paid_media_invalidated && (
+            <p>
+              本段已生成的视频版本（{previewResult.by_artifact_type['视频版本'] ?? 0} 个）将被
+              <b>永久删除，无法恢复</b>。
+            </p>
+          )}
         </div>
       )}
     </>

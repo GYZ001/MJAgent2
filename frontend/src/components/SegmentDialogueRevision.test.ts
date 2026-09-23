@@ -1,7 +1,7 @@
 import { createElement } from 'react'
 import TestRenderer, { act } from 'react-test-renderer'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { StoryboardPackSegment } from '../api'
+import { ApiError, type StoryboardPackSegment } from '../api'
 import {
   previewShotEditImpact, startShotEditSession, updateShot,
 } from '../api/storyboard/shotEditSession'
@@ -72,6 +72,10 @@ function mount(segment: StoryboardPackSegment) {
 function buttonText(node: TestRenderer.ReactTestInstance): string {
   return node.children.map(c => (typeof c === 'string' ? c : '')).join('').trim()
 }
+/** 提示文案里混了 <b> 强调，不能只取字符串子节点，要递归拼出全部文本。 */
+function textOf(node: TestRenderer.ReactTestInstance): string {
+  return node.children.map(c => (typeof c === 'string' ? c : textOf(c))).join('')
+}
 function findButtons(view: TestRenderer.ReactTestRenderer, label: string) {
   return view.root.findAll(n => n.type === 'button' && buttonText(n) === label)
 }
@@ -105,18 +109,18 @@ describe('段落没有台词模板（旧产物）', () => {
 })
 
 describe('预览与保存的两段式门禁', () => {
-  it('改过一句但还没预览时，确认保存保持禁用', async () => {
+  it('改过一句但还没预览时，确认删除并保存保持禁用', async () => {
     vi.mocked(startShotEditSession).mockResolvedValue(SESSION)
     const { view } = mount(SEGMENT)
     await openDialog(view)
-    expect(findButtons(view, '确认保存')[0].props.disabled).toBe(true)
+    expect(findButtons(view, '确认删除并保存')[0].props.disabled).toBe(true)
     setReason(view, '供应商合规拒收')
     editLine(view, 0, '那根线越来越粗了。')
-    expect(findButtons(view, '确认保存')[0].props.disabled).toBe(true)
+    expect(findButtons(view, '确认删除并保存')[0].props.disabled).toBe(true)
     act(() => view.unmount())
   })
 
-  it('预览通过后再改一句，预览作废、确认保存重新变禁用', async () => {
+  it('预览通过后再改一句，预览作废、确认删除并保存重新变禁用', async () => {
     vi.mocked(startShotEditSession).mockResolvedValue(SESSION)
     vi.mocked(previewShotEditImpact).mockResolvedValue(PREVIEW)
     const { view } = mount(SEGMENT)
@@ -124,9 +128,9 @@ describe('预览与保存的两段式门禁', () => {
     setReason(view, '供应商合规拒收')
     editLine(view, 0, '那根线越来越粗了。')
     await clickButton(view, '校验并预览影响')
-    expect(findButtons(view, '确认保存')[0].props.disabled).toBe(false)
+    expect(findButtons(view, '确认删除并保存')[0].props.disabled).toBe(false)
     editLine(view, 1, '还不是时机。')
-    expect(findButtons(view, '确认保存')[0].props.disabled).toBe(true)
+    expect(findButtons(view, '确认删除并保存')[0].props.disabled).toBe(true)
     act(() => view.unmount())
   })
 })
@@ -141,7 +145,7 @@ describe('409 防护：保存的 patch 必须与预览的 changes 逐字相同',
     setReason(view, '供应商合规拒收')
     editLine(view, 0, '那根线越来越粗了。')
     await clickButton(view, '校验并预览影响')
-    await clickButton(view, '确认保存')
+    await clickButton(view, '确认删除并保存')
 
     const previewCall = vi.mocked(previewShotEditImpact).mock.calls[0]
     const updateCall = vi.mocked(updateShot).mock.calls[0]
@@ -159,6 +163,98 @@ describe('409 防护：保存的 patch 必须与预览的 changes 逐字相同',
     expect(updateCall[1].revision_reason).toBe('供应商合规拒收')
     expect(notify).toHaveBeenCalledWith('本段台词已修订，原句已留档；可回生成台重新生成本段视频')
     expect(onSaved).toHaveBeenCalledOnce()
+    act(() => view.unmount())
+  })
+})
+
+describe('P0：确认框措辞与实际删除行为一致', () => {
+  it('打开即可见的规则提示说的是永久删除，不是「失效」', async () => {
+    vi.mocked(startShotEditSession).mockResolvedValue(SESSION)
+    const { view } = mount(SEGMENT)
+    await openDialog(view)
+    const hint = view.root.findAll(n => n.props.className === 'dialogue-revision-rule-hint')[0]
+    expect(textOf(hint)).toContain('永久删除、无法恢复')
+    expect(textOf(hint)).not.toContain('失效')
+    act(() => view.unmount())
+  })
+
+  it('预览影响改用「将被永久删除」，付费视频提示带上具体版本数', async () => {
+    vi.mocked(startShotEditSession).mockResolvedValue(SESSION)
+    vi.mocked(previewShotEditImpact).mockResolvedValue(PREVIEW)
+    const { view } = mount(SEGMENT)
+    await openDialog(view)
+    setReason(view, '供应商合规拒收')
+    editLine(view, 0, '那根线越来越粗了。')
+    await clickButton(view, '校验并预览影响')
+
+    const impact = view.root.findAll(n => n.props.className === 'review-impact danger')[0]
+    const text = textOf(impact)
+    expect(text).toContain('参考图将被永久删除 1 项')
+    expect(text).toContain('视频版本将被永久删除 2 项')
+    // 证据链下游只是标 stale、不删记录（app/evidence/repository.py），措辞不能跟着改。
+    expect(text).toContain('证据链下游会失效 2 项')
+    expect(text).toContain('本段已生成的视频版本（2 个）将被')
+    expect(text).toContain('永久删除，无法恢复')
+    act(() => view.unmount())
+  })
+
+  it('确认按钮文案体现后果，不再是中性的「确认保存」', async () => {
+    vi.mocked(startShotEditSession).mockResolvedValue(SESSION)
+    const { view } = mount(SEGMENT)
+    await openDialog(view)
+    expect(findButtons(view, '确认保存').length).toBe(0)
+    expect(findButtons(view, '确认删除并保存').length).toBe(1)
+    act(() => view.unmount())
+  })
+})
+
+describe('P1：三步握手失败后本地草稿必须原样保留', () => {
+  it('编辑租约过期时，点「重新获取编辑租约」不会清空已改的台词', async () => {
+    vi.mocked(startShotEditSession)
+      .mockResolvedValueOnce(SESSION)
+      .mockResolvedValueOnce({ ...SESSION, edit_session_token: 'tok-2' })
+    vi.mocked(previewShotEditImpact).mockRejectedValueOnce(
+      new ApiError(409, '编辑租约已过期；本地内容仍保留，请重新取得编辑基线'),
+    )
+    const { view } = mount(SEGMENT)
+    await openDialog(view)
+    setReason(view, '供应商合规拒收')
+    editLine(view, 0, '那根线越来越粗了。')
+    await clickButton(view, '校验并预览影响')
+
+    const errorPara = view.root.findAll(n => n.props.role === 'alert')[0]
+    expect(textOf(errorPara)).toContain('编辑租约已过期')
+    expect(textOf(errorPara)).not.toContain('避免覆盖他人改动')
+    expect(findButtons(view, '重新获取编辑租约').length).toBe(1)
+
+    await clickButton(view, '重新获取编辑租约')
+
+    expect(startShotEditSession).toHaveBeenCalledTimes(2)
+    expect(view.root.findAllByType('textarea')[0].props.value).toBe('那根线越来越粗了。')
+    act(() => view.unmount())
+  })
+
+  it('撞上新基线（STALE_EDIT_BASELINE）时额外提示核对内容，避免覆盖他人改动', async () => {
+    vi.mocked(startShotEditSession).mockResolvedValue(SESSION)
+    vi.mocked(previewShotEditImpact).mockRejectedValueOnce(
+      new ApiError(
+        409,
+        '编辑期间出现了新版本，发布已冻结；本地草稿仍保留，请核对内容后重新获取编辑基线再试',
+        'STALE_EDIT_BASELINE',
+      ),
+    )
+    const { view } = mount(SEGMENT)
+    await openDialog(view)
+    setReason(view, '供应商合规拒收')
+    editLine(view, 0, '那根线越来越粗了。')
+    await clickButton(view, '校验并预览影响')
+
+    const errorPara = view.root.findAll(n => n.props.role === 'alert')[0]
+    expect(textOf(errorPara)).toContain('本地草稿仍保留')
+    expect(textOf(errorPara)).toContain('避免覆盖他人改动')
+    // 撞新基线也走同一个不清空草稿的重试入口，不是另外一套「迁移草稿」流程
+    // （前端压根没有这个接口，见 app/storyboard_workspace.py 的文案改法）。
+    expect(findButtons(view, '重新获取编辑租约').length).toBe(1)
     act(() => view.unmount())
   })
 })

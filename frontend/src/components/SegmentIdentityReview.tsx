@@ -40,8 +40,13 @@ export default function SegmentIdentityReview({ shotId, onSaved, notify }: Props
   }
   async function save() {
     if (!review || !candidate || !previewed) return
-    await api.post(`${base}/apply`, { baseline: review.baseline, candidate })
-    notify('本段修订已保存，旧视频保留为历史版本；可前往生成台生成本段视频')
+    // 后端指纹比对后可能判定内容与基线一致（app/domain/storyboard_ops/identity_workspace.py
+    // ::save_identity_candidate 直接回滚并回 {unchanged:true}），此时没有产生新版本，
+    // 不能沿用「已保存」话术——那是在告诉用户一件没发生的事。
+    const result = await api.post(`${base}/apply`, { baseline: review.baseline, candidate }) as { unchanged?: boolean }
+    notify(result.unchanged
+      ? '内容未变化，无需保存'
+      : '本段修订已保存，旧视频保留为历史版本；可前往生成台生成本段视频')
     setReview(null); setCandidate(null); onSaved()
   }
   const editable = Boolean(candidate?.identity_contract_version)

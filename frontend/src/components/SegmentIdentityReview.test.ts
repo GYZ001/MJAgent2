@@ -42,6 +42,22 @@ it('必须预览后才能保存，修改发声方式会撤回旧预览', async (
   view.unmount()
 })
 
+it('保存的内容与基线指纹一致时（后端回 unchanged），提示未变化而不是冒充已保存', async () => {
+  // app/domain/storyboard_ops/identity_workspace.py::save_identity_candidate 在
+  // fingerprint 相同时直接回滚事务、回 {unchanged:true}——没有新版本、旧视频也
+  // 谈不上「保留为历史版本」，两句话术都不能套用「已保存」的说法。
+  const { view, notify, saved } = await mount()
+  vi.mocked(api.post).mockImplementation(async (path: string) => (
+    path.endsWith('/preview') ? { candidate: segment } : { unchanged: true }
+  ))
+  await click(view, '校验并预览修订')
+  await click(view, '保存本段修订')
+  expect(notify).toHaveBeenCalledWith('内容未变化，无需保存')
+  expect(notify).not.toHaveBeenCalledWith('本段修订已保存，旧视频保留为历史版本；可前往生成台生成本段视频')
+  expect(saved).toHaveBeenCalledOnce()
+  view.unmount()
+})
+
 it('并发版本冲突时保留候选并显示服务端原因', async () => {
   const { view, saved, notify } = await mount()
   vi.mocked(api.post).mockRejectedValue(new Error('片段已更新，请重新打开复核'))
