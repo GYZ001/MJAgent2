@@ -34,6 +34,71 @@ describe('subtitleSummaryLine', () => {
     ['lines_total 类型不对（畸形）', { subtitles: { enabled: true, lines_total: 'many' } }, null],
     ['lines_aligned 缺失（畸形）', { subtitles: { enabled: true, lines_total: 10 } }, null],
     ['lines_missing 缺失（畸形）', { subtitles: { enabled: true, lines_total: 10, lines_aligned: 10 } }, null],
+    [
+      '账本为空但检测到账本外人声：不得谎称没有台词',
+      {
+        subtitles: {
+          enabled: true, lines_total: 0, lines_aligned: 0, lines_missing: 0,
+          extra_speech: [
+            { shot_no: 3, text: '姑娘想吃点啥', start_s: 1.2, end_s: 2.5 },
+            { shot_no: 5, text: '好嘞您稍等', start_s: 0.5, end_s: 1.1 },
+          ],
+        },
+      },
+      '字幕：台词账本为空，但成片里检测到 2 处人声，未生成字幕（这些人声不是分镜登记的台词）',
+    ],
+    [
+      '账本为空且 extra_speech 是显式空数组（反向断言）：仍是没有台词',
+      { subtitles: { enabled: true, lines_total: 0, lines_aligned: 0, lines_missing: 0, extra_speech: [] } },
+      '字幕：本集没有台词',
+    ],
+    [
+      '账本为空且 extra_speech 字段类型不对（畸形，反向断言）：按无人声处理',
+      { subtitles: { enabled: true, lines_total: 0, lines_aligned: 0, lines_missing: 0, extra_speech: 'nope' } },
+      '字幕：本集没有台词',
+    ],
+    [
+      '账本为空，extra_speech 里混了畸形条目：跳过畸形项、只数有效项，不崩',
+      {
+        subtitles: {
+          enabled: true, lines_total: 0, lines_aligned: 0, lines_missing: 0,
+          extra_speech: [
+            { shot_no: 3, text: '有效条目', start_s: 1, end_s: 2 },
+            { shot_no: 'bad', text: '镜号畸形', start_s: 1, end_s: 2 },
+            { shot_no: 4, text: 123, start_s: 1, end_s: 2 },
+            'not-an-object',
+          ],
+        },
+      },
+      '字幕：台词账本为空，但成片里检测到 1 处人声，未生成字幕（这些人声不是分镜登记的台词）',
+    ],
+    [
+      '全部对齐同时有账本外人声：既有文案结构不变，补一句计数',
+      {
+        subtitles: {
+          enabled: true, lines_total: 31, lines_aligned: 31, lines_missing: 0,
+          extra_speech: [{ shot_no: 2, text: '多说的一句', start_s: 0, end_s: 1 }],
+        },
+      },
+      '字幕：31/31 句已对齐，另检测到 1 处账本外人声',
+    ],
+    [
+      '部分缺失同时有账本外人声：两句计数都要出现',
+      {
+        subtitles: {
+          enabled: true, lines_total: 31, lines_aligned: 29, lines_missing: 2,
+          missing: [
+            { shot_no: 20, utterance_id: 'U01', line: 'x', match_ratio: 0.1, reason: 'not_found' },
+            { shot_no: 12, utterance_id: 'U02', line: 'y', match_ratio: 0.1, reason: 'no_audio' },
+          ],
+          extra_speech: [
+            { shot_no: 6, text: '甲', start_s: 0, end_s: 1 },
+            { shot_no: 7, text: '乙', start_s: 0, end_s: 1 },
+          ],
+        },
+      },
+      '字幕：29/31 句已对齐，2 句未出声（第 12、20 镜），另检测到 2 处账本外人声',
+    ],
   ] as const)('%s', (_label, report, expected) => {
     expect(subtitleSummaryLine(report)).toBe(expected)
   })

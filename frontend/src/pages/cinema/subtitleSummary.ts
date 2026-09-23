@@ -70,18 +70,31 @@ export function subtitleSummaryLine(report: unknown): string | null {
 
   const linesTotal = asNonNegativeInt(subtitles.lines_total)
   if (linesTotal === null) return null
-  if (linesTotal === 0) return '字幕：本集没有台词'
+
+  // 台词账本条数与 ASR 实际识别到的人声是两回事：账本为空只代表没有登记
+  // 台词，不代表成片没有声音——视频模型常自行演绎对白，这段人声会被记在
+  // extra_speech 里但永远不会被烧成字幕（app/subtitles/align.py 的
+  // extra_speech 从不进入 cues_timeline）。谎称「本集没有台词」会让监制以
+  // 为没有声音需要处理，实际观众能听到无字幕的对白。
+  const extraCount = extraSpeechRows(report).length
+
+  if (linesTotal === 0) {
+    if (extraCount === 0) return '字幕：本集没有台词'
+    return `字幕：台词账本为空，但成片里检测到 ${extraCount} 处人声，未生成字幕（这些人声不是分镜登记的台词）`
+  }
 
   const linesAligned = asNonNegativeInt(subtitles.lines_aligned)
   if (linesAligned === null) return null
 
   const linesMissing = asNonNegativeInt(subtitles.lines_missing)
   if (linesMissing === null) return null
-  if (linesMissing === 0) return `字幕：${linesAligned}/${linesTotal} 句已对齐`
+
+  const extraSuffix = extraCount > 0 ? `，另检测到 ${extraCount} 处账本外人声` : ''
+  if (linesMissing === 0) return `字幕：${linesAligned}/${linesTotal} 句已对齐${extraSuffix}`
 
   const shotNos = Array.from(new Set(missingSubtitleRows(report).map(row => row.shotNo))).sort((a, b) => a - b)
   const shotsText = shotNos.length ? `（第 ${shotNos.join('、')} 镜）` : ''
-  return `字幕：${linesAligned}/${linesTotal} 句已对齐，${linesMissing} 句未出声${shotsText}`
+  return `字幕：${linesAligned}/${linesTotal} 句已对齐，${linesMissing} 句未出声${shotsText}${extraSuffix}`
 }
 
 /** 未出声台词列表，按镜号排序；逐项校验，单条畸形数据跳过而不丢弃整份列表。 */
