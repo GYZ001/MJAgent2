@@ -31,6 +31,10 @@ export default function AllocationsSection({ orgId }: { orgId: string | null }) 
   if (!orgId) return null;
 
   const planById = new Map(plans.map((p) => [p.id, p]));
+  // 首屏没数据时的失败交给下面的 QueryState（带重试）；已有数据后 reload 失败
+  // （AllocationEditDialog.onSaved 也会调用同一个 reload）不能被它的 hasData
+  // 分支吞掉，同 TeamsTab/RolesTab 的分工。
+  const loadFailed = allocations === null && !!error;
 
   return (
     <section className="card">
@@ -40,7 +44,14 @@ export default function AllocationsSection({ orgId }: { orgId: string | null }) 
           <button type="button" className="btn small primary" onClick={() => setEditing("new")}>新增分配</button>
         </div>
       </div>
-      <QueryState loading={allocations === null && !error} error={error} hasData={!!allocations?.length}
+      {!loadFailed && error && (
+        <div className="empty query-error" role="alert">
+          <strong>刷新失败</strong>
+          <p>{error}</p>
+          <button type="button" className="btn small" onClick={reload}>重试</button>
+        </div>
+      )}
+      <QueryState loading={allocations === null && !error} error={loadFailed ? error : null} hasData={!!allocations?.length}
         objectName="配额分配" onRetry={reload}
         emptyText="本组织还没有配置任何组织/团队/用户级分配，全部账号按各自档位默认额度生效。">
         {allocations?.map((item) => (

@@ -11,6 +11,7 @@ import { ProvisioningPanel, type ProvisioningPanelHandle } from "./ProvisioningP
 import { TIERS, TIER_HINTS, TIER_LABELS } from "../../lib/tier";
 import { AccountCard, DeletedAccountCard, formatTime } from "../AccountCard";
 import QueryState from "../QueryState";
+import RefreshFailBanner from "./RefreshFailBanner";
 import "../../styles/AccountAdminPage.css";
 
 /** 账号管理——「成员」标签页，系统管理员专属，移动端优先：每个账号一张卡片，
@@ -205,6 +206,11 @@ export default function MembersTab() {
   };
 
   const deletedCount = deletedUsers?.length ?? 0;
+  // 首屏加载失败与「刷新失败」（runAction 成功后 loadUsers/loadDeleted 重新拉取
+  // 失败）分工同 TeamsTab/RolesTab：前者交给 QueryState，后者不能被它的
+  // hasData 分支吞掉，见下方 RefreshFailBanner。
+  const usersLoadFailed = !users && !!usersError;
+  const deletedLoadFailed = !deletedUsers && !!deletedError;
 
   return (
     <>
@@ -235,26 +241,32 @@ export default function MembersTab() {
       </div>
 
       {tab === "active" ? (
-        <QueryState loading={!users && !usersError} error={usersError} hasData={!!users?.length}
-          objectName="账号" onRetry={() => void loadUsers()} emptyText="还没有账号，先「创建账号」。">
-          <div className="account-admin-cards">
-            {(users ?? []).map((u) => (
-              <AccountCard key={u.id} user={u} isSelf={u.id === myId} busy={busy}
-                onSaveDisplayName={saveDisplayName} onChangeTier={changeTier} onToggleAdmin={toggleAdmin}
-                onResetPassword={setResetTarget} onResetQuota={resetQuota} onToggleStatus={toggleStatus} onSoftDelete={setSoftDeleteTarget}
-                onSelfDeleteOpen={() => void openSelfDelete()} onGrantAddon={grantAddon} onOpenAssets={(t) => provisioningRef.current?.openAssets(t)} />
-            ))}
-          </div>
-        </QueryState>
+        <>
+          {!usersLoadFailed && usersError && <RefreshFailBanner error={usersError} onRetry={() => void loadUsers()} />}
+          <QueryState loading={!users && !usersError} error={usersLoadFailed ? usersError : null} hasData={!!users?.length}
+            objectName="账号" onRetry={() => void loadUsers()} emptyText="还没有账号，先「创建账号」。">
+            <div className="account-admin-cards">
+              {(users ?? []).map((u) => (
+                <AccountCard key={u.id} user={u} isSelf={u.id === myId} busy={busy}
+                  onSaveDisplayName={saveDisplayName} onChangeTier={changeTier} onToggleAdmin={toggleAdmin}
+                  onResetPassword={setResetTarget} onResetQuota={resetQuota} onToggleStatus={toggleStatus} onSoftDelete={setSoftDeleteTarget}
+                  onSelfDeleteOpen={() => void openSelfDelete()} onGrantAddon={grantAddon} onOpenAssets={(t) => provisioningRef.current?.openAssets(t)} />
+              ))}
+            </div>
+          </QueryState>
+        </>
       ) : (
-        <QueryState loading={!deletedUsers && !deletedError} error={deletedError} hasData={!!deletedUsers?.length}
-          objectName="回收站账号" onRetry={() => void loadDeleted()} emptyText="回收站是空的。">
-          <div className="account-admin-cards">
-            {(deletedUsers ?? []).map((u) => (
-              <DeletedAccountCard key={u.id} user={u} busy={busy} onRestore={restoreUser} />
-            ))}
-          </div>
-        </QueryState>
+        <>
+          {!deletedLoadFailed && deletedError && <RefreshFailBanner error={deletedError} onRetry={() => void loadDeleted()} />}
+          <QueryState loading={!deletedUsers && !deletedError} error={deletedLoadFailed ? deletedError : null} hasData={!!deletedUsers?.length}
+            objectName="回收站账号" onRetry={() => void loadDeleted()} emptyText="回收站是空的。">
+            <div className="account-admin-cards">
+              {(deletedUsers ?? []).map((u) => (
+                <DeletedAccountCard key={u.id} user={u} busy={busy} onRestore={restoreUser} />
+              ))}
+            </div>
+          </QueryState>
+        </>
       )}
 
       <p className="account-admin-tier-hint">

@@ -26,6 +26,7 @@ export default function InvitationsPanel() {
   const loadFailed = !items && !!error;
 
   const reload = () => {
+    setError(null); // 重试要把上一次的失败清掉，否则成功后旧的 field-error 红字仍挂在 state 上
     listInvitations()
       .then((data) => setItems(data.items))
       .catch((err) => setError(err instanceof ApiError ? err.message : "加载失败"));
