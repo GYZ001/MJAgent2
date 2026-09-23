@@ -112,7 +112,7 @@ export default function UserSessionsPanel() {
       {userId && sessions === null && <p className="hint">正在加载…</p>}
       {userId && sessions?.length === 0 && <p className="hint">该账号当前没有活跃会话。</p>}
       {sessions && sessions.length > 0 && (
-        <table className="data-table">
+        <table className="ledger">
           <thead><tr><th>类型</th><th>登录时间</th><th>最近活跃</th><th>IP</th><th>设备</th><th>操作</th></tr></thead>
           <tbody>
             {sessions.map((s) => (

@@ -138,7 +138,7 @@ export default function InvitationsPanel() {
           QueryState（它带重试），否则归上面贴着表单的 field-error，两边互斥。 */}
       <QueryState loading={!items && !error} error={loadFailed ? error : null} hasData={!!items?.length}
         objectName="邀请链接" onRetry={reload} emptyText="还没有邀请记录。">
-        <table className="data-table">
+        <table className="ledger">
           <thead>
             <tr><th>用户名</th><th>团队/角色</th><th>状态</th><th>过期时间</th><th>操作</th></tr>
           </thead>

@@ -239,3 +239,74 @@
     align-items: center;
   }
 }
+
+/* ── 团队 / 角色标签页：卡片头、成员表单与列表、角色权限点弹窗（EP-01） ──
+   .team-card-head 同时用于 TeamCard 与 RolesTab 的卡片头（标题 + 状态印章
+   [+ 操作按钮]）；.team-member-form 同时用于 TeamCard 的加成员行与 TeamsTab
+   的新建团队行——两处都是「输入项平分剩余空间 + 尾随按钮」，形状相同。 */
+.team-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.team-member-list {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.team-member-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.team-member-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.team-member-form input,
+.team-member-form select {
+  flex: 1;
+  min-width: 120px;
+}
+.role-editor-fields {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.role-editor-fields input,
+.role-editor-fields select {
+  width: 100%;
+}
+.role-permission-list {
+  display: grid;
+  gap: 6px;
+  max-height: min(360px, 46vh);
+  margin-top: 4px;
+  padding-right: 2px;
+  overflow: auto;
+}
+.role-permission-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.role-permission-item:hover {
+  background: rgba(108, 113, 121, 0.08);
+}
+.role-permission-title {
+  flex: 1;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
