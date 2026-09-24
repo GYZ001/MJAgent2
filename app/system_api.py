@@ -31,6 +31,9 @@ from app.system_ops.fs_browse import (
     _is_blocked_fs_path, _list_drives, allowed_directory_roots,
     assert_path_under_directory_grant, make_dir,
 )
+from app.voice.providers import PROTOCOL_HINTS, VOICE_PROTOCOLS
+from app.voice.providers.base import VoiceProviderError
+from app.voice.providers.dispatch import probe_voice_model
 
 router = APIRouter(prefix="/api")
 # 公开探活路由：不挂本机会话依赖（由 main 单独 include）。
@@ -127,10 +130,12 @@ async def make_dir_route(body: dict):
 
 # ---------- 系统 ----------
 
+# 内置服务商（hiagent）的能力集。
 MODEL_KINDS = {"text", "vlm", "video", "image"}
-# 自建服务商可以声明的能力。视频/图像要额外声明 protocol：它们没有统一协议，
-# 只能复用已实现的那几套。
-CUSTOM_PROVIDER_KINDS = {"text", "vlm", "video", "image"}
+# 自建服务商可以声明的能力。视频/图像/声音要额外声明 protocol：它们没有统一
+# 协议，只能复用已实现的那几套。"voice" 只属于自建服务商——声音生成模型只能
+# 通过「添加模型」自建接入，内置服务商的能力集不含它。
+CUSTOM_PROVIDER_KINDS = MODEL_KINDS | {"voice"}
 MODEL_PROVIDER_KINDS = {
     "hiagent": MODEL_KINDS,
     "minimax_h3": {"video"},
@@ -146,11 +151,14 @@ MODEL_PROVIDER_KINDS = {
 def probe_kind(kinds: list[str] | set[str] | None) -> str:
     """把「模型能力」翻译成连接测试要走的探测方式。
 
-    媒体模型只查目录（不出片、不产生费用），文本/视觉理解才真发一次补全。
-    两条测试路径（草稿态 /models/test 与已保存的 /models/{id}/test）共用这里，
-    避免再次出现"页面上勾了图像、后端却按文本去探测"的错配。
+    媒体模型只查目录（不出片、不产生费用）或做零成本鉴权探测，文本/视觉理解
+    才真发一次补全。两条测试路径（草稿态 /models/test 与已保存的
+    /models/{id}/test）共用这里，避免再次出现"页面上勾了图像、后端却按文本
+    去探测"的错配。
     """
     selected = list(kinds or ["text"])
+    if "voice" in selected:
+        return "voice"
     if "video" in selected:
         return "video"
     if "image" in selected:
@@ -175,6 +183,8 @@ def media_protocol_options(kinds: list[str] | set[str]) -> set[str]:
         options |= set(image_providers.IMAGE_PROTOCOLS)
     if "text" in kinds or "vlm" in kinds:
         options |= set(text_providers.TEXT_PROTOCOLS)
+    if "voice" in kinds:
+        options |= set(VOICE_PROTOCOLS)
     return options
 
 
@@ -250,7 +260,10 @@ def get_models():
             "image": sorted(image_providers.IMAGE_PROTOCOLS),
             "text": sorted(text_providers.TEXT_PROTOCOLS),
             "vlm": sorted(text_providers.TEXT_PROTOCOLS),
+            "voice": sorted(VOICE_PROTOCOLS),
         },
+        # 声音协议的中文名/填写示例；前端"添加模型"弹窗据此渲染，不用再抄一遍。
+        "protocol_hints": PROTOCOL_HINTS,
     }
 
 
@@ -463,6 +476,15 @@ async def prepare_model_token_capabilities(body: dict) -> dict:
     return prepared
 
 
+async def _probe_voice_protocol(protocol: str, base_url: str, api_key: str, model: str) -> dict:
+    """声音协议不是 OpenAI 兼容接口，走各自适配器的零成本探测（不生成音频）。"""
+    _assert_public_http_url(base_url)
+    try:
+        return await probe_voice_model(protocol, base_url, api_key, model)
+    except VoiceProviderError as exc:
+        raise HTTPException(422, f"声音生成模型测试失败：{exc}") from exc
+
+
 @router.post("/models/test")
 async def test_model_connection(body: dict):
     from app.capabilities.dispatch import ui_route
@@ -470,6 +492,14 @@ async def test_model_connection(body: dict):
     if routed is not None:
         return routed
     protocol = str(body.get("protocol") or "").strip().lower()
+    if protocol in VOICE_PROTOCOLS:
+        return {
+            **await _probe_voice_protocol(
+                protocol, str(body.get("base_url") or ""),
+                str(body.get("api_key") or ""), str(body.get("model") or ""),
+            ),
+            **normalize_token_limits({}),
+        }
     if protocol == "minimax_h3":
         # H3 不是 OpenAI 兼容接口，用它自己的能力探测：这样"测试连接"验的是
         # 真实出片前提（模式/加速档/VAE 是否就绪），而不只是端口通不通。
@@ -594,6 +624,8 @@ async def test_saved_model(model_id: str, body: dict | None = None):
     base_url = str(override.get("base_url") or saved.get("base_url") or item.get("base_url") or "")
     api_key = str(override.get("api_key") or saved.get("api_key") or item.get("api_key") or "")
     model = str(override.get("model") or item.get("model") or "")
+    if protocol in VOICE_PROTOCOLS:
+        return await _probe_voice_protocol(protocol, base_url, api_key, model)
     kind = probe_kind(override.get("kinds") or item.get("kinds"))
     result = await _probe_openai_model(base_url, api_key, model, kind)
     if kind in {"text", "vlm"}:
@@ -641,6 +673,10 @@ async def _probe_model_credential(item: dict, base_url: str, api_key: str) -> No
             await minimax_h3.probe_connection(base_url or str(item.get("base_url") or ""), connection)
         except hiagent.ProviderError as exc:
             raise HTTPException(422, f"新密钥探活失败：{exc}") from exc
+        return
+    protocol = str(item.get("protocol") or "").strip().lower()
+    if protocol in VOICE_PROTOCOLS:
+        await _probe_voice_protocol(protocol, base_url, api_key, str(item.get("model") or ""))
         return
     await _probe_openai_model(base_url, api_key, str(item.get("model") or ""), probe_kind(item.get("kinds")))
 
@@ -700,6 +736,7 @@ def health():
             ("vlm", "VLM 模型"),
             ("video", "视频模型"),
             ("image", "图像模型"),
+            ("voice", "声音生成模型"),
         )
     }
     credentials = system_health.credential_report(
@@ -746,6 +783,7 @@ _BUSINESS_CALL_KINDS = {
     "chat", "video_create", "video_poll", "image", "image_generate",
     "image_edit", "scene_image", "screenplay_prompt", "plan_prompt", "bible_prompt",
     "references_prompt", "storyboard_prompt", "storyboard_shot_prompt", "storyboard_outline_prompt",
+    "voice_design",
 }
 _WORKFLOW_CALL_MARKERS = ("prompt", "storyboard", "reference", "handoff", "repair")
 _FAILED_CALL_STATUSES = {"FAILED", "TIMEOUT", "NETWORK_ERROR", "TASK_FAILED", "QA_ERROR", "REPAIR_STALLED"}
@@ -1993,7 +2031,7 @@ def put_settings(body: dict):
             "zhipu": bool(config.ZHIPU_API_KEY),
             "minimax_h3": bool(config.MINIMAX_H3_BASE_URL and config.MINIMAX_H3_API_KEY),
         }
-        for kind in ("text", "vlm", "video", "image"):
+        for kind in ("text", "vlm", "video", "image", "voice"):
             provider_field = f"model_{kind}_provider"
             if provider_field not in normalized and not any(key.endswith(f"_model_{kind}") for key in normalized):
                 continue

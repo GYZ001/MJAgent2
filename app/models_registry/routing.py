@@ -177,6 +177,7 @@ def sync_legacy_binding(kind: str, provider: str) -> None:
 _LEGACY_PROVIDER_SETTING_KEYS = (
     ("text", "model_text_provider"), ("vlm", "model_vlm_provider"),
     ("video", "model_video_provider"), ("image", "model_image_provider"),
+    ("voice", "model_voice_provider"),
 )
 
 

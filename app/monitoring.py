@@ -215,7 +215,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
 # sync_legacy_binding 的调用），校验因此仍然保留、只是不再挂一张固定名单。
 _LEGACY_PROVIDER_SETTING_KEYS = (
     "model_text_provider", "model_vlm_provider",
-    "model_video_provider", "model_image_provider", "model_route",
+    "model_video_provider", "model_image_provider", "model_voice_provider", "model_route",
 )
 for _key in _LEGACY_PROVIDER_SETTING_KEYS:
     SETTINGS_SCHEMA[_key] = {

@@ -314,6 +314,14 @@ allowed_exceptions = []
 "app.seedance" = 3
 "app.minimax_h3" = 3
 "app.video_providers" = 3
+"app.voice.providers" = 3  # 2026-09-23 新增（声音生成模型层）：与
+                           # image_providers/video_providers/hiagent 同一种
+                           # "供应商协议适配"角色，同层。适配器模块可以 import
+                           # app.hiagent（同层，log_provider_call 记账）与
+                           # app.models_registry.routing（同层，选路）；覆盖
+                           # app.voice=4 前缀（最长前缀匹配），因为它比包根更
+                           # 具体——协议适配本身不依赖任何 L4 领域能力，判 L3
+                           # 而不是跟随包根判 L4
 "app.orchestration.engine" = 3  # 2026-08-30：覆盖 app.orchestration=5 前缀，
                                  # 受 app.harness.contracts 顶住，见变更说明
 "app.media_pipeline.stages" = 3       # 2026-08-30：覆盖 app.media_pipeline=4
@@ -329,6 +337,12 @@ allowed_exceptions = []
 "app.screenplay_ir" = 4
 "app.production" = 4
 "app.media_pipeline" = 4
+"app.voice" = 4  # 2026-09-23 新增：包根，当前只有一份模块文档（无代码），为
+                 # 后续人物卡音色绑定等业务模块（U1，见
+                 # docs/角色固定音色_声音生成接口调研与实施方案_2026-09-23.md
+                 # 第 8 节）预留层号——那些模块要读写 bible/人物卡，属于领域
+                 # 能力层。更具体的 app.voice.providers=3 覆盖协议适配子包，
+                 # 最长前缀匹配优先于这条包根声明
 
 # ---- L5 编排与入口：可依赖 L0-L4 ----
 "app.domain" = 5

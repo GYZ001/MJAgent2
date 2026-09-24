@@ -183,7 +183,7 @@ def migrate_builtin_models(*, force: bool = False) -> dict[str, Any]:
         if not isinstance(item, dict) or str(item.get("protocol") or "").strip():
             continue
         kinds = item.get("kinds") or []
-        if "video" in kinds or "image" in kinds:
+        if "video" in kinds or "image" in kinds or "voice" in kinds:
             continue
         item["protocol"] = "openai"
         backfilled.append(f"{item.get('label')} → openai")

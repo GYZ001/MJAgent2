@@ -20,13 +20,16 @@ os.chdir(REPO)
 sys.path.insert(0, REPO)
 
 KINDS = ("text", "vlm", "video", "image")
+# 声音生成模型层 2026-09-23 才接入，B 上可能还没配一条：不计入下面的失败判据，
+# 否则会拦住每晚的自动部署。仍然打印选路结果，方便人工核对配没配上。
+OPTIONAL_KINDS = ("voice",)
 
 
 def _resolve_all() -> dict[str, tuple[str, str]]:
     from app import hiagent
 
     resolved: dict[str, tuple[str, str]] = {}
-    for kind in KINDS:
+    for kind in KINDS + OPTIONAL_KINDS:
         provider = hiagent.active_provider(kind)
         model = hiagent.active_model(kind, provider) if provider else ""
         resolved[kind] = (provider, model)
@@ -68,9 +71,12 @@ async def _image_auth_smoke(provider: str, model: str) -> bool:
 
 def main() -> int:
     resolved = _resolve_all()
-    ok = all(provider and model for provider, model in resolved.values())
+    ok = all(resolved[kind][0] and resolved[kind][1] for kind in KINDS)
     if not ok:
         print("有职责选路为空")
+    voice_provider, voice_model = resolved["voice"]
+    if not (voice_provider and voice_model):
+        print("声音生成模型未配置（可选职责，不计入失败）")
     ok = asyncio.run(_text_smoke()) and ok
     image_provider, image_model = resolved["image"]
     if image_provider and image_model:
