@@ -12,12 +12,22 @@ from pathlib import Path
 import pytest
 
 from app import config
+from app.db import get_conn
 from app.domain.series_ops import merge
 from app.media_exec.concat import _final_video_path
 from app.media_pipeline.delivery_encode import DELIVERY_VIDEO_ARGS
 
 _FFMPEG_AVAILABLE = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
 pytestmark = pytest.mark.skipif(not _FFMPEG_AVAILABLE, reason="ffmpeg/ffprobe unavailable")
+
+
+def _seed_project(project_id: str) -> str:
+    """merge.build_series_film 现在会读 projects 表解析画幅/AI 标识；这些用例的
+    project_id 此前是不落库的合成字符串，必须先补一行最小项目记录（默认 9:16/关闭）。"""
+    conn = get_conn()
+    conn.execute("INSERT OR IGNORE INTO projects(id,name,created_at) VALUES(?,?,0)", (project_id, project_id))
+    conn.commit()
+    return project_id
 
 
 def _make_clip(path: Path, *, duration_s: float, color: str) -> None:
@@ -59,7 +69,7 @@ def test_build_series_film_uses_delivery_encode_params_and_lanczos_scale(
 
     monkeypatch.setattr(merge, "_run_ffmpeg", spy)
 
-    project_id = "proj-merge-encode"
+    project_id = _seed_project("proj-merge-encode")
     ep1 = _final_video_path(project_id, 1)
     ep2 = _final_video_path(project_id, 2)
     _make_clip(ep1, duration_s=2.0, color="red")
@@ -86,7 +96,7 @@ def test_build_series_film_uses_delivery_encode_params_and_lanczos_scale(
 
 
 def test_build_series_film_two_episodes_concatenates_and_reports_chapters(project_dir) -> None:
-    project_id = "proj-merge"
+    project_id = _seed_project("proj-merge")
     ep1 = _final_video_path(project_id, 1)
     ep2 = _final_video_path(project_id, 2)
     _make_clip(ep1, duration_s=2.0, color="red")
@@ -112,7 +122,7 @@ def test_build_series_film_two_episodes_concatenates_and_reports_chapters(projec
 
 def test_build_series_film_single_episode_span_is_legal(project_dir) -> None:
     """用户拍板：单集连播也合法（episode_from == episode_to），合并步骤照常执行。"""
-    project_id = "proj-merge-single"
+    project_id = _seed_project("proj-merge-single")
     ep1 = _final_video_path(project_id, 5)
     _make_clip(ep1, duration_s=2.0, color="green")
 
@@ -125,7 +135,7 @@ def test_build_series_film_single_episode_span_is_legal(project_dir) -> None:
 
 
 def test_merge_is_current_tracks_input_fingerprints(project_dir) -> None:
-    project_id = "proj-merge-current"
+    project_id = _seed_project("proj-merge-current")
     ep1 = _final_video_path(project_id, 1)
     _make_clip(ep1, duration_s=2.0, color="yellow")
     merge.build_series_film(project_id, 1, 1, [1])
@@ -137,8 +147,22 @@ def test_merge_is_current_tracks_input_fingerprints(project_dir) -> None:
     assert merge.merge_is_current(project_id, 1, 1, [1]) is False
 
 
+def test_merge_is_current_turns_false_when_project_aspect_ratio_changes(project_dir) -> None:
+    """2026-09-23 新增（派单 B 项）：项目画幅切到 16:9 后，即使各集成片文件本身
+    的指纹（mtime/size）都没变，旧的 9:16 合并结果也必须判过期，不能被沿用。"""
+    project_id = _seed_project("proj-merge-aspect")
+    ep1 = _final_video_path(project_id, 1)
+    _make_clip(ep1, duration_s=2.0, color="yellow")
+    merge.build_series_film(project_id, 1, 1, [1])
+    assert merge.merge_is_current(project_id, 1, 1, [1]) is True
+
+    get_conn().execute("UPDATE projects SET aspect_ratio='16:9' WHERE id=?", (project_id,))
+    get_conn().commit()
+    assert merge.merge_is_current(project_id, 1, 1, [1]) is False
+
+
 def test_build_series_film_missing_episode_raises_and_leaves_no_output(project_dir) -> None:
-    project_id = "proj-merge-missing"
+    project_id = _seed_project("proj-merge-missing")
     ep1 = _final_video_path(project_id, 1)
     _make_clip(ep1, duration_s=2.0, color="red")
     # 第 2 集没有成片。
@@ -151,7 +175,7 @@ def test_build_series_film_missing_episode_raises_and_leaves_no_output(project_d
 
 
 def test_film_for_range_and_latest_film_projection(project_dir) -> None:
-    project_id = "proj-merge-projection"
+    project_id = _seed_project("proj-merge-projection")
     ep1 = _final_video_path(project_id, 1)
     _make_clip(ep1, duration_s=2.0, color="purple")
     merge.build_series_film(project_id, 1, 1, [1])
@@ -173,7 +197,7 @@ def test_film_for_range_and_latest_film_projection(project_dir) -> None:
 def test_merge_is_current_turns_false_when_an_episode_storyboard_artifact_changes(project_dir, monkeypatch) -> None:
     """2026-09-03 实测：清空分镜后 final/episode.mp4 原封不动，只看文件指纹会把成片判成
     未过期，重新入队被「已完成，成片未过期」跳过；分镜产物 id 必须是第二个输入指纹。"""
-    project_id = "proj-merge-storyboard"
+    project_id = _seed_project("proj-merge-storyboard")
     _make_clip(_final_video_path(project_id, 1), duration_s=2.0, color="yellow")
     monkeypatch.setattr(merge, "_storyboard_artifact_ids", lambda _p, _nos: {"1": "art_old"})
     merge.build_series_film(project_id, 1, 1, [1])
@@ -186,7 +210,7 @@ def test_merge_is_current_turns_false_when_an_episode_storyboard_artifact_change
 def test_merge_is_current_keeps_judging_old_reports_by_file_fingerprints_only(project_dir, monkeypatch) -> None:
     """旧报告没有 storyboard_artifact_ids 键：不把历史成片一律判成过期。"""
     import json as _json
-    project_id = "proj-merge-legacy-report"
+    project_id = _seed_project("proj-merge-legacy-report")
     _make_clip(_final_video_path(project_id, 1), duration_s=2.0, color="yellow")
     monkeypatch.setattr(merge, "_storyboard_artifact_ids", lambda _p, _nos: {"1": "art_x"})
     merge.build_series_film(project_id, 1, 1, [1])
@@ -227,7 +251,7 @@ def _write_edit_report(final_path: Path, cues_timeline: list[dict]) -> None:
 
 
 def test_build_series_film_writes_film_srt_from_episode_reports(project_dir) -> None:
-    project_id = "proj-merge-srt"
+    project_id = _seed_project("proj-merge-srt")
     ep1 = _final_video_path(project_id, 1)
     ep2 = _final_video_path(project_id, 2)
     _make_clip(ep1, duration_s=2.0, color="red")
@@ -250,7 +274,7 @@ def test_build_series_film_writes_film_srt_from_episode_reports(project_dir) -> 
 
 
 def test_build_series_film_no_srt_when_no_episode_has_subtitles(project_dir) -> None:
-    project_id = "proj-merge-no-srt"
+    project_id = _seed_project("proj-merge-no-srt")
     ep1 = _final_video_path(project_id, 1)
     _make_clip(ep1, duration_s=2.0, color="red")
 

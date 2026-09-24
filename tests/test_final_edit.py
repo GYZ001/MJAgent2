@@ -165,7 +165,7 @@ def test_deterministic_cjk_text_card_has_fixed_dimensions(tmp_path: Path) -> Non
         pytest.skip("test host has no configured CJK font")
     destination = tmp_path / "text.png"
 
-    report = render_text_card("天门已开", "青铜古碑", destination)
+    report = render_text_card("天门已开", "青铜古碑", destination, play_res=(1080, 1920))
 
     with Image.open(destination) as image:
         assert image.size == (1080, 1920)
@@ -185,7 +185,7 @@ def test_text_card_border_scales_off_legacy_720_coordinates(tmp_path: Path) -> N
         pytest.skip("test host has no configured CJK font")
     destination = tmp_path / "text.png"
 
-    render_text_card("天门已开", "青铜古碑", destination)
+    render_text_card("天门已开", "青铜古碑", destination, play_res=(1080, 1920))
 
     with Image.open(destination) as image:
         height = image.height
@@ -278,6 +278,7 @@ def test_final_edit_smoke_renders_text_and_uses_incoming_transition(tmp_path: Pa
         [(1, str(one), 1.0), (2, str(two), 1.0)],
         destination,
         tmp_path / "work",
+        play_res=(1080, 1920),
     )
 
     assert destination.is_file() and destination.stat().st_size > 0
@@ -346,6 +347,7 @@ def test_final_edit_burns_subtitles_with_correct_xfade_offset(tmp_path: Path) ->
 
     report = render_episode_final_edit(
         conn, "e", [(1, str(one), 1.0), (2, str(two), 1.0)], destination, work_dir, plan,
+        play_res=(1080, 1920),
     )
 
     assert destination.is_file() and destination.stat().st_size > 0

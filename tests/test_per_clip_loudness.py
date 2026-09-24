@@ -175,6 +175,7 @@ def test_draft_concat_levels_audible_segments_and_caps_low_level_or_silent(tmp_p
 
     total_dur, publish_candidate, _artifacts, clip_loudness = _draft_concat_pieces(
         piece_specs, probe_by_shot, final_path, concat_timeout_s=60.0, subtitle_plan=None,
+        play_res=(1080, 1920),
     )
     assert total_dur == pytest.approx(_DUR * 4, abs=0.2)
     assert publish_candidate.is_file() and publish_candidate.stat().st_size > 0
@@ -215,6 +216,7 @@ def test_draft_concat_alimiter_caps_true_peak_after_large_boost(tmp_path: Path) 
 
     _total_dur, publish_candidate, _artifacts, clip_loudness = _draft_concat_pieces(
         piece_specs, probe_by_shot, final_path, concat_timeout_s=60.0, subtitle_plan=None,
+        play_res=(1080, 1920),
     )
     assert clip_loudness[0]["gain_db"] >= 15.0, f"测试场景本身要求大幅升益：{clip_loudness[0]}"
 
@@ -263,6 +265,7 @@ def test_final_edit_levels_audible_segments(tmp_path: Path) -> None:
     destination = tmp_path / "final.mp4"
     report = render_episode_final_edit(
         conn, "e", [(1, str(clip4), 1.0), (2, str(clip14), 1.0)], destination, work_dir,
+        play_res=(1080, 1920),
     )
 
     assert destination.is_file() and destination.stat().st_size > 0

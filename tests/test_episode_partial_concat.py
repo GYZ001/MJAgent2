@@ -269,7 +269,7 @@ def test_full_episode_with_real_transition_still_uses_final_edit(tmp_path, monke
 
     calls: list[list[tuple[int, str, float]]] = []
 
-    def fake_render_episode_final_edit(_conn, _episode_id, piece_specs, destination, _work_dir, _subtitle_plan=None):
+    def fake_render_episode_final_edit(_conn, _episode_id, piece_specs, destination, _work_dir, _subtitle_plan=None, **_kwargs):
         calls.append(piece_specs)
         Path(destination).write_bytes(b"edited-final")
         return {

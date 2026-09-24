@@ -11,8 +11,10 @@ from PIL import ImageFont
 
 from app.subtitles.cues import Cue
 
-_PLAY_RES_X = 1080
-_PLAY_RES_Y = 1920
+# 片头 AI 标识（项目级开关，默认关）：docs/ai_labeling_compliance.md A.2——起始画面
+# 是合规充分位置，P0 不做全片贯穿角标。文案/时长是唯一真源，两条合成路径共用。
+AI_LABEL_TEXT = "本视频由人工智能生成"
+AI_LABEL_DURATION_S = 3.0
 
 # ffmpeg 滤镜参数的两级转义特殊字符集合（ffmpeg-filters 文档「Notes on
 # filtergraph escaping」）：第一级只转义 : \ '；第二级在第一级结果之上再转义
@@ -82,7 +84,7 @@ def _srt_time(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def _ass_header(style: SubtitleStyle) -> str:
+def _ass_header(style: SubtitleStyle, play_res: tuple[int, int]) -> str:
     style_line = (
         f"Style: Default,{style.font_family},{style.font_size},&H00FFFFFF,"
         f"&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,3,1,2,60,60,"
@@ -91,8 +93,8 @@ def _ass_header(style: SubtitleStyle) -> str:
     return (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
-        f"PlayResX: {_PLAY_RES_X}\n"
-        f"PlayResY: {_PLAY_RES_Y}\n"
+        f"PlayResX: {play_res[0]}\n"
+        f"PlayResY: {play_res[1]}\n"
         "WrapStyle: 2\n"
         "ScaledBorderAndShadow: yes\n"
         "\n"
@@ -113,10 +115,27 @@ def _ass_event_line(cue: Cue, style: SubtitleStyle) -> str:
     return f"Dialogue: 0,{_ass_time(cue.start_s)},{_ass_time(cue.end_s)},Default,,0,0,0,,{text}\n"
 
 
-def render_ass(cues: Sequence[Cue], style: SubtitleStyle) -> str:
-    header = _ass_header(style)
-    events = "".join(_ass_event_line(c, style) for c in cues)
+def render_ass(
+    cues: Sequence[Cue], style: SubtitleStyle, play_res: tuple[int, int],
+    *, extra_events: Sequence[str] = (),
+) -> str:
+    header = _ass_header(style, play_res)
+    events = "".join(_ass_event_line(c, style) for c in cues) + "".join(extra_events)
     return header + events
+
+
+def ai_label_event(
+    play_res: tuple[int, int], *, text: str = AI_LABEL_TEXT, duration_s: float = AI_LABEL_DURATION_S,
+) -> str:
+    """AI 标识的独立 ``Dialogue`` 行：左上角小字描边，不占用 Default 样式的字号/位置。
+
+    字号/描边/外边距按 ``min(width, height)/1080`` 缩放——9:16 与 16:9 两种画幅的
+    短边都固定是 1080，取 min 后两种画幅视觉大小一致，不随横竖屏改变观感。
+    """
+    scale = min(play_res) / 1080
+    font_size, outline, margin = round(28 * scale), max(1, round(2 * scale)), round(28 * scale)
+    override = f"{{\\an7\\pos({margin},{margin})\\fs{font_size}\\bord{outline}\\shad0}}"
+    return f"Dialogue: 1,{_ass_time(0)},{_ass_time(duration_s)},Default,,0,0,0,,{override}{_escape_ass_text(text)}\n"
 
 
 def render_srt(cues: Sequence[Cue]) -> str:

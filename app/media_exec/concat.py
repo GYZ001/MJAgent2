@@ -15,12 +15,15 @@ from app.artifacts import _adopted_video_paths
 from app.atomic_io import atomic_copy
 from app.db import get_conn, new_id, now, rows_to_dicts
 from app.media_pipeline.delivery_encode import (
-    DELIVERY_VIDEO_ARGS, low_priority, INTERMEDIATE_VIDEO_ARGS, canvas_filter, encode_timeout_s,
-    probe_resolution, probe_video_codec, uniform_resolution,
+    low_priority, encode_timeout_s, probe_resolution, probe_video_codec, uniform_resolution,
 )
 from app.media_urls import build_media_url
 from app.media_exec import concat_auto_adopt, concat_state  # noqa: E402 —— 与 subtitle_episode 同组
+from app.media_exec import concat_draft
+from app.media_exec.concat_draft import _piece_video_args, _run_concat_demuxer  # 见 concat_draft 模块 docstring
+from app.project_settings import ai_label_enabled, canvas_size, resolve_aspect_ratio
 from app.subtitles import episode as subtitle_episode
+from app.subtitles.ass import ai_label_event as _build_label_event
 
 
 _ACTIVE_VIDEO_JOB_STATUSES = ("queued", "running", "waiting_provider", "waiting_retry")
@@ -908,7 +911,7 @@ def episode_mix_status(episode_id: str) -> dict:
         "all_ready": len(shots) > 0 and available == len(shots),
         "shots_skipped": len(skipped_shot_nos), "skipped_shot_nos": skipped_shot_nos,
         "final_video_url": _existing_final_url(ep),
-        "final_video_stale": _final_video_is_stale(ep),
+        "final_video_stale": _final_video_is_stale(conn, ep, final_edit_report),
         "final_is_partial": bool(
             isinstance(final_timeline, dict) and final_timeline.get("partial")
         ),
@@ -933,9 +936,19 @@ def _versioned_final_url(final_path: Path) -> str:
     return build_media_url(final_path, version=revision)
 
 
-def _final_video_is_stale(ep_row) -> bool:
+def _final_video_is_stale(conn, ep_row, edit_report: dict | None) -> bool:
+    """``.stale`` 覆盖「采纳变化」；再比一次画布/AI 标识与项目当前设置，漏了会复用旧成片。"""
     final_path = _final_video_path(ep_row["project_id"], ep_row["episode_no"])
-    return final_path.is_file() and final_path.with_suffix(".stale").is_file()
+    if not final_path.is_file():
+        return False
+    if final_path.with_suffix(".stale").is_file():
+        return True
+    report = edit_report if isinstance(edit_report, dict) else {}
+    canvas = canvas_size(resolve_aspect_ratio(conn, ep_row["project_id"]))
+    recorded = report.get("canvas") or {}
+    if (recorded.get("width", 1080), recorded.get("height", 1920)) != canvas:  # 缺键按历史默认 9:16 比较
+        return True
+    return bool(report.get("ai_label_enabled")) != ai_label_enabled(conn, ep_row["project_id"])
 
 
 def _final_video_path(project_id: str, episode_no: int) -> Path:
@@ -1014,52 +1027,14 @@ def _final_edit_decision(
     return False, "simple_timeline_fast_concat"
 
 
-def _piece_video_args(rate: float, speed_change: bool, needs_scale: bool) -> list[str]:
-    """不变速且分辨率已一致 → -c:v copy（无损最快，旧 720p 集保持 720p，放大不
-    会凭空多出细节）；否则按需 setpts/canvas_filter 后走 INTERMEDIATE_VIDEO_ARGS。
-    """
-    if not speed_change and not needs_scale:
-        return ["-c:v", "copy"]
-    parts = [f"setpts=PTS/{rate:.6f}"] if speed_change else []
-    if needs_scale:
-        parts.append(canvas_filter())
-    return ["-vf", ",".join(parts), *INTERMEDIATE_VIDEO_ARGS]
-
-
-def _run_concat_demuxer(
-    concat_in: list[str], concat_output: Path, timeout_s: float,
-    uniform_ok: bool, audio_rate: int, *, ass_filter: str | None = None,
-) -> None:
-    """分辨率一致且不烧字幕才尝试 -c copy 无损直粘；否则回退 DELIVERY_VIDEO_ARGS
-    全量重编码（不再用中间件参数顶替最终交付）；ass_filter 非空时插在最前。
-    """
-    if uniform_ok and ass_filter is None:
-        try:
-            subprocess.run(
-                concat_in + ["-c", "copy", "-movflags", "+faststart", str(concat_output)],
-                check=True, capture_output=True, timeout=timeout_s, preexec_fn=low_priority)
-            return
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            pass
-    vf_args = ["-vf", ass_filter] if ass_filter else []
-    try:
-        subprocess.run(
-            concat_in + [*vf_args, *DELIVERY_VIDEO_ARGS, "-c:a", "aac", "-ar", str(audio_rate),
-                         "-movflags", "+faststart", str(concat_output)],
-            check=True, capture_output=True, timeout=timeout_s, preexec_fn=low_priority)
-    except subprocess.TimeoutExpired as exc:
-        raise ValueError(f"整集合成超过 {int(timeout_s)} 秒，已停止本次任务；上一版成片仍保留，可稍后重试") from exc
-    except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or b"").decode("utf-8", "replace")[-500:]
-        raise ValueError("整集合成失败，上一版成片仍保留，可检查片段后重试" + (f"：{detail}" if detail else "")) from exc
-
-
 def _draft_concat_pieces(
     piece_specs: list[tuple[int, str, float]], probe_by_shot: dict[int, dict[str, Any]],
     final_path: Path, concat_timeout_s: float, subtitle_plan: Any = None,
+    *, play_res: tuple[int, int], label_event: str | None = None,
 ) -> tuple[float, Path, Any, list[dict[str, Any]]]:
     """逐镜音频归一（必要时视频重编码）后走 concat demuxer 拼接；不归一直接拼接
     会被按首段 timebase 解释后续音频包混用采样率时拉伸到秒级——draft 与 final_edit 共用同一套音频归一+响度增益逻辑（app.media_pipeline.loudness）。
+    字幕关闭且开了 AI 标识时，只对覆盖片头 3 秒的前缀分段重编码叠字，其余仍 -c copy。
     """
     from app.media_pipeline.loudness import FINAL_AUDIO_RATE, audio_normalize_filter, clip_loudness_report
 
@@ -1069,10 +1044,11 @@ def _draft_concat_pieces(
     uniform_ok = len(vpaths) <= 1 or uniform_resolution(vpaths) is not None
     piece_durations: list[tuple[int, float]] = []
     clip_loudness: list[dict[str, Any]] = []
+    prepared_paths: list[Path] = []
+    estimated_durations: list[float] = []
 
     with tempfile.TemporaryDirectory() as td:
         listfile = Path(td) / "list.txt"
-        lines = []
         for shot_no, vpath, rate in piece_specs:
             source_probe = probe_by_shot[shot_no]
             video_duration_s = float(source_probe["video_duration_s"])
@@ -1088,7 +1064,7 @@ def _draft_concat_pieces(
                     "-i", f"anullsrc=channel_layout=stereo:sample_rate={FINAL_AUDIO_RATE}",
                 ]
                 audio_label = "1:a"
-            video_args = _piece_video_args(rate, speed_change, not uniform_ok)
+            video_args = _piece_video_args(rate, speed_change, not uniform_ok, *play_res)
             clip_loudness.append(clip_loudness_report(vpath, has_audio, shot_no=shot_no))
             audio_filter = audio_normalize_filter(
                 atempo_rate=rate if (speed_change and has_audio) else None, duration_s=effective_duration,
@@ -1114,17 +1090,32 @@ def _draft_concat_pieces(
                 raise ValueError(f"镜 {shot_no} 的音视频归一处理未产出有效片段；上一版成片仍保留")
             if subtitle_plan:
                 piece_durations.append((shot_no, float(_probe_concat_media(str(prepared_path))["video_duration_s"])))
-            # concat demuxer 要求绝对路径并转义单引号
+            prepared_paths.append(prepared_path)
+            estimated_durations.append(effective_duration)
+        artifacts = (
+            subtitle_episode.write_episode_ass_sequential(
+                subtitle_plan, piece_durations, Path(td), play_res, label_event=label_event,
+            ) if subtitle_plan else
+            subtitle_episode.label_only_artifacts(play_res, label_event, Path(td))
+        )
+        if label_event and not subtitle_plan:
+            prepared_paths = concat_draft.relabeled_prefix(
+                prepared_paths, estimated_durations, artifacts.filter_arg, timeout_s=concat_timeout_s,
+            )
+        # concat demuxer 要求绝对路径并转义单引号
+        lines = []
+        for prepared_path in prepared_paths:
             safe = str(prepared_path).replace("'", "'\\''")
             lines.append(f"file '{safe}'")
         listfile.write_text("\n".join(lines), encoding="utf-8")
         concat_output = Path(td) / "concat.mp4"
         concat_in = ["ffmpeg", "-y", "-loglevel", "error",
                      "-f", "concat", "-safe", "0", "-i", str(listfile)]
-        artifacts = subtitle_episode.write_episode_ass_sequential(subtitle_plan, piece_durations, Path(td)) if subtitle_plan else None
+        # 字幕开启时 artifacts 覆盖全片（含标识），照旧交给 _run_concat_demuxer 整体重编码；
+        # 仅标识时已在上面逐段烧完，这里必须传 None 才能保住其余分段的 -c copy 零转码。
         _run_concat_demuxer(
             concat_in, concat_output, concat_timeout_s, uniform_ok, FINAL_AUDIO_RATE,
-            ass_filter=artifacts.filter_arg if artifacts else None,
+            ass_filter=artifacts.filter_arg if (artifacts and subtitle_plan) else None,
         )
         if not concat_output.is_file() or concat_output.stat().st_size <= 0:
             raise ValueError("ffmpeg 未产出有效成片，上一版成片仍保留，可检查片段后重试")
@@ -1156,6 +1147,9 @@ def concatenate_episode(
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     if not ep:
         raise ValueError("剧集不存在")
+    # 唯一入口：画布/AI 标识在此解析一次，两条子路径都显式接收，不再各自查库或默认 1080x1920。
+    play_res = canvas_size(resolve_aspect_ratio(conn, ep["project_id"]))
+    label_event = _build_label_event(play_res) if ai_label_enabled(conn, ep["project_id"]) else None
     if operation_idempotency_key is None:
         # 直接调用路径（测试/无幂等操作的兼容入口）：release_authority 与
         # video_delivery_manifest 都在下面就地现算，自动采纳必须先做，样本
@@ -1330,7 +1324,10 @@ def concatenate_episode(
             with tempfile.TemporaryDirectory() as edit_td:
                 edit_dir = _P(edit_td)
                 edited_video = edit_dir / "final-edit.mp4"
-                edit_report = render_episode_final_edit(conn, episode_id, piece_specs, edited_video, edit_dir, subtitle_plan)
+                edit_report = render_episode_final_edit(
+                    conn, episode_id, piece_specs, edited_video, edit_dir, subtitle_plan,
+                    play_res=play_res, label_event=label_event,
+                )
                 subtitle_artifacts = edit_report.pop("subtitle_artifacts", None)
                 edit_report["subtitles"] = subtitle_episode.report_section(subtitle_plan, subtitle_artifacts)
                 edit_report["timeline"] = {k: common_result[k] for k in _TIMELINE_KEYS}
@@ -1371,7 +1368,9 @@ def concatenate_episode(
             final_edit_failure = f"{type(exc).__name__}: {exc}"[:1000]
 
     total_dur, publish_candidate, subtitle_artifacts, clip_loudness = _draft_concat_pieces(
-        piece_specs, probe_by_shot, final_path, concat_timeout_s, subtitle_plan)
+        piece_specs, probe_by_shot, final_path, concat_timeout_s, subtitle_plan,
+        play_res=play_res, label_event=label_event,
+    )
 
     fallback_edit_report = {
         "ok": False,
@@ -1388,6 +1387,7 @@ def concatenate_episode(
         "video_delivery_manifest": video_delivery_manifest,
         "video_delivery_manifest_hash": video_delivery_manifest["manifest_hash"],
         "audio_normalization": "per_clip_linear", "clip_loudness": clip_loudness,  # 如实标出，不借用 _compose 的 "loudnorm"
+        "canvas": {"width": play_res[0], "height": play_res[1]}, "ai_label_enabled": label_event is not None,
     }
     result = {
         "total_duration_s": round(total_dur, 1),

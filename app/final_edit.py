@@ -18,8 +18,7 @@ from app.continuity import (
     structured_boundary_issues,
 )
 from app.media_pipeline.delivery_encode import (
-    DELIVERY_HEIGHT as FINAL_HEIGHT, low_priority, DELIVERY_VIDEO_ARGS, DELIVERY_WIDTH as FINAL_WIDTH,
-    INTERMEDIATE_VIDEO_ARGS, canvas_filter, encode_timeout_s, scale_box, scale_px,
+    low_priority, DELIVERY_VIDEO_ARGS, INTERMEDIATE_VIDEO_ARGS, canvas_filter, encode_timeout_s, scale_box, scale_px,
 )
 # 逐段响度测量与 FINAL_AUDIO_RATE 的真源是 app.media_pipeline.loudness（draft_concat
 # 与本模块共用，见该模块 docstring）；本文件不再自己定义，避免两份常量/两份滤镜拼装逻辑。
@@ -158,9 +157,10 @@ def render_text_card(
     surface: str,
     destination: Path,
     *,
+    play_res: tuple[int, int],
     font_role: str = "classical_serif",
 ) -> dict[str, Any]:
-    """用确定性布局渲染整帧中文插入卡。"""
+    """用确定性布局渲染整帧中文插入卡；``play_res`` 是当前项目交付画布。"""
     from PIL import Image, ImageDraw, ImageFont
 
     text = str(exact_text or "").strip()
@@ -170,32 +170,33 @@ def render_text_card(
         raise ValueError("确定性文字卡最多支持 64 个字符")
     font_path = _font_path()
     destination.parent.mkdir(parents=True, exist_ok=True)
+    width, height = play_res
 
-    image = Image.new("RGB", (FINAL_WIDTH, FINAL_HEIGHT), (30, 24, 18))
+    image = Image.new("RGB", (width, height), (30, 24, 18))
     draw = ImageDraw.Draw(image)
-    for y in range(FINAL_HEIGHT):
-        tone = int(232 - 30 * abs(y - FINAL_HEIGHT / 2) / (FINAL_HEIGHT / 2))
+    for y in range(height):
+        tone = int(232 - 30 * abs(y - height / 2) / (height / 2))
         draw.line(
-            (0, y, FINAL_WIDTH, y),
+            (0, y, width, y),
             fill=(max(150, tone - 9), max(126, tone - 36), max(88, tone - 73)),
         )
-    r1, r2, w1, w2 = scale_px(22), scale_px(16), scale_px(5), scale_px(2)
-    draw.rounded_rectangle(scale_box(54, 128, 666, 1152), radius=r1, outline=(80, 48, 26), width=w1)
-    draw.rounded_rectangle(scale_box(70, 144, 650, 1136), radius=r2, outline=(143, 96, 51), width=w2)
+    r1, r2, w1, w2 = scale_px(width, 22), scale_px(width, 16), scale_px(width, 5), scale_px(width, 2)
+    draw.rounded_rectangle(scale_box(width, 54, 128, 666, 1152), radius=r1, outline=(80, 48, 26), width=w1)
+    draw.rounded_rectangle(scale_box(width, 70, 144, 650, 1136), radius=r2, outline=(143, 96, 51), width=w2)
 
     max_chars = 8 if len(text) <= 24 else 12
     lines = _split_text(text, max_chars)
-    font_size = scale_px(92 if len(lines) <= 2 else (74 if len(lines) <= 4 else 58))
+    font_size = scale_px(width, 92 if len(lines) <= 2 else (74 if len(lines) <= 4 else 58))
     font = ImageFont.truetype(str(font_path), font_size)
-    label_font = ImageFont.truetype(str(font_path), scale_px(30))
+    label_font = ImageFont.truetype(str(font_path), scale_px(width, 30))
     line_height = int(font_size * 1.5)
     block_height = line_height * len(lines)
-    y = (FINAL_HEIGHT - block_height) // 2
+    y = (height - block_height) // 2
     for line in lines:
         bbox = draw.textbbox((0, 0), line, font=font)
         line_width = bbox[2] - bbox[0]
         draw.text(
-            ((FINAL_WIDTH - line_width) // 2, y),
+            ((width - line_width) // 2, y),
             line,
             font=font,
             fill=(48, 29, 20),
@@ -206,7 +207,7 @@ def render_text_card(
     label = str(surface or "画面文字").strip()[:24]
     label_bbox = draw.textbbox((0, 0), label, font=label_font)
     draw.text(
-        ((FINAL_WIDTH - (label_bbox[2] - label_bbox[0])) // 2, scale_px(1030)),
+        ((width - (label_bbox[2] - label_bbox[0])) // 2, scale_px(width, 1030)),
         label,
         font=label_font,
         fill=(102, 68, 42),
@@ -220,8 +221,8 @@ def render_text_card(
         "surface": surface,
         "font_path": str(font_path),
         "font_role": font_role,
-        "width": FINAL_WIDTH,
-        "height": FINAL_HEIGHT,
+        "width": width,
+        "height": height,
     }
 
 
@@ -266,7 +267,7 @@ def _prepare_clip(
     shot: Shot,
     playback_rate: float,
     text_enabled: bool,
-    work_dir: Path,
+    work_dir: Path, play_res: tuple[int, int],
 ) -> dict[str, Any]:
     probe = _probe_media(source_path)
     source_duration = probe["video_duration_s"] or float(shot.duration_s or 5)
@@ -277,7 +278,7 @@ def _prepare_clip(
     text_report: dict[str, Any] | None = None
     video_label = "base"
     video_chain = (
-        f"[0:v]setpts=(PTS-STARTPTS)/{rate:.6f},{canvas_filter()},"
+        f"[0:v]setpts=(PTS-STARTPTS)/{rate:.6f},{canvas_filter(*play_res)},"
         f"fps={FINAL_FPS},settb=AVTB,format=rgba[{video_label}]"
     )
     filters.append(video_chain)
@@ -289,6 +290,7 @@ def _prepare_clip(
             shot.required_text.exact_text,
             shot.required_text.surface,
             card_path,
+            play_res=play_res,
             font_role=shot.required_text.font_role,
         )
         inputs += ["-loop", "1", "-i", str(card_path)]
@@ -296,7 +298,7 @@ def _prepare_clip(
         fade_duration = min(0.12, max(0.04, (end - start) / 4))
         fade_out_start = max(start, end - fade_duration)
         filters.extend([
-            f"[1:v]scale={FINAL_WIDTH}:{FINAL_HEIGHT},format=rgba,"
+            f"[1:v]scale={play_res[0]}:{play_res[1]},format=rgba,"
             f"fade=t=in:st={start:.3f}:d={fade_duration:.3f}:alpha=1,"
             f"fade=t=out:st={fade_out_start:.3f}:d={fade_duration:.3f}:alpha=1[textcard]",
             f"[base][textcard]overlay=0:0:enable='between(t,{start:.3f},{end:.3f})':shortest=1,"
@@ -407,11 +409,12 @@ def _text_owners(shots: list[Shot]) -> tuple[dict[str, int], list[dict[str, Any]
 def _compose(
     prepared: list[dict[str, Any]], transitions: list[TransitionSpec], destination: Path,
     *, subtitle_plan: Any = None, work_dir: Path | None = None,
+    play_res: tuple[int, int], label_event: str | None = None,
 ) -> dict[str, Any]:
     from app.subtitles.episode import compose_artifacts  # 延迟导入避免与 episode.py 的模块级 import 本文件循环（同层 L4）
 
     if len(prepared) == 1:
-        artifacts = compose_artifacts(prepared, [], subtitle_plan, work_dir)
+        artifacts = compose_artifacts(prepared, [], subtitle_plan, work_dir, play_res, label_event)
         cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", prepared[0]["path"], *(["-vf", artifacts.filter_arg] if artifacts else []),
                *DELIVERY_VIDEO_ARGS, "-c:a", "copy", "-movflags", "+faststart", str(destination)]
         _run_ffmpeg(cmd, timeout=encode_timeout_s(prepared[0]["duration_s"]), context="最终编码（单镜）")
@@ -457,7 +460,7 @@ def _compose(
         video_label = next_video
         audio_label = next_audio
     base_command = list(command)
-    artifacts = compose_artifacts(prepared, reports, subtitle_plan, work_dir)
+    artifacts = compose_artifacts(prepared, reports, subtitle_plan, work_dir, play_res, label_event)
     filters, video_label = ([*filters, f"[{video_label}]{artifacts.filter_arg}[vsub]"], "vsub") if artifacts else (filters, video_label)
 
     def command_with_normalizer(normalizer: str) -> list[str]:
@@ -503,12 +506,10 @@ def render_episode_final_edit(
     destination: Path,
     work_dir: Path,
     subtitle_plan: Any = None,
+    *, play_res: tuple[int, int], label_event: str | None = None,
 ) -> dict[str, Any]:
-    """尝试完成确定性最终编辑；失败信息由调用方用于回退硬拼。"""
-    rows = conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
-        (episode_id,),
-    ).fetchall()
+    """尝试完成确定性最终编辑；失败信息由调用方用于回退硬拼。``play_res``/``label_event`` 由调用方解析一次后传入。"""
+    rows = conn.execute("SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall()
     shot_by_no = {int(row["shot_no"]): shot_from_row(row) for row in rows}
     ordered_shots = [shot_by_no[shot_no] for shot_no, _path, _rate in piece_specs]
     owners, text_warnings = _text_owners(ordered_shots)
@@ -526,7 +527,7 @@ def render_episode_final_edit(
                 shot=shot,
                 playback_rate=rate,
                 text_enabled=text_enabled,
-                work_dir=work_dir,
+                work_dir=work_dir, play_res=play_res,
             )
         except Exception as exc:
             # 文字层失败时先尝试不带文字的统一规格，不让内容后期阻断成片。
@@ -544,7 +545,7 @@ def render_episode_final_edit(
                 shot=shot,
                 playback_rate=rate,
                 text_enabled=False,
-                work_dir=work_dir,
+                work_dir=work_dir, play_res=play_res,
             )
         prepared.append(item)
 
@@ -556,7 +557,10 @@ def render_episode_final_edit(
         else transition_spec("硬切")
         for previous, current in zip(ordered_shots, ordered_shots[1:])
     ]
-    compose_report = _compose(prepared, transition_specs, destination, subtitle_plan=subtitle_plan, work_dir=work_dir)
+    compose_report = _compose(
+        prepared, transition_specs, destination, subtitle_plan=subtitle_plan,
+        work_dir=work_dir, play_res=play_res, label_event=label_event,
+    )
     return {
         "ok": True,
         "prepared_shots": len(prepared),
@@ -565,5 +569,6 @@ def render_episode_final_edit(
         "text_failures": text_failures,
         "boundary_report": boundary_report(ordered_shots),
         "clip_loudness": [item["loudness"] for item in prepared],
+        "canvas": {"width": play_res[0], "height": play_res[1]}, "ai_label_enabled": label_event is not None,
         **compose_report,
     }

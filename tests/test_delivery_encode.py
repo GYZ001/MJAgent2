@@ -66,14 +66,14 @@ def test_intermediate_video_args_uses_veryfast_crf14() -> None:
 
 
 def test_canvas_filter_targets_delivery_resolution_with_lanczos() -> None:
-    filter_str = canvas_filter()
+    filter_str = canvas_filter(DELIVERY_WIDTH, DELIVERY_HEIGHT)
     assert "lanczos" in filter_str
     assert f"scale={DELIVERY_WIDTH}:{DELIVERY_HEIGHT}" in filter_str
     assert f"crop={DELIVERY_WIDTH}:{DELIVERY_HEIGHT}" in filter_str
 
 
 def test_canvas_filter_custom_flags() -> None:
-    assert "flags=bicubic" in canvas_filter(flags="bicubic")
+    assert "flags=bicubic" in canvas_filter(DELIVERY_WIDTH, DELIVERY_HEIGHT, flags="bicubic")
 
 
 def test_uniform_resolution_empty_list_is_none() -> None:
@@ -138,7 +138,7 @@ def test_real_samples_normalize_and_concat_to_delivery_resolution(tmp_path: Path
         subprocess.run(
             [
                 "ffmpeg", "-y", "-loglevel", "error", "-i", str(sample), "-t", "3",
-                "-vf", canvas_filter(), *INTERMEDIATE_VIDEO_ARGS,
+                "-vf", canvas_filter(DELIVERY_WIDTH, DELIVERY_HEIGHT), *INTERMEDIATE_VIDEO_ARGS,
                 "-an", str(out),
             ],
             check=True, capture_output=True, timeout=120,

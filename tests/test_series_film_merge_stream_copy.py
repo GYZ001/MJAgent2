@@ -8,12 +8,21 @@ from pathlib import Path
 import pytest
 
 from app import config
+from app.db import get_conn
 from app.domain.series_ops import merge
 from app.media_exec.concat import _final_video_path
 
 pytestmark = pytest.mark.skipif(
     not (shutil.which("ffmpeg") and shutil.which("ffprobe")), reason="ffmpeg/ffprobe unavailable",
 )
+
+
+@pytest.fixture(autouse=True)
+def _seed_project_p() -> None:
+    """merge.build_series_film 现在会读 projects 表解析画幅；本文件全部用 "p"。"""
+    conn = get_conn()
+    conn.execute("INSERT OR IGNORE INTO projects(id,name,created_at) VALUES('p','p',0)")
+    conn.commit()
 
 
 def _make_clip(path: Path, *, size: str, duration_s: float = 0.5) -> None:

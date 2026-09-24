@@ -57,6 +57,10 @@ import json
 import subprocess
 from pathlib import Path
 
+# 2026-09-23 起不再是唯一真源：项目画幅（9:16/16:9）由
+# ``app.project_settings.resolve_aspect_ratio``/``canvas_size`` 决定，三个合成入口
+# （final_edit/draft_concat/series merge）各自解析一次后显式往下传。这两个常量降级为
+# 「9:16 默认值」，仍被 tests/ 与未涉及画幅切换的脚本直接引用，予以保留。
 DELIVERY_WIDTH = 1080
 DELIVERY_HEIGHT = 1920
 
@@ -98,26 +102,27 @@ def encode_timeout_s(total_duration_s: float) -> float:
     return min(4 * 3600.0, max(300.0, total_duration_s * DELIVERY_ENCODE_REALTIME_FACTOR + 120.0))
 
 
-def canvas_filter(*, flags: str = "lanczos") -> str:
-    """交付画布的标准 scale+crop 滤镜链：等比放大铺满后居中裁切到交付分辨率。"""
+def canvas_filter(width: int, height: int, *, flags: str = "lanczos") -> str:
+    """交付画布的标准 scale+crop 滤镜链：等比放大铺满后居中裁切到交付分辨率。
+
+    ``width``/``height`` 必须由调用方显式传入（通常是
+    ``app.project_settings.canvas_size(resolve_aspect_ratio(...))`` 的结果）——
+    本函数不再兜底默认 ``DELIVERY_WIDTH``/``DELIVERY_HEIGHT``，漏传在调用时就是
+    ``TypeError``，不会静默产出 1080x1920。
+    """
     return (
-        f"scale={DELIVERY_WIDTH}:{DELIVERY_HEIGHT}:force_original_aspect_ratio=increase:"
-        f"flags={flags},crop={DELIVERY_WIDTH}:{DELIVERY_HEIGHT}"
+        f"scale={width}:{height}:force_original_aspect_ratio=increase:"
+        f"flags={flags},crop={width}:{height}"
     )
 
 
-# app.final_edit 的确定性文字卡曾经写死在 720 宽画布上；换成 DELIVERY_WIDTH 后，
-# 那些硬编码像素数按这个比例整体缩放，不再假设 720 画布。
-CANVAS_SCALE = DELIVERY_WIDTH / 720
+def scale_px(canvas_width: int, value: float) -> int:
+    """把写死在 720 宽画布上的像素数按 ``canvas_width/720`` 缩放到当前交付画布。"""
+    return max(1, round(value * canvas_width / 720))
 
 
-def scale_px(value: float) -> int:
-    """把写死在 720 宽画布上的像素数按 CANVAS_SCALE 缩放到当前交付画布。"""
-    return max(1, round(value * CANVAS_SCALE))
-
-
-def scale_box(*values: float) -> tuple[int, ...]:
-    return tuple(scale_px(value) for value in values)
+def scale_box(canvas_width: int, *values: float) -> tuple[int, ...]:
+    return tuple(scale_px(canvas_width, value) for value in values)
 
 
 def _probe_video_stream(path: str | Path) -> dict[str, object]:

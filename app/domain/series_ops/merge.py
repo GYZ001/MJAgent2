@@ -32,10 +32,10 @@ from app.media_exec.concat import (
     _read_edit_report,
 )
 from app.media_pipeline.delivery_encode import (
-    DELIVERY_HEIGHT, DELIVERY_VIDEO_ARGS, DELIVERY_WIDTH, canvas_filter, encode_timeout_s,
-    probe_resolution,
+    DELIVERY_VIDEO_ARGS, canvas_filter, encode_timeout_s, probe_resolution,
 )
 from app.media_urls import build_media_url
+from app.project_settings import canvas_size, resolve_aspect_ratio
 from app.subtitles.series_srt import build_series_srt
 
 
@@ -101,11 +101,11 @@ def _input_fingerprints(paths: list[Path]) -> list[dict]:
     return fingerprints
 
 
-def _build_filter_complex(count: int) -> str:
+def _build_filter_complex(count: int, play_res: tuple[int, int]) -> str:
     parts: list[str] = []
     labels: list[str] = []
     for i in range(count):
-        parts.append(f"[{i}:v]{canvas_filter()},fps={FINAL_FPS},setsar=1[v{i}]")
+        parts.append(f"[{i}:v]{canvas_filter(*play_res)},fps={FINAL_FPS},setsar=1[v{i}]")
         parts.append(f"[{i}:a]aresample={FINAL_AUDIO_RATE}[a{i}]")
         labels.append(f"[v{i}][a{i}]")
     concat = f"{''.join(labels)}concat=n={count}:v=1:a=1[outv][outa]"
@@ -113,10 +113,16 @@ def _build_filter_complex(count: int) -> str:
 
 
 _MERGE_LOCK = threading.Lock()
-_CANVAS_SIGNATURE = (
-    ("h264", DELIVERY_WIDTH, DELIVERY_HEIGHT, f"{FINAL_FPS}/1", "yuv420p"),
-    ("aac", str(FINAL_AUDIO_RATE), 2),
-)
+
+
+def _canvas_signature(play_res: tuple[int, int]) -> tuple:
+    """当前项目画布对应的流签名——2026-09-23 前是写死 1080x1920 的模块常量，
+    现在按项目画幅（``app.project_settings.canvas_size``）逐次合并时现算。"""
+    width, height = play_res
+    return (
+        ("h264", width, height, f"{FINAL_FPS}/1", "yuv420p"),
+        ("aac", str(FINAL_AUDIO_RATE), 2),
+    )
 
 
 def _stream_signature(path: Path) -> tuple | None:
@@ -142,12 +148,14 @@ def _stream_signature(path: Path) -> tuple | None:
     )
 
 
-def _stream_copy_eligible(paths: list[Path]) -> bool:
+def _stream_copy_eligible(paths: list[Path], canvas_signature: tuple) -> bool:
     """全部输入流参数一致且正好是交付画布时才可流拷贝；任何一路探不出来就重编码。"""
-    return all(_stream_signature(path) == _CANVAS_SIGNATURE for path in paths)
+    return all(_stream_signature(path) == canvas_signature for path in paths)
 
 
-def _run_copy_concat_ffmpeg(paths: list[Path], out_path: Path, timeout_s: float) -> None:
+def _run_copy_concat_ffmpeg(paths: list[Path], out_path: Path, timeout_s: float, _play_res: tuple[int, int]) -> None:
+    """``_play_res`` 未使用——流拷贝前 ``_stream_copy_eligible`` 已经确认画布匹配；
+    参数只为与 ``_run_concat_ffmpeg`` 保持同一签名，供下方按 stream_copy 统一派发。"""
     list_path = out_path.with_suffix(".concat.txt")
     list_path.write_text(
         "".join("file '" + str(path).replace("'", "'\\''") + "'\n" for path in paths), encoding="utf-8",
@@ -176,12 +184,12 @@ def _delivery_args_summary() -> str:
     return f"{_after('-c:v').removeprefix('lib')} {_after('-preset')} crf{_after('-crf')}"
 
 
-def _run_concat_ffmpeg(paths: list[Path], out_path: Path, timeout_s: float) -> None:
+def _run_concat_ffmpeg(paths: list[Path], out_path: Path, timeout_s: float, play_res: tuple[int, int]) -> None:
     cmd = ["ffmpeg", "-y"]
     for path in paths:
         cmd += ["-i", str(path)]
     cmd += [
-        "-filter_complex", _build_filter_complex(len(paths)),
+        "-filter_complex", _build_filter_complex(len(paths), play_res),
         "-map", "[outv]", "-map", "[outa]",
         *DELIVERY_VIDEO_ARGS,
         "-c:a", "aac", "-b:a", "160k", "-ar", str(FINAL_AUDIO_RATE),
@@ -219,6 +227,9 @@ def build_series_film(
     """真实跑一次 ffmpeg 合并；任何一步失败都不改动已有 ``film.mp4``。"""
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RuntimeError("服务端未找到 ffmpeg/ffprobe，无法生成连播成片")
+    # 合成入口在此一次性解析项目画布：下游 _stream_copy_eligible/_run_concat_ffmpeg
+    # 都显式接收 play_res，不再依赖写死的 1080x1920 模块常量。
+    play_res = canvas_size(resolve_aspect_ratio(get_conn(), project_id))
     final_paths = [_final_video_path(project_id, no) for no in episode_nos]
     missing = [str(no) for no, path in zip(episode_nos, final_paths) if not path.is_file()]
     if missing:
@@ -229,9 +240,9 @@ def build_series_film(
     out_dir.mkdir(parents=True, exist_ok=True)
     tmp_path = out_dir / "film.tmp.mp4"
     timeout_s = encode_timeout_s(expected_total)
-    stream_copy = _stream_copy_eligible(final_paths)
+    stream_copy = _stream_copy_eligible(final_paths, _canvas_signature(play_res))
     with _MERGE_LOCK:  # 全机一次只跑一个合并，见模块 docstring
-        (_run_copy_concat_ffmpeg if stream_copy else _run_concat_ffmpeg)(final_paths, tmp_path, timeout_s)
+        (_run_copy_concat_ffmpeg if stream_copy else _run_concat_ffmpeg)(final_paths, tmp_path, timeout_s, play_res)
     probe = _validate_merged_duration(tmp_path, expected_total)
     film_path = out_dir / "film.mp4"
     os.replace(tmp_path, film_path)
@@ -286,6 +297,14 @@ def merge_is_current(
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        return False
+    # 2026-09-23 新增：项目画幅可切换，只看输入文件指纹会漏掉「设置变了但各集成片
+    # 尚未重新合成」这一步——那种情况下旧合并的 width/height（已探测的真实产物
+    # 分辨率）会跟当前画幅解析结果不一致，必须判过期重新合并。AI 标识不在这里比较：
+    # 连播合并本身不叠加标识（各集已各自带），标识开关变化只通过下方的输入文件
+    # 指纹（各集 final/episode.mp4 重新生成后 mtime/size 必然改变）间接触发失效。
+    current_canvas = canvas_size(resolve_aspect_ratio(get_conn(), project_id))
+    if (report.get("width"), report.get("height")) != current_canvas:
         return False
     # 2026-09-03 实测：清空分镜后各集 final/episode.mp4 原封不动，只看文件指纹会把
     # 一部分镜已经不存在的成片判成「未过期」，用户重新入队被跳过。分镜产物 id 是

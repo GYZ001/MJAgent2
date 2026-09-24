@@ -287,33 +287,58 @@ def plan_or_none(
 # ---------------------------------------------------------------------------
 
 
+def _write_ass(
+    style: SubtitleStyle, cues: tuple[Cue, ...], fonts_dir: Path, work_dir: Path,
+    play_res: tuple[int, int], extra_events: Sequence[str],
+) -> EpisodeSubtitleArtifacts:
+    ass_text = render_ass(cues, style, play_res, extra_events=extra_events)
+    ass_path = Path(work_dir) / "episode.ass"
+    ass_path.write_text(ass_text, encoding="utf-8")
+    filter_arg = ffmpeg_ass_filter(ass_path, fonts_dir)
+    return EpisodeSubtitleArtifacts(ass_path=ass_path, ass_text=ass_text, cues=cues, filter_arg=filter_arg)
+
+
 def write_episode_ass(
-    plan: EpisodeSubtitlePlan, pieces: Sequence[PieceTiming], work_dir: Path,
+    plan: EpisodeSubtitlePlan, pieces: Sequence[PieceTiming], work_dir: Path, play_res: tuple[int, int],
+    *, extra_events: Sequence[str] = (),
 ) -> EpisodeSubtitleArtifacts:
     cues_by_shot = {shot_no: shot.cues for shot_no, shot in plan.shots.items()}
     timeline_cues = tuple(place_on_timeline(cues_by_shot, pieces))
-    ass_text = render_ass(timeline_cues, plan.style)
-    ass_path = Path(work_dir) / "episode.ass"
-    ass_path.write_text(ass_text, encoding="utf-8")
-    filter_arg = ffmpeg_ass_filter(ass_path, plan.fonts_dir)
-    return EpisodeSubtitleArtifacts(ass_path=ass_path, ass_text=ass_text, cues=timeline_cues, filter_arg=filter_arg)
+    return _write_ass(plan.style, timeline_cues, plan.fonts_dir, work_dir, play_res, extra_events)
 
 
 def write_episode_ass_sequential(
-    plan: EpisodeSubtitlePlan, piece_durations: list[tuple[int, float]], work_dir: Path,
+    plan: EpisodeSubtitlePlan, piece_durations: list[tuple[int, float]], work_dir: Path, play_res: tuple[int, int],
+    *, label_event: str | None = None,
 ) -> EpisodeSubtitleArtifacts:
     """``concat.py`` draft_concat 专用：全部零转场顺序拼接（xfade_before_s 恒为 0）。"""
     pieces = [PieceTiming(shot_no, dur, 0.0) for shot_no, dur in piece_durations]
-    return write_episode_ass(plan, pieces, work_dir)
+    extra = (label_event,) if label_event else ()
+    return write_episode_ass(plan, pieces, work_dir, play_res, extra_events=extra)
+
+
+def label_only_artifacts(
+    play_res: tuple[int, int], label_event: str | None, work_dir: Path | None,
+) -> EpisodeSubtitleArtifacts | None:
+    """没有字幕方案（关闭或 final_edit 未启用），只需要 AI 标识事件时的独立渲染
+    入口：draft_concat 专用，也是 ``compose_artifacts`` 在 ``subtitle_plan is None``
+    时的落地分支。字体复用 ``app.final_edit._font_path``，与整集字幕同一来源。
+    """
+    if not label_event or work_dir is None:
+        return None
+    font_path = _font_path()
+    style = SubtitleStyle(font_family=font_family_from_file(font_path))
+    return _write_ass(style, (), font_path.parent, work_dir, play_res, (label_event,))
 
 
 def compose_artifacts(
     prepared: list[dict[str, Any]], reports: list[dict[str, Any]],
     subtitle_plan: EpisodeSubtitlePlan | None, work_dir: Path | None,
+    play_res: tuple[int, int], label_event: str | None = None,
 ) -> EpisodeSubtitleArtifacts | None:
     """``final_edit._compose`` 专用：按已完成的转场时长表拼 PieceTiming 并渲染整集 ASS。"""
     if subtitle_plan is None or work_dir is None:
-        return None
+        return label_only_artifacts(play_res, label_event, work_dir)
     pieces = [PieceTiming(int(prepared[0]["shot_no"]), float(prepared[0]["duration_s"]), 0.0)]
     pieces.extend(
         PieceTiming(
@@ -321,7 +346,8 @@ def compose_artifacts(
         )
         for i in range(1, len(prepared))
     )
-    return write_episode_ass(subtitle_plan, pieces, work_dir)
+    extra = (label_event,) if label_event else ()
+    return write_episode_ass(subtitle_plan, pieces, work_dir, play_res, extra_events=extra)
 
 
 # ---------------------------------------------------------------------------
