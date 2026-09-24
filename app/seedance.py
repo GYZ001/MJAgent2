@@ -46,6 +46,7 @@ class SeedanceAdapter:
         *,
         image_urls: list[tuple[str, str]] | None = None,
         video_urls: list[tuple[str, str]] | None = None,
+        audio_urls: list[tuple[str, str]] | None = None,
         return_last_frame: bool = False,
         call_meta: dict[str, Any] | None = None,
     ) -> str:
@@ -63,6 +64,8 @@ class SeedanceAdapter:
             content.append({"type": "image_url", "image_url": {"url": url}, "role": role})
         for url, role in video_urls or []:
             content.append({"type": "video_url", "video_url": {"url": url}, "role": role})
+        for url, role in audio_urls or []:
+            content.append({"type": "audio_url", "audio_url": {"url": url}, "role": role})
         model = active_model("video", self.provider)
         base_url, model_headers = _model_connection(
             self.provider, model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY,
@@ -301,6 +304,12 @@ class SeedanceAdapter:
             supports_reference_video=capability_verified,
             supports_true_video_continuation=False,
             supports_return_last_frame=False,
+            # 官方页 https://docs.volcengine.com/docs/82379/1520757：最多 3 段、
+            # 总时长不超过 15 秒；不随 capability_verified 打折——这是协议本身
+            # 的静态上限，与本次是否观测到活跃通道无关（同 duration_limits）。
+            supports_reference_audio=capability_verified,
+            max_reference_audios=3,
+            max_reference_audio_total_s=15.0,
             supports_data_url_by_media_type={"image": True, "video": False},
             requires_web_url_by_media_type={"image": False, "video": True},
             mutually_exclusive_input_roles=[

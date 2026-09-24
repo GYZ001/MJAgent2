@@ -1434,16 +1434,12 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
             "自由文本覆盖已审读的分镜语义；请通过受控分镜候选修订后重新发布"
         )
     conn = get_conn()
-    shot_row, ep, project = enqueue_context.load_video_binding_context(
-        conn, shot_id, target_video_provider,
-    )
+    shot_row, ep, project = enqueue_context.load_video_binding_context(conn, shot_id, target_video_provider)
     aspect_ratio = resolve_aspect_ratio(conn, project["id"])
     bible, shot, is_storyboard_pack_shot, screenplay, prior_shots = (
         enqueue_context.resolve_shot_context(conn, shot_row, ep, project, authority_context)
     )
-    shot_plan, decision = enqueue_context.resolve_mode_decision(
-        conn, shot_id, shot_row, authority_context,
-    )
+    shot_plan, decision = enqueue_context.resolve_mode_decision(conn, shot_id, shot_row, authority_context)
     first_frame_requirement, first_frame_source, boundary_source_shot_id = (
         enqueue_context.resolve_first_frame_requirement(shot_plan)
     )
@@ -1488,6 +1484,10 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         conn, shot_id, shot_row, ep, shot, screenplay, bible,
     )
 
+    reference_audio_fp = enqueue_prompt.reference_audio_idem_fingerprint(
+        conn, project["id"], shot, current_reference_manifest,
+        target_video_provider=target_video_provider, target_video_model=target_video_model,
+    )
     key = enqueue_prompt.build_idem_key(
         prompt_text, decision, chain_after_shot_id, chain_after_version_id,
         target_prompt_fingerprint=target_prompt_fingerprint, prompt_override=prompt_override,
@@ -1497,6 +1497,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         supervisor_run_id=supervisor_run_id, auto_retake_count=auto_retake_count,
         critique=critique, critique_sources=critique_sources,
         identity_fingerprint=enqueue_prompt.segment_identity_fingerprint(shot),
+        reference_audio_fingerprint=reference_audio_fp,
     )
 
     reused = enqueue_prompt.find_reusable_version(

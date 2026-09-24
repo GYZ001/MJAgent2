@@ -43,6 +43,7 @@ class VideoProviderAdapter(Protocol):
         *,
         image_urls: list[tuple[str, str]] | None = None,
         video_urls: list[tuple[str, str]] | None = None,
+        audio_urls: list[tuple[str, str]] | None = None,
         return_last_frame: bool = False,
         call_meta: dict[str, Any] | None = None,
     ) -> str:

@@ -232,8 +232,15 @@ def build_idem_key(
     current_reference_manifest: dict, reference_gallery, reroll: bool,
     operation_idempotency_key, supervisor_run_id, auto_retake_count: int,
     critique, critique_sources, identity_fingerprint: str = "",
+    reference_audio_fingerprint: str = "",
 ) -> str:
-    """构建幂等键：普通重复点击复用历史成功版；reroll 显式打破幂等。"""
+    """构建幂等键：普通重复点击复用历史成功版；reroll 显式打破幂等。
+
+    ``reference_audio_fingerprint`` 默认空串：开关关闭、本段没有分镜包段落、
+    或本段没有可用说话人参考音频时都是空串，追加分支不生效，键与开关上线前
+    逐字相同（U3 派单第 4 条）。非空时才追加，调用方用
+    :func:`reference_audio_idem_fingerprint` 计算。
+    """
     from app import video_modes
     from app.compiler import VIDEO_PROMPT_CONTRACT_VERSION, idem_key as make_idem_key
     from app.video_prompt_ai import AI_VIDEO_PROMPT_CONTRACT_VERSION
@@ -252,6 +259,7 @@ def build_idem_key(
         + f"|reference_input_policy:{video_modes.REFERENCE_INPUT_POLICY_VERSION}"
         + f"|reference_dependencies:{current_reference_manifest.get('input_fingerprint') or ''}"
         + (f"|segment_identity:{identity_fingerprint}" if identity_fingerprint else "")
+        + (f"|reference_audios:{reference_audio_fingerprint}" if reference_audio_fingerprint else "")
     )
     # 只有人工编辑会改变视频输入并打破原幂等键；未编辑画廊沿用历史幂等行为。
     if reference_gallery and reference_gallery["revision"] is not None:
@@ -277,6 +285,50 @@ def build_idem_key(
             )
         return make_idem_key(key_material + f"|reroll_operation:{reroll_scope}")
     return make_idem_key(key_material)
+
+
+def reference_audio_idem_fingerprint(
+    conn, project_id: str, shot, current_reference_manifest: dict,
+    *, target_video_provider: str, target_video_model: str,
+) -> str:
+    """本段说话角色声音参考清单的指纹，供 :func:`build_idem_key` 追加。
+
+    开关关闭、本镜不是分镜包段落（没有 ``dialogue``/说话人数据）、或算出来
+    的清单本就是空的，都返回空串——``build_idem_key`` 只在非空时追加后缀，
+    行为与本次改动之前逐字相同。真正挡住"已采纳镜头被重新烧掉"的不是这个
+    指纹算得准不准，而是更上游的 ``only_incomplete``/Supervisor 覆盖台账在
+    镜头进入这里之前就已经把它们过滤掉，见 ``app.voice.segment_refs`` 模块
+    文档与 U3 派单第 4 条。
+    """
+    segment = getattr(shot, "storyboard_pack_segment", None)
+    if segment is None:
+        return ""
+    from app.voice.segment_refs import (  # 绝大多数镜头没有分镜包段落，前面已提前返回，避免白付这次导入
+        configured_max_speakers, fingerprint_reference_audios, reference_audio_enabled,
+        resolve_segment_reference_audios,
+    )
+    if not reference_audio_enabled():
+        return ""
+    from app.video_plan.capability_snapshot import current_capability_snapshot  # 只在开关打开时才需要
+
+    capability = current_capability_snapshot(
+        provider=target_video_provider, model=target_video_model, conn=conn,
+    )
+    has_visual_reference = bool(
+        (current_reference_manifest.get("scene") or {}).get("selected_views")
+        or any(
+            (c or {}).get("selected_views")
+            for c in current_reference_manifest.get("characters") or []
+        )
+    )
+    refs, _skips = resolve_segment_reference_audios(
+        conn=conn, project_id=project_id, segment=segment,
+        has_visual_reference=has_visual_reference, max_speakers=configured_max_speakers(),
+        supports_reference_audio=capability.supports_reference_audio,
+        max_reference_audios=capability.max_reference_audios,
+        max_reference_audio_total_s=capability.max_reference_audio_total_s,
+    )
+    return fingerprint_reference_audios(refs)
 
 
 def _lookup_reusable_version_row(conn, shot_id: str, key: str, supervisor_run_id):

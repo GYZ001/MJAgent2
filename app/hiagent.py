@@ -2901,46 +2901,46 @@ async def create_video_task(
     *,
     image_urls: list[tuple[str, str]] | None = None,
     video_urls: list[tuple[str, str]] | None = None,
+    audio_urls: list[tuple[str, str]] | None = None,
     return_last_frame: bool = False,
     call_meta: dict | None = None,
 ) -> str:
-    """创建 Seedance 任务；图片角色与 reference_video 角色在本地先做互斥校验。"""
+    """创建视频任务；图片/视频/音频输入角色的本地校验见 app.video_submission.guard（从本函数搬出，音频规则新增）。"""
+    from app import video_providers  # 沿用本函数既有习惯：函数内导入，避免模块顶层拉起供应商注册表
+    from app.video_submission.guard import (  # 同上；L1 纯校验模块，无循环风险，只是延续本函数写法
+        SubmissionRoleError, assert_audio_roles_legal, assert_image_video_roles_legal,
+    )
+
     def reject_before_create(message: str, **kwargs: Any) -> ProviderError:
         return ProviderError(
-            message,
-            delivery_state="not_sent",
-            replay_safe=True,
-            create_not_accepted=True,
-            **kwargs,
+            message, delivery_state="not_sent", replay_safe=True, create_not_accepted=True, **kwargs,
         )
 
     image_roles = [str(role) for _url, role in (image_urls or [])]
     video_roles = [str(role) for _url, role in (video_urls or [])]
-    valid_image_roles = {"first_frame", "last_frame", "reference_image"}
-    if any(role not in valid_image_roles for role in image_roles):
-        raise reject_before_create(f"非法视频图片输入角色：{image_roles}")
-    if any(role != "reference_video" for role in video_roles):
-        raise reject_before_create(f"非法视频输入角色：{video_roles}")
-    if video_roles and image_roles:
-        raise reject_before_create("reference_video 不能与 reference_image/first_frame/last_frame 混用")
-    if "reference_image" in image_roles and (
-        "first_frame" in image_roles or "last_frame" in image_roles
-    ):
-        raise reject_before_create("reference_image 不能与 first_frame/last_frame 混用")
-    if "last_frame" in image_roles and "first_frame" not in image_roles:
-        raise reject_before_create("last_frame 不能脱离 first_frame 单独提交")
+    provider = active_provider("video")
+    try:
+        assert_image_video_roles_legal(image_roles, video_roles)
+        if audio_urls:
+            from app.video_plan.capability_snapshot import current_capability_snapshot  # 只在带音频参考时才需要
+
+            capability = current_capability_snapshot(provider=provider, model=active_model("video", provider))
+            assert_audio_roles_legal(
+                audio_urls, image_roles=image_roles, video_roles=video_roles,
+                max_count=capability.max_reference_audios,
+                max_total_duration_s=capability.max_reference_audio_total_s,
+            )
+    except SubmissionRoleError as exc:
+        raise reject_before_create(str(exc)) from exc
     for url, _role in video_urls or []:
         if str(url).startswith("data:") or not str(url).startswith(("http://", "https://")):
             raise reject_before_create("reference_video 必须是供应商可访问的 http(s) Web URL")
 
-    from app import video_providers
-
-    return await video_providers.resolve(
-        active_provider("video")
-    ).create_video_task(
+    return await video_providers.resolve(provider).create_video_task(
         prompt_text,
         image_urls=image_urls,
         video_urls=video_urls,
+        audio_urls=audio_urls,
         return_last_frame=return_last_frame,
         call_meta=call_meta,
     )

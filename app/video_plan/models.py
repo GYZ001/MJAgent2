@@ -69,6 +69,11 @@ class ProviderVideoCapabilitySnapshot(BaseModel):
     supports_reference_video: bool = False
     supports_true_video_continuation: bool = False
     supports_return_last_frame: bool = False
+    # 角色固定音色 U3：是否接受 reference_audio 输入角色，及其段数/总时长上限。
+    # 默认 False/0/0.0（未声明的适配器，如 MiniMax H3，按此不支持处理）。
+    supports_reference_audio: bool = False
+    max_reference_audios: int = 0
+    max_reference_audio_total_s: float = 0.0
     supports_data_url_by_media_type: dict[str, bool] = Field(default_factory=dict)
     requires_web_url_by_media_type: dict[str, bool] = Field(default_factory=dict)
     mutually_exclusive_input_roles: list[list[str]] = Field(default_factory=list)

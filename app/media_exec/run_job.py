@@ -57,6 +57,7 @@ import json
 import time
 
 from app import config, hiagent, video_modes
+from app.video_modes import seedance_audio
 from app.artifacts import _invalidate_final_video
 from app.compiler import ensure_source_excerpt_in_prompt, shot_cost_cny
 from app.completion_grant import VideoBudgetAuthorizationError
@@ -117,6 +118,7 @@ from .input_first_frame_last import (
     _prepare_first_last_mode_inputs,
 )
 from .input_reference import _prepare_reference_mode_inputs
+from .input_reference_audio import freeze_segment_reference_audios
 from .input_video_mode import (
     _ensure_ai_video_prompt,
     _prepare_planned_mode_inputs,
@@ -214,9 +216,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
 
     try:
         if not provider_recovery_only:
-            await _assert_review_dependency_fence_async(
-                job, version["id"], "worker_start",
-            )
+            await _assert_review_dependency_fence_async(job, version["id"], "worker_start")
         provider_operation_id = (
             _row_value(job, "provider_operation_id")
             or f"video-create-{version['id']}"
@@ -298,6 +298,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     job_id=job_id,
                     owner=owner,
                 )
+                frozen = bool(meta.get("video_input_manifest_frozen"))
                 meta, prompt_text = await _await_with_job_lease_heartbeat(
                     _prepare_planned_mode_inputs(
                         operation_conn, job, version, shot, ep, meta, prompt_text,
@@ -306,6 +307,9 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     job_id=job_id,
                     owner=owner,
                 )
+                if meta.get("mode") == video_modes.REFERENCE_IMAGE_MODE:
+                    prompt_text = freeze_segment_reference_audios(
+                        operation_conn, job, version, shot, meta, prompt_text, already_frozen=frozen)
         except _ContinuityWait as wait_exc:
             wait = 15.0
             note = wait_exc.reason
@@ -495,6 +499,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                                 prompt_text,
                                 image_urls=image_inputs,
                                 video_urls=video_inputs,
+                                audio_urls=seedance_audio.build_seedance_audio_inputs(meta),
                                 return_last_frame=False,
                                 call_meta={
                                     "asset_kind": "video",

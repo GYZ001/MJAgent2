@@ -13,8 +13,10 @@ from __future__ import annotations
 
 from app.video_modes import seedance_pack
 from app.video_modes.seedance_reference_notes import (
+    AUDIO_REFERENCE_NOTE_MARKER,
     REFERENCE_PROMPT_NOTE_MARKER,
     REFERENCE_SINGLE_INSTANCE_NOTE,
+    append_audio_reference_note,
     build_seedance_reference_prompt_notes,
 )
 
@@ -148,3 +150,55 @@ def test_at_mention_with_identity_prefix_is_still_replaced():
     body = "镜头1：@bible:李麦麦 站在地面上，@橘座 跳上桌，@entity:黄总 愣住。"
     out = _replace_at_mentions_with_picture_numbers(body, {"李麦麦": 3, "橘座": 2, "黄总": 4})
     assert out == "镜头1：@图片3 站在地面上，@图片2 跳上桌，@图片4 愣住。"
+
+
+# ---------------------------------------------------------------------------
+# append_audio_reference_note（角色固定音色 U3）
+# ---------------------------------------------------------------------------
+
+def test_append_audio_reference_note_is_a_positive_statement_per_speaker():
+    prompt = "镜头1：@图片1 张三 说话。 --ratio 9:16 --dur 15"
+    refs = [
+        {"index": 1, "character_name": "张三"},
+        {"index": 2, "character_name": "李四"},
+    ]
+
+    result = append_audio_reference_note(prompt, refs, aspect_ratio="9:16")
+
+    assert AUDIO_REFERENCE_NOTE_MARKER in result
+    assert "@音频1 是张三的声音，张三的每一句台词都用 @音频1 的音色和说话方式说出" in result
+    assert "@音频2 是李四的声音，李四的每一句台词都用 @音频2 的音色和说话方式说出" in result
+    assert "参考音频只提供音色，台词内容以本段剧本为准" in result
+    assert result.endswith("--ratio 9:16 --dur 15")
+
+
+def test_append_audio_reference_note_empty_list_leaves_prompt_untouched():
+    prompt = "镜头1：固定远景。 --ratio 9:16 --dur 15"
+    assert append_audio_reference_note(prompt, [], aspect_ratio="9:16") == prompt
+
+
+def test_append_audio_reference_note_is_idempotent():
+    prompt = "镜头1：@图片1 张三 说话。 --ratio 9:16 --dur 15"
+    refs = [{"index": 1, "character_name": "张三"}]
+
+    once = append_audio_reference_note(prompt, refs, aspect_ratio="9:16")
+    twice = append_audio_reference_note(once, refs, aspect_ratio="9:16")
+
+    assert once == twice
+    assert twice.count(AUDIO_REFERENCE_NOTE_MARKER) == 1
+
+
+def test_append_audio_reference_note_preserves_existing_image_note_and_duration():
+    """先加图片说明，再加声音说明；两段说明都在，尾部 --dur 沿用已内嵌的值
+    （不因为这次调用没传 duration_s 就被重置成默认 5 秒）。"""
+    prompt_with_image_note = build_seedance_reference_prompt_notes(
+        "镜头1：@橘座 蹲坐在窗台上。", [_character_ref("橘座")], duration_s=15, aspect_ratio="9:16",
+    )
+
+    result = append_audio_reference_note(
+        prompt_with_image_note, [{"index": 1, "character_name": "橘座"}], aspect_ratio="9:16",
+    )
+
+    assert REFERENCE_PROMPT_NOTE_MARKER in result
+    assert AUDIO_REFERENCE_NOTE_MARKER in result
+    assert result.endswith("--ratio 9:16 --dur 15")

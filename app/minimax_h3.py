@@ -1373,10 +1373,11 @@ class MiniMaxH3Adapter:
         *,
         image_urls: list[tuple[str, str]] | None = None,
         video_urls: list[tuple[str, str]] | None = None,
+        audio_urls: list[tuple[str, str]] | None = None,
         return_last_frame: bool = False,
         call_meta: dict[str, Any] | None = None,
     ) -> str:
-        # H3 不产出尾帧，return_last_frame 在能力快照里已声明为不支持。
+        if audio_urls: raise ProviderError("MiniMax H3 未接入 reference_audio 参考音频（能力快照声明不支持）", delivery_state="not_sent", replay_safe=True, create_not_accepted=True)
         return await create_video_task(
             prompt_text,
             image_urls=image_urls,

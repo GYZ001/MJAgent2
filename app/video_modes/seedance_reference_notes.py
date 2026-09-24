@@ -149,3 +149,36 @@ def build_seedance_reference_prompt_notes(
         return heading + "\n" + purpose_list + "\n" + body + prompt_args
     note = REFERENCE_PROMPT_NOTE_MARKER + "\n" + purpose_list
     return prompt_body + "\n" + note + prompt_args
+
+
+AUDIO_REFERENCE_NOTE_MARKER = "声音参考："
+
+
+def _compose_audio_note(reference_audios: list[dict[str, Any]]) -> str:
+    parts = [
+        f"@音频{item.get('index')} 是{item.get('character_name')}的声音，"
+        f"{item.get('character_name')}的每一句台词都用 @音频{item.get('index')} 的音色和说话方式说出"
+        for item in reference_audios
+    ]
+    return AUDIO_REFERENCE_NOTE_MARKER + "；".join(parts) + "。参考音频只提供音色，台词内容以本段剧本为准。"
+
+
+def append_audio_reference_note(
+    prompt_text: str, reference_audios: list[dict[str, Any]], *, aspect_ratio: str,
+) -> str:
+    """给已经追加过图片参考说明的 prompt_text 再追加一段声音参考说明（U3，角色固定
+    音色视频请求接入）。
+
+    独立于 ``build_seedance_reference_prompt_notes``——那个函数的 marker 幂等检查
+    一旦命中就整体短路返回，没法在"已经加过图片说明"的 prompt 上再补一段；这里
+    用同一套「剥离尾部 --ratio/--dur → 追加 → 还原」手法单独处理，marker 换成
+    ``AUDIO_REFERENCE_NOTE_MARKER``，两条说明互不影响彼此的幂等判定。没有音频、
+    或说明已经加过时原样返回。编号按 ``reference_audios`` 已排定的顺序（content
+    里音频出现的顺序），不重排。
+    """
+    if not reference_audios or AUDIO_REFERENCE_NOTE_MARKER in prompt_text:
+        return prompt_text
+    from app.compiler import _split_video_args  # 没有音频时上面已提前返回，避免白付这次导入
+
+    body, args = _split_video_args(prompt_text, None, aspect_ratio=aspect_ratio)
+    return body + "\n" + _compose_audio_note(reference_audios) + args

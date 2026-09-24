@@ -321,6 +321,8 @@ allowed_exceptions = []
 "app.seedance" = 3
 "app.minimax_h3" = 3
 "app.video_providers" = 3
+"app.video_submission" = 1  # 2026-09-24 新增：视频输入角色/参考音频的纯判定函数（从 app.hiagent 搬出），
+                            # 只用标准库；显式声明，不靠 "app" = 0 前缀兜底
 "app.voice.providers" = 3  # 2026-09-23 新增（声音生成模型层）：与
                            # image_providers/video_providers/hiagent 同一种
                            # "供应商协议适配"角色，同层。适配器模块可以 import

@@ -17,6 +17,30 @@ from app.media_urls import build_media_url
 
 _MAX_PUBLIC_IMAGE_INPUT_CHARS = 1_000_000
 
+
+def _public_reference_audios(meta: dict) -> list[dict]:
+    """角色固定音色 U3：本版本实际冻结的声音参考清单投影，数据只来自冻结
+    meta（app.media_exec.input_reference_audio），不重新解析——老版本/开关
+    关闭时 meta 里没有这个键，字段名是与前端的约定，不许改。"""
+    return [
+        {
+            "index": item.get("index"), "character_name": item.get("character_name"),
+            "voice_id": item.get("voice_id"), "clip_url": _media_url(item.get("clip_path")),
+            "clip_duration_s": item.get("clip_duration_s"),
+        }
+        for item in (meta.get("reference_audios") or [])
+        if isinstance(item, dict)
+    ]
+
+
+def _public_reference_audio_skips(meta: dict) -> list[dict]:
+    return [
+        {"character_name": item.get("character_name"), "reason": item.get("reason")}
+        for item in (meta.get("reference_audio_skips") or [])
+        if isinstance(item, dict)
+    ]
+
+
 def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[dict]:
     if include_inputs:
         rows = conn.execute(
@@ -119,12 +143,8 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
             "planned_mode": meta.get("planned_mode"),
             "actual_mode": meta.get("actual_mode"),
             "video_input_intent": meta.get("video_input_intent"),
-            "ai_video_prompt_contract_version": meta.get(
-                "ai_video_prompt_contract_version"
-            ),
-            "ai_video_prompt_generated_at": meta.get(
-                "ai_video_prompt_generated_at"
-            ),
+            "ai_video_prompt_contract_version": meta.get("ai_video_prompt_contract_version"),
+            "ai_video_prompt_generated_at": meta.get("ai_video_prompt_generated_at"),
             "required_reference_characters": list(
                 meta.get("required_reference_characters") or []
             ),
@@ -138,6 +158,8 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
                 for item in (meta.get("reference_failure_logs") or [])
                 if isinstance(item, dict)
             ],
+            "reference_audios": _public_reference_audios(meta),
+            "reference_audio_skips": _public_reference_audio_skips(meta),
             "fallback_reason": meta.get("fallback_reason"),
             "retry_reason": meta.get("retry_reason"),
             "omitted_for_size": inputs_omitted,
