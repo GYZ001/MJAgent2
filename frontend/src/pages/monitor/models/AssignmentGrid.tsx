@@ -8,8 +8,9 @@ import {
   modelProviderOptions,
 } from "./constants";
 
-/** 四类模型职责的分配网格——从 ModelCenter 里拆出来，纯展示 + 转发事件，草稿
- *  状态（draft）仍由 ModelsSection 持有并通过 setDraft 回调下发变更。 */
+/** 各类模型职责（MODEL_ROWS 决定有几类）的分配网格——从 ModelCenter 里拆
+ *  出来，纯展示 + 转发事件，草稿状态（draft）仍由 ModelsSection 持有并通过
+ *  setDraft 回调下发变更。 */
 export default function AssignmentGrid({
   health,
   catalog,
@@ -31,10 +32,32 @@ export default function AssignmentGrid({
     <div className="model-grid">
       {MODEL_ROWS.map((row) => {
         const selection = health?.models?.[row.key];
-        if (!selection)
+        if (!health || !catalog)
           return (
             <div className="monitor-loading" key={row.key}>
               正在加载 {row.label}…
+            </div>
+          );
+        // 该职责在模型库里一个模型都没有（常见于刚上线的新能力，比如只能
+        // 靠「添加模型」手填的声音生成）：给一条出路而不是渲染空下拉。
+        // 同时防两种后端形态：这个 kind 在 health.models 里键都不存在，
+        // 或者键存在但 options 为空（现有四类 kind 在零匹配时的既有兜底）。
+        const hasCatalogModels = catalog.items.some((item) =>
+          item.kinds.includes(row.key),
+        );
+        if (!selection || !hasCatalogModels)
+          return (
+            <div className="model-row" key={row.key}>
+              <div className="model-name">
+                <span className={`model-kind-icon ${row.key}`} aria-hidden="true">
+                  {row.key[0].toUpperCase()}
+                </span>
+                <b>{row.label}</b>
+                <span>{row.note}</span>
+              </div>
+              <div className="model-target-status pending">
+                <span>{`模型库里还没有${row.label}，请先点击上方「添加模型」添加一个声明该能力的模型`}</span>
+              </div>
             </div>
           );
         const providerKey =

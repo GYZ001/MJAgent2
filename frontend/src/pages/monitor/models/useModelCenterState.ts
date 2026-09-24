@@ -5,7 +5,7 @@ import { useFocusTrap } from "../../../hooks/useFocusTrap";
 import type { ModelTestState } from "./LibraryModal";
 import type { ModelDraft } from "./NewModelModal";
 import {
-  MODEL_ROWS,
+  MODEL_KINDS, MODEL_ROWS,
   formatTokenCapacity,
   modelAssignmentSettingKey,
   modelAssignmentValue,
@@ -255,7 +255,7 @@ export function useModelCenterState({
   // 每条模型都要声明接入协议：代码里只有协议实现，没有模型。
   const protocolOptions = Array.from(
     new Set(
-      (["video", "image", "text", "vlm"] as ModelKind[]).flatMap((kind) =>
+      MODEL_KINDS.flatMap((kind) =>
         modelDraft.kinds.includes(kind)
           ? catalog?.media_protocols?.[kind] ?? []
           : [],

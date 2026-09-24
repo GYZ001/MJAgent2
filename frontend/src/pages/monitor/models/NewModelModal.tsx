@@ -1,6 +1,11 @@
 import type { MutableRefObject } from "react";
 import type { CatalogModel, ModelCatalog, ModelKind } from "../../../api";
-import { MODEL_KIND_LABELS } from "./constants";
+import {
+  MODEL_KIND_LABELS,
+  MODEL_KINDS,
+  protocolHintText,
+  protocolLabel,
+} from "./constants";
 
 export interface ModelDraft {
   label: string;
@@ -41,6 +46,9 @@ export default function NewModelModal({
   onTest: () => void;
   onSave: () => void;
 }) {
+  const protocolHintMessage = protocolHintText(
+    catalog?.protocol_hints?.[modelDraft.protocol],
+  );
   return (
     <div className="model-modal-backdrop" role="presentation">
       <section
@@ -119,7 +127,7 @@ export default function NewModelModal({
           </label>
           <fieldset className="model-form-field model-form-wide">
             <legend>模型能力</legend>
-            {(["text", "vlm", "video", "image"] as ModelKind[]).map((kind) => (
+            {MODEL_KINDS.map((kind) => (
               <label key={kind}>
                 <input
                   type="checkbox"
@@ -129,12 +137,11 @@ export default function NewModelModal({
                       ? [...modelDraft.kinds, kind]
                       : modelDraft.kinds.filter((item) => item !== kind);
                     const allowed = new Set(
-                      (["video", "image", "text", "vlm"] as ModelKind[])
-                        .flatMap((item) =>
-                          kinds.includes(item)
-                            ? catalog?.media_protocols?.[item] ?? []
-                            : [],
-                        ),
+                      MODEL_KINDS.flatMap((item) =>
+                        kinds.includes(item)
+                          ? catalog?.media_protocols?.[item] ?? []
+                          : [],
+                      ),
                     );
                     onDraftChange({
                       ...modelDraft,
@@ -161,10 +168,13 @@ export default function NewModelModal({
                 <option value="">请选择</option>
                 {protocolOptions.map((option) => (
                   <option key={option} value={option}>
-                    {option}
+                    {protocolLabel(option, catalog?.protocol_hints)}
                   </option>
                 ))}
               </select>
+              {protocolHintMessage && (
+                <small className="model-protocol-hint">{protocolHintMessage}</small>
+              )}
               <small>
                 代码里只实现协议，不内置模型；同一协议下换服务只要改地址和
                 密钥。文本与视觉理解通常选 openai（OpenAI 兼容）。

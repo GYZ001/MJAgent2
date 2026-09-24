@@ -1,6 +1,6 @@
 import { get, mutate, request } from "../client";
 
-export type ModelKind = "text" | "vlm" | "video" | "image";
+export type ModelKind = "text" | "vlm" | "video" | "image" | "voice";
 type ProviderKey = string;
 
 export interface ModelOption {
@@ -43,15 +43,28 @@ export interface CatalogModel {
   rate_limit?: { rpm?: number; tpm?: number; concurrency?: number };
 }
 
+/** 协议候选项的中文填写提示——目前只有声音协议提供；没有 hint 的协议（多数
+ *  协议现状如此）界面照旧显示原始协议标识，不编造中文名。 */
+export interface ProtocolHint {
+  label: string;
+  base_url_example?: string;
+  model_example?: string;
+  note?: string;
+}
+
 export interface ModelCatalog {
   items: CatalogModel[];
-  // 视频/图像没有统一协议，自建实例必须声明走哪一套；清单由后端注册表给出。
+  // 视频/图像/声音没有统一协议，自建实例必须声明走哪一套；清单由后端注册表
+  // 给出，前端不得写死协议清单（声音协议清单尤其会变，目前是
+  // minimax_voice_design / qwen_voice_design 两家）。
   media_protocols?: {
     video?: string[];
     image?: string[];
     text?: string[];
     vlm?: string[];
+    voice?: string[];
   };
+  protocol_hints?: Record<string, ProtocolHint>;
 }
 
 export interface ModelTestResult {

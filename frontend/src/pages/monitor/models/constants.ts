@@ -1,18 +1,23 @@
-import type { CatalogModel, ModelKind, ModelSelection } from "../../../api";
+import type { CatalogModel, ModelKind, ModelSelection, ProtocolHint } from "../../../api";
 
 export type ProviderKey = string;
 
+/** 模型能力总清单——新增能力（比如这次的声音生成）只改这一处；能力勾选框、
+ *  协议候选集（两处）原来各写死一份重复清单，现在都改成引用这里。 */
+export const MODEL_KINDS: ModelKind[] = ["text", "vlm", "video", "image", "voice"];
 export const MODEL_ROWS: Array<{ key: ModelKind; label: string; note: string }> = [
   { key: "text", label: "文本模型", note: "分集、映射包、分镜与文本修复" },
   { key: "vlm", label: "视觉理解模型", note: "定妆照、场景图与关键帧质检" },
   { key: "video", label: "视频模型", note: "首尾帧、参考图与视频输入生成" },
   { key: "image", label: "图像模型", note: "Seedream 参考图 / 定妆照" },
+  { key: "voice", label: "声音生成模型", note: "角色音色设计（人物卡配音）" },
 ];
 export const MODEL_KIND_LABELS: Record<ModelKind, string> = {
   text: "文本生成",
   vlm: "视觉理解",
   video: "视频生成",
   image: "图像生成",
+  voice: "声音生成",
 };
 export const PROVIDER_LABELS: Record<string, string> = {
   hiagent: "火山",
@@ -25,6 +30,25 @@ export const PROVIDER_LABELS: Record<string, string> = {
 
 export function modelBusinessLabel(value: string) {
   return value.trim().toLowerCase() === "text 模型" ? "文本模型" : value;
+}
+
+/** 协议下拉的显示名：命中 protocol_hints 就显示中文名，没有 hint 的协议
+ *  （现状多数协议如此）原样显示协议标识——不写死清单、也不编造中文。 */
+export function protocolLabel(protocol: string, hints?: Record<string, ProtocolHint>) {
+  return hints?.[protocol]?.label || protocol;
+}
+
+/** 协议下方的中文填写提示，按「服务地址示例 / 模型标识示例 / 说明」拼接，
+ *  缺项跳过、不留空分隔符；没有 hint 时返回空串，调用方据此不渲染提示行。 */
+export function protocolHintText(hint?: ProtocolHint) {
+  if (!hint) return "";
+  return [
+    hint.base_url_example ? `服务地址示例：${hint.base_url_example}` : "",
+    hint.model_example ? `模型标识示例：${hint.model_example}` : "",
+    hint.note || "",
+  ]
+    .filter(Boolean)
+    .join("；");
 }
 
 export function formatTokenCapacity(value?: number) {

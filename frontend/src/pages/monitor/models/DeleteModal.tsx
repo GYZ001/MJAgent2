@@ -1,6 +1,6 @@
 import type { MutableRefObject } from "react";
 import type { CatalogModel } from "../../../api";
-import { PROVIDER_LABELS } from "./constants";
+import { MODEL_KIND_LABELS, PROVIDER_LABELS } from "./constants";
 
 export default function DeleteModelModal({
   deleteModel,
@@ -36,7 +36,7 @@ export default function DeleteModelModal({
         <dl>
           <div><dt>服务商</dt><dd>{PROVIDER_LABELS[deleteModel.provider] || deleteModel.provider_label || deleteModel.provider}</dd></div>
           <div><dt>模型</dt><dd>{deleteModel.model}</dd></div>
-          <div><dt>能力</dt><dd>{deleteModel.kinds.join(" / ")}</dd></div>
+          <div><dt>能力</dt><dd>{deleteModel.kinds.map((kind) => MODEL_KIND_LABELS[kind] ?? kind).join(" / ")}</dd></div>
         </dl>
         <div className="model-modal-actions">
           <button type="button" disabled={deletingModel}

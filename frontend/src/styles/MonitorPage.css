@@ -1249,6 +1249,11 @@ table.calls-ledger th:nth-child(6) {
   color: var(--ink-faint);
   font-size: 11px;
 }
+/* 选中带填写示例的接入协议（目前是声音生成协议）时的提示行：比通用说明更醒目一档。 */
+.model-form-field .model-protocol-hint {
+  color: var(--ink-soft);
+  line-height: 1.5;
+}
 .model-form-wide {
   grid-column: 1 / -1;
 }
