@@ -6,31 +6,30 @@
 被拍到（本模块不改这条：所有豁免只对模型显式声明、且经本模块确定性核验
 仍然有效的区间生效）。
 
+2026-09-24 起 ``dropped_source_spans`` 增加 beat_id 归属核验（见
+``storyboard_short_drama_schemas.verify_dropped_source_spans``）、
+``SegmentCountSoftCap`` 打回文案更具体（见 ``storyboard_short_drama_
+capacity_hint``）、``storyboard_short_drama_beat_guard`` 的调用时机后移——
+三处互不推翻对方判断、不形成死锁的完整说明见 ``storyboard_short_drama_
+beat_guard.py`` 模块 docstring。
+
 **两阶段核验，理由见 CLAUDE.md「修补器与校验器死锁」教训**（repair 删掉的
 正是 validator 要的会让整集失败）：
 
 1. ``reconcile_dropped_units``（``_validate_beat_sheet_draft`` 早期调用，
-   ``storyboard_beat_sheet_repair`` 的既有修补跑之前）：把模型声明的
-   ``dropped_source_spans`` 展开成 (source_segment_index, unit_no) 集合，减去
-   四类保护——已被某段 ``source_unit_ranges`` 覆盖的单元、已进 kept_lines 的
-   单元、作者点名必拍的单元（``screenplay_markers.required_beats``）、
-   paratext/背景交代段单元——全部用**模型原始声明时的快照**判断，不等后续
-   修补跑完。冲突一律确定性裁掉删减（偏向保留），不打回模型。命中的台词立即
-   强制并入 ``dropped_lines``，reason 可追溯到区间理由（``_SPAN_DROP_REASON_
-   PREFIX``）。
-2. ``finalize_dropped_units``（``repair_beat_sheet_draft`` 跑完之后）：
-   ``storyboard_beat_sheet_repair.fix_order_and_fill_holes`` 对「整个缺口都在
-   删减区间内」的洞会保持不填、对「缺口只有贴边部分不在删减区间内」只延伸
-   相邻段覆盖贴边部分（见该模块 ``_gap_fill_plan``），删减单元继续留空；只有
-   「缺口中间夹着两侧都够不到的非删减单元」这种没法用一段连续范围表达的
-   情形，才会整体回填、让这部分删减声明失效。这一步按修补后的 ``source_
-   unit_ranges`` 重新交集一遍，只留下「修补后依然没人覆盖」的部分作为最终
-   有效删减，写回 ``draft.dropped_source_spans``；修补后被回填、不再有效的
-   单元，如果对应台词是阶段一被 ``_force_drop_quotes`` 强制丢弃的（reason
-   带 ``_SPAN_DROP_REASON_PREFIX`` 前缀），一律放回 ``kept_lines``——这段原文
-   既然最终会被拍到，台词就不该继续被强制噤声，是「偏向保留」这条主线原则
-   在阶段二的延伸（``_rescue_quotes``）。最后跑 key 节拍覆盖检查（必须放在
-   修补跑完、段落归属稳定之后，否则会报出后续会被修补掉的假阳性）。
+   ``storyboard_beat_sheet_repair`` 的既有修补跑之前）：先用 ``verify_
+   dropped_source_spans`` 过滤掉 beat 归属不合法的整条区间（见上），再把
+   剩下的展开成 (source_segment_index, unit_no) 集合，减去四类保护——已被某段
+   ``source_unit_ranges`` 覆盖的单元、已进 kept_lines 的单元、作者点名必拍的
+   单元（``screenplay_markers.required_beats``）、paratext/背景交代段单元——
+   全部用**模型原始声明时的快照**判断，不等后续修补跑完。冲突一律确定性裁掉
+   删减（偏向保留），不打回模型。命中的台词立即强制并入 ``dropped_lines``，
+   reason 可追溯到区间理由（``_SPAN_DROP_REASON_PREFIX``）。
+2. ``finalize_dropped_units``（``repair_beat_sheet_draft`` 跑完之后）：按
+   修补后的 ``source_unit_ranges`` 重新核对哪些声明的删减最终依然有效
+   （``fix_order_and_fill_holes`` 只留空「整段都在删减区间内」的洞，贴边/
+   夹心部分会被回填）、放回因回填而不再有效的强制丢弃台词、跑 key 节拍覆盖
+   检查——具体规则见该函数自己的 docstring，不在这里重复。
 """
 from __future__ import annotations
 
@@ -42,7 +41,8 @@ from app.config import MAX_SPOKEN_CHARS_PER_SHOT, SHORT_DRAMA_TARGET_DURATION_S
 from app.production.storyboard_beat_sheet_schemas import SEGMENT_DURATION_S
 from app.production.storyboard_capacity_normalize import normalize_beat_sheet_capacity
 from app.production.storyboard_dialogue_ledger import _AiDroppedLine, _AiKeptLine
-from app.production.storyboard_short_drama_schemas import _AiDroppedSourceSpan
+from app.production.storyboard_short_drama_capacity_hint import oversized_segment_hint
+from app.production.storyboard_short_drama_schemas import _AiDroppedSourceSpan, verify_dropped_source_spans
 from app.production.screenplay_markers import required_beat_spans
 from app.production.storyboard_segment_ranges import quote_unit_index, split_source_units
 
@@ -104,11 +104,15 @@ def short_drama_beat_sheet_rules() -> list[str]:
         "校验。",
         "non-key（optional）的原文内容如果你判断整块可以不拍，把它对应的"
         "原文区间写进 dropped_source_spans（每条给 source_segment_index、"
-        "from_unit、to_unit、reason），reason 写清具体为什么可以删（例如"
-        "「与主线无关的环境描写，删除不影响理解」）；被删区间内的原文台词"
-        "随区间一起删除，不需要在 dropped_lines 里为它们单独写理由。区间"
-        "以外的原文——包括所有 key 节拍覆盖的原文——仍按下面的对白台账"
-        "规则逐句决定去留，整句台词默认保留。",
+        "from_unit、to_unit、reason、beat_id）：reason 写清具体为什么可以删"
+        "（例如「与主线无关的环境描写，删除不影响理解」），beat_id 必须填 "
+        "beat_sheet 里一个真实存在、importance=optional、且 segment_indexes "
+        "覆盖这个 source_segment_index 的节拍——三条任一不满足，这整条区间"
+        "按未声明处理，区间内原文退回下面的对白台账规则逐句判断；key 节拍"
+        "覆盖的原文不能通过 dropped_source_spans 删除。三条都满足时，被删"
+        "区间内的原文台词随区间一起删除，不需要在 dropped_lines 里为它们"
+        "单独写理由。区间以外的原文仍按下面的对白台账规则逐句决定去留，"
+        "整句台词默认保留。",
         "dialogue_density_by_source_segment 里的 min_segments 是按该原文段"
         "全部台词字数估算的下限；如果你计划把这个原文段的一部分整块写进 "
         "dropped_source_spans，被删部分的台词字数不需要计入这个原文段实际"
@@ -159,14 +163,16 @@ def required_beat_protected_units(source_segments: list[Any]) -> frozenset[tuple
     return frozenset(_required_beat_units(source_segments, set(range(1, len(source_segments) + 1))))
 
 
-def _declared_units(spans: list[Any], source_segments: list[Any]) -> dict[tuple[int, int], str]:
-    """模型声明的删减区间展开成 {(source_segment_index, unit_no): reason}；
-    与该原文段的合法单元范围 [1, total] 取**交集**，不夹紧（clamp）越界部分。
-    夹紧会把"模型声明的区间整个落在合法范围之外"误判成"声明了合法范围里的
-    最后一个单元"——那是一个模型从未声明过的单元，被凭空计入删减声明，等于
-    删掉了模型没说要删的内容。交集为空（例如 from_unit 本身就超过 total）
-    就是这条声明对这个原文段完全不生效，不产出任何单元。"""
-    result: dict[tuple[int, int], str] = {}
+def _declared_units(spans: list[Any], source_segments: list[Any]) -> dict[tuple[int, int], tuple[str, str]]:
+    """模型声明的删减区间展开成 {(source_segment_index, unit_no): (reason,
+    beat_id)}；与该原文段的合法单元范围 [1, total] 取**交集**，不夹紧（clamp）
+    越界部分。夹紧会把"模型声明的区间整个落在合法范围之外"误判成"声明了合法
+    范围里的最后一个单元"——那是一个模型从未声明过的单元，被凭空计入删减
+    声明，等于删掉了模型没说要删的内容。交集为空（例如 from_unit 本身就超过
+    total）就是这条声明对这个原文段完全不生效，不产出任何单元。不做 beat 归属
+    核验——由调用方预先过滤（见 reconcile_dropped_units/finalize_dropped_
+    units 各自调用点的注释）。"""
+    result: dict[tuple[int, int], tuple[str, str]] = {}
     for span in spans:
         index = span.source_segment_index
         if not (1 <= index <= len(source_segments)):
@@ -179,7 +185,7 @@ def _declared_units(spans: list[Any], source_segments: list[Any]) -> dict[tuple[
         if start > end:
             continue
         for unit_no in range(start, end + 1):
-            result.setdefault((index, unit_no), span.reason)
+            result.setdefault((index, unit_no), (span.reason, span.beat_id))
     return result
 
 
@@ -238,13 +244,17 @@ def reconcile_dropped_units(
     spans = getattr(draft, "dropped_source_spans", None)
     if adaptation_mode != "short_drama" or not spans:
         return frozenset()
-    declared = _declared_units(spans, source_segments)
+    beats_by_id = {beat.beat_id: beat for beat in draft.beat_sheet}
+    verified_spans, notes = verify_dropped_source_spans(spans, beats_by_id)
+    for note in notes:
+        _LOGGER.info("[STORYBOARD_SHORT_DRAMA] %s", note)
+    declared = _declared_units(verified_spans, source_segments)
     protected = _required_beat_units(source_segments, {index for index, _ in declared})
     quotes_by_id = {q.quote_id: q for q in dialogue_quotes}
     kept_units = _kept_unit_set(draft.kept_lines, quotes_by_id, source_segments)
     covered_units = _covered_unit_set(draft.segments)
     dropped = {
-        key: reason for key, reason in declared.items()
+        key: reason for key, (reason, _beat_id) in declared.items()
         if key not in protected and key not in kept_units and key not in covered_units
         and key[0] not in paratext_indexes and key[0] not in context_indexes
     }
@@ -252,10 +262,14 @@ def reconcile_dropped_units(
     return frozenset(dropped)
 
 
-def _canonical_spans(units: frozenset[tuple[int, int]], reasons: dict[tuple[int, int], str]) -> list[_AiDroppedSourceSpan]:
+#: 防御性兜底，避免 KeyError——正常路径下 info 里必然查得到（见 _canonical_spans 调用点）。
+_MISSING_SPAN_INFO = ("原始理由缺失（重算删减区间时未匹配到声明）", "原始 beat_id 缺失（重算删减区间时未匹配到声明）")
+
+
+def _canonical_spans(units: frozenset[tuple[int, int]], info: dict[tuple[int, int], tuple[str, str]]) -> list[_AiDroppedSourceSpan]:
     """(source_segment_index, unit_no) 集合合并回连续区间——落库/展示用，不
-    逐单元列一行。同一原文段号内连续单元号合并成一条，reason 取区间首个单元
-    的声明理由（同一条模型声明展开出的各单元理由本就相同）。"""
+    逐单元列一行。同一原文段号内连续单元号合并成一条，reason/beat_id 取区间
+    首个单元的声明值（同一条模型声明展开出的各单元本就相同）。"""
     by_index: dict[int, list[int]] = {}
     for index, unit_no in units:
         by_index.setdefault(index, []).append(unit_no)
@@ -267,15 +281,11 @@ def _canonical_spans(units: frozenset[tuple[int, int]], reasons: dict[tuple[int,
             if unit_no == prev + 1:
                 prev = unit_no
                 continue
-            spans.append(_AiDroppedSourceSpan(
-                source_segment_index=index, from_unit=start, to_unit=prev,
-                reason=reasons.get((index, start)) or "原始理由缺失（重算删减区间时未匹配到声明）",
-            ))
+            reason, beat_id = info.get((index, start), _MISSING_SPAN_INFO)
+            spans.append(_AiDroppedSourceSpan(source_segment_index=index, from_unit=start, to_unit=prev, reason=reason, beat_id=beat_id))
             start = prev = unit_no
-        spans.append(_AiDroppedSourceSpan(
-            source_segment_index=index, from_unit=start, to_unit=prev,
-            reason=reasons.get((index, start)) or "原始理由缺失（重算删减区间时未匹配到声明）",
-        ))
+        reason, beat_id = info.get((index, start), _MISSING_SPAN_INFO)
+        spans.append(_AiDroppedSourceSpan(source_segment_index=index, from_unit=start, to_unit=prev, reason=reason, beat_id=beat_id))
     return spans
 
 
@@ -355,14 +365,18 @@ def finalize_dropped_units(
     修补后被回填、不再有效的单元，其被强制丢弃的台词放回 kept_lines
     （``_rescue_quotes``）。最后跑 key 节拍覆盖检查（必须放在这里：段落归属
     要在修补跑完之后才稳定，提前跑会把后续会被修补掉的情况误判成错误）。
+
+    ``_declared_units`` 这里传未经 beat 过滤的原始 spans 不是漏做核验：
+    ``final_units`` ⊆ ``dropped_units``，只可能含第一次调用已经 ``verify_
+    dropped_source_spans`` 认可的单元，这里只为它们查 reason/beat_id 文本。
     """
     if not dropped_units:
         return frozenset(), []
     covered = _covered_unit_set(draft.segments)
     final_units = frozenset(key for key in dropped_units if key not in covered)
     _rescue_quotes(draft, source_segments, dialogue_quotes, dropped_units - final_units)
-    reasons = _declared_units(getattr(draft, "dropped_source_spans", None) or [], source_segments)
-    draft.dropped_source_spans = _canonical_spans(final_units, reasons)
+    info = _declared_units(getattr(draft, "dropped_source_spans", None) or [], source_segments)
+    draft.dropped_source_spans = _canonical_spans(final_units, info)
     return final_units, key_beat_coverage_errors(draft, adaptation_mode="short_drama")
 
 
@@ -421,28 +435,24 @@ def adaptation_summary(
     }
 
 
-def _projected_segment_count(draft: Any, quotes: list[Any], source_segments: list[Any]) -> int:
+def _capacity_projection(draft: Any, quotes: list[Any], source_segments: list[Any]) -> tuple[int, list[dict[str, Any]]]:
     """深拷贝草稿后跑一遍与生产同源的确定性容量归一化（复用 ``storyboard_
-    capacity_normalize.normalize_beat_sheet_capacity`` 这个真源函数，不另起
-    一套口径），只取拆分后的段数——不落回传入的 draft，调用方在同一次
-    ``validate()`` 里多次调用互不干扰，也不影响真正落库的归一化。
-
-    背景（2026-09-24 真实三集验证）：模型自己声明的段数达标（如 6 段）不等于
-    按 15 秒口播容量拆分后的真实段数也达标——台词在几段里分布不匀，单段一旦
-    超过 ``MAX_SPOKEN_CHARS_PER_SHOT``（54 字）就会被拆成更多段，实测撑到
-    11-13 段。``SegmentCountSoftCap`` 用这个函数的返回值判定，模型不能再靠
-    "自己声明的段数达标"蒙混过关。
+    capacity_normalize.normalize_beat_sheet_capacity`` 真源函数，不另起一套
+    口径），返回 ``(拆分后的段数, 拆分遥测)``——不落回传入的 draft。段数供
+    ``SegmentCountSoftCap`` 判定是否打回（背景见 ``DIALOGUE_BUDGET_CHARS``
+    注释），遥测（``bin_count>1`` 的段）供 ``storyboard_short_drama_capacity_
+    hint.oversized_segment_hint`` 告诉模型具体是哪几段超容。
     """
     projected = draft.model_copy(deep=True)
-    normalize_beat_sheet_capacity(projected, quotes, source_segments=source_segments)
-    return len(projected.segments)
+    telemetry = normalize_beat_sheet_capacity(projected, quotes, source_segments=source_segments)
+    return len(projected.segments), telemetry
 
 
 class SegmentCountSoftCap:
-    """段数软上限：按**容量归一化后的预计段数**（``_projected_segment_
-    count``，2026-09-24 起，不再是模型自己声明的 ``len(draft.segments)``）
-    超过 ``MAX_SEGMENT_COUNT`` 时前几次调用当业务错误打回模型语义重试，最后
-    一次（``chat_structured`` 语义重试预算耗尽前的最后一次 ``validate`` 调用）
+    """段数软上限：按**容量归一化后的预计段数**（``_capacity_projection``，
+    2026-09-24 起，不再是模型自己声明的 ``len(draft.segments)``）超过
+    ``MAX_SEGMENT_COUNT`` 时前几次调用当业务错误打回模型语义重试，最后一次
+    （``chat_structured`` 语义重试预算耗尽前的最后一次 ``validate`` 调用）
     降级为警告而不是继续打回——本仓至少 4 次真实事故都是"语义重试耗尽整集
     失败"，段数这种模型历来不精确的维度不该是压垮整集的最后一根稻草。
     ``retry_limit`` 必须是调用方传给 ``chat_structured`` 的同一个
@@ -467,19 +477,21 @@ class SegmentCountSoftCap:
     def errors(self, draft: Any) -> list[str]:
         if not self._active:
             return []
-        projected = _projected_segment_count(draft, self._quotes, self._source_segments)
+        projected, telemetry = _capacity_projection(draft, self._quotes, self._source_segments)
         self.last_projected_count = projected
         is_last_attempt = self._attempt >= self._retry_limit
         self._attempt += 1
         if projected <= MAX_SEGMENT_COUNT or is_last_attempt:
             return []
         cut_hint = (projected - MAX_SEGMENT_COUNT) * MAX_SPOKEN_CHARS_PER_SHOT
+        hint = oversized_segment_hint(draft, self._quotes, telemetry)
+        detail = f"，具体是{hint}" if hint else ""
         return [
             f"节拍表分了 {len(draft.segments)} 段，按 15 秒口播容量拆分后预计需要 "
             f"{projected} 段（约 {projected * SEGMENT_DURATION_S} 秒），超过短剧节奏档"
             f"软上限 {MAX_SEGMENT_COUNT} 段（约 {MAX_SEGMENT_COUNT * SEGMENT_DURATION_S} "
-            f"秒）：请从 importance=optional 节拍覆盖的原文里再弃置约 {cut_hint} 字台词"
-            "（写进 dropped_lines 并标注 beat_id），或合并信息量不足以单独成段的相邻"
-            "节拍——只减少你自己声明的段数不会生效，容量拆分后的段数才是这条软上限"
+            f"秒）{detail}：请从 importance=optional 节拍覆盖的原文里再弃置约 {cut_hint} "
+            "字台词（写进 dropped_lines 并标注 beat_id），或合并信息量不足以单独成段的"
+            "相邻节拍——只减少你自己声明的段数不会生效，容量拆分后的段数才是这条软上限"
             "真正判定的数字"
         ]

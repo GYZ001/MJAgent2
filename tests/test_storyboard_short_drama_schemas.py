@@ -26,6 +26,7 @@ from app.production.storyboard_short_drama_schemas import (
     _AiShortDramaBeat,
     _AiShortDramaBeatSheetDraft,
     _AiShortDramaDroppedLine,
+    verify_dropped_source_spans,
 )
 from app.source_excerpt import SourceSegment
 
@@ -135,7 +136,72 @@ def test_short_drama_dropped_line_requires_beat_id():
 
 def test_dropped_source_span_reason_is_required():
     with pytest.raises(Exception):
-        _AiDroppedSourceSpan(source_segment_index=1, from_unit=1, to_unit=2, reason="")
+        _AiDroppedSourceSpan(source_segment_index=1, from_unit=1, to_unit=2, reason="", beat_id="B1")
+
+
+def test_dropped_source_span_beat_id_is_required():
+    """2026-09-24：删减区间必须标 beat_id（核验见本模块
+    ``verify_dropped_source_spans``）——schema 层面先保证模型必须显式给出这个
+    字段，不允许漏填，与 ``_AiShortDramaDroppedLine`` 的 beat_id 必填同一立场。
+    """
+    schema = _AiDroppedSourceSpan.model_json_schema()
+    assert "beat_id" in schema.get("required", [])
+    with pytest.raises(Exception):
+        _AiDroppedSourceSpan(source_segment_index=1, from_unit=1, to_unit=2, reason="x")  # 缺 beat_id 必须拒绝
+    assert _AiDroppedSourceSpan(source_segment_index=1, from_unit=1, to_unit=2, reason="x", beat_id="B1").beat_id == "B1"
+
+
+# ---------------------------------------------------------------------------
+# verify_dropped_source_spans：区间的 beat 归属核验（模型提名、代码核验）
+# ---------------------------------------------------------------------------
+
+_KEY_BEAT = _AiShortDramaBeat(beat_id="B1", summary="主线", segment_indexes=[1], importance="key")
+_OPTIONAL_BEAT = _AiShortDramaBeat(beat_id="B2", summary="闲笔", segment_indexes=[1], importance="optional")
+
+
+def _span(**overrides) -> _AiDroppedSourceSpan:
+    fields = {"source_segment_index": 1, "from_unit": 2, "to_unit": 3, "reason": "闲笔可删", "beat_id": "B2"}
+    fields.update(overrides)
+    return _AiDroppedSourceSpan(**fields)
+
+
+def test_verify_dropped_source_spans_accepts_optional_beat_covering_segment():
+    beats_by_id = {b.beat_id: b for b in (_KEY_BEAT, _OPTIONAL_BEAT)}
+    valid, notes = verify_dropped_source_spans([_span()], beats_by_id)
+    assert notes == []
+    assert valid == [_span()]
+
+
+def test_verify_dropped_source_spans_rejects_unknown_beat_id():
+    beats_by_id = {b.beat_id: b for b in (_KEY_BEAT, _OPTIONAL_BEAT)}
+    valid, notes = verify_dropped_source_spans([_span(beat_id="B_NOT_EXIST")], beats_by_id)
+    assert valid == []
+    assert notes and "不存在" in notes[0]
+
+
+def test_verify_dropped_source_spans_rejects_key_beat():
+    """区间标 key 节拍——整条区间不认（模型不能靠整块删除绕开 key 节拍保护）。"""
+    beats_by_id = {b.beat_id: b for b in (_KEY_BEAT, _OPTIONAL_BEAT)}
+    valid, notes = verify_dropped_source_spans([_span(beat_id="B1")], beats_by_id)
+    assert valid == []
+    assert notes and "不是 optional" in notes[0]
+
+
+def test_verify_dropped_source_spans_rejects_beat_not_covering_segment():
+    other_segment_beat = _AiShortDramaBeat(beat_id="B3", summary="别的段", segment_indexes=[2], importance="optional")
+    beats_by_id = {b.beat_id: b for b in (_KEY_BEAT, other_segment_beat)}
+    valid, notes = verify_dropped_source_spans([_span(source_segment_index=1, beat_id="B3")], beats_by_id)
+    assert valid == []
+    assert notes and "未覆盖" in notes[0]
+
+
+def test_verify_dropped_source_spans_mixed_list_keeps_only_valid_ones():
+    beats_by_id = {b.beat_id: b for b in (_KEY_BEAT, _OPTIONAL_BEAT)}
+    good = _span(beat_id="B2")
+    bad = _span(from_unit=5, to_unit=5, beat_id="B1")
+    valid, notes = verify_dropped_source_spans([good, bad], beats_by_id)
+    assert valid == [good]
+    assert len(notes) == 1
 
 
 def test_faithful_rules_are_historically_unchanged():

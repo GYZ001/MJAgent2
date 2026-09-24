@@ -4,8 +4,10 @@
 零容忍必须被拍到」这句冻结契约的可执行版本。``SegmentCountSoftCap``（含
 容量归一化预计段数）另见 ``tests/test_storyboard_short_drama_segment_cap.
 py``；区间外弃置台词的 ``beat_id`` 核验另见 ``tests/test_storyboard_short_
-drama_beat_guard.py``——两块都是本文件同一批改造新增，拆出去是本文件自己
-的 500 行棘轮零余量，不是关注点不相关。
+drama_beat_guard.py``；区间（``dropped_source_spans``）自身的 beat 归属核验
+端到端效果另见 ``tests/test_storyboard_short_drama_span_guard.py``、纯函数级
+判据见 ``tests/test_storyboard_short_drama_schemas.py``——都是本文件同一批
+改造新增，拆出去是本文件自己的 500 行棘轮零余量，不是关注点不相关。
 """
 from __future__ import annotations
 
@@ -33,7 +35,11 @@ def _sources(*texts: str) -> list[SourceSegment]:
 
 def _draft(segments, *, dropped_source_spans=(), kept_lines=(), dropped_lines=(), beat_sheet=None):
     if beat_sheet is None:
-        beat_sheet = [_AiShortDramaBeat(beat_id="B1", summary="x", segment_indexes=[1], importance="key")]
+        # optional（非 key）：绝大多数用例的 dropped_source_spans 都以 B1 为
+        # beat_id，区间 beat 归属核验（见 storyboard_short_drama_schemas.
+        # verify_dropped_source_spans）要求所属节拍 importance=optional，测试
+        # key_beat_coverage_errors 的用例都显式传入自己的 beat_sheet，不受影响。
+        beat_sheet = [_AiShortDramaBeat(beat_id="B1", summary="x", segment_indexes=[1], importance="optional")]
     return _AiShortDramaBeatSheetDraft(
         beat_sheet=beat_sheet, segments=segments, kept_lines=list(kept_lines), dropped_lines=list(dropped_lines),
         dropped_source_spans=list(dropped_source_spans),
@@ -52,9 +58,12 @@ def _range_plan(no: int, index: int, from_unit: int, to_unit: int, **extra):
 # ---------------------------------------------------------------------------
 
 def test_reconcile_basic_drop_with_no_conflicts():
+    """区间 beat 归属核验的正面路径（_draft 默认 beat_sheet 是 B1/optional、
+    segment_indexes=[1]，与本区间的 source_segment_index 一致）：beat 存在、
+    importance=optional、覆盖该原文段——三条都满足，区间生效。"""
     sources = _sources("句一。句二。句三。")
     plan = _range_plan(1, 1, 1, 1)
-    draft = _draft([plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 3, "reason": "闲笔"}])
+    draft = _draft([plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 3, "reason": "闲笔", "beat_id": "B1"}])
     result = reconcile_dropped_units(draft, sources, [], set(), set(), adaptation_mode="short_drama")
     assert result == frozenset({(1, 2), (1, 3)})
 
@@ -65,7 +74,7 @@ def test_reconcile_out_of_range_declared_span_does_not_invent_units():
     是模型从未声明过的单元，夹紧等于凭空多删一个单元。"""
     sources = _sources("句一。句二。句三。")  # 原文段 1 共 3 个单元
     plan = _range_plan(1, 1, 1, 3)  # 全部 3 个单元都已被这一段覆盖，无缺口
-    draft = _draft([plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 5, "to_unit": 10, "reason": "越界"}])
+    draft = _draft([plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 5, "to_unit": 10, "reason": "越界", "beat_id": "B1"}])
     result = reconcile_dropped_units(draft, sources, [], set(), set(), adaptation_mode="short_drama")
     assert result == frozenset(), "越界声明不产出任何单元，尤其不能是单元 3"
 
@@ -73,7 +82,7 @@ def test_reconcile_out_of_range_declared_span_does_not_invent_units():
 def test_reconcile_partially_out_of_range_span_keeps_only_the_in_range_part():
     sources = _sources("句一。句二。句三。")
     plan = _range_plan(1, 1, 1, 1)
-    draft = _draft([plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 99, "reason": "x"}])
+    draft = _draft([plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 99, "reason": "x", "beat_id": "B1"}])
     result = reconcile_dropped_units(draft, sources, [], set(), set(), adaptation_mode="short_drama")
     assert result == frozenset({(1, 2), (1, 3)}), "只保留与 [1,total] 的交集部分（单元 2、3），不夹紧到单元 3 止步"
 
@@ -82,7 +91,7 @@ def test_reconcile_excludes_units_already_covered_by_another_segment():
     sources = _sources("句一。句二。句三。")
     plan1 = _range_plan(1, 1, 1, 1)
     plan2 = _range_plan(2, 1, 2, 3, synopsis="y")
-    draft = _draft([plan1, plan2], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 3, "reason": "x"}])
+    draft = _draft([plan1, plan2], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 3, "reason": "x", "beat_id": "B1"}])
     result = reconcile_dropped_units(draft, sources, [], set(), set(), adaptation_mode="short_drama")
     assert result == frozenset()
 
@@ -92,7 +101,7 @@ def test_reconcile_excludes_units_with_kept_dialogue():
     plan = _range_plan(1, 1, 1, 1)
     quotes = [DialogueQuote(quote_id="Q1", source_segment_index=1, text="句二。", content_chars=2)]
     draft = _draft(
-        [plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 3, "reason": "x"}],
+        [plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 3, "reason": "x", "beat_id": "B1"}],
         kept_lines=[{"quote_id": "Q1", "segment_no": 1}],
     )
     result = reconcile_dropped_units(draft, sources, quotes, set(), set(), adaptation_mode="short_drama")
@@ -106,7 +115,7 @@ def test_reconcile_excludes_required_beat_units():
     units = split_source_units(text)
     assert len(units) == 2, "括号钩子内部无终止符，与后文合并成一个单元"
     plan = _range_plan(1, 1, 1, 1)
-    draft = _draft([plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 2, "reason": "x"}])
+    draft = _draft([plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 2, "reason": "x", "beat_id": "B1"}])
     result = reconcile_dropped_units(draft, sources, [], set(), set(), adaptation_mode="short_drama")
     assert result == frozenset(), "含作者点名必拍钩子的单元不得被判定为有效删减"
 
@@ -120,7 +129,7 @@ def test_reconcile_protects_required_beat_marker_split_across_two_units_by_an_in
     units = split_source_units(text)
     assert len(units) == 3, "标记内部句号把括号钩子切成跨两个单元（第 2、3 个单元）"
     plan = _range_plan(1, 1, 1, 1)
-    draft = _draft([plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 3, "reason": "x"}])
+    draft = _draft([plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 3, "reason": "x", "beat_id": "B1"}])
     result = reconcile_dropped_units(draft, sources, [], set(), set(), adaptation_mode="short_drama")
     assert result == frozenset(), "钩子标记横跨的两个单元都必须受保护，一个都不能判成有效删减"
 
@@ -142,9 +151,9 @@ def test_required_beat_protected_units_empty_without_any_marker():
 def test_reconcile_excludes_paratext_and_context_indexes():
     sources = _sources("句一。句二。", "句三。句四。")
     plan = _range_plan(2, 2, 1, 1)
-    draft_paratext = _draft([plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 1, "to_unit": 2, "reason": "x"}])
+    draft_paratext = _draft([plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 1, "to_unit": 2, "reason": "x", "beat_id": "B1"}])
     assert reconcile_dropped_units(draft_paratext, sources, [], {1}, set(), adaptation_mode="short_drama") == frozenset()
-    draft_context = _draft([plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 1, "to_unit": 2, "reason": "x"}])
+    draft_context = _draft([plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 1, "to_unit": 2, "reason": "x", "beat_id": "B1"}])
     assert reconcile_dropped_units(draft_context, sources, [], set(), {1}, adaptation_mode="short_drama") == frozenset()
 
 
@@ -153,7 +162,7 @@ def test_reconcile_force_drops_quotes_with_traceable_reason_overriding_model_rea
     plan = _range_plan(1, 1, 1, 1)
     quotes = [DialogueQuote(quote_id="Q1", source_segment_index=1, text="句二。", content_chars=2)]
     draft = _draft(
-        [plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 2, "reason": "语气词闲笔"}],
+        [plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 2, "reason": "语气词闲笔", "beat_id": "B1"}],
         dropped_lines=[{"quote_id": "Q1", "reason": "模型自己的理由", "beat_id": "B1"}],
     )
     reconcile_dropped_units(draft, sources, quotes, set(), set(), adaptation_mode="short_drama")
@@ -165,7 +174,7 @@ def test_reconcile_force_drops_quotes_with_traceable_reason_overriding_model_rea
 def test_reconcile_is_noop_for_faithful_mode():
     sources = _sources("句一。句二。")
     plan = _range_plan(1, 1, 1, 1)
-    draft = _draft([plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 2, "reason": "x"}])
+    draft = _draft([plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 2, "reason": "x", "beat_id": "B1"}])
     result = reconcile_dropped_units(draft, sources, [], set(), set(), adaptation_mode="faithful")
     assert result == frozenset()
     assert len(draft.dropped_source_spans) == 1, "faithful 模式不篡改草稿，只是不生效"
@@ -282,7 +291,7 @@ def test_validate_beat_sheet_draft_accepts_declared_gap_without_refilling_or_new
     sources = _sources("句一。句二。句三。句四。")
     plan1 = _range_plan(1, 1, 1, 1, synopsis="开场", beat_ids=["B1"])
     plan2 = _range_plan(2, 1, 4, 4, synopsis="收尾", beat_ids=["B1"])
-    draft = _draft([plan1, plan2], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 3, "reason": "闲笔与重复"}])
+    draft = _draft([plan1, plan2], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 3, "reason": "闲笔与重复", "beat_id": "B1"}])
     errors = _validate_beat_sheet_draft(draft, source_segments=sources, dialogue_quotes=[], adaptation_mode="short_drama")
     assert errors == []
     assert len(draft.segments) == 2, "有效删减内的洞不应触发补段"
@@ -308,7 +317,7 @@ def test_validate_beat_sheet_draft_allows_dropping_dialogue_outside_the_declared
     ]
     draft = _draft(
         [plan1, plan2], beat_sheet=beat_sheet,
-        dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 3, "reason": "闲笔"}],
+        dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 3, "reason": "闲笔", "beat_id": "B2"}],
         dropped_lines=[{"quote_id": "Q1", "reason": "与主线无关的寒暄，画面已能交代", "beat_id": "B2"}],
     )
     errors = _validate_beat_sheet_draft(draft, source_segments=sources, dialogue_quotes=quotes, adaptation_mode="short_drama")
@@ -381,8 +390,8 @@ def test_finalize_excludes_units_that_repair_ended_up_covering_and_rescues_its_q
     quote = DialogueQuote(quote_id="Q1", source_segment_index=1, text="句二。", content_chars=6, speaker="老王")
     draft = _draft(
         [plan], dropped_source_spans=[
-            {"source_segment_index": 1, "from_unit": 2, "to_unit": 2, "reason": "闲笔A"},
-            {"source_segment_index": 1, "from_unit": 3, "to_unit": 4, "reason": "闲笔B"},
+            {"source_segment_index": 1, "from_unit": 2, "to_unit": 2, "reason": "闲笔A", "beat_id": "B1"},
+            {"source_segment_index": 1, "from_unit": 3, "to_unit": 4, "reason": "闲笔B", "beat_id": "B1"},
         ],
         dropped_lines=[{"quote_id": "Q1", "reason": "随原文区间删减：闲笔A", "beat_id": "B1"}],
     )
@@ -402,7 +411,7 @@ def test_finalize_does_not_rescue_quotes_whose_unit_remains_dropped():
     plan = _range_plan(1, 1, 1, 1, beat_ids=["B1"])
     quote = DialogueQuote(quote_id="Q1", source_segment_index=1, text="句二。", content_chars=6, speaker="老王")
     draft = _draft(
-        [plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 2, "reason": "闲笔"}],
+        [plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 2, "reason": "闲笔", "beat_id": "B1"}],
         dropped_lines=[{"quote_id": "Q1", "reason": "随原文区间删减：闲笔", "beat_id": "B1"}],
     )
     final_units, _ = finalize_dropped_units(draft, dropped_units, sources, [quote])

@@ -49,7 +49,7 @@ def test_adaptation_summary_short_drama_over_target_true_by_final_segment_count(
     界面「超出短剧上限」的提示永远不出现）。"""
     summary = adaptation_summary(
         adaptation_mode="short_drama", planned_segment_count=7, segment_count=16,
-        dropped_spans=[_AiDroppedSourceSpan(source_segment_index=1, from_unit=1, to_unit=2, reason="闲笔")],
+        dropped_spans=[_AiDroppedSourceSpan(source_segment_index=1, from_unit=1, to_unit=2, reason="闲笔", beat_id="B1")],
         dropped_quote_ids=["Q01"], kept_dialogue_chars=900, projected_segment_count=15,
     )
     assert summary["target_duration_s"] == 90
@@ -64,7 +64,7 @@ def test_adaptation_summary_short_drama_over_target_true_by_final_segment_count(
     assert summary["planned_over_cap"] is False, "模型规划的 7 段本身没超上限"
     assert summary["kept_dialogue_chars"] == 900
     assert summary["dialogue_budget_chars"] == DIALOGUE_BUDGET_CHARS == 432
-    assert summary["dropped_source_spans"] == [{"source_segment_index": 1, "from_unit": 1, "to_unit": 2, "reason": "闲笔"}]
+    assert summary["dropped_source_spans"] == [{"source_segment_index": 1, "from_unit": 1, "to_unit": 2, "reason": "闲笔", "beat_id": "B1"}]
     assert summary["dropped_line_quote_ids"] == ["Q01"]
 
 
@@ -212,7 +212,7 @@ def test_persist_storyboard_pack_writes_adaptation_artifact_short_drama_with_rea
     pack = _pack()
     pack.adaptation = adaptation_summary(
         adaptation_mode="short_drama", planned_segment_count=10, segment_count=len(pack.segments),
-        dropped_spans=[_AiDroppedSourceSpan(source_segment_index=1, from_unit=unit_no, to_unit=unit_no, reason="闲笔可删")],
+        dropped_spans=[_AiDroppedSourceSpan(source_segment_index=1, from_unit=unit_no, to_unit=unit_no, reason="闲笔可删", beat_id="B1")],
         dropped_quote_ids=["Q09"], kept_dialogue_chars=40, projected_segment_count=13,
     )
     persist_storyboard_pack(conn, episode_id, ep, payload, pack, segments=segments)
@@ -233,6 +233,7 @@ def test_persist_storyboard_pack_writes_adaptation_artifact_short_drama_with_rea
     assert content["dialogue_budget_chars"] == 432
     assert content["dropped_line_quote_ids"] == ["Q09"]
     span = content["dropped_source_spans"][0]
+    assert span["beat_id"] == "B1", "留档区间带 beat_id（2026-09-24 区间 beat 归属核验落库）"
     chapter_row = conn.execute("SELECT content FROM chapters WHERE project_id=?", (ep["project_id"],)).fetchone()
     assert chapter_row["content"][span["start_offset"]:span["end_offset"]] == target_text
 

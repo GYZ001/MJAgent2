@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from app.production.storyboard_beat_sheet import _validate_beat_sheet_draft
 from app.production.storyboard_dialogue_ledger import DialogueQuote, _AiDroppedLine
 from app.production.storyboard_short_drama import _SPAN_DROP_REASON_PREFIX
 from app.production.storyboard_short_drama_beat_guard import restore_dropped_lines_with_invalid_beat
@@ -144,3 +145,30 @@ def test_noop_for_faithful_mode():
     assert notes == []
     assert [d.quote_id for d in draft.dropped_lines] == ["Q1"], "忠实档不触碰 dropped_lines"
     assert draft.kept_lines == []
+
+
+# ---------------------------------------------------------------------------
+# S3 遗留边角（2026-09-24）：调用时机挪到 append_segments_for_uncovered_sources
+# 之后——模型整段原文漏排时，覆盖它的段要等补段之后才存在
+# ---------------------------------------------------------------------------
+
+def test_validate_beat_sheet_draft_restores_invalid_beat_line_after_appending_missing_segment():
+    """原文段 2 被模型整段漏排（``draft.segments`` 只覆盖原文段 1），其中一条
+    台词被弃置且 beat_id 指向不存在的节拍。补段之前 ``_find_covering_segment_
+    no`` 找不到覆盖段，只有调用顺序挪到 ``append_segments_for_uncovered_
+    sources`` 之后才能找到刚补出来的段，把台词放回 kept_lines（不再卡在
+    dropped_lines 里出不来）。"""
+    sources = _sources("句一。", "这句台词很重要。")
+    plan = _range_plan(1, 1, 1, 1)
+    beat_sheet = [_AiShortDramaBeat(beat_id="B1", summary="x", segment_indexes=[1], importance="optional")]
+    quote = DialogueQuote(
+        quote_id="Q1", source_segment_index=2, text="这句台词很重要。", content_chars=8, speaker="老王",
+    )
+    draft = _draft(
+        [plan], beat_sheet=beat_sheet,
+        dropped_lines=[{"quote_id": "Q1", "reason": "模型瞎填的理由", "beat_id": "B_NOT_EXIST"}],
+    )
+    errors = _validate_beat_sheet_draft(draft, source_segments=sources, dialogue_quotes=[quote], adaptation_mode="short_drama")
+    assert errors == []
+    assert [d.quote_id for d in draft.dropped_lines] == [], "无效 beat_id 的台词不应继续卡在 dropped_lines 里"
+    assert [k.quote_id for k in draft.kept_lines] == ["Q1"], "补段之后必须能定位覆盖段，放回 kept_lines"

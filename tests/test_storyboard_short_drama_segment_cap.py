@@ -7,6 +7,7 @@ evidence.py`` 从 ``tests.test_storyboard_pack`` 借夹具同一种既有写法�
 """
 from __future__ import annotations
 
+from app.config import MAX_SPOKEN_CHARS_PER_SHOT
 from app.production.storyboard_beat_sheet_schemas import _AiSegmentPlan
 from app.production.storyboard_dialogue_ledger import DialogueQuote
 from app.production.storyboard_short_drama import MAX_SEGMENT_COUNT, SegmentCountSoftCap
@@ -88,3 +89,34 @@ def test_soft_cap_last_projected_count_updates_on_every_call():
     assert cap.last_projected_count == 3
     cap.errors(_n_segment_draft(5))
     assert cap.last_projected_count == 5
+
+
+# ---------------------------------------------------------------------------
+# 打回文案列出具体超容段（2026-09-24）：段号/保留字数/容量/拆成几段，按超出
+# 量降序，最多 5 个——B 机沙箱第三轮真实验证：只给总量提示时模型不知道该
+# 删哪一段（我欲封天 EP3 两次打回段数未变）。
+# ---------------------------------------------------------------------------
+
+def test_soft_cap_error_lists_up_to_five_oversized_segments_sorted_by_excess():
+    seg_specs = [(1, 4, 40), (2, 3, 40), (3, 3, 35), (4, 2, 45), (5, 2, 40), (6, 2, 35), (7, 2, 30)]
+    sources = _sources(*(["占位原文占位原文占位原文占位原文占位原文占位原文占位原文。"] * 7))
+    plans, quotes, kept = [], [], []
+    counter = 0
+    for seg_no, n_quotes, chars in seg_specs:
+        plans.append(_range_plan(seg_no, seg_no, 1, 1))
+        for _ in range(n_quotes):
+            counter += 1
+            quote = DialogueQuote(quote_id=f"Q{counter:02d}", source_segment_index=seg_no, text="x" * chars, content_chars=chars)
+            quotes.append(quote)
+            kept.append({"quote_id": quote.quote_id, "segment_no": seg_no})
+    draft = _draft(plans, kept_lines=kept)
+    cap = SegmentCountSoftCap(adaptation_mode="short_drama", retry_limit=2, quotes=quotes, source_segments=sources)
+
+    message = cap.errors(draft)[0]
+
+    assert f"容量 {MAX_SPOKEN_CHARS_PER_SHOT} 字" in message
+    assert "第 1 段保留台词 160 字" in message and "将被拆成 4 段" in message, "4 条 40 字台词贪心装箱拆成 4 段"
+    assert "第 5 段保留台词 80 字" in message
+    assert "第 6 段" not in message and "第 7 段" not in message, "最多只列 5 个，第 6/7 段（70/60 字，超出量最小）不应出现"
+    order = [message.index(f"第 {i} 段") for i in range(1, 6)]
+    assert order == sorted(order), "列出的 5 个段必须按保留字数（超出量）降序排列"

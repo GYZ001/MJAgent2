@@ -30,12 +30,35 @@ sheet.py`` 同时 import 两者并在 ``_validate_beat_sheet_draft`` 里各调�
 ``restore_undroppable_lines`` 之后——只有该函数把"作者点名必拍单元"
 （``protected_units``）强制放回 ``kept_lines`` 之后，``draft.dropped_lines``
 里剩下的才是短剧档豁免下真正的"模型主动弃置"候选集合，本模块只对这部分做
-``beat_id`` 核验，避免与该函数的既有保护重复判定同一条台词；必须放在
-``repair_beat_sheet_draft`` 之前——与 ``restore_undroppable_lines`` 同样的
-理由，此时 ``source_unit_ranges`` 可能还没修补完，放回 ``kept_lines`` 时用
-"覆盖范围优先、否则按 ``source_segment_indexes`` 兜底"的两层查找，与
-``restore_undroppable_lines`` 一致，不追求精确（后续 ``reassign_kept_lines_
-to_covering_segments`` 会再校正，不会因为这里选的段不够精确而漏掉修正）。
+``beat_id`` 核验，避免与该函数的既有保护重复判定同一条台词。
+
+2026-09-24（S3 遗留边角修复）：必须放在 ``append_segments_for_uncovered_
+sources`` **之后**（原来紧跟在 ``restore_undroppable_lines`` 之后、在它之前）
+——模型把整个原文段漏排时，覆盖该原文段的段要等 ``append_segments_for_
+uncovered_sources`` 跑完才存在；本模块的 ``_find_covering_segment_no`` 找不到
+覆盖段时会把条目原样留在 ``dropped_lines`` 里出不来，即使它的 ``beat_id``
+确实无效、本该被放回，也没法放回。挪到之后不会引入新风险：本模块只读
+``draft.segments`` 定位覆盖段、只写 ``kept_lines``/``dropped_lines``；
+``append_segments_for_uncovered_sources`` 只读 ``draft.beat_sheet``/
+``dropped_units`` 添加新段、完全不读 ``dropped_lines``——两者互不依赖对方的
+输出重新判断，挪动顺序不会让 ``append_segments_for_uncovered_sources`` 已经
+做出的补段决定被推翻，也不会让本模块的放回被它撤销；仍必须放在 ``repair_
+beat_sheet_draft`` 之前——与 ``restore_undroppable_lines`` 同样的理由，此时
+``source_unit_ranges`` 可能还没修补完，放回 ``kept_lines`` 时用"覆盖范围
+优先、否则按 ``source_segment_indexes`` 兜底"的两层查找，与 ``restore_
+undroppable_lines`` 一致，不追求精确（后续 ``reassign_kept_lines_to_
+covering_segments`` 会再校正）。
+
+2026-09-24 三处改动为什么不会形成「修补后又被下一道校验打回同一件事」的
+循环（``storyboard_short_drama.py`` 模块 docstring 指到这里）：本模块的
+beat_id 核验只读/写 ``dropped_lines``/``kept_lines``，不改变 ``draft.
+segments`` 的覆盖范围；``storyboard_short_drama.verify_dropped_source_
+spans`` 只读 ``draft.beat_sheet``，在 ``reconcile_dropped_units`` 里一次性
+过滤 ``dropped_source_spans``，不会在同一轮 ``validate()`` 里被后续修补步骤
+重新触发；``SegmentCountSoftCap`` 打回文案的新增内容只是把同一个既有判据
+说得更具体，不改变触发条件。三者的输入互不依赖对方在本轮 ``validate()``
+调用里刚做出的输出，因此不存在"A 的产出触发 B 打回、B 的修补又让 A 的判断
+失效"的循环。
 """
 from __future__ import annotations
 

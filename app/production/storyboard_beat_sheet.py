@@ -118,7 +118,6 @@ def _validate_beat_sheet_draft(
         unknown_beats = [b for b in seg.beat_ids if b not in beat_ids]
         if unknown_beats:
             errors.append(f"段 {seg.segment_no} 引用了不存在的 beat_id {unknown_beats}")
-    segment_source_indexes = {s.segment_no: s.source_segment_indexes for s in draft.segments}
     # 短剧节奏档：declared − 四类保护（已覆盖/已 kept/必拍/paratext·context），
     # 命中的台词立即强制并入 dropped_lines；忠实档返回空集合、无副作用（见
     # app.production.storyboard_short_drama.reconcile_dropped_units）。
@@ -131,16 +130,17 @@ def _validate_beat_sheet_draft(
         _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
     for note in restore_undroppable_lines(draft, dialogue_quotes, source_segments, dropped_units=dropped_units, adaptation_mode=adaptation_mode, protected_units=protected_units):
         _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
-    # 短剧档第三类核验（2026-09-24）：区间外弃置台词须有合法 beat_id，须紧跟在上面
-    # restore_undroppable_lines 之后（只处理它放行的部分），见该函数模块 docstring。
-    for note in restore_dropped_lines_with_invalid_beat(draft, dialogue_quotes, source_segments, adaptation_mode=adaptation_mode):
-        _LOGGER.info("[STORYBOARD_SHORT_DRAMA] %s", note)
     for note in append_segments_for_uncovered_sources(draft, dialogue_quotes, source_segments, set(paratext_indexes), set(context_indexes), dropped_units=dropped_units):
         _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
+    # 短剧档第三类核验，须放在 append_segments_for_uncovered_sources 之后（见该函数模块 docstring「S3 遗留边角」）。
+    for note in restore_dropped_lines_with_invalid_beat(draft, dialogue_quotes, source_segments, adaptation_mode=adaptation_mode):
+        _LOGGER.info("[STORYBOARD_SHORT_DRAMA] %s", note)
     errors.extend(undroppable_quote_errors(draft.dropped_lines, dialogue_quotes, source_segments, dropped_units=dropped_units, adaptation_mode=adaptation_mode, protected_units=protected_units))
     # 先按单元位置/原文段号把分错段的台词挪到覆盖它的段（确定性，不打回模型），再查台账分区——
     # 否则「台词不得跨段漂移」会先把整份节拍表打回（2026-09-05 第 23 集三次重试仍失败）。
     reassign_kept_lines_to_covering_segments(draft.kept_lines, dialogue_quotes, draft.segments, source_segments)
+    # 现算而非调用最早时快照——补段后才出现的 segment_no 也可能被分到台词，早期快照没有这个键。
+    segment_source_indexes = {s.segment_no: s.source_segment_indexes for s in draft.segments}
     errors.extend(dialogue_ledger_errors(
         quotes=dialogue_quotes,
         kept_lines=draft.kept_lines,
