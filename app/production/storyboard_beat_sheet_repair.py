@@ -253,6 +253,7 @@ def fix_order_and_fill_holes(
 
 def restore_undroppable_lines(
     draft: Any, quotes: list[Any], source_segments: list[Any], *, dropped_units: frozenset[tuple[int, int]],
+    adaptation_mode: str, protected_units: frozenset[tuple[int, int]],
 ) -> list[str]:
     """模型把整句台词（有说话人、正文超过语气词长度）塞进 dropped_lines 时，放回 kept_lines：
     先归到单元范围覆盖它的段，否则归到引用其原文段且必保台词字数最少的段；没有任何段引用
@@ -262,7 +263,13 @@ def restore_undroppable_lines(
     空集合，必传无默认值）内的台词不在此列——它们已被
     ``storyboard_short_drama.reconcile_dropped_units`` 强制并入 dropped_lines，
     这里必须放行而不是强行修回 kept_lines，否则短剧档的删减声明会被这道既有
-    修补悄悄撤销。"""
+    修补悄悄撤销。
+    2026-09-24：短剧档（``adaptation_mode=="short_drama"``）额外放行「区间外、
+    理由非空」的整句弃置——模型按台词预算主动决定丢弃的非关键台词不再被这里
+    强制修回；``protected_units``（作者点名必拍，见 ``storyboard_short_drama.
+    required_beat_protected_units``）覆盖的单元不受此豁免，仍会被放回
+    kept_lines（偏向保留）。忠实档 ``protected_units`` 恒传空集合、
+    ``adaptation_mode`` 恒不等于 ``"short_drama"``，行为逐字节不变。"""
     from app.production.storyboard_dialogue_ledger import _AiKeptLine
     from app.production.storyboard_segment_ranges import quote_unit_index
 
@@ -282,6 +289,9 @@ def restore_undroppable_lines(
         idx = quote.source_segment_index
         unit_no = quote_unit_index(quote, source_segments[idx - 1].text) if 1 <= idx <= len(source_segments) else -1
         if (idx, unit_no) in dropped_units:
+            remaining.append(item)
+            continue
+        if adaptation_mode == "short_drama" and (idx, unit_no) not in protected_units:
             remaining.append(item)
             continue
         covering = [

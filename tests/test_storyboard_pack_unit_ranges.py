@@ -331,5 +331,8 @@ def test_dropping_a_full_speaker_line_is_rejected_but_interjections_may_be_dropp
     ]
     dropped = [_AiDroppedLine(quote_id="Q10", reason="未在当前剧情节拍中保留"), _AiDroppedLine(quote_id="Q06", reason="语气词"), _AiDroppedLine(quote_id="Q20", reason="屏上文字")]
     source_segments = _fake_source_segments(5)
-    errors = undroppable_quote_errors(dropped, quotes, source_segments, dropped_units=frozenset())
+    errors = undroppable_quote_errors(
+        dropped, quotes, source_segments, dropped_units=frozenset(),
+        adaptation_mode="faithful", protected_units=frozenset(),
+    )
     assert len(errors) == 1 and "Q10" in errors[0] and "李麦麦" in errors[0]

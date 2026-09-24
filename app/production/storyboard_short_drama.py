@@ -38,7 +38,7 @@ import logging
 import math
 from typing import Any
 
-from app.config import SHORT_DRAMA_TARGET_DURATION_S
+from app.config import MAX_SPOKEN_CHARS_PER_SHOT, SHORT_DRAMA_TARGET_DURATION_S
 from app.production.storyboard_beat_sheet_schemas import SEGMENT_DURATION_S
 from app.production.storyboard_dialogue_ledger import _AiDroppedLine, _AiKeptLine
 from app.production.storyboard_short_drama_schemas import _AiDroppedSourceSpan
@@ -54,6 +54,15 @@ TARGET_SEGMENT_COUNT = -(-SHORT_DRAMA_TARGET_DURATION_S // SEGMENT_DURATION_S)
 #: 8 = ceil(6 * 1.3)：段数软上限。模型对「精确 N 段」历来不可靠（本仓 4 次
 #: 语义重试耗尽整集失败的事故都与段数/容量类字面量约束有关），留 30% 浮动。
 MAX_SEGMENT_COUNT = math.ceil(TARGET_SEGMENT_COUNT * 1.3)
+
+#: 432 = 8 * 54：台词预算，口径与段数软上限同一套——全集 kept_lines 纯文字
+#: 字数上限，按"每段 15 秒最多说 54 字"（config.MAX_SPOKEN_CHARS_PER_SHOT，
+#: 与 storyboard_capacity_normalize 的容量归一化同一常量）乘段数软上限换算。
+#: 2026-09-24 真实三集验证：模型规划段数达标但几乎不删台词，容量归一化按
+#: 15 秒口播容量机械拆段把 6-8 段撑回 11-16 段——段数软上限只管"模型自己声明
+#: 几段"，管不住"保留的台词多到必须拆出这么多段"，需要在台词量这一维度上
+#: 单独给模型一个可执行的预算，而不是等它间接撞上拆分后的段数。
+DIALOGUE_BUDGET_CHARS = MAX_SEGMENT_COUNT * MAX_SPOKEN_CHARS_PER_SHOT
 
 #: 有效删减强制丢弃的台词，reason 统一带这个前缀，供事后追溯"这句台词是被
 #: 哪个机制丢的"，也供 generate_storyboard_pack 从 dropped_lines 里筛出
@@ -132,6 +141,15 @@ def _required_beat_units(source_segments: list[Any], indexes: set[int]) -> set[t
             if any(u_start < m_end and m_start < u_end for m_start, m_end in marker_spans):
                 protected.add((index, unit_no))
     return protected
+
+
+def required_beat_protected_units(source_segments: list[Any]) -> frozenset[tuple[int, int]]:
+    """全集范围的作者点名必拍单元集合（公开入口，供
+    ``storyboard_beat_sheet``/``storyboard_beat_sheet_repair`` 判断"这句台词
+    能不能在短剧档被按理由弃置"用）；与 ``reconcile_dropped_units`` 内部只扫
+    "有声明删减区间的原文段"不同，这里要扫**全部**原文段——个别台词弃置不
+    像整块区间声明那样有天然的候选范围收窄。"""
+    return frozenset(_required_beat_units(source_segments, set(range(1, len(source_segments) + 1))))
 
 
 def _declared_units(spans: list[Any], source_segments: list[Any]) -> dict[tuple[int, int], str]:
@@ -354,19 +372,35 @@ def dropped_line_quote_ids(draft: Any) -> list[str]:
 def adaptation_summary(
     *, adaptation_mode: str, planned_segment_count: int, segment_count: int,
     dropped_spans: list[_AiDroppedSourceSpan], dropped_quote_ids: list[str],
+    kept_dialogue_chars: int,
 ) -> dict[str, Any]:
     """``generate_storyboard_pack`` 用它拼出 ``StoryboardPack.adaptation``
     （章节偏移/原文摘录留给持久化阶段的 ``storyboard_pack_evidence``——那里
-    才有 conn/章节内容，生成阶段没有）。"""
+    才有 conn/章节内容，生成阶段没有）。
+
+    2026-09-24 真实三集验证：``over_target`` 曾按模型规划的 ``planned_
+    segment_count``（容量归一化拆段**之前**）判定，归一化把 6-8 段撑回
+    11-16 段后这个字段结构上恒为 false——界面"超出短剧上限"的提示永远不
+    出现，是一句假的界面承诺。改按**最终段数**（``segment_count``，容量
+    归一化之后、真正落库的段数，调用方 ``generate_storyboard_pack`` 传入的
+    ``len(pack_segments)`` 本就已经是这个值）判定；旧语义（"模型规划在最后
+    一次语义重试仍超上限"）不丢，改名 ``planned_over_cap`` 继续留档，供事后
+    区分"模型没规划够"与"规划够了但台词太多被归一化拆段撑大"两类根因。
+    """
     is_short_drama = adaptation_mode == "short_drama"
     return {
         "adaptation_mode": adaptation_mode,
         "target_duration_s": SHORT_DRAMA_TARGET_DURATION_S if is_short_drama else None,
         "target_segment_count": TARGET_SEGMENT_COUNT if is_short_drama else None,
         "max_segment_count": MAX_SEGMENT_COUNT if is_short_drama else None,
+        "max_duration_s": MAX_SEGMENT_COUNT * SEGMENT_DURATION_S if is_short_drama else None,
         "planned_segment_count": planned_segment_count,
         "segment_count": segment_count,
-        "over_target": bool(is_short_drama and planned_segment_count > MAX_SEGMENT_COUNT),
+        "final_duration_s": segment_count * SEGMENT_DURATION_S,
+        "over_target": bool(is_short_drama and segment_count > MAX_SEGMENT_COUNT),
+        "planned_over_cap": bool(is_short_drama and planned_segment_count > MAX_SEGMENT_COUNT),
+        "kept_dialogue_chars": kept_dialogue_chars,
+        "dialogue_budget_chars": DIALOGUE_BUDGET_CHARS if is_short_drama else None,
         "dropped_source_spans": [span.model_dump(mode="json") for span in dropped_spans],
         "dropped_line_quote_ids": list(dropped_quote_ids),
     }

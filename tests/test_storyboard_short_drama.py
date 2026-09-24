@@ -18,6 +18,7 @@ from app.production.storyboard_short_drama import (
     finalize_dropped_units,
     key_beat_coverage_errors,
     reconcile_dropped_units,
+    required_beat_protected_units,
 )
 from app.production.storyboard_short_drama_schemas import _AiShortDramaBeat, _AiShortDramaBeatSheetDraft
 from app.production.storyboard_segment_ranges import split_source_units
@@ -120,6 +121,20 @@ def test_reconcile_protects_required_beat_marker_split_across_two_units_by_an_in
     draft = _draft([plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 3, "reason": "x"}])
     result = reconcile_dropped_units(draft, sources, [], set(), set(), adaptation_mode="short_drama")
     assert result == frozenset(), "钩子标记横跨的两个单元都必须受保护，一个都不能判成有效删减"
+
+
+def test_required_beat_protected_units_scans_every_source_segment():
+    """公开入口（供 storyboard_beat_sheet/storyboard_beat_sheet_repair 判断
+    "区间外整句弃置"豁免用）：与 reconcile_dropped_units 内部只扫"有声明
+    删减区间的原文段"不同，这里必须扫全部原文段——没有声明删减区间的原文段
+    照样可能含必拍标记。"""
+    sources = _sources("句一。句二。", "（钩子：警笛声）句尾。")
+    assert required_beat_protected_units(sources) == frozenset({(2, 1)})
+
+
+def test_required_beat_protected_units_empty_without_any_marker():
+    sources = _sources("句一。句二。句三。")
+    assert required_beat_protected_units(sources) == frozenset()
 
 
 def test_reconcile_excludes_paratext_and_context_indexes():
@@ -272,19 +287,59 @@ def test_validate_beat_sheet_draft_accepts_declared_gap_without_refilling_or_new
     assert (draft.dropped_source_spans[0].from_unit, draft.dropped_source_spans[0].to_unit) == (2, 3)
 
 
-def test_validate_beat_sheet_draft_still_protects_dialogue_outside_the_declared_span():
-    """区间外的整句台词仍按现行规则不许弃置——短剧档的豁免只对声明区间内生效。"""
+def test_validate_beat_sheet_draft_allows_dropping_dialogue_outside_the_declared_span_in_short_drama():
+    """2026-09-24：短剧档放行「区间外、理由非空」的整句弃置——模型按台词预算
+    主动决定丢弃非关键台词（不落在作者点名必拍单元内）时，不再被
+    restore_undroppable_lines 强制放回 kept_lines，也不再被 undroppable_
+    quote_errors 打回。旧行为（区间外一律不许弃置）仅对忠实档与"落在必拍
+    单元内"两种情形保留，见下面两个测试。"""
     sources = _sources("句一。句二。句三。句四。")
     plan1 = _range_plan(1, 1, 1, 1, synopsis="开场", beat_ids=["B1"])
     plan2 = _range_plan(2, 1, 4, 4, synopsis="收尾", beat_ids=["B1"])
     quotes = [DialogueQuote(quote_id="Q1", source_segment_index=1, text="句四。", content_chars=6, speaker="老王")]
     draft = _draft(
         [plan1, plan2], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 3, "reason": "闲笔"}],
-        dropped_lines=[{"quote_id": "Q1", "reason": "不重要"}],
+        dropped_lines=[{"quote_id": "Q1", "reason": "与主线无关的寒暄，画面已能交代"}],
     )
     errors = _validate_beat_sheet_draft(draft, source_segments=sources, dialogue_quotes=quotes, adaptation_mode="short_drama")
+    assert errors == [], "区间外的整句台词按理由弃置，短剧档放行，不报错"
+    assert [d.quote_id for d in draft.dropped_lines] == ["Q1"], "不再被强制放回 kept_lines"
+    assert draft.kept_lines == []
+
+
+def test_validate_beat_sheet_draft_faithful_still_protects_dialogue_outside_the_declared_span():
+    """忠实档没有短剧档的新豁免：区间外整句台词仍按既有规则不许弃置（忠实档
+    本就没有 dropped_source_spans 机制，这里传的声明区间不生效）。"""
+    sources = _sources("句一。句二。句三。句四。")
+    plan1 = _range_plan(1, 1, 1, 1, synopsis="开场", beat_ids=["B1"])
+    plan2 = _range_plan(2, 1, 4, 4, synopsis="收尾", beat_ids=["B1"])
+    quotes = [DialogueQuote(quote_id="Q1", source_segment_index=1, text="句四。", content_chars=6, speaker="老王")]
+    draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[1])], segments=[plan1, plan2],
+        dropped_lines=[{"quote_id": "Q1", "reason": "不重要"}],
+    )
+    errors = _validate_beat_sheet_draft(draft, source_segments=sources, dialogue_quotes=quotes, adaptation_mode="faithful")
     assert errors == [], "区间外整句台词被机械放回 kept_lines，不应再报错"
     assert [k.quote_id for k in draft.kept_lines] == ["Q1"]
+
+
+def test_validate_beat_sheet_draft_still_protects_required_beat_dialogue_from_ad_hoc_dropping():
+    """必拍单元（screenplay_markers.required_beat_spans）里的整句台词，短剧档
+    即使没有声明删减区间也不能靠 dropped_lines 逃过——"区间外整句弃置"这条
+    新豁免对必拍单元不生效，仍会被机械放回 kept_lines。"""
+    text = "句零。（钩子：远处传来警笛声。）句三尾。"
+    sources = _sources(text)
+    units = split_source_units(text)
+    assert len(units) == 3, "标记内部句号把括号钩子切成跨两个单元（第 2、3 个单元）"
+    plan = _range_plan(1, 1, 1, 3, synopsis="开场", beat_ids=["B1"])
+    # content_chars 必须 > DROPPABLE_MAX_CHARS（4）才算"整句台词"，短到像语气词
+    # 的引用不受这条保护——用真实原文子串「远处传来警笛声」（7 字）。
+    quotes = [DialogueQuote(quote_id="Q1", source_segment_index=1, text="远处传来警笛声", content_chars=7, speaker="老王")]
+    draft = _draft([plan], dropped_lines=[{"quote_id": "Q1", "reason": "模型觉得不重要"}])
+    errors = _validate_beat_sheet_draft(draft, source_segments=sources, dialogue_quotes=quotes, adaptation_mode="short_drama")
+    assert errors == [], "被机械放回 kept_lines 后不再报错"
+    assert [k.quote_id for k in draft.kept_lines] == ["Q1"]
+    assert draft.dropped_lines == []
 
 
 def test_validate_beat_sheet_draft_faithful_rejects_undeclared_gap_same_as_before():

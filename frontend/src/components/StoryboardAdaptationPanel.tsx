@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, type StoryboardAdaptationSummary } from '../api'
-import { adaptationModeLabel, adaptationPanelTitle, durationComparisonText } from '../lib/storyboardAdaptation'
+import { adaptationModeLabel, adaptationPanelTitle, durationComparisonText, overTargetText } from '../lib/storyboardAdaptation'
 
 /**
  * 分镜台「本集删减」面板（2026-09-23 用户拍板）：短剧节奏档声明的原文删减区间 +
@@ -38,7 +38,7 @@ export default function StoryboardAdaptationPanel({ episodeId }: { episodeId: st
       <div className="storyboard-adaptation-body">
         <p>档位：{adaptationModeLabel(summary)}</p>
         {durationText && <p>{durationText}</p>}
-        {summary.over_target && <p role="status">模型多次调整后仍超出短剧上限</p>}
+        {summary.over_target && <p role="status">{overTargetText(summary)}</p>}
         {!hasDrops && <p>本集没有删减内容</p>}
         {spanCount > 0 && (
           <div>

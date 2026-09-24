@@ -69,10 +69,16 @@ def test_undroppable_dropped_line_is_restored_to_a_covering_segment():
     draft.kept_lines = []
     draft.dropped_lines = [SimpleNamespace(quote_id="Q22", reason="未在当前节拍中保留")]
     quotes = [DialogueQuote(quote_id="Q22", source_segment_index=4, text="猫忽然跳上了桌子", content_chars=17, speaker="小胖子")]
-    notes = restore_undroppable_lines(draft, quotes, _scene_4_segments(), dropped_units=frozenset())
+    notes = restore_undroppable_lines(
+        draft, quotes, _scene_4_segments(), dropped_units=frozenset(),
+        adaptation_mode="faithful", protected_units=frozenset(),
+    )
     assert notes and draft.dropped_lines == []
     assert [(k.quote_id, k.segment_no) for k in draft.kept_lines] == [("Q22", 1)]  # S03 在第 1 段范围内
-    assert undroppable_quote_errors(draft.dropped_lines, quotes, _scene_4_segments(), dropped_units=frozenset()) == []
+    assert undroppable_quote_errors(
+        draft.dropped_lines, quotes, _scene_4_segments(), dropped_units=frozenset(),
+        adaptation_mode="faithful", protected_units=frozenset(),
+    ) == []
 
 
 def test_droppable_filler_stays_dropped():
@@ -84,7 +90,10 @@ def test_droppable_filler_stays_dropped():
     draft.kept_lines = []
     draft.dropped_lines = [SimpleNamespace(quote_id="Q01", reason="语气词")]
     quotes = [DialogueQuote(quote_id="Q01", source_segment_index=4, text="喵", content_chars=1, speaker="橘座")]
-    assert restore_undroppable_lines(draft, quotes, _scene_4_segments(), dropped_units=frozenset()) == []
+    assert restore_undroppable_lines(
+        draft, quotes, _scene_4_segments(), dropped_units=frozenset(),
+        adaptation_mode="faithful", protected_units=frozenset(),
+    ) == []
     assert len(draft.dropped_lines) == 1
 
 
@@ -103,7 +112,10 @@ def test_missing_quote_decisions_are_completed_then_restored_by_rule():
     ]
     notes = complete_missing_quote_decisions(draft, quotes)
     assert len(notes) == 2 and {d.quote_id for d in draft.dropped_lines} == {"Q41", "Q42"}
-    restore_undroppable_lines(draft, quotes, _scene_4_segments(), dropped_units=frozenset())
+    restore_undroppable_lines(
+        draft, quotes, _scene_4_segments(), dropped_units=frozenset(),
+        adaptation_mode="faithful", protected_units=frozenset(),
+    )
     assert [k.quote_id for k in draft.kept_lines] == ["Q41"]
     assert [d.quote_id for d in draft.dropped_lines] == ["Q42"]
     assert complete_missing_quote_decisions(draft, quotes) == [], "已决定去留的不再重复补"
@@ -167,3 +179,61 @@ def test_uncovered_tail_source_segment_without_dialogue_gets_a_segment_too():
     notes = append_segments_for_uncovered_sources(context, [], _scene_4_segments(), {1}, {2}, dropped_units=frozenset())
     assert [s.source_segment_indexes for s in context.segments] == [[2, 3], [4]], notes
     assert any("并入" in n for n in notes)
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-24：短剧档放行「区间外、理由非空」的整句弃置，必拍单元仍受保护
+# ---------------------------------------------------------------------------
+
+def test_short_drama_allows_dropping_undroppable_line_outside_protected_units():
+    """短剧档新增豁免：区间外的整句台词只要不落在作者点名必拍单元内，就允许
+    留在 dropped_lines（模型按台词预算主动决定丢弃），不再被强制修回
+    kept_lines——理由非空已由 schema（min_length=1）保证，这里不重复校验。"""
+    from types import SimpleNamespace
+    from app.production.storyboard_beat_sheet import undroppable_quote_errors
+    from app.production.storyboard_beat_sheet_repair import restore_undroppable_lines
+    from app.production.storyboard_dialogue_ledger import DialogueQuote
+
+    draft = _draft([_plan(1, [(1, 12)])])
+    draft.kept_lines = []
+    draft.dropped_lines = [SimpleNamespace(quote_id="Q22", reason="与主线无关的寒暄，画面已能交代人物关系")]
+    quotes = [DialogueQuote(quote_id="Q22", source_segment_index=4, text="猫忽然跳上了桌子", content_chars=17, speaker="小胖子")]
+    notes = restore_undroppable_lines(
+        draft, quotes, _scene_4_segments(), dropped_units=frozenset(),
+        adaptation_mode="short_drama", protected_units=frozenset(),
+    )
+    assert notes == [], "不在必拍单元内，短剧档放行，不强制修回"
+    assert len(draft.dropped_lines) == 1
+    assert undroppable_quote_errors(
+        draft.dropped_lines, quotes, _scene_4_segments(), dropped_units=frozenset(),
+        adaptation_mode="short_drama", protected_units=frozenset(),
+    ) == []
+
+
+def test_short_drama_still_protects_required_beat_units_from_dropping():
+    """必拍保护不因短剧档新增的豁免而失效：quote 所在单元若在 protected_units
+    （作者点名必拍）内，短剧档仍报错、仍强制放回 kept_lines（偏向保留）。"""
+    from types import SimpleNamespace
+    from app.production.storyboard_beat_sheet import undroppable_quote_errors
+    from app.production.storyboard_beat_sheet_repair import restore_undroppable_lines
+    from app.production.storyboard_dialogue_ledger import DialogueQuote, _AiDroppedLine
+
+    quotes = [DialogueQuote(quote_id="Q22", source_segment_index=4, text="猫忽然跳上了桌子", content_chars=17, speaker="小胖子")]
+    # Q22 落在原文段 4 的第 3 个单元（S03），与 test_undroppable_dropped_line_is_restored_to_a_covering_segment 同一定位。
+    protected = frozenset({(4, 3)})
+
+    errors = undroppable_quote_errors(
+        [_AiDroppedLine(quote_id="Q22", reason="模型想删")], quotes, _scene_4_segments(), dropped_units=frozenset(),
+        adaptation_mode="short_drama", protected_units=protected,
+    )
+    assert len(errors) == 1 and "Q22" in errors[0], "短剧档也不能弃置必拍单元里的整句台词"
+
+    draft = _draft([_plan(1, [(1, 3)]), _plan(2, [(4, 12)])])
+    draft.kept_lines = []
+    draft.dropped_lines = [SimpleNamespace(quote_id="Q22", reason="模型想删")]
+    notes = restore_undroppable_lines(
+        draft, quotes, _scene_4_segments(), dropped_units=frozenset(),
+        adaptation_mode="short_drama", protected_units=protected,
+    )
+    assert notes and draft.dropped_lines == []
+    assert [(k.quote_id, k.segment_no) for k in draft.kept_lines] == [("Q22", 1)]

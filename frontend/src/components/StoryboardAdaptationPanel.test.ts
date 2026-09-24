@@ -85,13 +85,40 @@ describe('StoryboardAdaptationPanel：老分集 recorded=false', () => {
 })
 
 describe('StoryboardAdaptationPanel：over_target', () => {
-  it('over_target 为真时提示模型多次调整后仍超出短剧上限', async () => {
+  it('老留档缺新字段时降级提示模型多次调整后仍超出短剧上限', async () => {
     vi.mocked(api.getStoryboardAdaptation).mockResolvedValue({
       recorded: true, adaptation_mode: 'short_drama', target_duration_s: 90, segment_count: 9,
       over_target: true, dropped_source_spans: [], dropped_lines: [],
     })
     const view = await mount()
     expect(textOf(view.root)).toContain('模型多次调整后仍超出短剧上限')
+    view.unmount()
+  })
+
+  it('新字段齐全时如实展示最终段数/时长/上限与台词预算原因', async () => {
+    vi.mocked(api.getStoryboardAdaptation).mockResolvedValue({
+      recorded: true, adaptation_mode: 'short_drama', target_duration_s: 90, segment_count: 16,
+      over_target: true, dropped_source_spans: [], dropped_lines: [],
+      final_duration_s: 240, max_duration_s: 120, kept_dialogue_chars: 900, dialogue_budget_chars: 432,
+      planned_over_cap: false,
+    })
+    const view = await mount()
+    const text = textOf(view.root)
+    expect(text).toContain('本集最终 16 段约 240 秒，超出短剧目标约 90 秒（上限 120 秒）')
+    expect(text).toContain('保留台词 900 字需要约 250 秒口播')
+    expect(text).not.toContain('模型多次调整后规划段数仍超上限')
+    view.unmount()
+  })
+
+  it('planned_over_cap 为真时额外提示模型规划阶段就已超上限', async () => {
+    vi.mocked(api.getStoryboardAdaptation).mockResolvedValue({
+      recorded: true, adaptation_mode: 'short_drama', target_duration_s: 90, segment_count: 10,
+      over_target: true, dropped_source_spans: [], dropped_lines: [],
+      final_duration_s: 150, max_duration_s: 120, kept_dialogue_chars: null, dialogue_budget_chars: null,
+      planned_over_cap: true,
+    })
+    const view = await mount()
+    expect(textOf(view.root)).toContain('模型多次调整后规划段数仍超上限')
     view.unmount()
   })
 })

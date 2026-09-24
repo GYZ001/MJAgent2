@@ -25,3 +25,30 @@ export function durationComparisonText(segmentCount: number | null, targetDurati
     ? `${segmentCount} 段 · 约 ${estimated} 秒`
     : `${segmentCount} 段 · 约 ${estimated} 秒（目标 ${targetDurationS} 秒）`
 }
+
+/** 老留档没有 2026-09-24 新增字段时的降级文案——与改造前逐字相同，不假装
+ *  拿到了具体数字（CLAUDE.md「界面承诺必须与实际行为一致」）。 */
+const DEGRADED_OVER_TARGET_TEXT = '模型多次调整后仍超出短剧上限'
+
+/** over_target 为真时的如实说明：本集最终几段、约多少秒、超出目标/上限多少；
+ *  有台词预算信息且确实是台词超预算时追加原因；planned_over_cap 为真时追加
+ *  "模型规划阶段就已超上限"这句区别于"归一化拆段撑大"的根因说明。
+ *  final_duration_s/target_duration_s 任一缺失（老留档）时整句降级为固定
+ *  文案，不用本地公式拼一个后端没给出的数字顶替。 */
+export function overTargetText(summary: Pick<StoryboardAdaptationSummary,
+  'segment_count' | 'final_duration_s' | 'target_duration_s' | 'max_duration_s' |
+  'kept_dialogue_chars' | 'dialogue_budget_chars' | 'planned_over_cap'>): string {
+  const n = summary.segment_count
+  const x = summary.final_duration_s
+  if (n == null || x == null || summary.target_duration_s == null) return DEGRADED_OVER_TARGET_TEXT
+  let text = `本集最终 ${n} 段约 ${x} 秒，超出短剧目标约 ${summary.target_duration_s} 秒`
+  if (summary.max_duration_s != null) text += `（上限 ${summary.max_duration_s} 秒）`
+  const kept = summary.kept_dialogue_chars
+  const budget = summary.dialogue_budget_chars
+  if (kept != null && budget != null && budget > 0 && summary.max_duration_s != null && kept > budget) {
+    const seconds = Math.round((kept / budget) * summary.max_duration_s)
+    text += `；保留台词 ${kept} 字需要约 ${seconds} 秒口播`
+  }
+  if (summary.planned_over_cap) text += '；模型多次调整后规划段数仍超上限'
+  return text
+}

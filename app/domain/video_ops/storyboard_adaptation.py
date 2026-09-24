@@ -111,6 +111,15 @@ def storyboard_adaptation_summary(conn, episode_id: str) -> dict:
         "over_target": bool(adaptation.get("over_target", False)),
         "dropped_source_spans": adaptation.get("dropped_source_spans") or [],
         "dropped_lines": dropped_lines,
+        # 2026-09-24 新增，见 storyboard_pack_evidence 模块 docstring 的扩展
+        # 说明：老留档（改造前生成）没有这五个字段，.get() 降级为 None/False，
+        # 不抛异常——前端按现有字段降级显示（CLAUDE.md「界面承诺必须与实际
+        # 行为一致」的反面：宁可少显示一句解释，也不能因为缺字段而整页报错）。
+        "final_duration_s": adaptation.get("final_duration_s"),
+        "max_duration_s": adaptation.get("max_duration_s"),
+        "planned_over_cap": bool(adaptation.get("planned_over_cap", False)),
+        "kept_dialogue_chars": adaptation.get("kept_dialogue_chars"),
+        "dialogue_budget_chars": adaptation.get("dialogue_budget_chars"),
     }
 
 

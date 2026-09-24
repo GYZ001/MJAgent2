@@ -79,6 +79,7 @@ from app.production.storyboard_short_drama_schemas import (
     _AiShortDramaBeatSheetDraft,
 )
 from app.production import storyboard_short_drama as _short_drama
+from app.production import storyboard_short_drama_budget as _short_drama_budget
 
 
 def _validate_beat_sheet_draft(
@@ -120,18 +121,18 @@ def _validate_beat_sheet_draft(
     # 短剧节奏档：declared − 四类保护（已覆盖/已 kept/必拍/paratext·context），
     # 命中的台词立即强制并入 dropped_lines；忠实档返回空集合、无副作用（见
     # app.production.storyboard_short_drama.reconcile_dropped_units）。
-    dropped_units = _short_drama.reconcile_dropped_units(
-        draft, source_segments, dialogue_quotes, set(paratext_indexes), set(context_indexes),
-        adaptation_mode=adaptation_mode,
-    )
+    dropped_units = _short_drama.reconcile_dropped_units(draft, source_segments, dialogue_quotes, set(paratext_indexes), set(context_indexes), adaptation_mode=adaptation_mode)
+    # 短剧档允许按理由弃置区间外的整句台词（2026-09-24）：作者点名必拍单元仍是
+    # 硬保护，全集扫一遍算出来；忠实档恒空集合，不影响其零容忍行为。
+    protected_units = _short_drama.required_beat_protected_units(source_segments) if adaptation_mode == "short_drama" else frozenset()
     # 2.1.2：容量检查不在这里跑，改由 storyboard_capacity_normalize 兜底。
     for note in complete_missing_quote_decisions(draft, dialogue_quotes):
         _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
-    for note in restore_undroppable_lines(draft, dialogue_quotes, source_segments, dropped_units=dropped_units):
+    for note in restore_undroppable_lines(draft, dialogue_quotes, source_segments, dropped_units=dropped_units, adaptation_mode=adaptation_mode, protected_units=protected_units):
         _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
     for note in append_segments_for_uncovered_sources(draft, dialogue_quotes, source_segments, set(paratext_indexes), set(context_indexes), dropped_units=dropped_units):
         _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
-    errors.extend(undroppable_quote_errors(draft.dropped_lines, dialogue_quotes, source_segments, dropped_units=dropped_units))
+    errors.extend(undroppable_quote_errors(draft.dropped_lines, dialogue_quotes, source_segments, dropped_units=dropped_units, adaptation_mode=adaptation_mode, protected_units=protected_units))
     # 先按单元位置/原文段号把分错段的台词挪到覆盖它的段（确定性，不打回模型），再查台账分区——
     # 否则「台词不得跨段漂移」会先把整份节拍表打回（2026-09-05 第 23 集三次重试仍失败）。
     reassign_kept_lines_to_covering_segments(draft.kept_lines, dialogue_quotes, draft.segments, source_segments)
@@ -343,8 +344,17 @@ def _beat_sheet_task_payload(
     """阶段一 task_payload；从 ``_generate_beat_sheet`` 抽出为独立函数给它腾
     函数行数（该函数已在 function_lines 棘轮基线上零余量）。忠实档
     （``adaptation_mode="faithful"``）的返回值与改造前逐字节相同——
-    ``_beat_sheet_rules``/``draft_cls`` 只在 short_drama 分支才偏离原样。
+    ``_beat_sheet_rules``/``draft_cls``/下面的台词预算只在 short_drama 分支
+    才偏离原样，faithful 分支 ``extra`` 恒空、不贡献任何新 key（fingerprint
+    冻结测试用的 ``json.dumps(..., sort_keys=True)`` 只认键值集合，不认
+    插入顺序）。
     """
+    rules = _beat_sheet_rules(paratext_indexes, context_indexes, adaptation_mode=adaptation_mode)
+    extra: dict[str, Any] = {}
+    if adaptation_mode == "short_drama":
+        budget = _short_drama_budget.dialogue_budget_payload(dialogue_quotes)
+        rules = [*rules, _short_drama_budget.dialogue_budget_rule(budget)]
+        extra["dialogue_budget"] = budget
     return {
         "task": (
             "通读本章原文，列出节拍表（beat_sheet）：每个节拍是一次情绪或信息的变化，"
@@ -357,11 +367,12 @@ def _beat_sheet_task_payload(
             "不回退、不留洞——见 rules。dialogue_targets 里的每一句原文台词都要显式"
             "决定去留，见 rules。"
         ),
-        "rules": _beat_sheet_rules(paratext_indexes, context_indexes, adaptation_mode=adaptation_mode),
+        "rules": rules,
         "episode_no": episode_no,
         "known_assets": _manifest_brief_for_prompt(payload),
         "source_text_by_segment": _source_block_for_prompt(segments, paratext_indexes),
         **_dialogue_targets_payload(dialogue_quotes),
+        **extra,
         "output_schema": draft_cls.model_json_schema(),
     }
 
@@ -397,6 +408,9 @@ async def _generate_beat_sheet(
         json.dumps(task_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()[:24]
     soft_cap = _short_drama.SegmentCountSoftCap(adaptation_mode=adaptation_mode, retry_limit=_BEAT_SHEET_SEMANTIC_RETRY_LIMIT)
+    budget_cap = _short_drama_budget.DialogueBudgetSoftCap(
+        adaptation_mode=adaptation_mode, retry_limit=_BEAT_SHEET_SEMANTIC_RETRY_LIMIT, quotes=dialogue_quotes,
+    )
     return await model_gateway.chat_structured(
         [
             {"role": "system", "content": "你是短剧分镜师。只输出符合 Schema 的一个 JSON 对象，不输出 Markdown或解释。"},
@@ -409,6 +423,7 @@ async def _generate_beat_sheet(
                 context_indexes=context_indexes, paratext_indexes=paratext_indexes, adaptation_mode=adaptation_mode,
             ),
             *soft_cap.errors(value),
+            *budget_cap.errors(value),
         ],
         normalize_payload=_normalize_beat_sheet_payload,
         operation_id=f"storyboard_pack_beat_sheet_{episode_id}_{fingerprint}",
@@ -434,7 +449,8 @@ from app.production.storyboard_beat_sheet_schemas import DROPPABLE_MAX_CHARS as 
 
 def undroppable_quote_errors(
     dropped: list, quotes: list[DialogueQuote], source_segments: list[SourceSegment],
-    *, dropped_units: frozenset[tuple[int, int]],
+    *, dropped_units: frozenset[tuple[int, int]], adaptation_mode: str,
+    protected_units: frozenset[tuple[int, int]],
 ) -> list[str]:
     """剧本格式抽出的整句台词（有说话人、正文超过 4 字）不能进 dropped_lines。
 
@@ -445,6 +461,12 @@ def undroppable_quote_errors(
     ``dropped_units``（短剧节奏档确定性核验后仍然有效的删减单元，忠实档恒传
     空集合，必传无默认值）内的台词不报错——它们是被声明区间正当删减的，不是
     模型在逃避校验；见 app.production.storyboard_short_drama 模块 docstring。
+    2026-09-24：短剧档（``adaptation_mode=="short_drama"``）额外放行「区间外、
+    理由非空」的整句弃置——``_AiDroppedLine.reason`` 本就 ``min_length=1``，
+    schema 已经保证非空，这里不重复校验；``protected_units``（作者点名必拍、
+    见 ``storyboard_short_drama.required_beat_protected_units``）覆盖的单元
+    永远不放行，不管是不是短剧档。忠实档 ``protected_units`` 恒传空集合、
+    ``adaptation_mode`` 恒不等于 ``"short_drama"``，行为逐字节不变。
     """
     by_id = {quote.quote_id: quote for quote in quotes}
     errors: list[str] = []
@@ -455,6 +477,8 @@ def undroppable_quote_errors(
         idx = quote.source_segment_index
         unit_no = quote_unit_index(quote, source_segments[idx - 1].text) if 1 <= idx <= len(source_segments) else -1
         if (idx, unit_no) in dropped_units:
+            continue
+        if adaptation_mode == "short_drama" and (idx, unit_no) not in protected_units:
             continue
         errors.append(
             f"dropped_lines 里的 {quote.quote_id} 是 {quote.speaker} 的整句台词（{quote.content_chars} 字）"

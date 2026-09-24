@@ -85,6 +85,14 @@ export interface StoryboardAdaptationSummary {
   over_target: boolean;
   dropped_source_spans: StoryboardAdaptationDroppedSpan[];
   dropped_lines: StoryboardAdaptationDroppedLine[];
+  // 2026-09-24 新增：老留档（改造前生成）没有这五个字段，后端用 dict.get()
+  // 降级为 None/False——这里标 optional 而不是必填，前端据此按现有字段降级
+  // 显示，不假装拿到了一个具体数字。
+  final_duration_s?: number | null;
+  max_duration_s?: number | null;
+  planned_over_cap?: boolean;
+  kept_dialogue_chars?: number | null;
+  dialogue_budget_chars?: number | null;
 }
 
 /** 分镜台「本集删减」面板的只读数据源：GET /episodes/{id}/storyboard-adaptation。

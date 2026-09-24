@@ -51,6 +51,7 @@ from app import config, hiagent, spoken_contract
 from app.db import new_id
 from app.harness import model_gateway
 from app.production import storyboard_short_drama
+from app.production import storyboard_short_drama_budget
 from app.project_settings import resolve_adaptation_mode
 from app.production.storyboard_capacity_normalize import normalize_and_assert_capacity
 from app.production.storyboard_identity_contract import canonical_segment_identities, visible_character_ids
@@ -1200,6 +1201,11 @@ class StoryboardPackBeat(BaseModel):
     beat_id: str
     summary: str
     segment_indexes: list[int]
+    #: 2026-09-24 短剧节奏档：key/optional，来自 beat_draft.beat_sheet 对应节拍
+    #: 的同名字段（_AiShortDramaBeat.importance）；忠实档没有这个字段，
+    #: getattr 拿不到时留 None——持久化到 storyboard_pack_beat_sheet 产物时
+    #: exclude_none 会让忠实档的记录不多出这个 key（见 storyboard_pack_evidence）。
+    importance: str | None = None
 
 
 class StoryboardPackSegment(BaseModel):
@@ -1413,6 +1419,7 @@ async def generate_storyboard_pack(
         beat_sheet=[
             StoryboardPackBeat(
                 beat_id=beat.beat_id, summary=beat.summary, segment_indexes=list(beat.segment_indexes),
+                importance=getattr(beat, "importance", None),
             )
             for beat in beat_draft.beat_sheet
         ],
@@ -1424,6 +1431,7 @@ async def generate_storyboard_pack(
             adaptation_mode=adaptation_mode, planned_segment_count=planned_segment_count,
             segment_count=len(pack_segments), dropped_spans=getattr(beat_draft, "dropped_source_spans", None) or [],
             dropped_quote_ids=storyboard_short_drama.dropped_line_quote_ids(beat_draft),
+            kept_dialogue_chars=storyboard_short_drama_budget.kept_dialogue_chars(beat_draft.kept_lines, dialogue_quotes),
         ),
     )
 

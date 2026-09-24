@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { adaptationModeLabel, adaptationPanelTitle, durationComparisonText } from './storyboardAdaptation'
+import { adaptationModeLabel, adaptationPanelTitle, durationComparisonText, overTargetText } from './storyboardAdaptation'
 
 describe('adaptationModeLabel', () => {
   it('recorded=false 时如实说明是旧分镜，不冒充忠实原著', () => {
@@ -32,5 +32,48 @@ describe('durationComparisonText', () => {
   })
   it('segmentCount 为 null（老分集未记录）时返回空串，不编造 0 段', () => {
     expect(durationComparisonText(null, 90)).toBe('')
+  })
+})
+
+describe('overTargetText', () => {
+  it('新字段齐全时如实说明最终段数、时长与上限', () => {
+    const text = overTargetText({
+      segment_count: 16, final_duration_s: 240, target_duration_s: 90, max_duration_s: 120,
+      kept_dialogue_chars: null, dialogue_budget_chars: null, planned_over_cap: false,
+    })
+    expect(text).toBe('本集最终 16 段约 240 秒，超出短剧目标约 90 秒（上限 120 秒）')
+  })
+
+  it('保留台词超预算时追加口播时长原因', () => {
+    const text = overTargetText({
+      segment_count: 16, final_duration_s: 240, target_duration_s: 90, max_duration_s: 120,
+      kept_dialogue_chars: 900, dialogue_budget_chars: 432, planned_over_cap: false,
+    })
+    expect(text).toContain('本集最终 16 段约 240 秒，超出短剧目标约 90 秒（上限 120 秒）')
+    expect(text).toContain('保留台词 900 字需要约 250 秒口播') // 900 / 432 * 120 = 250
+  })
+
+  it('保留台词未超预算时不追加口播原因（超目标另有别的根因）', () => {
+    const text = overTargetText({
+      segment_count: 16, final_duration_s: 240, target_duration_s: 90, max_duration_s: 120,
+      kept_dialogue_chars: 100, dialogue_budget_chars: 432, planned_over_cap: false,
+    })
+    expect(text).not.toContain('口播')
+  })
+
+  it('planned_over_cap 为真时追加模型规划阶段就已超上限的说明', () => {
+    const text = overTargetText({
+      segment_count: 10, final_duration_s: 150, target_duration_s: 90, max_duration_s: 120,
+      kept_dialogue_chars: null, dialogue_budget_chars: null, planned_over_cap: true,
+    })
+    expect(text).toContain('模型多次调整后规划段数仍超上限')
+  })
+
+  it('老留档缺 final_duration_s 等新字段时降级为固定文案，不编造数字', () => {
+    const text = overTargetText({
+      segment_count: 9, final_duration_s: undefined, target_duration_s: 90, max_duration_s: undefined,
+      kept_dialogue_chars: undefined, dialogue_budget_chars: undefined, planned_over_cap: undefined,
+    })
+    expect(text).toBe('模型多次调整后仍超出短剧上限')
   })
 })

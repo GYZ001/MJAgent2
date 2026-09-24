@@ -77,9 +77,14 @@ def _adaptation_content(*, mode: str = "short_drama", spans: list[dict] | None =
         "target_duration_s": 90 if mode == "short_drama" else None,
         "target_segment_count": 6 if mode == "short_drama" else None,
         "max_segment_count": 8 if mode == "short_drama" else None,
+        "max_duration_s": 120 if mode == "short_drama" else None,
         "planned_segment_count": 6,
         "segment_count": 6,
+        "final_duration_s": 90,
         "over_target": False,
+        "planned_over_cap": False,
+        "kept_dialogue_chars": 40,
+        "dialogue_budget_chars": 432 if mode == "short_drama" else None,
         "dropped_source_spans": spans or [],
         "dropped_line_quote_ids": [],
     }
@@ -274,6 +279,31 @@ def test_summary_has_record_shape() -> None:
     assert len(summary["dropped_source_spans"]) == 1
     assert summary["dropped_source_spans"][0]["excerpt"]
     assert summary["dropped_lines"] == [{"quote_id": "q1", "reason": "寒暄", "text": "早啊"}]
+    # 2026-09-24 新增字段透传（见 storyboard_pack_evidence 模块 docstring 的扩展说明）。
+    assert summary["final_duration_s"] == 90
+    assert summary["max_duration_s"] == 120
+    assert summary["planned_over_cap"] is False
+    assert summary["kept_dialogue_chars"] == 40
+    assert summary["dialogue_budget_chars"] == 432
+
+
+def test_summary_gracefully_degrades_when_old_record_lacks_new_fields() -> None:
+    """老留档（改造前生成，没有 final_duration_s/kept_dialogue_chars 等
+    2026-09-24 新增字段）：降级为 None/False，不抛异常、不拿旧字段冒充新字段。"""
+    conn = _conn("甲" * 300)
+    old_content = _adaptation_content(spans=[_span(start=100, end=300, chars=200)])
+    for key in ("final_duration_s", "max_duration_s", "planned_over_cap", "kept_dialogue_chars", "dialogue_budget_chars"):
+        old_content.pop(key, None)
+    _write_adaptation(conn, content=old_content)
+    summary = storyboard_adaptation_summary(conn, "e")
+    assert summary["recorded"] is True
+    assert summary["adaptation_mode"] == "short_drama"
+    assert summary["over_target"] is False, "老字段仍正常读取"
+    assert summary["final_duration_s"] is None
+    assert summary["max_duration_s"] is None
+    assert summary["planned_over_cap"] is False
+    assert summary["kept_dialogue_chars"] is None
+    assert summary["dialogue_budget_chars"] is None
 
 
 def test_summary_without_adaptation_still_returns_ledger_drops() -> None:

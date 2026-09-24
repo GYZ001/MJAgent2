@@ -8,16 +8,29 @@ artifact）需要新行数——原先写 beat_sheet/dialogue_ledger 两份产�
 beat_sheet/dialogue_ledger 两份产物的内容/顺序）到这里腾出空间。
 
 ``storyboard_pack_adaptation`` 产物形状（冻结契约，门禁侧 ``app.domain.
-video_ops.source_coverage`` 读取此形状，字段名/结构不得无协调改动）::
+video_ops.source_coverage``/``confirmation_gate`` 只读 ``adaptation_mode``/
+``dropped_source_spans`` 两个字段，字段名/结构不得无协调改动）::
 
     {"adaptation_mode": "faithful|short_drama",
      "target_duration_s": int | None, "target_segment_count": int | None,
-     "max_segment_count": int | None,
-     "planned_segment_count": int, "segment_count": int, "over_target": bool,
+     "max_segment_count": int | None, "max_duration_s": int | None,
+     "planned_segment_count": int, "segment_count": int,
+     "final_duration_s": int, "over_target": bool, "planned_over_cap": bool,
+     "kept_dialogue_chars": int, "dialogue_budget_chars": int | None,
      "dropped_source_spans": [{"source_segment_index", "from_unit", "to_unit",
                                 "reason", "chapter_idx", "start_offset",
                                 "end_offset", "excerpt", "chars"}],
      "dropped_line_quote_ids": [str]}
+
+2026-09-24 扩展（只加字段，未改/未删已有字段名——``over_target`` 判据从
+"模型规划段数"改成"最终段数"，语义变了但字段名/类型不变；旧语义改名
+``planned_over_cap`` 继续存在）：``max_duration_s``/``final_duration_s``/
+``planned_over_cap``/``kept_dialogue_chars``/``dialogue_budget_chars``，见
+``storyboard_short_drama.adaptation_summary`` 文档。老留档（改造前生成）没
+有这五个字段，读取方一律 ``dict.get(...)`` 降级为 ``None``/``False``，不
+抛异常——``app.domain.video_ops.storyboard_adaptation.storyboard_adaptation_
+summary``（REST `/storyboard-adaptation`，供『本集删减』面板）是唯一转发
+这五个新字段给前端的读取点。
 
 忠实档也写这一条（``adaptation_mode="faithful"``、``dropped_source_spans``
 恒空）：门禁按"最高 version 那一条"判定当前留档，只在短剧档才写会让旧的
@@ -130,7 +143,10 @@ def persist_storyboard_pack_evidence(
         contract_version=version, content={
             "storyboard_version": version, "episode_no": pack.episode_no, "target_model": pack.target_model,
             "segment_count": len(pack.segments),
-            "beat_sheet": [beat.model_dump(mode="json") for beat in pack.beat_sheet],
+            # exclude_none：忠实档 beat.importance 恒 None（该档没有这个字段），
+            # 排除后忠实档产物形状逐字节不变；短剧档 importance 恒为
+            # "key"/"optional"，正常写入（见 StoryboardPackBeat 字段注释）。
+            "beat_sheet": [beat.model_dump(mode="json", exclude_none=True) for beat in pack.beat_sheet],
         },
     )
     # 2.1.0：episode 级对白台账，与上面 beat_sheet 产物同一模式、同一事务。
