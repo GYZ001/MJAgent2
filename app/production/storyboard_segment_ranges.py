@@ -194,9 +194,14 @@ def _plan_own_range_errors(
 
 
 def _cross_plan_order_and_coverage_errors(
-    plans: list[Any], unit_counts: dict[int, int],
+    plans: list[Any], unit_counts: dict[int, int], *, dropped_units: frozenset[tuple[int, int]],
 ) -> list[str]:
-    """同一原文段号被多段引用时的顺序（不回退）与覆盖（无洞）检查。"""
+    """同一原文段号被多段引用时的顺序（不回退）与覆盖（无洞）检查。
+
+    ``dropped_units``（短剧节奏档确定性核验后仍然有效的删减单元，忠实档恒传
+    空集合，必传无默认值）内的单元不算「洞」——那是声明过、核验过的删减，
+    不是漏拍。
+    """
     by_source: dict[int, list[tuple[int, _AiSourceUnitRange]]] = {}
     for plan in plans:
         for r in plan.source_unit_ranges:
@@ -219,7 +224,7 @@ def _cross_plan_order_and_coverage_errors(
         covered: set[int] = set()
         for _seg_no, r in entries:
             covered.update(range(r.from_unit, r.to_unit + 1))
-        missing = sorted(set(range(1, total + 1)) - covered)
+        missing = [m for m in sorted(set(range(1, total + 1)) - covered) if (source_index, m) not in dropped_units]
         if missing:
             missing_labels = [f"S{m:02d}" for m in missing]
             errors.append(
@@ -231,12 +236,14 @@ def _cross_plan_order_and_coverage_errors(
 
 def segment_unit_range_errors(
     plans: list[Any], source_segments: list[SourceSegment], paratext_indexes: set[int],
+    *, dropped_units: frozenset[tuple[int, int]],
 ) -> list[str]:
     """阻断式校验：每段各占一块原文、按顺序不回退、并集覆盖全部单元。
 
     ``plans`` 用鸭子类型（``.segment_no``/``.source_segment_indexes``/
     ``.source_unit_ranges``），不绑定具体 pydantic 模型，方便节拍表草稿与
-    容量归一化产出的中间态双方复用。
+    容量归一化产出的中间态双方复用。``dropped_units`` 必传无默认值，忠实档
+    调用方恒传空集合（frozenset()）——见 app.production.storyboard_short_drama。
     """
     unit_counts = {
         i: len(split_source_units(seg.text)) for i, seg in enumerate(source_segments, start=1)
@@ -244,7 +251,7 @@ def segment_unit_range_errors(
     errors: list[str] = []
     for plan in plans:
         errors.extend(_plan_own_range_errors(plan, unit_counts, paratext_indexes))
-    errors.extend(_cross_plan_order_and_coverage_errors(plans, unit_counts))
+    errors.extend(_cross_plan_order_and_coverage_errors(plans, unit_counts, dropped_units=dropped_units))
     return errors
 
 

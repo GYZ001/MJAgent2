@@ -29,9 +29,9 @@ def test_repair_makes_real_failure_shapes_pass_validation():
         _plan(4, [(11, 17)], palette="暖黄日光"),          # 越界 + 与段 3 之间 S10 是洞
     ]
     draft = _draft(plans)
-    notes = repair_beat_sheet_draft(draft, _scene_4_segments(), set())
+    notes = repair_beat_sheet_draft(draft, _scene_4_segments(), set(), dropped_units=frozenset())
     assert notes, "应有修补记录"
-    assert segment_unit_range_errors(draft.segments, _scene_4_segments(), set()) == []
+    assert segment_unit_range_errors(draft.segments, _scene_4_segments(), set(), dropped_units=frozenset()) == []
     assert palette_scene_consistency_errors(draft.segments) == []
     assert [s.palette for s in draft.segments] == ["暖黄日光"] * 4
     ranges = [(s.source_unit_ranges[0].from_unit, s.source_unit_ranges[0].to_unit) for s in draft.segments]
@@ -45,7 +45,7 @@ def test_repair_makes_real_failure_shapes_pass_validation():
 def test_repair_is_noop_on_valid_draft():
     plans = [_plan(1, [(1, 6)]), _plan(2, [(7, 12)])]
     draft = _draft(plans)
-    assert repair_beat_sheet_draft(draft, _scene_4_segments(), set()) == []
+    assert repair_beat_sheet_draft(draft, _scene_4_segments(), set(), dropped_units=frozenset()) == []
     assert [(s.source_unit_ranges[0].from_unit, s.source_unit_ranges[0].to_unit) for s in draft.segments] == [(1, 6), (7, 12)]
 
 
@@ -53,7 +53,7 @@ def test_empty_palette_is_not_filled_in():
     """空 palette 是漏填信号，不兜底沿用（保持校验去报）。"""
     plans = [_plan(1, [(1, 6)], palette="暖黄"), _plan(2, [(7, 12)], palette="")]
     draft = _draft(plans)
-    repair_beat_sheet_draft(draft, _scene_4_segments(), set())
+    repair_beat_sheet_draft(draft, _scene_4_segments(), set(), dropped_units=frozenset())
     assert draft.segments[1].palette == ""
 
 
@@ -69,10 +69,10 @@ def test_undroppable_dropped_line_is_restored_to_a_covering_segment():
     draft.kept_lines = []
     draft.dropped_lines = [SimpleNamespace(quote_id="Q22", reason="未在当前节拍中保留")]
     quotes = [DialogueQuote(quote_id="Q22", source_segment_index=4, text="猫忽然跳上了桌子", content_chars=17, speaker="小胖子")]
-    notes = restore_undroppable_lines(draft, quotes, _scene_4_segments())
+    notes = restore_undroppable_lines(draft, quotes, _scene_4_segments(), dropped_units=frozenset())
     assert notes and draft.dropped_lines == []
     assert [(k.quote_id, k.segment_no) for k in draft.kept_lines] == [("Q22", 1)]  # S03 在第 1 段范围内
-    assert undroppable_quote_errors(draft.dropped_lines, quotes) == []
+    assert undroppable_quote_errors(draft.dropped_lines, quotes, _scene_4_segments(), dropped_units=frozenset()) == []
 
 
 def test_droppable_filler_stays_dropped():
@@ -84,7 +84,7 @@ def test_droppable_filler_stays_dropped():
     draft.kept_lines = []
     draft.dropped_lines = [SimpleNamespace(quote_id="Q01", reason="语气词")]
     quotes = [DialogueQuote(quote_id="Q01", source_segment_index=4, text="喵", content_chars=1, speaker="橘座")]
-    assert restore_undroppable_lines(draft, quotes, _scene_4_segments()) == []
+    assert restore_undroppable_lines(draft, quotes, _scene_4_segments(), dropped_units=frozenset()) == []
     assert len(draft.dropped_lines) == 1
 
 
@@ -103,7 +103,7 @@ def test_missing_quote_decisions_are_completed_then_restored_by_rule():
     ]
     notes = complete_missing_quote_decisions(draft, quotes)
     assert len(notes) == 2 and {d.quote_id for d in draft.dropped_lines} == {"Q41", "Q42"}
-    restore_undroppable_lines(draft, quotes, _scene_4_segments())
+    restore_undroppable_lines(draft, quotes, _scene_4_segments(), dropped_units=frozenset())
     assert [k.quote_id for k in draft.kept_lines] == ["Q41"]
     assert [d.quote_id for d in draft.dropped_lines] == ["Q42"]
     assert complete_missing_quote_decisions(draft, quotes) == [], "已决定去留的不再重复补"
@@ -140,17 +140,17 @@ def test_uncovered_source_segment_with_required_lines_gets_a_synthesized_segment
     draft = _draft([_plan(1, [(1, 1)], index=3)])
     draft.kept_lines = [_AiKeptLine(quote_id="Q14", segment_no=1)]
     quotes = [DialogueQuote(quote_id="Q14", source_segment_index=4, text="猫忽然跳上了桌子", content_chars=17, speaker="小胖子")]
-    notes = append_segments_for_uncovered_sources(draft, quotes, _scene_4_segments(), set())
+    notes = append_segments_for_uncovered_sources(draft, quotes, _scene_4_segments(), set(), dropped_units=frozenset())
     assert len(notes) == 3, notes  # 原文段 1、2、4 都没被引用（2026-09-05 起不限有台词的段）
     assert [s.segment_no for s in draft.segments] == [1, 2, 3, 4]
     assert [s.source_segment_indexes for s in draft.segments] == [[1], [2], [3], [4]]
     added = draft.segments[3]
     assert added.beat_ids == ["b1"] and added.palette == "暖黄"
     assert (added.source_unit_ranges[0].from_unit, added.source_unit_ranges[0].to_unit) == (1, 12)
-    assert segment_unit_range_errors(draft.segments, _scene_4_segments(), set()) == []
+    assert segment_unit_range_errors(draft.segments, _scene_4_segments(), set(), dropped_units=frozenset()) == []
     reassign_kept_lines_to_covering_segments(draft.kept_lines, quotes, draft.segments, _scene_4_segments())
     assert draft.kept_lines[0].segment_no == 4, "补段后台词按单元归位到新段"
-    assert append_segments_for_uncovered_sources(draft, quotes, _scene_4_segments(), set()) == [], "已覆盖不再补"
+    assert append_segments_for_uncovered_sources(draft, quotes, _scene_4_segments(), set(), dropped_units=frozenset()) == [], "已覆盖不再补"
 
 
 def test_uncovered_tail_source_segment_without_dialogue_gets_a_segment_too():
@@ -159,11 +159,11 @@ def test_uncovered_tail_source_segment_without_dialogue_gets_a_segment_too():
     from app.production.storyboard_beat_sheet_repair import append_segments_for_uncovered_sources
 
     draft = _draft([_plan(1, [(1, 1)], index=3)])
-    notes = append_segments_for_uncovered_sources(draft, [], _scene_4_segments(), set(), set())
+    notes = append_segments_for_uncovered_sources(draft, [], _scene_4_segments(), set(), set(), dropped_units=frozenset())
     assert len(notes) == 3, notes  # 原文段 1、2、4 都没被引用
     assert [s.source_segment_indexes for s in draft.segments] == [[1], [2], [3], [4]]
-    assert segment_unit_range_errors(draft.segments, _scene_4_segments(), set()) == []
+    assert segment_unit_range_errors(draft.segments, _scene_4_segments(), set(), dropped_units=frozenset()) == []
     context = _draft([_plan(1, [(1, 1)], index=3)])
-    notes = append_segments_for_uncovered_sources(context, [], _scene_4_segments(), {1}, {2})
+    notes = append_segments_for_uncovered_sources(context, [], _scene_4_segments(), {1}, {2}, dropped_units=frozenset())
     assert [s.source_segment_indexes for s in context.segments] == [[2, 3], [4]], notes
     assert any("并入" in n for n in notes)

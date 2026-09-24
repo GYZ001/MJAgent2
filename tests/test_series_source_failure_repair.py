@@ -96,7 +96,7 @@ def test_single_owner_missing_ranges_recover_all_sources_in_one_pass():
     plan = _AiSegmentPlan(segment_no=3, synopsis='完整场戏', source_segment_indexes=list(range(1, 59)))
     notes = fill_single_owner_ranges([plan], {i: 2 for i in range(1, 59)}, set())
     assert len(notes) == 58
-    assert segment_unit_range_errors([plan], sources, set()) == []
+    assert segment_unit_range_errors([plan], sources, set(), dropped_units=frozenset()) == []
     assert fill_single_owner_ranges([plan], {i: 2 for i in range(1, 59)}, set()) == []
 
 
@@ -112,10 +112,10 @@ def test_real_episode_nine_repairs_missing_ranges_and_splits_in_source_order():
     paratext = set(fixture['paratext_indexes'])
     quotes = [DialogueQuote.model_validate(q) for q in fixture['dialogue_targets']]
     draft = _AiBeatSheetDraft.model_validate(fixture['draft'])
-    assert segment_unit_range_errors(draft.segments, sources, paratext)
-    assert _validate_beat_sheet_draft(draft, source_segments=sources, dialogue_quotes=quotes, paratext_indexes=paratext) == []
+    assert segment_unit_range_errors(draft.segments, sources, paratext, dropped_units=frozenset())
+    assert _validate_beat_sheet_draft(draft, source_segments=sources, dialogue_quotes=quotes, paratext_indexes=paratext, adaptation_mode="faithful") == []
     assert normalize_and_assert_capacity(draft, quotes, source_segments=sources, paratext_indexes=paratext)
-    assert segment_unit_range_errors(draft.segments, sources, paratext) == []
+    assert segment_unit_range_errors(draft.segments, sources, paratext, dropped_units=frozenset()) == []
     indexes = [i for plan in draft.segments for i in plan.source_segment_indexes]
     assert indexes == sorted(indexes)
     assert set(indexes) == set(range(1, len(sources) + 1)) - paratext

@@ -57,6 +57,18 @@ def required_beats(text: str) -> list[str]:
     return [f"{label}：{body.strip()}" for label, body in _REQUIRED_BEAT_RE.findall(text or "")]
 
 
+def required_beat_spans(text: str) -> list[tuple[int, int]]:
+    """作者点名必拍的括号镜在 ``text`` 里的字符区间（``re.Match.span()``），
+    与 ``required_beats`` 共用同一个 ``_REQUIRED_BEAT_RE``，不是另起一套判据。
+
+    调用方（短剧节奏档判断"这个句单元是否含必拍标记"）需要按**位置重叠**判断，
+    不能把每个单元的子串单独喂给 ``required_beats`` 重新匹配：标记内容如果
+    含句末标点（例如「（钩子：警笛声。灯灭了。）」），``split_source_units``
+    会把它切成两个甚至更多单元，切开后每个子串都缺一半括号，单独匹配不出
+    完整的「（标签：…）」，会误判成"这个单元没有必拍标记"。"""
+    return [m.span() for m in _REQUIRED_BEAT_RE.finditer(text or "")]
+
+
 def _same_place(left: str, right: str) -> bool:
     """段头地点按「·」分层，作者常省略中间层（「人间·医院·诊室」与「人间·诊室」、「爪间·掌心接线台」与
     「爪间·接线台」是同一处）：最末一层互为后缀即同一地点。"""
@@ -99,7 +111,7 @@ def _head(text: str, chars: int = 120) -> str:
 
 __all__ = [
     "SAME_SCENE_TRANSITION", "SCENE_CHANGE_TRANSITION", "explicit_transition_marker", "map_transition",
-    "parse_scene_header", "required_beats", "scene_changed", "transition_between",
+    "parse_scene_header", "required_beats", "required_beat_spans", "scene_changed", "transition_between",
 ]
 
 

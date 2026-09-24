@@ -563,7 +563,7 @@ def test_beat_sheet_narrative_arc_rules_authorizes_expanding_climax_beats():
 def test_beat_sheet_rules_includes_narrative_arc_rules():
     """确认 _beat_sheet_rules() 真的把三条叙事弧线规则接进了阶段一 rules[]，
     不是新函数写好了但没接线。"""
-    rules = _beat_sheet_rules(set())
+    rules = _beat_sheet_rules(set(), adaptation_mode="faithful")
     assert any("segments[].palette" in r for r in rules)
     assert any("连续静态独白" in r for r in rules)
     assert any("2-3 个段展开" in r for r in rules)

@@ -44,7 +44,7 @@ def test_segment_sourced_only_from_context_segments_is_rejected_with_merge_guida
     draft = _draft({1: [2, 3], 2: [4, 5]})
     errors = _validate_beat_sheet_draft(
         draft, source_segments=_source_segments(13), dialogue_quotes=[],
-        context_indexes={2, 3}, paratext_indexes={1},
+        context_indexes={2, 3}, paratext_indexes={1}, adaptation_mode="faithful",
     )
     assert any("第 1 段" in e and "全部是映射台判定的背景交代段" in e and "并入相邻的事件段" in e for e in errors)
 
@@ -53,7 +53,7 @@ def test_context_segments_merged_into_an_event_segment_pass() -> None:
     draft = _draft({1: [2, 3, 4], 2: [5]})
     errors = _validate_beat_sheet_draft(
         draft, source_segments=_source_segments(13), dialogue_quotes=[],
-        context_indexes={2, 3}, paratext_indexes={1},
+        context_indexes={2, 3}, paratext_indexes={1}, adaptation_mode="faithful",
     )
     assert not any("背景交代" in e for e in errors)
 
@@ -61,11 +61,11 @@ def test_context_segments_merged_into_an_event_segment_pass() -> None:
 def test_no_context_ledger_keeps_legacy_behaviour() -> None:
     draft = _draft({1: [2, 3], 2: [4]})
     assert context_only_segment_errors(draft.segments, set(), {1}) == []
-    errors = _validate_beat_sheet_draft(draft, source_segments=_source_segments(13), dialogue_quotes=[])
+    errors = _validate_beat_sheet_draft(draft, source_segments=_source_segments(13), dialogue_quotes=[], adaptation_mode="faithful")
     assert not any("背景交代" in e for e in errors)
 
 
 def test_rules_state_context_segments_positively() -> None:
-    rules = _beat_sheet_rules(set(), {2, 3})
+    rules = _beat_sheet_rules(set(), {2, 3}, adaptation_mode="faithful")
     assert any("背景交代" in r and "[2, 3]" in r and "不得单独成段" in r for r in rules)
     assert context_segment_rule(set()) is None

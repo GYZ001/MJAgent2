@@ -49,12 +49,13 @@ from pydantic import BaseModel, Field
 
 from app import config, hiagent, spoken_contract
 from app.db import new_id
-from app.evidence import repository as evidence_repository
 from app.harness import model_gateway
-from app.harness.types import EvidenceArtifact
+from app.production import storyboard_short_drama
+from app.project_settings import resolve_adaptation_mode
 from app.production.storyboard_capacity_normalize import normalize_and_assert_capacity
 from app.production.storyboard_identity_contract import canonical_segment_identities, visible_character_ids
 from app.production.storyboard_identity_scope import bind_quote_identities
+from app.production.storyboard_pack_evidence import persist_storyboard_pack_evidence
 from app.production.storyboard_repair_context import known_character_identities, storyboard_repair_context
 from app.production.storyboard_source_spans import segment_source_bindings
 from app.production.storyboard_segment_output import segment_output_contract
@@ -420,7 +421,10 @@ STORYBOARD_PACK_VERSION = "2.4.1"
 #: 改到 storyboard_pack/2.4.0：新增 source_unit_ranges 落库字段，同一理由。
 STORYBOARD_PACK_CONTRACT_MARKER = "storyboard_pack/2.4.1"
 
-SEGMENT_DURATION_S = 15
+#: 2026-09-23：真源搬到 storyboard_beat_sheet_schemas（叶子）——短剧节奏档要在
+#: storyboard_beat_sheet/storyboard_short_drama 里换算目标段数，这两个模块都
+#: 不能 import 本文件（会成环），`as` 自别名保持这里的既有用法不变。
+from app.production.storyboard_beat_sheet_schemas import SEGMENT_DURATION_S as SEGMENT_DURATION_S
 MIN_SHOTS_PER_SEGMENT = 2
 MAX_SHOTS_PER_SEGMENT = 4
 
@@ -1250,6 +1254,11 @@ class StoryboardPack(BaseModel):
     segments: list[StoryboardPackSegment]
     #: 2.1.0 对白台账统计，只是 generate->persist 传递载体，落库形态是另开的 EvidenceArtifact。
     dialogue_ledger: dict[str, Any] = Field(default_factory=dict)
+    #: 2026-09-23 改编强度档位：同上，只是 generate->persist 传递载体，形状见
+    #: app.production.storyboard_short_drama.adaptation_summary；落库形态是
+    #: storyboard_pack_evidence.persist_storyboard_pack_evidence 写的
+    #: storyboard_pack_adaptation 产物（章节偏移/原文摘录在那一步才补全）。
+    adaptation: dict[str, Any] = Field(default_factory=dict)
 
 
 def _load_indexed_source_segments(conn, ep) -> list[SourceSegment]:
@@ -1325,10 +1334,15 @@ async def generate_storyboard_pack(
     )
     bind_quote_identities(dialogue_quotes, payload)
 
+    # 2026-09-23 改编强度档位：档位以生成这一刻的项目设置为准并写进留档
+    # （见 StoryboardPack.adaptation），之后项目档位被改只影响以后的生成。
+    adaptation_mode = resolve_adaptation_mode(conn, ep["project_id"])
     beat_draft = await _generate_beat_sheet(
         episode_id=episode_id, episode_no=episode_no, segments=segments, payload=payload,
         dialogue_quotes=dialogue_quotes, contract_version=STORYBOARD_PACK_VERSION,
+        adaptation_mode=adaptation_mode,
     )
+    planned_segment_count = len(beat_draft.segments)
     # 防御性兜底（见 STORYBOARD_PACK_VERSION 2.0.4 changelog）：stage 1 的
     # rules[] 只是提示词层面的禁令，不是校验闸门，这里在通过格式校验之后、
     # 进入 phase 2 之前用同一份 paratext 账把漏网的引用滤掉。
@@ -1405,6 +1419,11 @@ async def generate_storyboard_pack(
         segments=list(pack_segments),
         dialogue_ledger=dialogue_ledger_summary(
             dialogue_quotes, beat_draft.kept_lines, beat_draft.dropped_lines, capacity_normalization,
+        ),
+        adaptation=storyboard_short_drama.adaptation_summary(
+            adaptation_mode=adaptation_mode, planned_segment_count=planned_segment_count,
+            segment_count=len(pack_segments), dropped_spans=getattr(beat_draft, "dropped_source_spans", None) or [],
+            dropped_quote_ids=storyboard_short_drama.dropped_line_quote_ids(beat_draft),
         ),
     )
 
@@ -1745,54 +1764,13 @@ def persist_storyboard_pack(
         persist_source_binding(shot_id, source_binding, conn=conn, commit=False)
         shot_ids.append(shot_id)
 
-    # Full beat_sheet (with summaries), stored once per generation independent
-    # of any single segment row. Per-segment ``beats`` above only carries the
-    # beats each segment overlaps -- it cannot answer "how was the segment
-    # count decided" on its own if a beat somehow ends up unclaimed by every
-    # segment, and it duplicates the same beat's summary across every segment
-    # it touches instead of having one canonical copy. This artifact is that
-    # canonical copy: an auditable record of exactly what
-    # ``_generate_beat_sheet`` produced (segment_count here is
-    # ``len(pack.segments)``, i.e. the number this whole module exists to
-    # decide -- see ``generate_storyboard_pack``'s docstring).
-    evidence_repository.create_artifact(
-        EvidenceArtifact(
-            type="storyboard_pack_beat_sheet",
-            scope_type="episode",
-            scope_id=episode_id,
-            status="validated",
-            trust_level="T2",
-            content={
-                "storyboard_version": pack.storyboard_version,
-                "episode_no": pack.episode_no,
-                "target_model": pack.target_model,
-                "segment_count": len(pack.segments),
-                "beat_sheet": [beat.model_dump(mode="json") for beat in pack.beat_sheet],
-            },
-            parent_artifact_ids=(
-                [str(ep["screenplay_artifact_id"])] if ep["screenplay_artifact_id"] else []
-            ),
-            contract_version=pack.storyboard_version,
-        ),
-        conn=conn,
-        commit=False,
-    )
-    # 2.1.0：episode 级对白台账，与上面 beat_sheet 产物同一模式、同一事务。
-    evidence_repository.create_artifact(
-        EvidenceArtifact(
-            type="storyboard_pack_dialogue_ledger",
-            scope_type="episode",
-            scope_id=episode_id,
-            status="validated",
-            trust_level="T2",
-            content=pack.dialogue_ledger,
-            parent_artifact_ids=(
-                [str(ep["screenplay_artifact_id"])] if ep["screenplay_artifact_id"] else []
-            ),
-            contract_version=pack.storyboard_version,
-        ),
-        conn=conn,
-        commit=False,
+    # beat_sheet/dialogue_ledger/adaptation 三份产物，同一事务写入：见
+    # app.production.storyboard_pack_evidence 模块 docstring（beat_sheet 是
+    # 每次生成的可审计记录——per-segment ``beats`` 只带这一段自己覆盖到的
+    # 节拍，答不出"整集段数怎么定的"，这份是唯一的规范副本）。
+    persist_storyboard_pack_evidence(
+        conn, episode_id, ep, pack,
+        segments=segments, full_source_text=full_source_text, authorized_sources=authorized_sources,
     )
     conn.commit()
     return shot_ids

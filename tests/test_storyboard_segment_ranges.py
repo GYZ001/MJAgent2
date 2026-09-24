@@ -135,21 +135,21 @@ def test_six_segments_sharing_one_source_segment_contiguous_ranges_pass():
     plans = [_plan(no, frm, to) for no, (frm, to) in enumerate(
         [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12)], start=1,
     )]
-    assert segment_unit_range_errors(plans, _scene_4_segments(), set()) == []
+    assert segment_unit_range_errors(plans, _scene_4_segments(), set(), dropped_units=frozenset()) == []
 
 
 def test_backward_range_between_two_segments_sharing_a_source_segment_is_rejected():
     """段 2 从 S02 开始，倒退回段 1 已经占用过的单元——猫跳上桌被拍两次的
     根本原因。"""
     plans = [_plan(1, 1, 3), _plan(2, 2, 5)]
-    errors = segment_unit_range_errors(plans, _scene_4_segments(), set())
+    errors = segment_unit_range_errors(plans, _scene_4_segments(), set(), dropped_units=frozenset())
     assert any("回退或重叠超过一个单元" in e for e in errors)
 
 
 def test_gap_between_two_segments_sharing_a_source_segment_is_rejected():
     """段 1 到 S03，段 2 从 S06 开始——S04/S05 没有任何段负责，等于被静默删掉。"""
     plans = [_plan(1, 1, 3), _plan(2, 6, 8)]
-    errors = segment_unit_range_errors(plans, _scene_4_segments(), set())
+    errors = segment_unit_range_errors(plans, _scene_4_segments(), set(), dropped_units=frozenset())
     assert any("S04" in e and "S05" in e and "没有被任何段" in e for e in errors)
 
 
@@ -158,7 +158,7 @@ def test_shared_boundary_unit_between_adjacent_segments_is_legal():
     只断言不触发"回退/重叠"——覆盖率检查另有专门用例，这里只有 2 段、天然
     覆盖不了全部 12 个单元，不是本用例要测的维度。"""
     plans = [_plan(1, 1, 3), _plan(2, 3, 6)]
-    errors = segment_unit_range_errors(plans, _scene_4_segments(), set())
+    errors = segment_unit_range_errors(plans, _scene_4_segments(), set(), dropped_units=frozenset())
     assert not any("回退或重叠" in e for e in errors)
 
 
@@ -166,7 +166,7 @@ def test_missing_range_for_a_referenced_non_paratext_segment_is_rejected():
     from app.production.storyboard_beat_sheet import _AiSegmentPlan
 
     plan = _AiSegmentPlan(segment_no=1, synopsis="x", source_segment_indexes=[4], source_unit_ranges=[])
-    errors = segment_unit_range_errors([plan], _scene_4_segments(), set())
+    errors = segment_unit_range_errors([plan], _scene_4_segments(), set(), dropped_units=frozenset())
     assert any("声明了 0 条范围" in e for e in errors)
 
 
@@ -177,7 +177,7 @@ def test_range_declared_for_an_unreferenced_segment_index_is_rejected():
         segment_no=1, synopsis="x", source_segment_indexes=[2],
         source_unit_ranges=[{"source_segment_index": 4, "from_unit": 1, "to_unit": 1}],
     )
-    errors = segment_unit_range_errors([plan], _scene_4_segments(), set())
+    errors = segment_unit_range_errors([plan], _scene_4_segments(), set(), dropped_units=frozenset())
     assert any("不在本段" in e for e in errors)
 
 
@@ -192,13 +192,13 @@ def test_range_declared_for_a_paratext_segment_is_rejected():
         ],
     )
     # 段号 1 是 paratext：不该为它声明范围。
-    errors = segment_unit_range_errors([plan], _scene_4_segments(), {1})
+    errors = segment_unit_range_errors([plan], _scene_4_segments(), {1}, dropped_units=frozenset())
     assert any("不在本段" in e for e in errors)
 
 
 def test_out_of_bounds_range_is_rejected():
     plan = _plan(1, 1, 99)
-    errors = segment_unit_range_errors([plan], _scene_4_segments(), set())
+    errors = segment_unit_range_errors([plan], _scene_4_segments(), set(), dropped_units=frozenset())
     assert any("不合法" in e and "1 ≤ from_unit ≤ to_unit ≤" in e for e in errors)
 
 
@@ -222,7 +222,7 @@ def test_prose_single_sentence_segment_referenced_by_two_plans_sharing_the_only_
             source_unit_ranges=[{"source_segment_index": 1, "from_unit": 1, "to_unit": 1}],
         ),
     ]
-    assert segment_unit_range_errors(plans, segments, set()) == []
+    assert segment_unit_range_errors(plans, segments, set(), dropped_units=frozenset()) == []
 
 
 # ---------------------------------------------------------------------------

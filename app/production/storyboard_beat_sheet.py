@@ -32,8 +32,6 @@ import logging
 import json
 from typing import Any
 
-from pydantic import BaseModel, Field
-
 from app import config
 from app.harness import model_gateway
 from app.production.storyboard_context_segments import (
@@ -41,8 +39,6 @@ from app.production.storyboard_context_segments import (
 )
 from app.production.storyboard_dialogue_ledger import (
     DialogueQuote,
-    _AiDroppedLine,
-    _AiKeptLine,
     beat_sheet_dialogue_ledger_rules,
     dialogue_density_by_source_segment,
     dialogue_ledger_errors,
@@ -58,6 +54,7 @@ from app.production.storyboard_beat_sheet_repair import (
 from app.production.storyboard_segment_ranges import (
     _PARATEXT_PLACEHOLDER_TEXT,
     kept_line_unit_binding_errors,
+    quote_unit_index,
     reassign_kept_lines_to_covering_segments,
     render_source_units,
     segment_unit_range_errors,
@@ -66,36 +63,38 @@ from app.source_excerpt import SourceSegment
 from app.production.storyboard_repair_context import storyboard_repair_context
 
 
-class _AiBeat(BaseModel):
-    beat_id: str
-    summary: str
-    segment_indexes: list[int] = Field(min_length=1)
-
-
 #: 挪到 storyboard_beat_sheet_schemas（叶子）打破与 storyboard_beat_sheet_repair
 #: 的循环 import；`as` 自别名保持 `from .storyboard_beat_sheet import _AiSegmentPlan`
-#: 这条全仓既有用法不变，真源与字段说明见该模块。
-from app.production.storyboard_beat_sheet_schemas import _AiSegmentPlan as _AiSegmentPlan
-
-
-class _AiBeatSheetDraft(BaseModel):
-    beat_sheet: list[_AiBeat] = Field(min_length=1)
-    segments: list[_AiSegmentPlan] = Field(min_length=1)
-    #: 2.1.0 对白台账：平铺列表，不用条件 schema；"逐一决定去留" 由
-    #: _validate_beat_sheet_draft 的 dialogue_ledger_errors 检查兜底。
-    kept_lines: list[_AiKeptLine] = Field(default_factory=list)
-    dropped_lines: list[_AiDroppedLine] = Field(default_factory=list)
+#: 这条全仓既有用法不变，真源与字段说明见该模块。2026-09-23：_AiBeat/
+#: _AiBeatSheetDraft/SEGMENT_DURATION_S 同一原因一并搬走（见该模块 docstring）
+#: ——app.production.storyboard_short_drama_schemas 要子类化前两者，本模块又要
+#: 把子类用作 chat_structured 的 model_type，两边互相依赖会成环。
+from app.production.storyboard_beat_sheet_schemas import (
+    SEGMENT_DURATION_S as SEGMENT_DURATION_S,
+    _AiBeat as _AiBeat,
+    _AiBeatSheetDraft as _AiBeatSheetDraft,
+    _AiSegmentPlan as _AiSegmentPlan,
+)
+from app.production.storyboard_short_drama_schemas import (
+    _AiShortDramaBeatSheetDraft,
+)
+from app.production import storyboard_short_drama as _short_drama
 
 
 def _validate_beat_sheet_draft(
     draft: _AiBeatSheetDraft, *, source_segments: list[SourceSegment], dialogue_quotes: list[DialogueQuote],
-    context_indexes: set[int] = frozenset(), paratext_indexes: set[int] = frozenset(),
+    context_indexes: set[int] = frozenset(), paratext_indexes: set[int] = frozenset(), adaptation_mode: str,
 ) -> list[str]:
     """阶段一 blocking 校验：格式合法性 + 对白台账 + 2.4.0 单元范围/色温一致性。
 
     ``source_segments`` 2.4.0 起取代旧的 ``total_segments: int``——单元范围
     校验需要真实原文文本（算每个原文段有几个句单元），只给个数不够用；
     ``total_segments`` 本身仍然等价于 ``len(source_segments)``，不重复传参。
+
+    ``adaptation_mode``（2026-09-23，必传无默认值）：``"faithful"`` 时下面
+    对 ``short_drama`` 相关函数的调用全部是无副作用的空操作（
+    ``app.production.storyboard_short_drama`` 内部按 ``adaptation_mode`` 短路，
+    见该模块 docstring），保证忠实档校验行为逐字节不变。
     """
     total_segments = len(source_segments)
     errors = context_only_segment_errors(draft.segments, set(context_indexes), set(paratext_indexes))
@@ -118,14 +117,21 @@ def _validate_beat_sheet_draft(
         if unknown_beats:
             errors.append(f"段 {seg.segment_no} 引用了不存在的 beat_id {unknown_beats}")
     segment_source_indexes = {s.segment_no: s.source_segment_indexes for s in draft.segments}
+    # 短剧节奏档：declared − 四类保护（已覆盖/已 kept/必拍/paratext·context），
+    # 命中的台词立即强制并入 dropped_lines；忠实档返回空集合、无副作用（见
+    # app.production.storyboard_short_drama.reconcile_dropped_units）。
+    dropped_units = _short_drama.reconcile_dropped_units(
+        draft, source_segments, dialogue_quotes, set(paratext_indexes), set(context_indexes),
+        adaptation_mode=adaptation_mode,
+    )
     # 2.1.2：容量检查不在这里跑，改由 storyboard_capacity_normalize 兜底。
     for note in complete_missing_quote_decisions(draft, dialogue_quotes):
         _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
-    for note in restore_undroppable_lines(draft, dialogue_quotes, source_segments):
+    for note in restore_undroppable_lines(draft, dialogue_quotes, source_segments, dropped_units=dropped_units):
         _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
-    for note in append_segments_for_uncovered_sources(draft, dialogue_quotes, source_segments, set(paratext_indexes), set(context_indexes)):
+    for note in append_segments_for_uncovered_sources(draft, dialogue_quotes, source_segments, set(paratext_indexes), set(context_indexes), dropped_units=dropped_units):
         _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
-    errors.extend(undroppable_quote_errors(draft.dropped_lines, dialogue_quotes))
+    errors.extend(undroppable_quote_errors(draft.dropped_lines, dialogue_quotes, source_segments, dropped_units=dropped_units))
     # 先按单元位置/原文段号把分错段的台词挪到覆盖它的段（确定性，不打回模型），再查台账分区——
     # 否则「台词不得跨段漂移」会先把整份节拍表打回（2026-09-05 第 23 集三次重试仍失败）。
     reassign_kept_lines_to_covering_segments(draft.kept_lines, dialogue_quotes, draft.segments, source_segments)
@@ -139,9 +145,13 @@ def _validate_beat_sheet_draft(
     ))
     # 2026-09-05：机械规则先确定性修补（色温统一、范围裁剪/合并、补洞、不回退），
     # 修了什么写日志；只把修不了的留给校验打回模型。
-    for note in repair_beat_sheet_draft(draft, source_segments, set(paratext_indexes)):
+    for note in repair_beat_sheet_draft(draft, source_segments, set(paratext_indexes), dropped_units=dropped_units):
         _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
-    errors.extend(segment_unit_range_errors(draft.segments, source_segments, set(paratext_indexes)))
+    # 修补跑完、段落归属稳定之后才重算最终有效删减（修补可能把只部分声明删减的
+    # 缺口整体回填），并跑 key 节拍覆盖检查；忠实档/dropped_units 为空时是空操作。
+    dropped_units, key_beat_errors = _short_drama.finalize_dropped_units(draft, dropped_units, source_segments, dialogue_quotes)
+    errors.extend(key_beat_errors)
+    errors.extend(segment_unit_range_errors(draft.segments, source_segments, set(paratext_indexes), dropped_units=dropped_units))
     reassign_kept_lines_to_covering_segments(draft.kept_lines, dialogue_quotes, draft.segments, source_segments)
     errors.extend(kept_line_unit_binding_errors(draft.kept_lines, dialogue_quotes, draft.segments, source_segments))
     errors.extend(palette_scene_consistency_errors(draft.segments))
@@ -247,9 +257,16 @@ def _dialogue_targets_payload(dialogue_quotes: list[DialogueQuote]) -> dict[str,
     }
 
 
-def _beat_sheet_rules(paratext_indexes: set[int], context_indexes: set[int] = frozenset()) -> list[str]:
+def _beat_sheet_rules(
+    paratext_indexes: set[int], context_indexes: set[int] = frozenset(), *, adaptation_mode: str,
+) -> list[str]:
     """阶段一 rules[]：段落归组形状要求 + 2.4.0 单元范围声明规则 + 2.1.0 对白
     台账正面陈述（见 beat_sheet_dialogue_ledger_rules）。
+
+    ``adaptation_mode="short_drama"`` 时追加短剧节奏档规则（见
+    ``app.production.storyboard_short_drama.short_drama_beat_sheet_rules``）；
+    ``"faithful"`` 时这条分支不执行，返回值与改造前逐字节相同——忠实档指纹
+    冻结测试见 ``tests/test_storyboard_short_drama.py``。
     """
     rules = [
         "beat_sheet[].segment_indexes 与 segments[].source_segment_indexes 必须引用"
@@ -282,6 +299,9 @@ def _beat_sheet_rules(paratext_indexes: set[int], context_indexes: set[int] = fr
     ]
     extra = (_paratext_exclusion_rule(paratext_indexes), context_segment_rule(set(context_indexes)))
     rules.extend(rule for rule in extra if rule is not None)
+    if adaptation_mode == "short_drama":
+        rules = _short_drama.adjust_faithful_rules_for_short_drama(rules)
+        rules.extend(_short_drama.short_drama_beat_sheet_rules())
     return rules
 
 
@@ -304,22 +324,28 @@ def _normalize_beat_sheet_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-async def _generate_beat_sheet(
-    *,
-    episode_id: str,
-    episode_no: int,
-    segments: list[SourceSegment],
-    payload: dict[str, Any],
-    dialogue_quotes: list[DialogueQuote],
-    contract_version: str,
-) -> _AiBeatSheetDraft:
-    """``contract_version`` 由调用方传入（``storyboard_pack.
-    STORYBOARD_PACK_VERSION``），不在本模块内引用那个模块级常量——本模块不
-    import ``storyboard_pack``，避免与它对本模块的再导出构成循环导入。
+#: _generate_beat_sheet 传给 chat_structured 的 semantic_retry_limit——短剧档
+#: 段数软上限（SegmentCountSoftCap）的 retry_limit 必须引用同一个值，不重复
+#: 写字面量（CLAUDE.md「不许重复写字面量」）。忠实档语义重试预算不变。
+_BEAT_SHEET_SEMANTIC_RETRY_LIMIT = 2
+
+
+def _beat_sheet_draft_cls(adaptation_mode: str) -> type[_AiBeatSheetDraft]:
+    """model_type/output_schema 两处都要用同一个类，避免各写一次判断分叉。"""
+    return _AiShortDramaBeatSheetDraft if adaptation_mode == "short_drama" else _AiBeatSheetDraft
+
+
+def _beat_sheet_task_payload(
+    *, episode_no: int, payload: dict[str, Any], segments: list[SourceSegment],
+    paratext_indexes: set[int], context_indexes: set[int], dialogue_quotes: list[DialogueQuote],
+    adaptation_mode: str, draft_cls: type[_AiBeatSheetDraft],
+) -> dict[str, Any]:
+    """阶段一 task_payload；从 ``_generate_beat_sheet`` 抽出为独立函数给它腾
+    函数行数（该函数已在 function_lines 棘轮基线上零余量）。忠实档
+    （``adaptation_mode="faithful"``）的返回值与改造前逐字节相同——
+    ``_beat_sheet_rules``/``draft_cls`` 只在 short_drama 分支才偏离原样。
     """
-    paratext_indexes = _paratext_segment_indexes(payload)
-    context_indexes = context_segment_indexes(payload)
-    task_payload = {
+    return {
         "task": (
             "通读本章原文，列出节拍表（beat_sheet）：每个节拍是一次情绪或信息的变化，"
             "不是一个句子；合并同质描写。然后把节拍按叙事单元归入段（一个段要能用"
@@ -331,31 +357,64 @@ async def _generate_beat_sheet(
             "不回退、不留洞——见 rules。dialogue_targets 里的每一句原文台词都要显式"
             "决定去留，见 rules。"
         ),
-        "rules": _beat_sheet_rules(paratext_indexes, context_indexes),
+        "rules": _beat_sheet_rules(paratext_indexes, context_indexes, adaptation_mode=adaptation_mode),
         "episode_no": episode_no,
         "known_assets": _manifest_brief_for_prompt(payload),
         "source_text_by_segment": _source_block_for_prompt(segments, paratext_indexes),
         **_dialogue_targets_payload(dialogue_quotes),
-        "output_schema": _AiBeatSheetDraft.model_json_schema(),
+        "output_schema": draft_cls.model_json_schema(),
     }
+
+
+async def _generate_beat_sheet(
+    *,
+    episode_id: str,
+    episode_no: int,
+    segments: list[SourceSegment],
+    payload: dict[str, Any],
+    dialogue_quotes: list[DialogueQuote],
+    contract_version: str,
+    adaptation_mode: str,
+) -> _AiBeatSheetDraft:
+    """``contract_version`` 由调用方传入（``storyboard_pack.
+    STORYBOARD_PACK_VERSION``），不在本模块内引用那个模块级常量——本模块不
+    import ``storyboard_pack``，避免与它对本模块的再导出构成循环导入。
+
+    ``adaptation_mode``（2026-09-23，必传无默认值）：``"faithful"`` 时
+    ``draft_cls`` 恒为 ``_AiBeatSheetDraft``、``soft_cap`` 恒不产生错误，
+    发给模型的 task_payload（含 output_schema）与改造前逐字节相同——指纹
+    冻结测试见 ``tests/test_storyboard_short_drama.py``。
+    """
+    paratext_indexes = _paratext_segment_indexes(payload)
+    context_indexes = context_segment_indexes(payload)
+    draft_cls = _beat_sheet_draft_cls(adaptation_mode)
+    task_payload = _beat_sheet_task_payload(
+        episode_no=episode_no, payload=payload, segments=segments, paratext_indexes=paratext_indexes,
+        context_indexes=context_indexes, dialogue_quotes=dialogue_quotes, adaptation_mode=adaptation_mode,
+        draft_cls=draft_cls,
+    )
     fingerprint = hashlib.sha256(
         json.dumps(task_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()[:24]
+    soft_cap = _short_drama.SegmentCountSoftCap(adaptation_mode=adaptation_mode, retry_limit=_BEAT_SHEET_SEMANTIC_RETRY_LIMIT)
     return await model_gateway.chat_structured(
         [
             {"role": "system", "content": "你是短剧分镜师。只输出符合 Schema 的一个 JSON 对象，不输出 Markdown或解释。"},
             {"role": "user", "content": json.dumps(task_payload, ensure_ascii=False)},
         ],
-        model_type=_AiBeatSheetDraft,
-        validate=lambda value: _validate_beat_sheet_draft(
-            value, source_segments=segments, dialogue_quotes=dialogue_quotes,
-            context_indexes=context_indexes, paratext_indexes=paratext_indexes,
-        ),
+        model_type=draft_cls,
+        validate=lambda value: [
+            *_validate_beat_sheet_draft(
+                value, source_segments=segments, dialogue_quotes=dialogue_quotes,
+                context_indexes=context_indexes, paratext_indexes=paratext_indexes, adaptation_mode=adaptation_mode,
+            ),
+            *soft_cap.errors(value),
+        ],
         normalize_payload=_normalize_beat_sheet_payload,
         operation_id=f"storyboard_pack_beat_sheet_{episode_id}_{fingerprint}",
         max_tokens=6000,
         format_retry_limit=1,
-        semantic_retry_limit=2,
+        semantic_retry_limit=_BEAT_SHEET_SEMANTIC_RETRY_LIMIT,
         temperature=0.4,
         call_meta={
             "stage_key": "storyboard_pack_beat_sheet",
@@ -373,19 +432,29 @@ async def _generate_beat_sheet(
 from app.production.storyboard_beat_sheet_schemas import DROPPABLE_MAX_CHARS as DROPPABLE_MAX_CHARS
 
 
-def undroppable_quote_errors(dropped: list, quotes: list[DialogueQuote]) -> list[str]:
+def undroppable_quote_errors(
+    dropped: list, quotes: list[DialogueQuote], source_segments: list[SourceSegment],
+    *, dropped_units: frozenset[tuple[int, int]],
+) -> list[str]:
     """剧本格式抽出的整句台词（有说话人、正文超过 4 字）不能进 dropped_lines。
 
     EP1 第三次重跑实测：第一轮漏了 Q10 被打回后，模型把它塞进 dropped_lines、理由
     写「未在当前剧情节拍中保留」——这不是三类可弃置内容中的任何一种，只是把校验
     错误换了个地方。判据从数据推导：DialogueQuote.speaker 非空说明它是原文里的
     说话人行，content_chars 超过语气词长度说明它不是「啊」「哦」。
+    ``dropped_units``（短剧节奏档确定性核验后仍然有效的删减单元，忠实档恒传
+    空集合，必传无默认值）内的台词不报错——它们是被声明区间正当删减的，不是
+    模型在逃避校验；见 app.production.storyboard_short_drama 模块 docstring。
     """
     by_id = {quote.quote_id: quote for quote in quotes}
     errors: list[str] = []
     for item in dropped:
         quote = by_id.get(item.quote_id)
         if quote is None or not getattr(quote, "speaker", "") or quote.content_chars <= DROPPABLE_MAX_CHARS:
+            continue
+        idx = quote.source_segment_index
+        unit_no = quote_unit_index(quote, source_segments[idx - 1].text) if 1 <= idx <= len(source_segments) else -1
+        if (idx, unit_no) in dropped_units:
             continue
         errors.append(
             f"dropped_lines 里的 {quote.quote_id} 是 {quote.speaker} 的整句台词（{quote.content_chars} 字）"

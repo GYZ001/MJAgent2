@@ -105,7 +105,7 @@ def test_validate_beat_sheet_draft_accepts_well_formed_draft():
             )
         ],
     )
-    assert _validate_beat_sheet_draft(draft, source_segments=_fake_source_segments(3), dialogue_quotes=[]) == []
+    assert _validate_beat_sheet_draft(draft, source_segments=_fake_source_segments(3), dialogue_quotes=[], adaptation_mode="faithful") == []
 
 
 def test_validate_beat_sheet_draft_rejects_out_of_range_segment_index():
@@ -113,7 +113,7 @@ def test_validate_beat_sheet_draft_rejects_out_of_range_segment_index():
         beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[99])],
         segments=[_AiSegmentPlan(segment_no=1, synopsis="x", source_segment_indexes=[1])],
     )
-    errors = _validate_beat_sheet_draft(draft, source_segments=_fake_source_segments(3), dialogue_quotes=[])
+    errors = _validate_beat_sheet_draft(draft, source_segments=_fake_source_segments(3), dialogue_quotes=[], adaptation_mode="faithful")
     assert any("不存在的原文段号" in e for e in errors)
 
 
@@ -122,7 +122,7 @@ def test_validate_beat_sheet_draft_rejects_non_contiguous_segment_no():
         beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[1])],
         segments=[_AiSegmentPlan(segment_no=2, synopsis="x", source_segment_indexes=[1])],
     )
-    errors = _validate_beat_sheet_draft(draft, source_segments=_fake_source_segments(3), dialogue_quotes=[])
+    errors = _validate_beat_sheet_draft(draft, source_segments=_fake_source_segments(3), dialogue_quotes=[], adaptation_mode="faithful")
     assert any("连续递增" in e for e in errors)
 
 
@@ -135,7 +135,7 @@ def test_validate_beat_sheet_draft_rejects_unknown_beat_id_reference():
             )
         ],
     )
-    errors = _validate_beat_sheet_draft(draft, source_segments=_fake_source_segments(3), dialogue_quotes=[])
+    errors = _validate_beat_sheet_draft(draft, source_segments=_fake_source_segments(3), dialogue_quotes=[], adaptation_mode="faithful")
     assert any("不存在的 beat_id" in e for e in errors)
 
 
@@ -146,7 +146,7 @@ def test_validate_beat_sheet_draft_surfaces_dialogue_ledger_errors():
         segments=[_AiSegmentPlan(segment_no=1, synopsis="x", source_segment_indexes=[1], beat_ids=["B1"])],
         kept_lines=[_AiKeptLine(quote_id="Q-GHOST", segment_no=1)],
     )
-    errors = _validate_beat_sheet_draft(draft, source_segments=_fake_source_segments(3), dialogue_quotes=[])
+    errors = _validate_beat_sheet_draft(draft, source_segments=_fake_source_segments(3), dialogue_quotes=[], adaptation_mode="faithful")
     assert any("不存在的 quote_id" in e for e in errors)
 
 
@@ -330,5 +330,6 @@ def test_dropping_a_full_speaker_line_is_rejected_but_interjections_may_be_dropp
         DialogueQuote(quote_id="Q20", source_segment_index=5, text="牌匾上的四个字", content_chars=7),
     ]
     dropped = [_AiDroppedLine(quote_id="Q10", reason="未在当前剧情节拍中保留"), _AiDroppedLine(quote_id="Q06", reason="语气词"), _AiDroppedLine(quote_id="Q20", reason="屏上文字")]
-    errors = undroppable_quote_errors(dropped, quotes)
+    source_segments = _fake_source_segments(5)
+    errors = undroppable_quote_errors(dropped, quotes, source_segments, dropped_units=frozenset())
     assert len(errors) == 1 and "Q10" in errors[0] and "李麦麦" in errors[0]
