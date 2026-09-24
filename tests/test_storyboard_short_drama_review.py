@@ -1,7 +1,18 @@
-"""短剧节奏档删减复核（``app.production.storyboard_short_drama_review``）：
-纯函数单元测试 + 顶层编排的简单形态（忠实档/无删减/复核失败/复核结果处理）。
-第二遍确定性强制的端到端形态另见 ``tests/test_storyboard_short_drama_review_
-second_pass.py``——拆开是本文件自己的 500 行棘轮零余量，不是关注点不相关。
+"""短剧节奏档删减复核（``app.production.storyboard_short_drama_review`` +
+``storyboard_short_drama_review_items``）：纯函数单元测试 + 顶层编排的简单
+形态（忠实档/无删减/复核失败/复核结果处理）。第二遍确定性强制的端到端形态
+另见 ``tests/test_storyboard_short_drama_review_second_pass.py``——拆开是本
+文件自己的 500 行棘轮零余量，不是关注点不相关。
+
+2026-09-24 第二轮（单元粒度）：条目收集与单元拆分/合并移到
+``storyboard_short_drama_review_items``（``_collect_review_items``/
+``_split_span_into_items`` 等），本文件同时覆盖两个模块——判据从数据来，
+不是关注点跨文件混装。本文件不少测试的夹具原本用「句一。句二。」这类两字
+短句：``DROPPABLE_MAX_CHARS=4`` 下这类句子的 ``content_char_count`` 恰好
+不超过阈值，会被新的「极短单元不送审」规则跳过，因此凡是要验证"单元被
+真正送审/裁剪"的用例都换成了非极短的句子（"速去爬山"一类，用于制造与
+业务语义无关但足够长的占位句），只有专门测试"极短单元不送审/放行"的用例
+才保留两字短句。
 """
 from __future__ import annotations
 
@@ -14,18 +25,21 @@ from app.harness import model_gateway
 from app.production.storyboard_beat_sheet import _AiBeat, _AiBeatSheetDraft
 from app.production.storyboard_dialogue_ledger import DialogueQuote
 from app.production.storyboard_short_drama_review import (
-    _DropReviewItem,
     _allowed_sets,
     _clip_spans_to_allowed_units,
-    _collect_review_items,
     _item_payload,
     _must_keep_record,
     _resolve_review_verdicts,
     _review_response_model,
     _revert_disallowed_lines,
     _skipped_review,
-    _span_text,
     generate_beat_sheet_with_drop_review,
+)
+from app.production.storyboard_short_drama_review_items import (
+    _DropReviewItem,
+    _collect_review_items,
+    _split_span_into_items,
+    _unit_range_text,
 )
 from app.production.storyboard_short_drama_schemas import _AiShortDramaBeat
 from tests.test_storyboard_short_drama import _draft, _range_plan, _sources
@@ -36,23 +50,44 @@ def _payload(paratext=()):
 
 
 # ---------------------------------------------------------------------------
-# _span_text / _collect_review_items
+# _unit_range_text / _split_span_into_items / _collect_review_items
 # ---------------------------------------------------------------------------
 
-def test_span_text_extracts_verbatim_unit_range():
+def test_unit_range_text_extracts_verbatim_unit_range():
     sources = _sources("句一。句二。句三。句四。")
-    span = SimpleNamespace(source_segment_index=1, from_unit=2, to_unit=3)
-    assert _span_text(span, sources) == "句二。句三。"
+    assert _unit_range_text(1, 2, 3, sources) == "句二。句三。"
 
 
-def test_span_text_out_of_range_returns_empty():
+def test_unit_range_text_out_of_range_returns_empty():
     sources = _sources("句一。句二。")
-    span = SimpleNamespace(source_segment_index=1, from_unit=5, to_unit=9)
-    assert _span_text(span, sources) == ""
+    assert _unit_range_text(1, 5, 9, sources) == ""
+
+
+def test_split_span_into_items_skips_trivial_units():
+    """单元 1、2「句一。」「句二。」口播实际字数 2 ≤ DROPPABLE_MAX_CHARS(4)，
+    不构成送审条目；单元 3 是真正的一句话，正常送审。"""
+    sources = _sources("句一。句二。今天天气好去爬山。")
+    span = SimpleNamespace(source_segment_index=1, from_unit=1, to_unit=3, reason="x")
+    items = _split_span_into_items(span, sources)
+    assert [it.item_id for it in items] == ["unit:1:3"]
+    assert items[0].kind == "unit" and items[0].text == "今天天气好去爬山。"
+
+
+def test_split_span_into_items_merges_large_span_into_groups_of_three():
+    """31 个单元 > 30，按位置相邻最多 3 个一组合并送审：10 组整 + 1 组余 1。"""
+    sources = _sources("甲乙丙丁戊。" * 31)
+    span = SimpleNamespace(source_segment_index=1, from_unit=1, to_unit=31, reason="过场描写，压缩篇幅")
+    items = _split_span_into_items(span, sources)
+    assert len(items) == 11
+    assert [(it.from_unit, it.to_unit) for it in items[:3]] == [(1, 3), (4, 6), (7, 9)]
+    assert (items[-1].from_unit, items[-1].to_unit) == (31, 31), "余下 1 个单元单独成组"
+    assert items[0].text == "甲乙丙丁戊。" * 3
+    assert all(it.kind == "unit" and it.reason == "过场描写，压缩篇幅" for it in items)
+    assert all(it.region_label for it in items), "合并送审的条目也带所属区间标识，供模型理解上下文"
 
 
 def test_collect_review_items_includes_span_and_out_of_span_line():
-    sources = _sources("句一。句二。句三。句四。")
+    sources = _sources("句一。句二。今天天气好去爬山。句四。")
     plan = _range_plan(1, 1, 1, 2, beat_ids=["B1"])
     quote = DialogueQuote(quote_id="Q1", source_segment_index=1, text="句四。", content_chars=6, speaker="老王")
     beat_sheet = [
@@ -65,8 +100,8 @@ def test_collect_review_items_includes_span_and_out_of_span_line():
         dropped_lines=[{"quote_id": "Q1", "reason": "与主线无关", "beat_id": "B2"}],
     )
     items = _collect_review_items(draft, [quote], sources)
-    assert [it.item_id for it in items] == ["span:1:3-3", "line:Q1"]
-    assert items[0].kind == "span" and items[0].text == "句三。"
+    assert [it.item_id for it in items] == ["unit:1:3", "line:Q1"]
+    assert items[0].kind == "unit" and items[0].text == "今天天气好去爬山。"
     assert items[1].kind == "line" and items[1].text == "句四。" and items[1].quote_id == "Q1"
 
 
@@ -92,15 +127,15 @@ def test_collect_review_items_skips_span_forced_and_trivial_lines():
 # ---------------------------------------------------------------------------
 
 def test_review_response_model_rejects_unknown_item_id():
-    model = _review_response_model(["span:1:1-1"])
+    model = _review_response_model(["unit:1:1"])
     with pytest.raises(Exception):
-        model(items=[{"item_id": "span:9:9-9", "must_keep": True, "evidence_quote": "x"}])
+        model(items=[{"item_id": "unit:9:9", "must_keep": True, "evidence_quote": "x"}])
 
 
 def test_review_response_model_accepts_known_item_id():
-    model = _review_response_model(["span:1:1-1"])
-    instance = model(items=[{"item_id": "span:1:1-1", "must_keep": False, "evidence_quote": ""}])
-    assert instance.items[0].item_id == "span:1:1-1"
+    model = _review_response_model(["unit:1:1"])
+    instance = model(items=[{"item_id": "unit:1:1", "must_keep": False, "evidence_quote": ""}])
+    assert instance.items[0].item_id == "unit:1:1"
 
 
 # ---------------------------------------------------------------------------
@@ -198,10 +233,10 @@ def test_resolve_verdicts_false_must_keep_is_droppable():
 # _item_payload / _must_keep_record / _allowed_sets
 # ---------------------------------------------------------------------------
 
-def test_item_payload_span_and_line_shapes():
-    span_item = _DropReviewItem(item_id="span:1:2-3", kind="span", source_segment_index=1, from_unit=2, to_unit=3, text="x", reason="r")
+def test_item_payload_unit_and_line_shapes():
+    unit_item = _DropReviewItem(item_id="unit:1:2-3", kind="unit", source_segment_index=1, from_unit=2, to_unit=3, text="x", reason="r")
     line_item = _DropReviewItem(item_id="line:Q1", kind="line", source_segment_index=1, from_unit=1, to_unit=1, text="x", reason="r", quote_id="Q1")
-    assert _item_payload(span_item) == {"item_id": "span:1:2-3", "kind": "span", "source_segment_index": 1, "text": "x", "from_unit": 2, "to_unit": 3}
+    assert _item_payload(unit_item) == {"item_id": "unit:1:2-3", "kind": "unit", "source_segment_index": 1, "text": "x", "from_unit": 2, "to_unit": 3}
     assert _item_payload(line_item) == {"item_id": "line:Q1", "kind": "line", "source_segment_index": 1, "text": "x", "quote_id": "Q1"}
 
 
@@ -213,9 +248,9 @@ def test_must_keep_record_truncates_long_text_and_keeps_evidence():
 
 
 def test_allowed_sets_splits_by_kind():
-    span_item = _DropReviewItem(item_id="span:1:2-3", kind="span", source_segment_index=1, from_unit=2, to_unit=3, text="x", reason="r")
+    unit_item = _DropReviewItem(item_id="unit:1:2-3", kind="unit", source_segment_index=1, from_unit=2, to_unit=3, text="x", reason="r")
     line_item = _DropReviewItem(item_id="line:Q1", kind="line", source_segment_index=2, from_unit=1, to_unit=1, text="x", reason="r", quote_id="Q1")
-    quote_ids, span_units = _allowed_sets([span_item, line_item])
+    quote_ids, span_units = _allowed_sets([unit_item, line_item])
     assert quote_ids == {"Q1"}
     assert span_units == frozenset({(1, 2), (1, 3)})
 
@@ -250,7 +285,7 @@ def test_revert_disallowed_lines_leaves_trivial_untouched():
 
 
 def test_clip_spans_to_allowed_units_keeps_only_candidate_units():
-    sources = _sources("句一。句二。句三。句四。")
+    sources = _sources("句一。句二。今天天气好。速去爬山吧。")
     plan = _range_plan(1, 1, 1, 1, beat_ids=["B1"])
     draft = _draft(
         [plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 4, "reason": "x", "beat_id": "B1"}],
@@ -258,15 +293,31 @@ def test_clip_spans_to_allowed_units_keeps_only_candidate_units():
     _clip_spans_to_allowed_units(draft, sources, allowed_span_units=frozenset({(1, 2), (1, 3)}))
     assert len(draft.dropped_source_spans) == 1
     span = draft.dropped_source_spans[0]
-    assert (span.from_unit, span.to_unit) == (2, 3), "单元 4 不在候选内，被裁掉"
+    assert (span.from_unit, span.to_unit) == (2, 3), "单元 4 不在候选内且非极短，被裁掉"
 
 
 def test_clip_spans_to_allowed_units_removes_span_entirely_when_no_overlap():
-    sources = _sources("句一。句二。")
+    sources = _sources("句一。速去爬山吧。")
     plan = _range_plan(1, 1, 1, 1, beat_ids=["B1"])
     draft = _draft([plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 2, "reason": "x", "beat_id": "B1"}])
     _clip_spans_to_allowed_units(draft, sources, allowed_span_units=frozenset())
     assert draft.dropped_source_spans == []
+
+
+def test_clip_spans_to_allowed_units_passes_through_trivial_units_even_outside_candidates():
+    """极短单元本来就不会被送审（见 storyboard_short_drama_review_items 模块
+    docstring 规则 1），第二遍确定性强制不能因为它没出现在候选清单里就误判
+    成未经允许的删减而裁掉——否则一次与它无关的必保项会连累撤销这段本来
+    合理的极短删减，时长因此不降反升（第五轮真实验证的直接教训）。"""
+    sources = _sources("句一。句二。速去爬山吧。")
+    plan = _range_plan(1, 1, 1, 1, beat_ids=["B1"])
+    draft = _draft([plan], dropped_source_spans=[
+        {"source_segment_index": 1, "from_unit": 2, "to_unit": 3, "reason": "x", "beat_id": "B1"},
+    ])
+    _clip_spans_to_allowed_units(draft, sources, allowed_span_units=frozenset())
+    assert len(draft.dropped_source_spans) == 1
+    span = draft.dropped_source_spans[0]
+    assert (span.from_unit, span.to_unit) == (2, 2), "单元 2「句二。」极短，放行；单元 3 非极短且候选外，裁掉"
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +391,7 @@ async def test_review_call_failure_does_not_fail_the_episode(monkeypatch, caplog
     monkeypatch.setattr(model_gateway, "chat_structured", _stub)
     with caplog.at_level(logging.WARNING):
         draft, _projected, drop_review = await generate_beat_sheet_with_drop_review(
-            episode_id="ep1", episode_no=1, segments=_sources("句一。"), payload=_payload(),
+            episode_id="ep1", episode_no=1, segments=_sources("速去爬山砍柴。"), payload=_payload(),
             dialogue_quotes=[], contract_version="2.4.1", adaptation_mode="short_drama",
         )
     assert len(calls) == 2, "复核调用失败后不应再尝试第二遍"
@@ -362,11 +413,11 @@ async def test_review_all_droppable_skips_second_pass(monkeypatch):
         if len(calls) == 1:
             return first_pass_draft
         model_type = kwargs["model_type"]
-        return model_type(items=[{"item_id": "span:1:1-1", "must_keep": False, "evidence_quote": ""}])
+        return model_type(items=[{"item_id": "unit:1:1", "must_keep": False, "evidence_quote": ""}])
 
     monkeypatch.setattr(model_gateway, "chat_structured", _stub)
     draft, _projected, drop_review = await generate_beat_sheet_with_drop_review(
-        episode_id="ep1", episode_no=1, segments=_sources("句一。"), payload=_payload(),
+        episode_id="ep1", episode_no=1, segments=_sources("速去爬山砍柴。"), payload=_payload(),
         dialogue_quotes=[], contract_version="2.4.1", adaptation_mode="short_drama",
     )
     assert len(calls) == 2, "全部判 droppable 时不应触发第二遍"

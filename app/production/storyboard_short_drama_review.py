@@ -13,21 +13,33 @@ scene_recheck``——单一职责的调用不跟别的任务抢注意力，模�
 本模块只在 ``adaptation_mode="short_drama"`` 生效；忠实档、以及短剧档没有
 任何删减时，直接返回第一遍草稿，不发起任何复核调用。
 
+2026-09-24 B 机沙箱第五轮真实验证：关键内容全部保住，但时长不降反升
+（我欲封天 EP3 165s→240s）——根因是送审粒度太粗，一整条删减区间（可能
+几百字）只要有一句关键就整条判 must_keep，区间里其余真正无关的内容跟着
+一起被救回。送审粒度下沉到句单元（``storyboard_short_drama_review_items.
+_collect_review_items``，与 ``dropped_source_spans.from_unit/to_unit`` 同一套
+单元编号）之后，复核结果精确到「哪几句」而不是「这一整条」，本模块只消费
+拆分结果，不关心怎么拆——见该模块 docstring 的三条规则（极短单元不送审、
+超长区间合并送审、区间外台词逐句不变）。
+
 ## 三步流程
 
 1. ``_generate_beat_sheet``（未改动，直接复用真源）生成第一遍节拍表并通过
    全部既有校验。
-2. 有删减（有效删减区间，或区间外弃置的整句台词——语气词/屏上文字/区间
-   强制弃置不算，见 ``_collect_review_items``）时，发起一次独立复核调用：
-   逐条判断这条被删内容是否交代了后续剧情会用到的目标/期限/计划/承诺、
-   伏笔/悬念、关键设定、或人物关系变化；判 must_keep 的必须引用被删内容
-   里承载这个判断的那一句（去标点空白归一化后须是子串，见 ``_resolve_
-   review_verdicts``；不满足的按 droppable 处理并记日志，模型提名、代码核验）。
+2. 有删减（有效删减区间拆分出的句单元，或区间外弃置的整句台词——语气词/
+   屏上文字/区间强制弃置/极短单元不算，见 ``storyboard_short_drama_review_
+   items._collect_review_items``）时，发起一次独立复核调用：逐条判断这条
+   被删内容是否交代了后续剧情会用到的目标/期限/计划/承诺、伏笔/悬念、
+   关键设定、或人物关系变化；判 must_keep 的必须引用被删内容里承载这个
+   判断的那一句（去标点空白归一化后须是子串，见 ``_resolve_review_
+   verdicts``；不满足的按 droppable 处理并记日志，模型提名、代码核验）。
    复核调用失败（重试耗尽/供应商错误）不让整集失败：按无必保项继续，
    ``drop_review.status="failed"`` 如实记录。
 3. 只有复核给出至少一条有效 must_keep 时，才生成第二遍节拍表：payload 里
    带上必保清单与「允许删减的候选」（= 第一遍删减里被复核判 droppable 的
-   条目），第二遍的确定性强制见 ``_enforce_second_pass_constraints``。
+   句单元/台词条目），第二遍的确定性强制见 ``_enforce_second_pass_
+   constraints``——判据同样是句单元粒度，见该函数与 ``_clip_spans_to_
+   allowed_units`` 各自 docstring。
 
 ## 第二遍强制为什么不改 ``storyboard_beat_sheet._validate_beat_sheet_draft``，也不死锁
 
@@ -50,13 +62,24 @@ for_uncovered_sources``（``storyboard_beat_sheet_repair.py``，同样未改动�
 满足这部分校验（模型自己在台词归属/色温等其它维度产生的问题仍走既有语义
 重试预算，与本模块无关）。
 
+必保单元被夹在两段仍然合法的删减中间时（同一条区间拆出的三个单元里只有
+中间那个是 must_keep），只裁剪声明本身不够——``fix_order_and_fill_holes``/
+``_gap_fill_plan``（``storyboard_beat_sheet_repair.py``，不改）对「两侧都是
+有效删减、中间夹一个非删减单元」的缺口，找不到一段连续范围能只覆盖中间
+不牵连两侧时会整体回填，等于把两侧本该继续删除的单元也一起救回——这是
+该安全网蓄意的「偏向保留」设计（宁可多留不可错删），不是 bug，不能改。
+唯一的正确解法在提示词层面：``_must_keep_rule`` 明确要求模型让覆盖必保
+单元的段显式声明包含它的 ``source_unit_ranges``（单独一小段范围或并入
+相邻段），这样它从一开始就不是「缺口」，``_gap_fill_plan`` 根本不会被
+触发到这段范围。
+
 ## 契约
 
 ``drop_review`` 留档形状（``StoryboardPack.adaptation["drop_review"]``，
 ``app.domain.video_ops.storyboard_adaptation`` 只读透出给前端）::
 
     {"status": "ok" | "failed" | "skipped", "reviewed_count": int,
-     "must_keep": [{"item_id": str, "kind": "span" | "line", "text": str,
+     "must_keep": [{"item_id": str, "kind": "unit" | "line", "text": str,
                      "evidence_quote": str}],
      "second_pass": bool}
 
@@ -69,7 +92,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, create_model
@@ -93,86 +115,25 @@ from app.production import storyboard_short_drama as _short_drama
 from app.production import storyboard_short_drama_budget as _short_drama_budget
 from app.production.storyboard_short_drama_beat_guard import _find_covering_segment_no
 from app.production.storyboard_repair_context import storyboard_repair_context
-from app.production.storyboard_segment_ranges import quote_unit_index, split_source_units
+from app.production.storyboard_segment_ranges import quote_unit_index
+from app.production.storyboard_short_drama_review_items import (
+    _DropReviewItem,
+    _collect_review_items,
+    unit_is_trivial_at,
+)
 from app.source_excerpt import SourceSegment
 
 _LOGGER = logging.getLogger(__name__)
 
 #: 留档 must_keep[].text 的展示摘录上限——与 storyboard_pack_evidence 的
 #: 原文摘录（span excerpt[:24]）不是同一个字段，这里给的是复核输入原文
-#: （可能是一整条区间），留更多字数才看得出"关键内容"具体是什么。
+#: （可能是合并后最多 3 个单元的拼接），留更多字数才看得出"关键内容"具体
+#: 是什么。条目收集/单元拆分见 ``storyboard_short_drama_review_items``。
 _EXCERPT_MAX_CHARS = 60
-
-
-@dataclass(frozen=True)
-class _DropReviewItem:
-    """一条待复核的删减内容：区间（``kind="span"``）或区间外弃置的整句台词
-    （``kind="line"``）。``item_id`` 既是复核 schema 的枚举取值域，也是第二遍
-    payload 里必保/候选清单的稳定键，两处必须逐字同源，不能各自派生。"""
-
-    item_id: str
-    kind: str  # "span" | "line"
-    source_segment_index: int
-    from_unit: int
-    to_unit: int
-    text: str
-    reason: str
-    quote_id: str = ""  # 仅 kind="line" 有效
 
 
 def _skipped_review() -> dict[str, Any]:
     return {"status": "skipped", "reviewed_count": 0, "must_keep": [], "second_pass": False}
-
-
-def _span_text(span: Any, source_segments: list[SourceSegment]) -> str:
-    """按声明区间的单元范围切出原文全文；越界/定位不到时返回空串，调用方
-    据此跳过这条（防御性兜底，正常路径下区间已经过 finalize_dropped_units
-    核验，单元范围必然合法）。"""
-    idx = span.source_segment_index
-    if not (1 <= idx <= len(source_segments)):
-        return ""
-    text = source_segments[idx - 1].text
-    units = split_source_units(text)
-    start_i, end_i = span.from_unit - 1, span.to_unit - 1
-    if not (0 <= start_i <= end_i < len(units)):
-        return ""
-    return text[units[start_i][0]:units[end_i][1]]
-
-
-def _collect_review_items(
-    draft: Any, quotes: list[DialogueQuote], source_segments: list[SourceSegment],
-) -> list[_DropReviewItem]:
-    """第一遍通过校验后，汇总需要送审的删减条目：有效删减区间（``draft.
-    dropped_source_spans``，已经过 ``finalize_dropped_units`` 核验）+ 区间外
-    弃置的整句台词（判据与 ``undroppable_quote_errors`` 同一套：有说话人、
-    正文超过 ``DROPPABLE_MAX_CHARS``）。区间强制弃置的台词（reason 带
-    ``_SPAN_DROP_REASON_PREFIX``）跳过——它们已经由所属区间送审，不重复。
-    语气词/屏上文字（无说话人或极短）本就可以无条件弃置，不送审。
-    """
-    items: list[_DropReviewItem] = []
-    for span in getattr(draft, "dropped_source_spans", None) or []:
-        text = _span_text(span, source_segments)
-        if not text:
-            continue
-        items.append(_DropReviewItem(
-            item_id=f"span:{span.source_segment_index}:{span.from_unit}-{span.to_unit}", kind="span",
-            source_segment_index=span.source_segment_index, from_unit=span.from_unit, to_unit=span.to_unit,
-            text=text, reason=span.reason,
-        ))
-    quotes_by_id = {q.quote_id: q for q in quotes}
-    for line in draft.dropped_lines:
-        if str(line.reason).startswith(_short_drama._SPAN_DROP_REASON_PREFIX):
-            continue
-        quote = quotes_by_id.get(line.quote_id)
-        if quote is None or not quote.speaker or quote.content_chars <= DROPPABLE_MAX_CHARS:
-            continue
-        idx = quote.source_segment_index
-        unit_no = quote_unit_index(quote, source_segments[idx - 1].text) if 1 <= idx <= len(source_segments) else -1
-        items.append(_DropReviewItem(
-            item_id=f"line:{quote.quote_id}", kind="line", source_segment_index=idx, from_unit=unit_no,
-            to_unit=unit_no, text=quote.text, reason=line.reason, quote_id=quote.quote_id,
-        ))
-    return items
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +156,11 @@ _REVIEW_TASK = (
     "引用其它条目/原文段的内容。都不属于时，must_keep 填 false，evidence_quote 填"
     "空字符串。不要考虑删了会不会影响时长、节奏或观感——那些已经由别的机制判断"
     "过，与你无关。\n\n"
+    "items 里的每一条通常是一句原文，个别条目是把原删减区间里位置相邻的最多三句"
+    "合并成一条（原区间很长时）——按这条 text 的整体文字判断即可，不需要在条目"
+    "内部再拆分。部分条目带 region 字段，说明它出自哪一条更大的删减区间，仅供你"
+    "理解上下文：region 里没有单独列成 items 的其它内容不属于这次判断范围，不要"
+    "据此推断它们已经确定可删或必须保留。\n\n"
     "下面的原文段仅供你理解上下文，不是复核对象本身；真正要逐条判断的是 items "
     "清单里的每一条。"
 )
@@ -215,12 +181,19 @@ def _review_response_model(item_ids: list[str]) -> type[BaseModel]:
     )
 
 
+def _review_item_json(item: _DropReviewItem) -> dict[str, Any]:
+    """条目在 items 清单里的 JSON 形状——``region`` 只在非空（来自区间拆分的
+    ``kind="unit"`` 条目）时才带上，台词条目没有所属区间，不写这个键。"""
+    payload: dict[str, Any] = {"item_id": item.item_id, "text": item.text, "drop_reason": item.reason}
+    if item.region_label:
+        payload["region"] = item.region_label
+    return payload
+
+
 def _review_prompt(items: list[_DropReviewItem], source_segments: list[SourceSegment]) -> str:
     touched = sorted({it.source_segment_index for it in items if 1 <= it.source_segment_index <= len(source_segments)})
     segment_block = "\n".join(f"[段{i}] {source_segments[i - 1].text}" for i in touched)
-    items_block = json.dumps(
-        [{"item_id": it.item_id, "text": it.text, "drop_reason": it.reason} for it in items], ensure_ascii=False,
-    )
+    items_block = json.dumps([_review_item_json(it) for it in items], ensure_ascii=False)
     return f"{_REVIEW_TASK}\n\n原文段：\n{segment_block}\n\nitems：\n{items_block}"
 
 
@@ -299,7 +272,7 @@ async def _run_drop_review(
 
 def _item_payload(item: _DropReviewItem) -> dict[str, Any]:
     base = {"item_id": item.item_id, "kind": item.kind, "source_segment_index": item.source_segment_index, "text": item.text}
-    if item.kind == "span":
+    if item.kind == "unit":
         return {**base, "from_unit": item.from_unit, "to_unit": item.to_unit}
     return {**base, "quote_id": item.quote_id}
 
@@ -311,15 +284,18 @@ def _must_keep_rule(must_keep: list[_DropReviewItem], candidates: list[_DropRevi
         "原文内容，本次必须让它们的原文完整出现在某一段的画面或台词里（台词进 kept_lines，不得再出现"
         f"在任何 dropped_source_spans/dropped_lines 里）；droppable_candidates（共 {len(candidates)} 条）"
         "是复核判定为确实可以不拍的内容，你这次弃置或整段删除时只能从这份候选清单里选，不得弃置或删除"
-        "候选清单之外的其它台词或原文区间，也不得扩大候选清单里某一条的删除范围。除了这两条新约束，"
-        "其余规则与上一次相同。"
+        "候选清单之外的其它台词或原文区间，也不得扩大候选清单里某一条的删除范围。must_keep_items 里"
+        "kind=unit 的条目是原删减区间里的一句或相邻几句原文（不是整条区间的全部内容），必须让某一段"
+        "的 source_unit_ranges 显式覆盖到这几个单元——单独给它一小段范围，或并入相邻段的范围都可以，"
+        "不要留空指望系统自动补上：系统只会在探测到「漏拍」时兜底回填，一旦回填就会连同它两侧本该继续"
+        "删除的内容一起救回，达不到本次删减的目的。除了这些新约束，其余规则与上一次相同。"
     )
 
 
 def _allowed_sets(candidates: list[_DropReviewItem]) -> tuple[set[str], frozenset[tuple[int, int]]]:
     allowed_quote_ids = {it.quote_id for it in candidates if it.kind == "line"}
     allowed_span_units = frozenset(
-        (it.source_segment_index, u) for it in candidates if it.kind == "span" for u in range(it.from_unit, it.to_unit + 1)
+        (it.source_segment_index, u) for it in candidates if it.kind == "unit" for u in range(it.from_unit, it.to_unit + 1)
     )
     return allowed_quote_ids, allowed_span_units
 
@@ -360,10 +336,17 @@ def _clip_spans_to_allowed_units(
 ) -> None:
     """第二遍声明的删减区间与候选单元取交集，候选外的单元裁掉——裁掉后这些
     单元在 ``_validate_beat_sheet_draft`` 眼里就是普通缺口，既有回填机制会
-    把它们排回某一段（见模块 docstring）。"""
+    把它们排回某一段（见模块 docstring）。极短单元（``unit_is_trivial_at``，
+    与 ``storyboard_short_drama_review_items._collect_review_items`` 判断"要
+    不要送审"同一套口径）即使不在候选集合里也放行——它们本来就没被送审
+    （见该模块 docstring 规则 1「极短单元不送审、直接按可删」），不能因为
+    没出现在候选清单里就被这里误判成"未经允许的删减"裁掉。"""
     spans = getattr(draft, "dropped_source_spans", None) or []
     declared = _short_drama._declared_units(spans, source_segments)
-    kept_units = {key: value for key, value in declared.items() if key in allowed_span_units}
+    kept_units = {
+        key: value for key, value in declared.items()
+        if key in allowed_span_units or unit_is_trivial_at(key[0], key[1], source_segments)
+    }
     clipped = len(declared) - len(kept_units)
     if clipped:
         _LOGGER.info("[STORYBOARD_SHORT_DRAMA_REVIEW] 第二遍声明的删减区间裁掉候选之外的 %d 个单元", clipped)
