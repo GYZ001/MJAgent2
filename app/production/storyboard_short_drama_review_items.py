@@ -44,9 +44,11 @@ import 本模块，不构成循环；``storyboard_short_drama_review.py`` 同时
    逐字子串），复核判 ``must_keep`` 时整组一起保留/删除，不再细分——这是
    为控制条目数接受的粒度上限，本模块只解决"整条区间"这一种最粗粒度的
    问题，不追求无限细分。
-3. **区间外整句弃置台词仍逐句一条**：这部分的判据与第一版完全相同（未
-   改动，直接沿用），不受上面两条规则影响——台词天然是逐句的，没有"整条
-   区间"这种更粗粒度需要拆。
+3. **区间外整句弃置台词仍逐句一条**：不受上面两条规则影响——台词天然是
+   逐句的，没有"整条区间"这种更粗粒度需要拆。是否送审只看 ``content_
+   chars``（``_line_items``，2026-09-24 起不再要求有说话人，理由见该函数
+   docstring——第一版把「有没有说话人」误当「是否语气词」的代理指标，让
+   小说体里说话人归属失败的整句台词形同免检）。
 
 条目的 ``region_label``（仅区间来源的条目非空）是这条内容所属原始声明区间
 的人话描述（原文段号 + 完整单元范围），随条目一起送给模型，帮它判断"这句
@@ -154,17 +156,22 @@ def _split_span_into_items(span: Any, source_segments: list[SourceSegment]) -> l
 
 
 def _line_items(draft: Any, quotes: list[DialogueQuote], source_segments: list[SourceSegment]) -> list[_DropReviewItem]:
-    """区间外弃置的整句台词——判据与第一版逐字相同（未改动，见模块
-    docstring 规则 3）：有说话人、正文超过 ``DROPPABLE_MAX_CHARS``、且不是
-    随区间强制弃置（``_SPAN_DROP_REASON_PREFIX`` 前缀，已由所属区间送审，
-    不重复）。"""
+    """区间外弃置的整句台词：正文超过 ``DROPPABLE_MAX_CHARS``、且不是随区间
+    强制弃置（``_SPAN_DROP_REASON_PREFIX`` 前缀，已由所属区间送审，不重复）。
+
+    2026-09-24（S6 修复）：判据不再要求 ``quote.speaker`` 非空——第一版把
+    「有没有说话人」当「是否语气词」的代理指标，但小说体原文走
+    ``_extract_prose_segment`` 时 speaker 可能确定性归属失败留空（我欲封天
+    EP3 Q26「凝气入体，融散全身，经脉一通，天地共鸣。」、Q33「一周后你若到了
+    凝气一层……」即是此例），把这类整句台词整体排除在送审之外形同免检；是否
+    语气词只看 ``content_chars``，与是否抽到说话人无关。"""
     items: list[_DropReviewItem] = []
     quotes_by_id = {q.quote_id: q for q in quotes}
     for line in draft.dropped_lines:
         if str(line.reason).startswith(_SPAN_DROP_REASON_PREFIX):
             continue
         quote = quotes_by_id.get(line.quote_id)
-        if quote is None or not quote.speaker or quote.content_chars <= DROPPABLE_MAX_CHARS:
+        if quote is None or quote.content_chars <= DROPPABLE_MAX_CHARS:
             continue
         idx = quote.source_segment_index
         unit_no = quote_unit_index(quote, source_segments[idx - 1].text) if 1 <= idx <= len(source_segments) else -1

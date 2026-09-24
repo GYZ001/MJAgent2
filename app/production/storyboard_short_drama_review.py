@@ -306,12 +306,20 @@ def _revert_disallowed_lines(
     """第二遍弃置的整句台词不在候选内（必保台词、或模型新弃置的候选外台词）
     时，确定性放回 kept_lines——先取覆盖它的段，找不到就退而求其次挂在第一
     段，后续 ``_validate_beat_sheet_draft`` 里的 ``reassign_kept_lines_to_
-    covering_segments`` 会再校正到真正覆盖它的段（见模块 docstring）。"""
+    covering_segments`` 会再校正到真正覆盖它的段（见模块 docstring）。
+
+    2026-09-24（B 机沙箱第六轮修复）：「极短可无条件弃置」判据只看
+    ``content_chars``，不再看 ``quote.speaker``——小说体原文走
+    ``_extract_prose_segment`` 时 speaker 可能确定性归属失败留空（我欲封天
+    EP3 Q26/Q33 即是此例），用它当放回豁免会让候选外新删的整句台词（含
+    关键台词）永远进不了放回分支，对没有说话人的小说体项目形同死代码；
+    ``content_chars`` 无论走哪条抽取路径都已由 ``spoken_contract.content_
+    char_count`` 计算，不依赖是否抽到说话人。"""
     quotes_by_id = {q.quote_id: q for q in quotes}
     remaining: list[Any] = []
     for item in draft.dropped_lines:
         quote = quotes_by_id.get(item.quote_id)
-        trivial = quote is None or not quote.speaker or quote.content_chars <= DROPPABLE_MAX_CHARS
+        trivial = quote is None or quote.content_chars <= DROPPABLE_MAX_CHARS
         if trivial or item.quote_id in allowed_quote_ids:
             remaining.append(item)
             continue

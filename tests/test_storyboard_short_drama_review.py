@@ -109,17 +109,40 @@ def test_collect_review_items_skips_span_forced_and_trivial_lines():
     sources = _sources("句一。句二。句三。")
     plan = _range_plan(1, 1, 1, 1, beat_ids=["B1"])
     quote_short = DialogueQuote(quote_id="Q1", source_segment_index=1, text="句二。", content_chars=2, speaker="老王")
-    quote_no_speaker = DialogueQuote(quote_id="Q2", source_segment_index=1, text="句三。", content_chars=6, speaker="")
     draft = _draft(
         [plan],
         dropped_lines=[
             {"quote_id": "Q1", "reason": "随原文区间删减：闲笔", "beat_id": "B1"},  # 区间强制，应跳过
             {"quote_id": "Q1", "reason": "语气词", "beat_id": "B1"},  # 极短，应跳过
-            {"quote_id": "Q2", "reason": "无说话人", "beat_id": "B1"},  # 无说话人，应跳过
         ],
     )
-    items = _collect_review_items(draft, [quote_short, quote_no_speaker], sources)
+    items = _collect_review_items(draft, [quote_short], sources)
     assert items == []
+
+
+def test_collect_review_items_skips_trivial_line_without_speaker():
+    """≤4 字语气词无论有无说话人都不送审——极短本身就是判据，不看 speaker。"""
+    sources = _sources("句一。句二。")
+    plan = _range_plan(1, 1, 1, 1, beat_ids=["B1"])
+    filler = DialogueQuote(quote_id="Q1", source_segment_index=1, text="嗯", content_chars=1, speaker="")
+    draft = _draft([plan], dropped_lines=[{"quote_id": "Q1", "reason": "语气词", "beat_id": "B1"}])
+    items = _collect_review_items(draft, [filler], sources)
+    assert items == []
+
+
+def test_collect_review_items_includes_out_of_span_line_without_speaker():
+    """2026-09-24 S6 修复（B 机沙箱第六轮，我欲封天 EP3 Q26/Q33）：小说体原文
+    走 ``_extract_prose_segment`` 时 speaker 可能确定性归属失败留空——用「有
+    没有说话人」代替「是否语气词」会让这类整句台词（哪怕是关键台词）永远
+    进不了复核候选，对没有「说话人：台词」行的小说体项目形同免检。是否
+    送审只看 content_chars，与是否抽到说话人无关。"""
+    sources = _sources("句一。今天天气好去爬山。")
+    plan = _range_plan(1, 1, 1, 1, beat_ids=["B1"])
+    quote = DialogueQuote(quote_id="Q1", source_segment_index=1, text="今天天气好去爬山。", content_chars=9, speaker="")
+    draft = _draft([plan], dropped_lines=[{"quote_id": "Q1", "reason": "无说话人但内容关键", "beat_id": "B1"}])
+    items = _collect_review_items(draft, [quote], sources)
+    assert [it.item_id for it in items] == ["line:Q1"]
+    assert items[0].kind == "line" and items[0].text == "今天天气好去爬山。"
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +304,30 @@ def test_revert_disallowed_lines_leaves_trivial_untouched():
     draft = _draft([plan], dropped_lines=[{"quote_id": "Q1", "reason": "语气词", "beat_id": "B2"}])
     _revert_disallowed_lines(draft, [filler], sources, allowed_quote_ids=set())
     assert [d.quote_id for d in draft.dropped_lines] == ["Q1"], "语气词不受候选约束"
+    assert draft.kept_lines == []
+
+
+def test_revert_disallowed_lines_restores_non_candidate_without_speaker():
+    """2026-09-24 S6 修复：speaker 为空不再被当"极短可无条件弃置"处理——我欲
+    封天 EP3 Q26「凝气入体，融散全身，经脉一通，天地共鸣。」、Q33「一周后你
+    若到了凝气一层……」正是被这条误判成"极短"，放回分支对没抽到说话人的
+    小说体台词形同死代码，候选外新删的关键台词永远救不回来。"""
+    sources = _sources("句一。句二。句三。")
+    plan = _range_plan(1, 1, 1, 1, beat_ids=["B1"])
+    q_drop = DialogueQuote(quote_id="Q1", source_segment_index=1, text="句二。", content_chars=6, speaker="")
+    draft = _draft([plan], dropped_lines=[{"quote_id": "Q1", "reason": "第二遍模型新删的候选外台词", "beat_id": "B2"}])
+    _revert_disallowed_lines(draft, [q_drop], sources, allowed_quote_ids=set())
+    assert draft.dropped_lines == [], "候选外的弃置必须被强制放回，即使没有说话人"
+    assert [k.quote_id for k in draft.kept_lines] == ["Q1"]
+
+
+def test_revert_disallowed_lines_leaves_trivial_untouched_without_speaker():
+    sources = _sources("句一。句二。")
+    plan = _range_plan(1, 1, 1, 1, beat_ids=["B1"])
+    filler = DialogueQuote(quote_id="Q1", source_segment_index=1, text="嗯", content_chars=1, speaker="")
+    draft = _draft([plan], dropped_lines=[{"quote_id": "Q1", "reason": "语气词", "beat_id": "B2"}])
+    _revert_disallowed_lines(draft, [filler], sources, allowed_quote_ids=set())
+    assert [d.quote_id for d in draft.dropped_lines] == ["Q1"], "≤4 字语气词无论有无说话人都不受候选约束"
     assert draft.kept_lines == []
 
 

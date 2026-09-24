@@ -77,6 +77,21 @@ def test_restores_when_beat_does_not_cover_the_quotes_source_segment():
     assert [(k.quote_id, k.segment_no) for k in draft.kept_lines] == [("Q1", 1)]
 
 
+def test_restores_when_beat_id_missing_and_quote_has_no_speaker():
+    """2026-09-24 S6 修复（我欲封天 EP3 Q26/Q33 同一根因）：小说体台词的
+    ``speaker`` 可能确定性归属失败留空，之前 ``not getattr(quote, "speaker",
+    "")`` 会让这类台词直接跳过三条 beat_id 核验，等于放弃保护。核验只看
+    正文是否超过语气词长度，与是否抽到说话人无关。"""
+    quote = _quote(speaker="")
+    sources, draft = _draft_with(
+        [{"quote_id": "Q1", "reason": "不重要", "beat_id": "B_NOT_EXIST"}], beat_sheet=[_KEY_BEAT, _OPTIONAL_BEAT],
+    )
+    notes = restore_dropped_lines_with_invalid_beat(draft, [quote], sources, adaptation_mode="short_drama")
+    assert notes and "beat_id 缺失或指向不存在的节拍" in notes[0]
+    assert draft.dropped_lines == []
+    assert [(k.quote_id, k.segment_no) for k in draft.kept_lines] == [("Q1", 1)]
+
+
 def test_keeps_dropped_when_beat_is_optional_and_covers_segment():
     """三条核验全部满足：保留弃置，不打扰模型的正当决定。"""
     quote = _quote()
@@ -114,6 +129,18 @@ def test_filler_word_is_unaffected_by_invalid_beat_id():
     受这条新规则约束——即使没有 beat_id 属性（SimpleNamespace 模拟旧路径
     直接构造的条目）。"""
     quote = _quote(text="啊", content_chars=1)
+    sources = _sources("句一。句二。句三。")
+    plan = _range_plan(1, 1, 1, 3, beat_ids=["B1"])
+    draft = _draft([plan], beat_sheet=[_KEY_BEAT])
+    draft.dropped_lines = [SimpleNamespace(quote_id="Q1", reason="语气词")]
+    notes = restore_dropped_lines_with_invalid_beat(draft, [quote], sources, adaptation_mode="short_drama")
+    assert notes == []
+    assert len(draft.dropped_lines) == 1
+
+
+def test_filler_word_without_speaker_is_still_unaffected():
+    """≤4 字语气词无论有无说话人都不受这条新规则约束——极短本身就是判据。"""
+    quote = _quote(text="啊", content_chars=1, speaker="")
     sources = _sources("句一。句二。句三。")
     plan = _range_plan(1, 1, 1, 3, beat_ids=["B1"])
     draft = _draft([plan], beat_sheet=[_KEY_BEAT])

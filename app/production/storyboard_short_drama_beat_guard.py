@@ -101,11 +101,17 @@ def restore_dropped_lines_with_invalid_beat(
     draft: Any, quotes: list[Any], source_segments: list[Any], *, adaptation_mode: str,
 ) -> list[str]:
     """短剧档新增第三类确定性核验，见模块 docstring；忠实档无副作用直接返回
-    空表。只检查"整句台词"（有说话人、正文超过 ``DROPPABLE_MAX_CHARS``）——
-    语气词/屏上文字与随原文区间强制弃置（reason 带 ``_SPAN_DROP_REASON_
-    PREFIX`` 前缀）两类不受这条新规则约束，理由同 ``undroppable_quote_
-    errors``/``restore_undroppable_lines`` 对它们的既有豁免：这两类从来都是
-    可以无条件弃置的，不是短剧档台词预算新引入的自由度，不该被新规则收紧。
+    空表。只检查"整句台词"（正文超过 ``DROPPABLE_MAX_CHARS``）——语气词/
+    屏上文字与随原文区间强制弃置（reason 带 ``_SPAN_DROP_REASON_PREFIX``
+    前缀）两类不受这条新规则约束，理由同 ``undroppable_quote_errors``/
+    ``restore_undroppable_lines`` 对它们的既有豁免：这两类从来都是可以无
+    条件弃置的，不是短剧档台词预算新引入的自由度，不该被新规则收紧。
+
+    2026-09-24（S6 修复）：不再要求 ``quote.speaker`` 非空——小说体台词的
+    speaker 可能确定性归属失败留空（我欲封天 EP3 Q26/Q33 即是此例），用它
+    当豁免会让这类台词的弃置永远跳过 beat_id 核验，等于放弃保护；是否
+    语气词只看 ``content_chars``，与是否抽到说话人无关，见
+    ``storyboard_short_drama_review_items._line_items`` 同日同理由的修复。
     """
     if adaptation_mode != "short_drama":
         return []
@@ -118,7 +124,6 @@ def restore_dropped_lines_with_invalid_beat(
         if (
             str(item.reason).startswith(_SPAN_DROP_REASON_PREFIX)
             or quote is None
-            or not getattr(quote, "speaker", "")
             or quote.content_chars <= DROPPABLE_MAX_CHARS
         ):
             remaining.append(item)
