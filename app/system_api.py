@@ -26,6 +26,7 @@ from app.model_capabilities import (
     merge_token_capability_override,
     normalize_token_limits,
 )
+from app.models_registry import routing
 from app.models_registry import store as models_registry_store
 from app.system_ops.fs_browse import (
     _is_blocked_fs_path, _list_drives, allowed_directory_roots,
@@ -307,6 +308,7 @@ def add_model(body: dict):
     models_registry_store.upsert_model(item, created_by=current_actor_name(fallback="admin"))
     if custom_provider:
         models_registry_store.put_credential(item_id, base_url=base_url, api_key=api_key, rotated_by=current_actor_name(fallback="admin"))
+    routing.ensure_default_bindings(item_id, kinds, created_by=current_actor_name(fallback="admin"))
     return _public_model(item)
 
 
@@ -567,6 +569,7 @@ def update_model(model_id: str, body: dict):
         if effective_key:
             models_registry_store.put_credential(model_id, base_url=base_url, api_key=effective_key, rotated_by=current_actor_name(fallback="admin"))
     models_registry_store.upsert_model(item, created_by=current_actor_name(fallback="admin"))
+    routing.ensure_default_bindings(model_id, kinds, created_by=current_actor_name(fallback="admin"))
     return _public_model(item)
 
 

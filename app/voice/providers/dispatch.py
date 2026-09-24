@@ -55,11 +55,24 @@ def _redact_result_for_log(result: VoiceDesignResult) -> dict[str, Any]:
     }
 
 
+def resolve_voice_model(purpose: str = "voice:default") -> routing.ResolvedModel | None:
+    """先按 purpose 的优先级绑定选路；没有绑定时回落到模型库里第一条同能力的模型——
+    与 ``hiagent.active_provider`` 的既有回落、也就是模型中心「当前运行」显示的是同
+    一个条目。只认绑定会出现界面显示「当前运行 X」、生成却报「未配置」的界面撒谎
+    （2026-09-24 用户实测）。"""
+    resolved = routing.resolve(purpose)
+    if resolved is not None:
+        return resolved
+    kind = purpose.split(":", 1)[0]
+    provider = routing.resolve_provider_for_kind(kind)
+    return routing.resolve_explicit(provider, kind) if provider else None
+
+
 async def design_voice(
     req: VoiceDesignRequest, *, purpose: str = "voice:default", call_meta: dict[str, Any] | None = None,
 ) -> VoiceDesignResult:
     """凭文字描述生成一个新音色；未配置或协议不认识都明确报错，不静默回落。"""
-    resolved = routing.resolve(purpose)
+    resolved = resolve_voice_model(purpose)
     if resolved is None:
         raise VoiceProviderError("未配置声音生成模型，请在模型中心添加并绑定", failure_kind="not_configured")
     adapter = adapter_for(resolved.protocol)

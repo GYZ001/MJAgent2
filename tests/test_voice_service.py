@@ -120,7 +120,7 @@ def _fake_description(monkeypatch) -> None:
 
 def test_generate_voice_for_character_happy_path_auto_adopts(monkeypatch) -> None:
     _seed_project([_character("张三")])
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
     _design_voice_ok(monkeypatch)
     _check_passed(monkeypatch)
 
@@ -140,7 +140,7 @@ def test_generate_voice_for_character_happy_path_auto_adopts(monkeypatch) -> Non
 
 def test_generate_voice_for_character_second_candidate_not_auto_adopted(monkeypatch) -> None:
     _seed_project([_character("李四")])
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
     _design_voice_ok(monkeypatch)
     _check_passed(monkeypatch)
     first = asyncio.run(voice_service.generate_voice_for_character(
@@ -163,7 +163,7 @@ def test_generate_voice_for_character_check_failed_still_candidate_not_auto_adop
     """校验未通过（check_status=failed）不算「校验通过」，不自动采用，但生成
     本身没有失败——status 仍是 candidate，等人工判断是否采用。"""
     _seed_project([_character("周五")])
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
     _design_voice_ok(monkeypatch)
     _check_failed(monkeypatch)
 
@@ -179,7 +179,7 @@ def test_generate_voice_for_character_check_failed_still_candidate_not_auto_adop
 
 def test_generate_voice_for_character_raises_not_configured(monkeypatch) -> None:
     _seed_project([_character("赵六")])
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: None)
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: None)
 
     with pytest.raises(VoiceProviderError) as exc:
         asyncio.run(voice_service.generate_voice_for_character(
@@ -190,7 +190,7 @@ def test_generate_voice_for_character_raises_not_configured(monkeypatch) -> None
 
 def test_generate_voice_for_character_marks_row_failed_on_provider_error(monkeypatch) -> None:
     _seed_project([_character("孙七")])
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
 
     async def fake_fail(req, *, purpose, call_meta=None):
         raise VoiceProviderError("供应商额度不足", failure_kind="insufficient_balance")
@@ -210,7 +210,7 @@ def test_generate_voice_for_character_marks_row_failed_on_provider_error(monkeyp
 
 def test_generate_voice_for_character_raises_lookup_error_for_missing_character(monkeypatch) -> None:
     _seed_project([_character("已存在")])
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
 
     with pytest.raises(voice_service.VoiceLookupError):
         asyncio.run(voice_service.generate_voice_for_character(
@@ -220,7 +220,7 @@ def test_generate_voice_for_character_raises_lookup_error_for_missing_character(
 
 def test_generate_voice_for_character_auto_writes_description_when_blank(monkeypatch) -> None:
     _seed_project([_character("自动描述")])
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
     _design_voice_ok(monkeypatch)
     _check_passed(monkeypatch)
 
@@ -240,7 +240,7 @@ def test_generate_voice_for_character_auto_writes_description_when_blank(monkeyp
 def test_generate_voice_for_character_clip_failure_marks_failed_not_candidate(monkeypatch) -> None:
     """全量音频太短（<2 秒），裁片必然失败——整行应标记 failed，不产出半成品候选。"""
     _seed_project([_character("太短")])
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
     _design_voice_ok(monkeypatch, wav=_wav_bytes(duration_s=1.0, pause_at=0.5))
     _check_passed(monkeypatch)
 
@@ -258,7 +258,7 @@ def test_generate_voice_for_character_clip_failure_marks_failed_not_candidate(mo
 
 def test_adopt_voice_switches_current_and_demotes_previous(monkeypatch) -> None:
     _seed_project([_character("阿凯")])
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
     _design_voice_ok(monkeypatch)
     _check_passed(monkeypatch)
     first = asyncio.run(voice_service.generate_voice_for_character(
@@ -278,7 +278,7 @@ def test_adopt_voice_switches_current_and_demotes_previous(monkeypatch) -> None:
 
 def test_adopt_voice_rejects_wrong_character(monkeypatch) -> None:
     _seed_project([_character("小明"), _character("小红")])
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
     _design_voice_ok(monkeypatch)
     _check_passed(monkeypatch)
     row = asyncio.run(voice_service.generate_voice_for_character(
@@ -291,7 +291,7 @@ def test_adopt_voice_rejects_wrong_character(monkeypatch) -> None:
 
 def test_adopt_voice_rejects_failed_row(monkeypatch) -> None:
     _seed_project([_character("小刚")])
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
     _design_voice_ok(monkeypatch, wav=_wav_bytes(duration_s=1.0, pause_at=0.5))
     _check_passed(monkeypatch)
     failed_row = asyncio.run(voice_service.generate_voice_for_character(
@@ -343,7 +343,7 @@ async def _run_and_drain(coro, project_id: str):
 
 def test_generate_missing_for_project_generates_all_eligible_characters(monkeypatch) -> None:
     _seed_project([_character("甲"), _character("乙")], project_id="p_missing")
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
     _design_voice_ok(monkeypatch)
     _check_passed(monkeypatch)
     _fake_description(monkeypatch)
@@ -361,7 +361,7 @@ def test_generate_missing_for_project_generates_all_eligible_characters(monkeypa
 def test_generate_missing_for_project_raises_not_configured(monkeypatch) -> None:
     """未配置模型时明确报错（REST 层转 409 并提示去模型中心），不静默返回 0。"""
     _seed_project([_character("丙")], project_id="p_missing_unconf")
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: None)
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: None)
 
     with pytest.raises(VoiceProviderError) as excinfo:
         asyncio.run(voice_service.generate_missing_for_project("p_missing_unconf", triggered_by="tester"))
@@ -371,7 +371,7 @@ def test_generate_missing_for_project_raises_not_configured(monkeypatch) -> None
 def test_generate_missing_for_project_reports_running_batch(monkeypatch) -> None:
     """同项目已有批量任务在跑：明确报「进行中」，不静默返回受理 0 个。"""
     _seed_project([_character("己")], project_id="p_missing_busy")
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
 
     def busy_spawn(kind, key, coro, **kwargs):
         coro.close()
@@ -385,7 +385,7 @@ def test_generate_missing_for_project_reports_running_batch(monkeypatch) -> None
 def test_generate_voice_for_character_unexpected_finalize_error_marks_failed(monkeypatch) -> None:
     """落盘/裁片阶段的意外异常要把该行标成 failed，不能停在 generating 等超时。"""
     _seed_project([_character("庚")], project_id="p_finalize_err")
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
     _design_voice_ok(monkeypatch)
 
     def broken_finalize(*args, **kwargs):
@@ -404,7 +404,7 @@ def test_generate_voice_for_character_unexpected_finalize_error_marks_failed(mon
 
 def test_generate_missing_for_project_skips_characters_that_already_have_current(monkeypatch) -> None:
     _seed_project([_character("丁"), _character("戊")], project_id="p_missing_partial")
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
     _design_voice_ok(monkeypatch)
     _check_passed(monkeypatch)
     _fake_description(monkeypatch)
@@ -426,7 +426,7 @@ def test_generate_missing_for_project_skips_characters_that_already_have_current
 
 def test_trigger_auto_generate_after_portrait_noop_when_disabled(monkeypatch) -> None:
     _seed_project([_character("己")], project_id="p_hook_off")
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
     monkeypatch.setattr(voice_service, "voice_auto_generate_enabled", lambda: False)
 
     voice_service.trigger_auto_generate_after_portrait("p_hook_off", ["己"])
@@ -436,7 +436,7 @@ def test_trigger_auto_generate_after_portrait_noop_when_disabled(monkeypatch) ->
 
 def test_trigger_auto_generate_after_portrait_noop_when_not_configured(monkeypatch) -> None:
     _seed_project([_character("庚")], project_id="p_hook_unconf")
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: None)
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: None)
     monkeypatch.setattr(voice_service, "voice_auto_generate_enabled", lambda: True)
 
     voice_service.trigger_auto_generate_after_portrait("p_hook_unconf", ["庚"])
@@ -446,7 +446,7 @@ def test_trigger_auto_generate_after_portrait_noop_when_not_configured(monkeypat
 
 def test_trigger_auto_generate_after_portrait_generates_missing_characters(monkeypatch) -> None:
     _seed_project([_character("辛"), _character("壬")], project_id="p_hook_on")
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
     monkeypatch.setattr(voice_service, "voice_auto_generate_enabled", lambda: True)
     _design_voice_ok(monkeypatch)
     _check_passed(monkeypatch)

@@ -44,7 +44,7 @@ def _character(name: str) -> Character:
 
 
 def _patch_generation_ok(monkeypatch) -> None:
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
 
     async def fake_design_voice(req, *, purpose, call_meta=None):
         return VoiceDesignResult(
@@ -66,7 +66,7 @@ def _patch_generation_ok(monkeypatch) -> None:
 
 def test_list_character_voices_lists_every_named_character_with_empty_slot(monkeypatch) -> None:
     _seed_project([_character("甲"), _character("乙")], project_id="p_list")
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: None)
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: None)
 
     result = asyncio.run(voice_routes.list_character_voices("p_list"))
 
@@ -166,7 +166,7 @@ def test_generate_character_voice_missing_idempotency_key_422() -> None:
 
 def test_generate_character_voice_character_not_found_404(monkeypatch) -> None:
     _seed_project([_character("辛")], project_id="p_gen3")
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
     with pytest.raises(HTTPException) as exc:
         asyncio.run(voice_routes.generate_character_voice(
             "p_gen3", "不存在", {"voice_prompt": "a", "preview_text": "b", "idempotency_key": "k1"},
@@ -176,7 +176,7 @@ def test_generate_character_voice_character_not_found_404(monkeypatch) -> None:
 
 def test_generate_character_voice_not_configured_409(monkeypatch) -> None:
     _seed_project([_character("壬")], project_id="p_gen4")
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: None)
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: None)
     with pytest.raises(HTTPException) as exc:
         asyncio.run(voice_routes.generate_character_voice(
             "p_gen4", "壬", {"voice_prompt": "a", "preview_text": "b", "idempotency_key": "k1"},
@@ -187,7 +187,7 @@ def test_generate_character_voice_not_configured_409(monkeypatch) -> None:
 
 def test_generate_character_voice_provider_failure_502(monkeypatch) -> None:
     _seed_project([_character("癸")], project_id="p_gen5")
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
 
     async def fake_fail(req, *, purpose, call_meta=None):
         raise VoiceProviderError("供应商拒绝了本次请求", failure_kind="content_rejected")
@@ -238,7 +238,7 @@ def test_adopt_character_voice_wrong_character_404(monkeypatch) -> None:
 
 def test_adopt_character_voice_failed_row_409(monkeypatch) -> None:
     _seed_project([_character("小虎")], project_id="p_adopt3")
-    monkeypatch.setattr(voice_service.routing, "resolve", lambda purpose: _resolved_model())
+    monkeypatch.setattr(dispatch.routing, "resolve", lambda purpose: _resolved_model())
 
     async def fake_short(req, *, purpose, call_meta=None):
         return VoiceDesignResult(

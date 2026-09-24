@@ -179,8 +179,9 @@ def test_sync_legacy_bindings_voice_provider_key_updates_voice_default_binding()
     否则就是 CLAUDE.md 禁止的"界面撒谎"（保存成功但选路无变化）。"""
     from app.models_registry import routing
 
-    item = _add_voice_model()
-    assert routing.resolve("voice:default") is None
+    first = _add_voice_model()  # 第一条声音模型自动成为主用
+    item = _add_voice_model(label="千问声音设计备用", model="qwen3-tts-vd-2026-01-26-b")
+    assert routing.resolve("voice:default").provider == first["provider"]
 
     routing.sync_legacy_bindings({"model_voice_provider": item["provider"]})
 
@@ -221,3 +222,26 @@ def test_model_migration_protocol_backfill_skips_voice_entries() -> None:
     catalog = _json.loads(get_setting("custom_models") or "[]")
     voice_entry = next(item for item in catalog if item["id"] == "model_voice_legacy")
     assert voice_entry.get("protocol", "") == ""
+
+
+def test_first_voice_model_becomes_default_binding_and_second_does_not_override() -> None:
+    """新能力的第一条模型自动设为主用（否则「保存模型分配」无改动不可点、主用永远建不起来）；
+    已有主用时再加模型不改动它。"""
+    from app.models_registry import bindings
+
+    first = _add_voice_model()
+    assert bindings.get_priority_zero("voice:default")["model_id"] == first["id"]
+    _add_voice_model(label="千问声音设计备用", model="qwen3-tts-vd-2026-01-26-b")
+    assert bindings.get_priority_zero("voice:default")["model_id"] == first["id"]
+
+
+def test_saving_an_unbound_model_restores_missing_default_binding() -> None:
+    """存量「有模型、无主用绑定」：编辑该模型并保存即补上主用绑定，界面红框随之消失。"""
+    from app.models_registry import bindings
+
+    item = _add_voice_model()
+    bindings.delete_binding(bindings.get_priority_zero("voice:default")["id"])
+    assert bindings.get_priority_zero("voice:default") is None
+    api.update_model(item["id"], {"label": "千问声音设计", "model": "qwen3-tts-vd-2026-01-26"})
+    assert bindings.get_priority_zero("voice:default")["model_id"] == item["id"]
+

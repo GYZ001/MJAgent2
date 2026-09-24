@@ -320,6 +320,32 @@ async def test_switching_voice_default_binding_switches_adapter(monkeypatch) -> 
     assert result_minimax.provider_voice_id == "mm-v1"
 
 
+async def test_design_voice_falls_back_to_catalog_voice_model_when_unbound(monkeypatch) -> None:
+    """模型已在模型库、但 voice:default 没有主用绑定（2026-09-24 B 上实测状态）：
+    按模型中心「当前运行」同一口径回落到第一条声音模型，不再报「未配置」。"""
+    calls: list[str] = []
+
+    async def fake_qwen(conn: VoiceConnection, req: VoiceDesignRequest, *, client=None) -> VoiceDesignResult:
+        calls.append(conn.model_ref)
+        return VoiceDesignResult(
+            provider_voice_id="qwen-v1", audio=_wav_bytes(), audio_format="wav",
+            sample_rate=24000, request_id="q1", latency_ms=10,
+        )
+
+    monkeypatch.setattr(qwen, "design_voice", fake_qwen)
+    _add_voice_model(
+        "qwen_voice_design", base_url="https://dashscope.aliyuncs.com", api_key="sk-q",
+        model="qwen3-tts-vd-2026-01-26", label="千问声音设计",
+    )
+    binding = bindings.get_priority_zero("voice:default")
+    assert binding is not None  # 添加第一条声音模型时已自动设为主用
+    bindings.delete_binding(binding["id"])  # 复现「有模型、无绑定」的存量状态
+
+    result = await dispatch.design_voice(VoiceDesignRequest(voice_prompt="x", preview_text="y"))
+    assert calls == ["qwen3-tts-vd-2026-01-26"]
+    assert result.provider_voice_id == "qwen-v1"
+
+
 async def test_design_voice_not_configured_when_no_binding() -> None:
     req = VoiceDesignRequest(voice_prompt="x", preview_text="y")
     with pytest.raises(VoiceProviderError) as exc:

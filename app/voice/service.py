@@ -21,7 +21,6 @@ from typing import Any
 from app import task_registry
 from app.db import get_conn
 from app.media_urls import build_media_url
-from app.models_registry import routing
 from app.schemas import Bible, Character, character_is_portrait_eligible
 
 from app.voice import store
@@ -47,7 +46,7 @@ class VoiceLookupError(LookupError):
 
 
 def voice_model_configured() -> bool:
-    return routing.resolve(VOICE_PURPOSE) is not None
+    return dispatch.resolve_voice_model(VOICE_PURPOSE) is not None
 
 
 def _project_bible(conn, project_id: str) -> Bible | None:
@@ -185,7 +184,7 @@ async def generate_voice_for_character(
     conn = get_conn()
     bible = _project_bible(conn, project_id)
     character = _character_or_404(bible, character_name)
-    resolved = routing.resolve(VOICE_PURPOSE)
+    resolved = dispatch.resolve_voice_model(VOICE_PURPOSE)
     if resolved is None:
         raise VoiceProviderError("未配置声音生成模型，请在模型中心添加并绑定", failure_kind="not_configured")
     voice_prompt = voice_prompt.strip()

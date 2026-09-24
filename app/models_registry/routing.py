@@ -174,6 +174,24 @@ def sync_legacy_binding(kind: str, provider: str) -> None:
     )
 
 
+def ensure_default_bindings(model_id: str, kinds: list[str], *, created_by: str) -> list[str]:
+    """添加/编辑模型保存时：它声明的能力里，凡是 ``<kind>:default`` 还没有
+    priority=0 绑定的（模型中心红框「缺少主用模型绑定」），就把这条模型设为主用。
+    已有主用（含被停用的）一律不动——那是管理员的显式选择。返回新建绑定的 purpose。
+
+    没有这一步时，新能力（2026-09-24 的声音生成）加进第一条模型后「当前运行」
+    显示的是回落选中的条目，「保存模型分配」因为无改动而不可点，主用绑定永远建
+    不起来。"""
+    created: list[str] = []
+    for kind in dict.fromkeys(str(k).strip() for k in (kinds or []) if str(k).strip()):
+        purpose = f"{kind}:default"
+        if bindings.get_priority_zero(purpose) is not None:
+            continue
+        bindings.upsert_binding(purpose=purpose, model_id=model_id, priority=0, created_by=created_by)
+        created.append(purpose)
+    return created
+
+
 _LEGACY_PROVIDER_SETTING_KEYS = (
     ("text", "model_text_provider"), ("vlm", "model_vlm_provider"),
     ("video", "model_video_provider"), ("image", "model_image_provider"),

@@ -282,6 +282,11 @@ def test_custom_model_can_be_edited_then_deleted(monkeypatch) -> None:
     })
     updated = api.update_model(item["id"], {"label": "New", "model": "new-model", "kinds": ["text", "vlm"]})
     assert updated["label"] == "New"
+    # 空库里第一条模型会自动成为它各项能力的主用（避免「缺少主用绑定」无路可修）；
+    # 被用途绑定引用的模型不许删，所以先解除这两条自动绑定，再验证删除本身。
+    from app.models_registry import bindings
+    for purpose in ("text:default", "vlm:default"):
+        bindings.delete_binding(bindings.get_priority_zero(purpose)["id"])
     monkeypatch.setattr(hiagent, "active_provider", lambda kind: "")
     api.delete_model(item["id"])
     assert models_registry_store.get_model(item["id"]) is None
