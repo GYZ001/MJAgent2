@@ -1343,7 +1343,7 @@ async def generate_storyboard_pack(
     # 2026-09-23 改编强度档位：档位以生成这一刻的项目设置为准并写进留档
     # （见 StoryboardPack.adaptation），之后项目档位被改只影响以后的生成。
     adaptation_mode = resolve_adaptation_mode(conn, ep["project_id"])
-    beat_draft = await _generate_beat_sheet(
+    beat_draft, projected_segment_count = await _generate_beat_sheet(
         episode_id=episode_id, episode_no=episode_no, segments=segments, payload=payload,
         dialogue_quotes=dialogue_quotes, contract_version=STORYBOARD_PACK_VERSION,
         adaptation_mode=adaptation_mode,
@@ -1432,6 +1432,7 @@ async def generate_storyboard_pack(
             segment_count=len(pack_segments), dropped_spans=getattr(beat_draft, "dropped_source_spans", None) or [],
             dropped_quote_ids=storyboard_short_drama.dropped_line_quote_ids(beat_draft),
             kept_dialogue_chars=storyboard_short_drama_budget.kept_dialogue_chars(beat_draft.kept_lines, dialogue_quotes),
+            projected_segment_count=projected_segment_count,
         ),
     )
 

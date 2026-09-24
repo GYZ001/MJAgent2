@@ -25,7 +25,7 @@ from app import db
 def test_adaptation_summary_faithful_mode_has_empty_targets_and_spans():
     summary = adaptation_summary(
         adaptation_mode="faithful", planned_segment_count=9, segment_count=9, dropped_spans=[], dropped_quote_ids=[],
-        kept_dialogue_chars=123,
+        kept_dialogue_chars=123, projected_segment_count=None,
     )
     assert summary["adaptation_mode"] == "faithful"
     assert summary["target_duration_s"] is None
@@ -39,6 +39,7 @@ def test_adaptation_summary_faithful_mode_has_empty_targets_and_spans():
     assert summary["dialogue_budget_chars"] is None
     assert summary["dropped_source_spans"] == []
     assert summary["dropped_line_quote_ids"] == []
+    assert summary["projected_segment_count"] is None
 
 
 def test_adaptation_summary_short_drama_over_target_true_by_final_segment_count():
@@ -49,13 +50,14 @@ def test_adaptation_summary_short_drama_over_target_true_by_final_segment_count(
     summary = adaptation_summary(
         adaptation_mode="short_drama", planned_segment_count=7, segment_count=16,
         dropped_spans=[_AiDroppedSourceSpan(source_segment_index=1, from_unit=1, to_unit=2, reason="闲笔")],
-        dropped_quote_ids=["Q01"], kept_dialogue_chars=900,
+        dropped_quote_ids=["Q01"], kept_dialogue_chars=900, projected_segment_count=15,
     )
     assert summary["target_duration_s"] == 90
     assert summary["target_segment_count"] == 6
     assert summary["max_segment_count"] == 8
     assert summary["max_duration_s"] == 120
     assert summary["planned_segment_count"] == 7
+    assert summary["projected_segment_count"] == 15, "SegmentCountSoftCap 最后一次校验时算出的预计段数，原样透传"
     assert summary["segment_count"] == 16
     assert summary["final_duration_s"] == 240
     assert summary["over_target"] is True, "按最终段数 16 > 8 判定"
@@ -72,7 +74,7 @@ def test_adaptation_summary_short_drama_planned_over_cap_true_when_model_itself_
     结构上也必为真。"""
     summary = adaptation_summary(
         adaptation_mode="short_drama", planned_segment_count=10, segment_count=10,
-        dropped_spans=[], dropped_quote_ids=[], kept_dialogue_chars=0,
+        dropped_spans=[], dropped_quote_ids=[], kept_dialogue_chars=0, projected_segment_count=10,
     )
     assert summary["over_target"] is True
     assert summary["planned_over_cap"] is True
@@ -81,7 +83,7 @@ def test_adaptation_summary_short_drama_planned_over_cap_true_when_model_itself_
 def test_adaptation_summary_short_drama_within_target_not_over():
     summary = adaptation_summary(
         adaptation_mode="short_drama", planned_segment_count=6, segment_count=6, dropped_spans=[], dropped_quote_ids=[],
-        kept_dialogue_chars=0,
+        kept_dialogue_chars=0, projected_segment_count=6,
     )
     assert summary["over_target"] is False
     assert summary["planned_over_cap"] is False
@@ -180,7 +182,7 @@ def test_persist_storyboard_pack_writes_adaptation_artifact_faithful_mode_empty(
     pack = _pack()
     pack.adaptation = adaptation_summary(
         adaptation_mode="faithful", planned_segment_count=len(pack.segments), segment_count=len(pack.segments),
-        dropped_spans=[], dropped_quote_ids=[], kept_dialogue_chars=0,
+        dropped_spans=[], dropped_quote_ids=[], kept_dialogue_chars=0, projected_segment_count=None,
     )
     persist_storyboard_pack(conn, episode_id, ep, payload, pack, segments=segments)
 
@@ -193,6 +195,7 @@ def test_persist_storyboard_pack_writes_adaptation_artifact_faithful_mode_empty(
     assert content["dropped_source_spans"] == []
     assert content["over_target"] is False
     assert content["planned_over_cap"] is False
+    assert content["projected_segment_count"] is None
 
 
 def test_persist_storyboard_pack_writes_adaptation_artifact_short_drama_with_real_offsets():
@@ -210,7 +213,7 @@ def test_persist_storyboard_pack_writes_adaptation_artifact_short_drama_with_rea
     pack.adaptation = adaptation_summary(
         adaptation_mode="short_drama", planned_segment_count=10, segment_count=len(pack.segments),
         dropped_spans=[_AiDroppedSourceSpan(source_segment_index=1, from_unit=unit_no, to_unit=unit_no, reason="闲笔可删")],
-        dropped_quote_ids=["Q09"], kept_dialogue_chars=40,
+        dropped_quote_ids=["Q09"], kept_dialogue_chars=40, projected_segment_count=13,
     )
     persist_storyboard_pack(conn, episode_id, ep, payload, pack, segments=segments)
 
@@ -220,6 +223,7 @@ def test_persist_storyboard_pack_writes_adaptation_artifact_short_drama_with_rea
     content = json.loads(row["content_json"])
     assert content["adaptation_mode"] == "short_drama"
     assert content["planned_segment_count"] == 10
+    assert content["projected_segment_count"] == 13, "留档字段原样透传，不是从 segment_count 派生"
     # _pack() 只有 1 个最终段：over_target 按*最终*段数（1）判定为 False，
     # 但模型规划阶段的 10 段本身已经超上限，planned_over_cap 为 True——
     # 这正是两个字段分拆之后要能表达的差异（2026-09-24 真实三集验证的根因）。

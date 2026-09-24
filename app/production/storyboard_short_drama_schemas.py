@@ -17,6 +17,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from app.production.storyboard_beat_sheet_schemas import _AiBeat, _AiBeatSheetDraft
+from app.production.storyboard_dialogue_ledger import _AiDroppedLine
 
 
 class _AiDroppedSourceSpan(BaseModel):
@@ -41,8 +42,28 @@ class _AiShortDramaBeat(_AiBeat):
     importance: Literal["key", "optional"]
 
 
+class _AiShortDramaDroppedLine(_AiDroppedLine):
+    """忠实档 ``_AiDroppedLine`` 的短剧档子类：新增必填 ``beat_id``——这条个别
+    （区间外）弃置的台词属于哪个节拍。核验见 ``app.production.
+    storyboard_short_drama_beat_guard.restore_dropped_lines_with_invalid_beat``：
+    beat_id 必须真实存在、所属节拍 ``importance`` 必须是 ``optional``、且这句
+    台词的原文段号必须落在该节拍 ``segment_indexes`` 覆盖范围内，三者任一不
+    满足就被机械放回 ``kept_lines``（偏向保留），不打回模型——2026-09-24 真实
+    三集验证实测：没有这道核验时，模型会用这条豁免删掉修炼口诀、目标铺垫这类
+    关键节拍的台词，理由写得通顺但经不起核对。随原文区间强制弃置的台词（
+    ``storyboard_short_drama._SPAN_DROP_REASON_PREFIX`` 前缀）由代码直接构造
+    基类 ``_AiDroppedLine`` 实例，不经过这个子类，天然不受影响；语气词/屏上
+    文字弃置同样不受这条新规则的语义核验约束（见该函数 docstring）。
+    """
+
+    beat_id: str = Field(min_length=1)
+
+
 class _AiShortDramaBeatSheetDraft(_AiBeatSheetDraft):
     beat_sheet: list[_AiShortDramaBeat] = Field(min_length=1)
+    #: 覆盖父类字段类型（忠实档 dropped_lines 不要求 beat_id，见上面
+    #: _AiShortDramaDroppedLine 与 _AiDroppedLine 两个类各自的字段集合）。
+    dropped_lines: list[_AiShortDramaDroppedLine] = Field(default_factory=list)
     #: 模型声明要整块删掉的非关键原文区间；忠实档没有这个字段（getattr 判断
     #: 「是不是短剧档草稿」时以此为准，见 storyboard_short_drama 模块）。
     dropped_source_spans: list[_AiDroppedSourceSpan] = Field(default_factory=list)

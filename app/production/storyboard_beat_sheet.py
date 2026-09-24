@@ -80,6 +80,7 @@ from app.production.storyboard_short_drama_schemas import (
 )
 from app.production import storyboard_short_drama as _short_drama
 from app.production import storyboard_short_drama_budget as _short_drama_budget
+from app.production.storyboard_short_drama_beat_guard import restore_dropped_lines_with_invalid_beat
 
 
 def _validate_beat_sheet_draft(
@@ -130,6 +131,10 @@ def _validate_beat_sheet_draft(
         _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
     for note in restore_undroppable_lines(draft, dialogue_quotes, source_segments, dropped_units=dropped_units, adaptation_mode=adaptation_mode, protected_units=protected_units):
         _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
+    # 短剧档第三类核验（2026-09-24）：区间外弃置台词须有合法 beat_id，须紧跟在上面
+    # restore_undroppable_lines 之后（只处理它放行的部分），见该函数模块 docstring。
+    for note in restore_dropped_lines_with_invalid_beat(draft, dialogue_quotes, source_segments, adaptation_mode=adaptation_mode):
+        _LOGGER.info("[STORYBOARD_SHORT_DRAMA] %s", note)
     for note in append_segments_for_uncovered_sources(draft, dialogue_quotes, source_segments, set(paratext_indexes), set(context_indexes), dropped_units=dropped_units):
         _LOGGER.info("[STORYBOARD_BEAT_SHEET_REPAIR] %s", note)
     errors.extend(undroppable_quote_errors(draft.dropped_lines, dialogue_quotes, source_segments, dropped_units=dropped_units, adaptation_mode=adaptation_mode, protected_units=protected_units))
@@ -386,7 +391,7 @@ async def _generate_beat_sheet(
     dialogue_quotes: list[DialogueQuote],
     contract_version: str,
     adaptation_mode: str,
-) -> _AiBeatSheetDraft:
+) -> tuple[_AiBeatSheetDraft, int | None]:
     """``contract_version`` 由调用方传入（``storyboard_pack.
     STORYBOARD_PACK_VERSION``），不在本模块内引用那个模块级常量——本模块不
     import ``storyboard_pack``，避免与它对本模块的再导出构成循环导入。
@@ -395,6 +400,10 @@ async def _generate_beat_sheet(
     ``draft_cls`` 恒为 ``_AiBeatSheetDraft``、``soft_cap`` 恒不产生错误，
     发给模型的 task_payload（含 output_schema）与改造前逐字节相同——指纹
     冻结测试见 ``tests/test_storyboard_short_drama.py``。
+
+    返回 ``(draft, projected_segment_count)``（2026-09-24 新增第二个元素）：
+    后者是 ``soft_cap.last_projected_count``，供调用方写进 ``adaptation_
+    summary`` 留档；忠实档恒 ``None``。
     """
     paratext_indexes = _paratext_segment_indexes(payload)
     context_indexes = context_segment_indexes(payload)
@@ -407,7 +416,10 @@ async def _generate_beat_sheet(
     fingerprint = hashlib.sha256(
         json.dumps(task_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()[:24]
-    soft_cap = _short_drama.SegmentCountSoftCap(adaptation_mode=adaptation_mode, retry_limit=_BEAT_SHEET_SEMANTIC_RETRY_LIMIT)
+    soft_cap = _short_drama.SegmentCountSoftCap(
+        adaptation_mode=adaptation_mode, retry_limit=_BEAT_SHEET_SEMANTIC_RETRY_LIMIT,
+        quotes=dialogue_quotes, source_segments=segments,
+    )
     budget_cap = _short_drama_budget.DialogueBudgetSoftCap(
         adaptation_mode=adaptation_mode, retry_limit=_BEAT_SHEET_SEMANTIC_RETRY_LIMIT, quotes=dialogue_quotes,
     )
@@ -440,7 +452,7 @@ async def _generate_beat_sheet(
         },
         repair_context=storyboard_repair_context(task_payload),
         format_repair_context=storyboard_repair_context(task_payload),
-    )
+    ), soft_cap.last_projected_count
 
 
 #: 同 _AiSegmentPlan，挪到 storyboard_beat_sheet_schemas 打破与 repair 兄弟模块的循环 import。

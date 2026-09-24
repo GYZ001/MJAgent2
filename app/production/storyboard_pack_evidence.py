@@ -14,7 +14,8 @@ video_ops.source_coverage``/``confirmation_gate`` 只读 ``adaptation_mode``/
     {"adaptation_mode": "faithful|short_drama",
      "target_duration_s": int | None, "target_segment_count": int | None,
      "max_segment_count": int | None, "max_duration_s": int | None,
-     "planned_segment_count": int, "segment_count": int,
+     "planned_segment_count": int, "projected_segment_count": int | None,
+     "segment_count": int,
      "final_duration_s": int, "over_target": bool, "planned_over_cap": bool,
      "kept_dialogue_chars": int, "dialogue_budget_chars": int | None,
      "dropped_source_spans": [{"source_segment_index", "from_unit", "to_unit",
@@ -30,7 +31,11 @@ video_ops.source_coverage``/``confirmation_gate`` 只读 ``adaptation_mode``/
 有这五个字段，读取方一律 ``dict.get(...)`` 降级为 ``None``/``False``，不
 抛异常——``app.domain.video_ops.storyboard_adaptation.storyboard_adaptation_
 summary``（REST `/storyboard-adaptation`，供『本集删减』面板）是唯一转发
-这五个新字段给前端的读取点。
+这五个新字段给前端的读取点。同批（同一天）再加一个字段
+``projected_segment_count``——``SegmentCountSoftCap`` 最后一次校验时按容量
+归一化预测出的段数，读取方同样要 ``dict.get(...)`` 降级，本模块不单独处理，
+经 ``_adaptation_evidence_content`` 的 ``**raw`` 展开自动写入，不需要读者
+名单同步改动。
 
 忠实档也写这一条（``adaptation_mode="faithful"``、``dropped_source_spans``
 恒空）：门禁按"最高 version 那一条"判定当前留档，只在短剧档才写会让旧的

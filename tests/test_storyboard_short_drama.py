@@ -1,7 +1,11 @@
 """短剧节奏档（``adaptation_mode="short_drama"``）确定性核验：有效删减四类
-排除、台词强制入账、洞不被误填、key 节拍覆盖、段数软上限。忠实档在每一类
-都必须是无副作用的空操作——这是「删了什么必须显式声明、留档、可追溯，
-没声明的原文照旧零容忍必须被拍到」这句冻结契约的可执行版本。
+排除、台词强制入账、洞不被误填、key 节拍覆盖。忠实档在每一类都必须是无副
+作用的空操作——这是「删了什么必须显式声明、留档、可追溯，没声明的原文照旧
+零容忍必须被拍到」这句冻结契约的可执行版本。``SegmentCountSoftCap``（含
+容量归一化预计段数）另见 ``tests/test_storyboard_short_drama_segment_cap.
+py``；区间外弃置台词的 ``beat_id`` 核验另见 ``tests/test_storyboard_short_
+drama_beat_guard.py``——两块都是本文件同一批改造新增，拆出去是本文件自己
+的 500 行棘轮零余量，不是关注点不相关。
 """
 from __future__ import annotations
 
@@ -13,8 +17,6 @@ from app.production.storyboard_beat_sheet_repair import (
 )
 from app.production.storyboard_dialogue_ledger import DialogueQuote
 from app.production.storyboard_short_drama import (
-    MAX_SEGMENT_COUNT,
-    SegmentCountSoftCap,
     finalize_dropped_units,
     key_beat_coverage_errors,
     reconcile_dropped_units,
@@ -152,7 +154,7 @@ def test_reconcile_force_drops_quotes_with_traceable_reason_overriding_model_rea
     quotes = [DialogueQuote(quote_id="Q1", source_segment_index=1, text="句二。", content_chars=2)]
     draft = _draft(
         [plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 2, "reason": "语气词闲笔"}],
-        dropped_lines=[{"quote_id": "Q1", "reason": "模型自己的理由"}],
+        dropped_lines=[{"quote_id": "Q1", "reason": "模型自己的理由", "beat_id": "B1"}],
     )
     reconcile_dropped_units(draft, sources, quotes, set(), set(), adaptation_mode="short_drama")
     assert len(draft.dropped_lines) == 1
@@ -288,21 +290,29 @@ def test_validate_beat_sheet_draft_accepts_declared_gap_without_refilling_or_new
 
 
 def test_validate_beat_sheet_draft_allows_dropping_dialogue_outside_the_declared_span_in_short_drama():
-    """2026-09-24：短剧档放行「区间外、理由非空」的整句弃置——模型按台词预算
-    主动决定丢弃非关键台词（不落在作者点名必拍单元内）时，不再被
-    restore_undroppable_lines 强制放回 kept_lines，也不再被 undroppable_
-    quote_errors 打回。旧行为（区间外一律不许弃置）仅对忠实档与"落在必拍
-    单元内"两种情形保留，见下面两个测试。"""
+    """2026-09-24：短剧档放行「区间外、理由非空、beat_id 合法」的整句弃置——
+    模型按台词预算主动决定丢弃非关键台词（不落在作者点名必拍单元内）、且
+    标注的 beat_id 指向一个真实存在、覆盖这句台词原文段号的 optional 节拍
+    时，不再被 restore_undroppable_lines 强制放回 kept_lines，也不再被
+    restore_dropped_lines_with_invalid_beat（beat_id 核验，见
+    tests/test_storyboard_short_drama_beat_guard.py）放回。旧行为（区间外
+    一律不许弃置）仅对忠实档与"落在必拍单元内"两种情形保留，见下面两个测试。
+    """
     sources = _sources("句一。句二。句三。句四。")
     plan1 = _range_plan(1, 1, 1, 1, synopsis="开场", beat_ids=["B1"])
     plan2 = _range_plan(2, 1, 4, 4, synopsis="收尾", beat_ids=["B1"])
     quotes = [DialogueQuote(quote_id="Q1", source_segment_index=1, text="句四。", content_chars=6, speaker="老王")]
+    beat_sheet = [
+        _AiShortDramaBeat(beat_id="B1", summary="主线", segment_indexes=[1], importance="key"),
+        _AiShortDramaBeat(beat_id="B2", summary="寒暄", segment_indexes=[1], importance="optional"),
+    ]
     draft = _draft(
-        [plan1, plan2], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 3, "reason": "闲笔"}],
-        dropped_lines=[{"quote_id": "Q1", "reason": "与主线无关的寒暄，画面已能交代"}],
+        [plan1, plan2], beat_sheet=beat_sheet,
+        dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 3, "reason": "闲笔"}],
+        dropped_lines=[{"quote_id": "Q1", "reason": "与主线无关的寒暄，画面已能交代", "beat_id": "B2"}],
     )
     errors = _validate_beat_sheet_draft(draft, source_segments=sources, dialogue_quotes=quotes, adaptation_mode="short_drama")
-    assert errors == [], "区间外的整句台词按理由弃置，短剧档放行，不报错"
+    assert errors == [], "区间外整句台词按理由弃置、beat_id 指向合法 optional 节拍，短剧档放行，不报错"
     assert [d.quote_id for d in draft.dropped_lines] == ["Q1"], "不再被强制放回 kept_lines"
     assert draft.kept_lines == []
 
@@ -335,7 +345,7 @@ def test_validate_beat_sheet_draft_still_protects_required_beat_dialogue_from_ad
     # content_chars 必须 > DROPPABLE_MAX_CHARS（4）才算"整句台词"，短到像语气词
     # 的引用不受这条保护——用真实原文子串「远处传来警笛声」（7 字）。
     quotes = [DialogueQuote(quote_id="Q1", source_segment_index=1, text="远处传来警笛声", content_chars=7, speaker="老王")]
-    draft = _draft([plan], dropped_lines=[{"quote_id": "Q1", "reason": "模型觉得不重要"}])
+    draft = _draft([plan], dropped_lines=[{"quote_id": "Q1", "reason": "模型觉得不重要", "beat_id": "B1"}])
     errors = _validate_beat_sheet_draft(draft, source_segments=sources, dialogue_quotes=quotes, adaptation_mode="short_drama")
     assert errors == [], "被机械放回 kept_lines 后不再报错"
     assert [k.quote_id for k in draft.kept_lines] == ["Q1"]
@@ -374,7 +384,7 @@ def test_finalize_excludes_units_that_repair_ended_up_covering_and_rescues_its_q
             {"source_segment_index": 1, "from_unit": 2, "to_unit": 2, "reason": "闲笔A"},
             {"source_segment_index": 1, "from_unit": 3, "to_unit": 4, "reason": "闲笔B"},
         ],
-        dropped_lines=[{"quote_id": "Q1", "reason": "随原文区间删减：闲笔A"}],
+        dropped_lines=[{"quote_id": "Q1", "reason": "随原文区间删减：闲笔A", "beat_id": "B1"}],
     )
     final_units, key_errors = finalize_dropped_units(draft, dropped_units, sources, [quote])
     assert final_units == frozenset({(1, 3), (1, 4)})
@@ -393,7 +403,7 @@ def test_finalize_does_not_rescue_quotes_whose_unit_remains_dropped():
     quote = DialogueQuote(quote_id="Q1", source_segment_index=1, text="句二。", content_chars=6, speaker="老王")
     draft = _draft(
         [plan], dropped_source_spans=[{"source_segment_index": 1, "from_unit": 2, "to_unit": 2, "reason": "闲笔"}],
-        dropped_lines=[{"quote_id": "Q1", "reason": "随原文区间删减：闲笔"}],
+        dropped_lines=[{"quote_id": "Q1", "reason": "随原文区间删减：闲笔", "beat_id": "B1"}],
     )
     final_units, _ = finalize_dropped_units(draft, dropped_units, sources, [quote])
     assert final_units == frozenset({(1, 2)}), "单元 2 修补后依然没人覆盖，仍是有效删减"
@@ -443,36 +453,3 @@ def test_key_beat_coverage_errors_is_noop_for_faithful_mode():
         beat_sheet=[_AiShortDramaBeat(beat_id="B1", summary="x", segment_indexes=[1], importance="key")],
     )
     assert key_beat_coverage_errors(draft, adaptation_mode="faithful") == []
-
-
-# ---------------------------------------------------------------------------
-# SegmentCountSoftCap：前几次打回，最后一次降级为警告
-# ---------------------------------------------------------------------------
-
-class _FakeDraft:
-    def __init__(self, n: int) -> None:
-        self.segments = [object()] * n
-
-
-def test_soft_cap_blocks_first_attempts_then_warns_on_last():
-    cap = SegmentCountSoftCap(adaptation_mode="short_drama", retry_limit=2)
-    over = _FakeDraft(MAX_SEGMENT_COUNT + 2)
-    assert cap.errors(over) != [], "第 1 次（attempt 0）应打回"
-    assert cap.errors(over) != [], "第 2 次（attempt 1）应打回"
-    assert cap.errors(over) == [], "第 3 次（attempt 2 == retry_limit，最后一次）应降级为警告"
-
-
-def test_soft_cap_never_errors_when_within_target():
-    cap = SegmentCountSoftCap(adaptation_mode="short_drama", retry_limit=2)
-    within = _FakeDraft(MAX_SEGMENT_COUNT)
-    assert cap.errors(within) == []
-    assert cap.errors(within) == []
-    assert cap.errors(within) == []
-
-
-def test_soft_cap_is_noop_for_faithful_mode():
-    cap = SegmentCountSoftCap(adaptation_mode="faithful", retry_limit=2)
-    huge = _FakeDraft(999)
-    assert cap.errors(huge) == []
-    assert cap.errors(huge) == []
-    assert cap.errors(huge) == []

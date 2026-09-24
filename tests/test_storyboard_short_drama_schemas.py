@@ -20,11 +20,12 @@ import pytest
 
 from app.harness import model_gateway
 from app.production.storyboard_beat_sheet import _AiBeat, _AiBeatSheetDraft, _generate_beat_sheet
-from app.production.storyboard_dialogue_ledger import DialogueQuote
+from app.production.storyboard_dialogue_ledger import DialogueQuote, _AiDroppedLine
 from app.production.storyboard_short_drama_schemas import (
     _AiDroppedSourceSpan,
     _AiShortDramaBeat,
     _AiShortDramaBeatSheetDraft,
+    _AiShortDramaDroppedLine,
 )
 from app.source_excerpt import SourceSegment
 
@@ -104,6 +105,10 @@ def test_faithful_schema_has_no_short_drama_fields():
     assert "dropped_source_spans" not in schema_text
     assert set(_AiBeatSheetDraft.model_fields.keys()) == {"beat_sheet", "segments", "kept_lines", "dropped_lines"}
     assert set(_AiBeat.model_fields.keys()) == {"beat_id", "summary", "segment_indexes"}
+    # 2026-09-24：dropped_lines 的项类型仍是基类 _AiDroppedLine，没有 beat_id 字段
+    # （_AiBeat 本身自带的 beat_id 字段不算——这里直接比对项类型，不做子串匹配）。
+    assert _AiBeatSheetDraft.model_fields["dropped_lines"].annotation == list[_AiDroppedLine]
+    assert "beat_id" not in _AiDroppedLine.model_fields
 
 
 def test_short_drama_schema_requires_explicit_importance_and_has_dropped_spans():
@@ -114,6 +119,18 @@ def test_short_drama_schema_requires_explicit_importance_and_has_dropped_spans()
     with pytest.raises(Exception):
         _AiShortDramaBeat(beat_id="B1", summary="x", segment_indexes=[1])  # 缺 importance 必须拒绝
     assert schema  # schema 本身可正常生成，不抛异常
+
+
+def test_short_drama_dropped_line_requires_beat_id():
+    """2026-09-24：区间外个别弃置的台词必须标 beat_id（核验见 storyboard_short_
+    drama_beat_guard.restore_dropped_lines_with_invalid_beat）——schema 层面
+    先保证模型必须显式给出这个字段，不允许漏填。"""
+    schema = _AiShortDramaDroppedLine.model_json_schema()
+    assert "beat_id" in schema.get("required", [])
+    with pytest.raises(Exception):
+        _AiShortDramaDroppedLine(quote_id="Q1", reason="x")  # 缺 beat_id 必须拒绝
+    assert _AiShortDramaDroppedLine(quote_id="Q1", reason="x", beat_id="B1").beat_id == "B1"
+    assert _AiShortDramaBeatSheetDraft.model_fields["dropped_lines"].annotation == list[_AiShortDramaDroppedLine]
 
 
 def test_dropped_source_span_reason_is_required():

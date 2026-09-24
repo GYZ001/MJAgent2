@@ -40,6 +40,7 @@ from typing import Any
 
 from app.config import MAX_SPOKEN_CHARS_PER_SHOT, SHORT_DRAMA_TARGET_DURATION_S
 from app.production.storyboard_beat_sheet_schemas import SEGMENT_DURATION_S
+from app.production.storyboard_capacity_normalize import normalize_beat_sheet_capacity
 from app.production.storyboard_dialogue_ledger import _AiDroppedLine, _AiKeptLine
 from app.production.storyboard_short_drama_schemas import _AiDroppedSourceSpan
 from app.production.screenplay_markers import required_beat_spans
@@ -112,6 +113,12 @@ def short_drama_beat_sheet_rules() -> list[str]:
         "全部台词字数估算的下限；如果你计划把这个原文段的一部分整块写进 "
         "dropped_source_spans，被删部分的台词字数不需要计入这个原文段实际"
         "所需的段数。",
+        "dropped_lines 里按理由弃置的每一条台词（区间外的个别弃置，不是"
+        "dropped_source_spans 那种整段区间删除）都必须给出 beat_id，指向 "
+        "beat_sheet 里一个真实存在、importance=optional、且 segment_indexes "
+        "覆盖这句台词原文段号的节拍——三条任一不满足会被机械放回 kept_lines，"
+        "不打回重试；key 节拍推动主线情节、人物关系、关键设定或悬念钩子，它"
+        "覆盖的台词一律保留，不能靠 dropped_lines 绕过。",
         "上面「同一原文段号被多个段引用时必须合并覆盖全部句单元、不能留洞」"
         "这条规则，对你在 dropped_source_spans 里整块声明删除的原文区间不"
         "适用：这部分单元本就不需要出现在任何段的 source_unit_ranges 里，"
@@ -372,7 +379,7 @@ def dropped_line_quote_ids(draft: Any) -> list[str]:
 def adaptation_summary(
     *, adaptation_mode: str, planned_segment_count: int, segment_count: int,
     dropped_spans: list[_AiDroppedSourceSpan], dropped_quote_ids: list[str],
-    kept_dialogue_chars: int,
+    kept_dialogue_chars: int, projected_segment_count: int | None,
 ) -> dict[str, Any]:
     """``generate_storyboard_pack`` 用它拼出 ``StoryboardPack.adaptation``
     （章节偏移/原文摘录留给持久化阶段的 ``storyboard_pack_evidence``——那里
@@ -386,6 +393,13 @@ def adaptation_summary(
     ``len(pack_segments)`` 本就已经是这个值）判定；旧语义（"模型规划在最后
     一次语义重试仍超上限"）不丢，改名 ``planned_over_cap`` 继续留档，供事后
     区分"模型没规划够"与"规划够了但台词太多被归一化拆段撑大"两类根因。
+
+    ``projected_segment_count``（2026-09-24 新增）：调用方传入 ``_generate_
+    beat_sheet`` 返回的 ``SegmentCountSoftCap.last_projected_count``——最后
+    一次校验时、按生产同源容量归一化预测出的段数（见该类文档）。与
+    ``segment_count``（真正落库的最终段数）通常接近但不保证相等：两者之间
+    还有 ``_strip_paratext_from_beat_draft`` 这一道不经过 ``validate()`` 循环
+    的防御性兜底，会在真正归一化之前再改一次台词分布。忠实档恒 ``None``。
     """
     is_short_drama = adaptation_mode == "short_drama"
     return {
@@ -395,6 +409,7 @@ def adaptation_summary(
         "max_segment_count": MAX_SEGMENT_COUNT if is_short_drama else None,
         "max_duration_s": MAX_SEGMENT_COUNT * SEGMENT_DURATION_S if is_short_drama else None,
         "planned_segment_count": planned_segment_count,
+        "projected_segment_count": projected_segment_count if is_short_drama else None,
         "segment_count": segment_count,
         "final_duration_s": segment_count * SEGMENT_DURATION_S,
         "over_target": bool(is_short_drama and segment_count > MAX_SEGMENT_COUNT),
@@ -406,32 +421,65 @@ def adaptation_summary(
     }
 
 
+def _projected_segment_count(draft: Any, quotes: list[Any], source_segments: list[Any]) -> int:
+    """深拷贝草稿后跑一遍与生产同源的确定性容量归一化（复用 ``storyboard_
+    capacity_normalize.normalize_beat_sheet_capacity`` 这个真源函数，不另起
+    一套口径），只取拆分后的段数——不落回传入的 draft，调用方在同一次
+    ``validate()`` 里多次调用互不干扰，也不影响真正落库的归一化。
+
+    背景（2026-09-24 真实三集验证）：模型自己声明的段数达标（如 6 段）不等于
+    按 15 秒口播容量拆分后的真实段数也达标——台词在几段里分布不匀，单段一旦
+    超过 ``MAX_SPOKEN_CHARS_PER_SHOT``（54 字）就会被拆成更多段，实测撑到
+    11-13 段。``SegmentCountSoftCap`` 用这个函数的返回值判定，模型不能再靠
+    "自己声明的段数达标"蒙混过关。
+    """
+    projected = draft.model_copy(deep=True)
+    normalize_beat_sheet_capacity(projected, quotes, source_segments=source_segments)
+    return len(projected.segments)
+
+
 class SegmentCountSoftCap:
-    """段数软上限：模型节拍表段数超过 ``MAX_SEGMENT_COUNT`` 时前几次调用当
-    业务错误打回模型语义重试，最后一次（``chat_structured`` 语义重试预算
-    耗尽前的最后一次 ``validate`` 调用）降级为警告而不是继续打回——本仓至少
-    4 次真实事故都是"语义重试耗尽整集失败"，段数这种模型历来不精确的维度
-    不该是压垮整集的最后一根稻草。``retry_limit`` 必须是调用方传给
-    ``chat_structured`` 的同一个 ``semantic_retry_limit`` 值（不重复写字面量，
-    见 ``storyboard_beat_sheet._BEAT_SHEET_SEMANTIC_RETRY_LIMIT``）。忠实档
-    （``adaptation_mode != "short_drama"``）永远不产生任何错误。
+    """段数软上限：按**容量归一化后的预计段数**（``_projected_segment_
+    count``，2026-09-24 起，不再是模型自己声明的 ``len(draft.segments)``）
+    超过 ``MAX_SEGMENT_COUNT`` 时前几次调用当业务错误打回模型语义重试，最后
+    一次（``chat_structured`` 语义重试预算耗尽前的最后一次 ``validate`` 调用）
+    降级为警告而不是继续打回——本仓至少 4 次真实事故都是"语义重试耗尽整集
+    失败"，段数这种模型历来不精确的维度不该是压垮整集的最后一根稻草。
+    ``retry_limit`` 必须是调用方传给 ``chat_structured`` 的同一个
+    ``semantic_retry_limit`` 值（不重复写字面量，见 ``storyboard_beat_sheet.
+    _BEAT_SHEET_SEMANTIC_RETRY_LIMIT``）。忠实档（``adaptation_mode !=
+    "short_drama"``）永远不产生任何错误、永远不计算预计段数。
     """
 
-    def __init__(self, *, adaptation_mode: str, retry_limit: int) -> None:
+    def __init__(
+        self, *, adaptation_mode: str, retry_limit: int, quotes: list[Any], source_segments: list[Any],
+    ) -> None:
         self._active = adaptation_mode == "short_drama"
         self._retry_limit = retry_limit
         self._attempt = 0
+        self._quotes = quotes
+        self._source_segments = source_segments
+        #: adaptation_summary 的 projected_segment_count 留档字段直接读这个
+        #: 属性（最后一次 errors() 调用算出的值）；忠实档恒 None——_active=
+        #: False 时 errors() 提前返回，从不写它。
+        self.last_projected_count: int | None = None
 
     def errors(self, draft: Any) -> list[str]:
         if not self._active:
             return []
-        segment_count = len(draft.segments)
+        projected = _projected_segment_count(draft, self._quotes, self._source_segments)
+        self.last_projected_count = projected
         is_last_attempt = self._attempt >= self._retry_limit
         self._attempt += 1
-        if segment_count <= MAX_SEGMENT_COUNT or is_last_attempt:
+        if projected <= MAX_SEGMENT_COUNT or is_last_attempt:
             return []
+        cut_hint = (projected - MAX_SEGMENT_COUNT) * MAX_SPOKEN_CHARS_PER_SHOT
         return [
-            f"节拍表分了 {segment_count} 段，超过短剧节奏档软上限 {MAX_SEGMENT_COUNT} "
-            f"段（目标约 {TARGET_SEGMENT_COUNT} 段）：请合并信息量不足以单独成段的"
-            "相邻节拍，或把更多 optional 节拍对应的原文整块写进 dropped_source_spans"
+            f"节拍表分了 {len(draft.segments)} 段，按 15 秒口播容量拆分后预计需要 "
+            f"{projected} 段（约 {projected * SEGMENT_DURATION_S} 秒），超过短剧节奏档"
+            f"软上限 {MAX_SEGMENT_COUNT} 段（约 {MAX_SEGMENT_COUNT * SEGMENT_DURATION_S} "
+            f"秒）：请从 importance=optional 节拍覆盖的原文里再弃置约 {cut_hint} 字台词"
+            "（写进 dropped_lines 并标注 beat_id），或合并信息量不足以单独成段的相邻"
+            "节拍——只减少你自己声明的段数不会生效，容量拆分后的段数才是这条软上限"
+            "真正判定的数字"
         ]
