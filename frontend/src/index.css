@@ -10305,6 +10305,153 @@ a.segres-thumb-empty {
     grid-template-columns: 1fr;
   }
 }
+/* 人物旁边放播放按钮时（voice-chip/voice-play-btn，见下方声明），名字要跟按钮
+   同一行——.segres-name 自己的单行省略号规则不改，只是外面多套一层横向容器。 */
+.segres-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.segres-name-row .segres-name {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* ---------------------------------------------------------------------------
+   角色固定音色（U4，2026-09-23，方案 5.4 节）：声音预览统一放这里而不是任一页的
+   styles/*.css——components/voice/ 下的组件被 BiblePage（人物卡/「角色设定与
+   生成参数」弹窗）、ScriptPage（映射台人物谱，只读）、SegmentResourcePanel
+   （BoardPage 分镜台 + WallPage 生成台共用）三处以上挂载，任何一处的页面样式表
+   都会被 scripts/check_css_split.py 判成跨页选择器（同 .segres-* 的先例）。
+   颜色全部走 --token，不引入新的硬编码色值，不需要另外补 :root[data-theme="dark"]
+   覆盖（scripts/check_dark_theme.py 只抓 hex/rgba 字面量）。
+   --------------------------------------------------------------------------- */
+.voice-play-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: var(--card);
+  color: var(--ink-soft);
+  cursor: pointer;
+  font: 600 11px var(--ui);
+  line-height: 1.4;
+}
+.voice-play-btn:disabled {
+  color: var(--ink-faint);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.voice-play-btn.playing {
+  border-color: var(--cinnabar);
+  color: var(--cinnabar-deep);
+}
+.voice-play-btn-thumb {
+  flex-direction: column;
+  width: 72px;
+  height: 72px;
+  border-radius: 8px;
+  border-style: dashed;
+}
+.voice-play-icon {
+  font-size: 11px;
+}
+.voice-play-btn-thumb .voice-play-icon {
+  font-size: 18px;
+}
+.voice-play-duration {
+  color: var(--ink-faint);
+  font: 400 10px var(--ui);
+}
+
+.voice-chip {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+}
+.voice-chip-text {
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  background: none;
+  padding: 0;
+  margin-left: 6px;
+  color: var(--ink-faint);
+  font: 600 11px var(--ui);
+  text-decoration: none;
+  cursor: default;
+}
+a.voice-chip-text {
+  cursor: pointer;
+  text-decoration: underline;
+}
+.voice-chip-generating {
+  color: var(--gold);
+}
+.voice-chip-failed {
+  color: var(--cinnabar-deep);
+}
+
+.voice-panel {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--hairline);
+}
+.voice-panel-textarea {
+  width: 100%;
+  resize: vertical;
+  padding: 6px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink);
+  font: 400 12.5px/1.5 var(--ui);
+}
+.voice-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+.voice-candidate-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+.voice-candidate-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+.voice-error {
+  margin: 4px 0;
+  color: var(--cinnabar-deep);
+  font: 400 12px/1.5 var(--ui);
+}
+.voice-config-banner {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--paper-deep);
+  color: var(--ink-soft);
+  font: 400 12px/1.6 var(--ui);
+}
+.voice-roster-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
 
 /* EP-01 第二阶段：项目设置里的「协作者」区块（ProjectCollaboratorsPanel）。 */
 .project-collaborators-toggle {

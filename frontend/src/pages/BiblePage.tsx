@@ -27,6 +27,7 @@ import WorldbuildingStatus from '../components/WorldbuildingStatus'
 import CharacterLibraryEmptyState from '../components/bible/CharacterLibraryEmptyState'
 import ManualCharacterDialog from '../components/bible/ManualCharacterDialog'
 import ReplaceCharacterPortraitControl from '../components/bible/ReplaceCharacterPortraitControl'
+import VoiceChip from '../components/voice/VoiceChip'; import CharacterVoicePanel from '../components/voice/CharacterVoicePanel'; import VoiceRosterActions from '../components/voice/VoiceRosterActions'
 import "../styles/BiblePage.css";
 
 const REQUIRED_CHARACTER_VIEWS = ['front_full', 'three_quarter', 'profile'] as const
@@ -1021,6 +1022,7 @@ export default function BiblePage() {
             />
             <span className="library-result-count" role="status">共 {bible.characters.length} 个角色{hasCharacterCriteria ? ` · 当前显示 ${filteredChars.length}` : ''}</span>
             <ManualCharacterDialog projectId={p.id} onAdded={refresh} />
+            <VoiceRosterActions projectId={p.id} />
           </div>
           <div ref={characterGridRef} className="figure-grid">
             {pagedChars.map(({ c, i }: { c: Character; i: number }) => {
@@ -1041,6 +1043,7 @@ export default function BiblePage() {
               <article key={c.name} className="figure character-card">
                 <div className="f-name">{c.name} <span className="f-role">{c.role}</span>
                   <span className={`stamp ${stamp.color}`}>{stamp.label}</span>{characterPortraitStatusDetail(c) && <span className="portrait-status-detail hint" role="status">　{characterPortraitStatusDetail(c)}</span>}
+                  <VoiceChip projectId={p.id} characterName={c.name} />
                 </div>
                 {(c.ref_image_url || hasPortraitImage) && (
                   <CharacterPortraitGallery
@@ -1245,6 +1248,7 @@ export default function BiblePage() {
               ? paramsCharacter.relationships.map(r => `${r.relation}→${r.to}`).join('；')
               : '未设置'}</p></div>
           </div>
+          <CharacterVoicePanel key={paramsCharacter.name} projectId={p.id} characterName={paramsCharacter.name} />
           <ReplaceCharacterPortraitControl
             projectId={p.id} characterName={paramsCharacter.name} onChanged={refresh}
           />

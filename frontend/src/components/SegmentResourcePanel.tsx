@@ -5,11 +5,14 @@ import type {
   StoryboardPackResourceScene,
   StoryboardPackResources,
 } from '../api'
+import type { ProjectVoices } from '../api/voices'
 import { characterPortraitDisplay, type ImageGenTaskLike } from '../lib/bibleAssets'
 import { needsCharacterImage } from '../lib/segmentIdentity'
 import ImageCompareModal from './ImageCompareModal'
 import PortraitPlaceholder from './PortraitPlaceholder'
 import SceneReferencePlaceholder from './SceneReferencePlaceholder'
+import VoicePlayButton from './voice/VoicePlayButton'
+import { findCurrentVoiceByIdentity, useProjectVoices } from './voice/useProjectVoices'
 
 /**
  * 段落资源清单的展示名：优先用后端按本集映射包现算的 display_name；没有就从内部
@@ -56,7 +59,7 @@ type OnPreview = (label: string, src: string) => void
  */
 export default function SegmentResourcePanel({ resources, project }: {
   resources: StoryboardPackResources
-  project: ImageGenTaskLike | null | undefined
+  project: (ImageGenTaskLike & { id?: string }) | null | undefined
 }) {
   const [preview, setPreview] = useState<Preview | null>(null)
   const onPreview: OnPreview = (label, src) => setPreview({ title: label, images: [{ src, label }] })
@@ -64,6 +67,9 @@ export default function SegmentResourcePanel({ resources, project }: {
   const scenes = resources.scenes ?? []
   const props = resources.props ?? []
   const empty = !characters.length && !scenes.length && !props.length
+  // 角色固定音色（U4）：按 identity_id 查当前声音，多个 SegmentResourcePanel 实例
+  // 共用同一份 /voices 请求（useProjectVoices.ts 模块级缓存，见其文档字符串）。
+  const { data: voices } = useProjectVoices(project?.id)
 
   return (
     <section className="segres-panel" aria-label="本段涉及素材">
@@ -75,7 +81,7 @@ export default function SegmentResourcePanel({ resources, project }: {
         ? <p className="segres-empty-hint">暂无数据</p>
         : (
           <div className="segres-groups">
-            <CharacterGroup characters={characters} project={project} onPreview={onPreview} />
+            <CharacterGroup characters={characters} project={project} voices={voices} onPreview={onPreview} />
             <SceneGroup scenes={scenes} project={project} onPreview={onPreview} />
             <PropGroup props={props} onPreview={onPreview} />
           </div>
@@ -85,9 +91,10 @@ export default function SegmentResourcePanel({ resources, project }: {
   )
 }
 
-function CharacterGroup({ characters, project, onPreview }: {
+function CharacterGroup({ characters, project, voices, onPreview }: {
   characters: StoryboardPackResourceCharacter[]
   project: ImageGenTaskLike | null | undefined
+  voices: ProjectVoices | null
   onPreview: OnPreview
 }) {
   return (
@@ -98,6 +105,8 @@ function CharacterGroup({ characters, project, onPreview }: {
           const requiresImage = needsCharacterImage(character)
           const { imageUrl, updated } = requiresImage ? characterPortraitDisplay(character) : { imageUrl: null, updated: false }
           const label = resourceLabel(character.display_name, character.identity_id, '未具名群演')
+          const voiceOnly = character.visibility === 'voice_only'
+          const voice = findCurrentVoiceByIdentity(voices, character.identity_id)
           return (
             <div className="segres-item" key={`c-${index}`}>
               {imageUrl
@@ -108,9 +117,14 @@ function CharacterGroup({ characters, project, onPreview }: {
                   </button>
                 )
                 : requiresImage ? <PortraitPlaceholder identityId={character.identity_id} project={project} className="segres-thumb-empty" />
-                  : <div className="segres-thumb-empty">{character.visibility === 'voice_only' ? '仅声音' : '独立群演'}</div>}
+                  : voiceOnly && voice
+                    ? <VoicePlayButton voice={voice} label={`${label}的声音`} size="thumb" />
+                    : <div className="segres-thumb-empty">{voiceOnly ? '仅声音' : '独立群演'}</div>}
               <div className="segres-body">
-                <span className="segres-name" title={character.identity_id}>{label}</span>
+                <span className="segres-name-row">
+                  <span className="segres-name" title={character.identity_id}>{label}</span>
+                  {!voiceOnly && voice && <VoicePlayButton voice={voice} label={`${label}的声音`} size="inline" />}
+                </span>
                 <span className="segres-desc">{character.description || (imageUrl ? '' : '暂无文字描述')}</span>
               </div>
             </div>

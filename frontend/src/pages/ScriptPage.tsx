@@ -19,10 +19,11 @@ import StaleRefreshBanner from '../components/StaleRefreshBanner'
 import PrepPackPreviewDialog from '../components/script/PrepPackPreviewDialog'
 import PrepPackDiscoverySummary from '../components/script/PrepPackDiscoverySummary'
 import PortraitPlaceholder from '../components/PortraitPlaceholder'; import SceneReferencePlaceholder from '../components/SceneReferencePlaceholder'
+import VoiceChip from '../components/voice/VoiceChip'
 import { useDeleteConfirm } from '../hooks/useDeleteConfirm'; import { useRefsSettledRefresh } from '../hooks/useRefsSettledRefresh'
 import { screenplayTaskNotice } from '../lib/productionNotices'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
-import { characterPortraitDisplay, refsBusyPollInterval, type RefsTaskLike } from '../lib/bibleAssets'
+import { characterNameFromIdentity, characterPortraitDisplay, refsBusyPollInterval, type RefsTaskLike } from '../lib/bibleAssets'
 import StageTextModelPicker from '../components/StageTextModelPicker'
 import "../styles/ScriptPage.css";
 
@@ -630,8 +631,9 @@ export function PrepPackView({
 }: {
   pack: EpisodePrepPack
   sourceFallback: string
-  /** 测试大量直接构造本组件不关心 refs 任务态，未传时占位落到 pending，不是静默错误。 */
-  project?: { refs_status?: string; refs_target?: string | null; scene_refs_status?: string; scene_refs_target?: string | null } | null
+  /** 测试大量直接构造本组件不关心 refs 任务态，未传时占位落到 pending，不是静默错误；
+   *  id 是 U4 新增可选字段（VoiceChip 用），同 PortraitPlaceholder.tsx 的先例。 */
+  project?: { id?: string; refs_status?: string; refs_target?: string | null; scene_refs_status?: string; scene_refs_target?: string | null } | null
 }) {
   const gate = useMemo(() => coverageGateSummary(pack.coverage_ledger), [pack.coverage_ledger])
   const legacy = isLegacyPrepPackFormat(pack)
@@ -788,6 +790,7 @@ export function PrepPackView({
                       {coverageText}
                     </span>
                   </div>
+                  <VoiceChip projectId={project?.id} characterName={characterNameFromIdentity(character.identity_id)} readOnly />
                 </div>
               )
             })}
