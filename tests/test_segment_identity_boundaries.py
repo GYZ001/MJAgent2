@@ -29,11 +29,20 @@ def test_normalization_must_not_hide_an_extra_borrowing_a_known_identity():
     assert any("独立群演" in e for e in generation_errors(value,payload))
 
 
-@pytest.mark.parametrize("mention",["@孟浩同门", "@未登记人物", "@bible:孟浩"])
-def test_unknown_and_prefix_image_references_are_rejected(mention):
+@pytest.mark.parametrize("mention",["@未登记人物", "@bible:孟浩"])
+def test_unknown_image_references_are_rejected(mention):
     value,payload = draft_and_payload()
     value["prompt_text"] = value["prompt_text"].replace("@孟浩",mention)
     assert any("图片引用" in e for e in generation_errors(value,payload))
+
+
+def test_legal_name_glued_to_trailing_text_is_repaired_not_rejected():
+    """@孟浩同门 曾按「未登记引用」拒绝；storyboard_reference_tag_repair 上线后
+    「孟浩」是合法名的最长前缀，生成路径会按空格拆开再校验，不再报错——这是
+    真实故障（我欲封天 EP3 @孟浩肩后看向对面的）的最小复现。"""
+    value,payload = draft_and_payload()
+    value["prompt_text"] = value["prompt_text"].replace("@孟浩","@孟浩同门")
+    assert generation_errors(value,payload) == []
 
 
 def test_prompt_capacity_is_checked_after_utterance_expansion(monkeypatch):

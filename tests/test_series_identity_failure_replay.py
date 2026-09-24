@@ -85,12 +85,15 @@ def test_hidden_registered_characters_are_available_to_generation_and_repair():
             character['identity_id'] = 'bible:' + character['display_name']
             character['subject_kind'] = 'character'
     draft = _AiStoryboardSegmentDraft.model_validate(raw)
+    # 原始素材里 @上官修身着金色绣纹道袍 与镜头描述连写（真实故障，2026-09-24
+    # 我欲封天 EP3 同类问题的历史前身）；storyboard_reference_tag_repair 上线后，
+    # generated_identity_errors 会在校验前按最长合法名前缀自动补空格，不再需要
+    # 手工模拟模型重试改写。
+    assert '@上官修身着' in draft.prompt_text
     errors = generated_identity_errors(draft, payload=payload, source_indexes=context['source_segment_indexes'],
                                        required_dialogue=context['required_dialogue'], dialect='seedance')
-    assert errors and all('图片引用' in error for error in errors)
-    draft.prompt_text = draft.prompt_text.replace('@上官修身着', '@上官修 身着')
-    assert generated_identity_errors(draft, payload=payload, source_indexes=context['source_segment_indexes'],
-                                     required_dialogue=context['required_dialogue'], dialect='seedance') == []
+    assert errors == []
+    assert '@上官修 身着' in draft.prompt_text
     # 真正的独立群演依然不能借同名正式角色卡。
     raw['resources']['characters'][1].update(identity_id='bible:许师姐', portrait_id='portrait_x')
     assert identity_contract_errors(raw, require_explicit=True)

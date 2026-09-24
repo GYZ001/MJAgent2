@@ -1,4 +1,6 @@
 """身份合同在分镜模型调用边界的装配与验证，不参与数据库写入。"""
+import logging
+
 from app.production.storyboard_identity_contract import (
     canonical_segment_identities, identity_contract_errors, registered_subject_errors, stamp_identity_contract,
 )
@@ -6,6 +8,9 @@ from app.production.storyboard_speech_render import (
     attach_quote_provenance, render_segment_speech, speech_template_errors,
 )
 from app.production.storyboard_identity_validation import final_identity_prompt_errors, quote_provenance_errors
+from app.production.storyboard_reference_tag_repair import repair_segment_reference_tags
+
+log = logging.getLogger(__name__)
 
 IDENTITY_GENERATION_RULES = [
     "每个出场或发声主体单独列入 resources.characters；visibility=visible 表示实际出镜，voice_only 表示本段仅有声音。内心独白的人也可能可见，按实际画面填写。旁白只有声音，不列入人物资源。",
@@ -22,6 +27,17 @@ def generated_identity_errors(draft, *, payload: dict, source_indexes: list[int]
     segment = draft.model_dump(mode="json")
     segment.update(source_segment_indexes=source_indexes, required_dialogue=required_dialogue)
     normalized = canonical_segment_identities(segment, payload)
+    # 模型产出进入校验之前的确定性修补（模型提名、代码核验）：@X 连写紧随镜头描述时
+    # 按最长合法名前缀补一个空格。draft 是 model_gateway.chat_structured 校验通过后
+    # 原样返回、再传给 finalize_generated_identity 的同一个对象，这里就地写回
+    # draft.prompt_text 能让后续 finalize 重新 model_dump 时也拿到修补后的文本，
+    # 不产生「校验用修补后的副本、落盘用未修补的原文」的半次修补。
+    fixed = repair_segment_reference_tags(normalized)
+    if fixed:
+        draft.prompt_text = normalized["prompt_text"]
+        if normalized.get("speech_template"):
+            draft.speech_template = normalized["speech_template"]
+        log.info("[STORYBOARD_REFERENCE_TAG_REPAIR] @ 引用与紧随文字之间已补空格：%s", "、".join(fixed))
     errors = [*identity_contract_errors(segment), *identity_contract_errors(normalized, require_explicit=True),
               *registered_subject_errors(normalized, payload),
               *speech_template_errors(normalized, require_tokens=True), *quote_provenance_errors(normalized)]

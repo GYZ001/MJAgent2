@@ -49,14 +49,25 @@ def quote_provenance_errors(segment: dict) -> list[str]:
     return errors
 
 
-def final_identity_prompt_errors(segment: dict) -> list[str]:
-    """只约束新合同：明确引用可见主体；检验展开后的供应商输入长度。"""
-    prompt = str(segment.get("prompt_text") or "")
+def visible_reference_names(segment: dict) -> set[str]:
+    """@ 引用允许指向的合法名：本段可见角色 + 全部场景的展示名。
+
+    与 ``final_identity_prompt_errors`` 用同一份名单——抽出来是为了
+    ``storyboard_reference_tag_repair`` 能在校验之前复用同一份合法名，
+    不另造一份可能与校验漂移的清单。
+    """
     resources = segment.get("resources") or {}
     names = {str(c.get("display_name") or str(c.get("identity_id") or "").split(":", 1)[-1])
              for c in resources.get("characters") or []
              if c.get("visibility") == "visible" and c.get("subject_kind") == "character"}
     names.update(str(s.get("display_name") or str(s.get("scene_id") or "").split(":", 1)[-1]) for s in resources.get("scenes") or [])
+    return names
+
+
+def final_identity_prompt_errors(segment: dict) -> list[str]:
+    """只约束新合同：明确引用可见主体；检验展开后的供应商输入长度。"""
+    prompt = str(segment.get("prompt_text") or "")
+    names = visible_reference_names(segment)
     unknown = sorted(set(re.findall(r"@([\w:-]+)", prompt)) - names)
     errors = [f"图片引用 @{name} 没有对应的可见角色或场景；请使用完整名称并用空格或标点分隔，群演使用独立描述" for name in unknown]
     if not prompt.strip():
