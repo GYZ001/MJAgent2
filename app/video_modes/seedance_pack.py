@@ -203,18 +203,18 @@ def append_reference_prompt_notes_from_dicts(
     prompt_text: str,
     packed_refs: list[dict[str, Any]],
     *,
-    duration_s: float | int | None = None,
+    duration_s: float | int | None = None, aspect_ratio: str,
 ) -> str:
     """Bind each provider image to a stable ``@图片N`` Seedance subject label
     and append a Chinese purpose note after the prompt body (2026-09-03 起，
     对齐 Seedance 2.0 官方指南：用编号引用图片、说明语言与正文一致）。
 
-    实现搬到 ``app.video_modes.seedance_reference_notes``（该模块的拆分背景
-    与 duration_s 语义见那边的模块 docstring 与函数 docstring；本文件已在
+    实现搬到 ``app.video_modes.seedance_reference_notes``（该模块的拆分背景、
+    duration_s 与新增 aspect_ratio 语义见那边的 docstring；本文件已在
     line_count 棘轮基线里、零余量，新逻辑不能再往这加）。
     """
     return build_seedance_reference_prompt_notes(
-        prompt_text, packed_refs, duration_s=duration_s,
+        prompt_text, packed_refs, duration_s=duration_s, aspect_ratio=aspect_ratio,
     )
 
 
@@ -223,7 +223,7 @@ def append_reference_prompt_notes(
     assets: list[ReferenceImageAsset],
     *,
     required_identity_names: list[str] | None = None,
-    duration_s: float | int | None = None,
+    duration_s: float | int | None = None, aspect_ratio: str,
 ) -> str:
     # Notes and provider inputs must use the exact same packed order.
     packed_refs = pack_reference_images_for_seedance(
@@ -231,7 +231,7 @@ def append_reference_prompt_notes(
         required_identity_names=required_identity_names,
     )
     return append_reference_prompt_notes_from_dicts(
-        prompt_text, packed_refs, duration_s=duration_s,
+        prompt_text, packed_refs, duration_s=duration_s, aspect_ratio=aspect_ratio,
     )
 
 

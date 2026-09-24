@@ -84,7 +84,7 @@ def test_workspace_episode_views_do_not_expand_historical_inputs(monkeypatch) ->
     assert wall["shots"][0]["video_status"] == "adopted"
     assert all(not v["image_inputs"]["reference_images"] for v in wall["shots"][0]["versions"])
     assert not any("SELECT * FROM shot_versions" in sql for sql in statements)
-    assert not any("json_extract" in sql.lower() for sql in statements)
+    assert "embedded" not in json.dumps([v["image_inputs"] for v in wall["shots"][0]["versions"]])  # 有界 json_extract 只取 aspect_ratio，大字段仍不展开
 
 
 def test_shot_contract_is_scoped_to_script_and_board(

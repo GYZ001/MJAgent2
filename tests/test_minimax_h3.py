@@ -231,6 +231,7 @@ def test_h3_reference_binding_stays_inside_subject_definitions() -> None:
             "entity_name": "A",
             "relatedCharacterIds": ["A"],
         }],
+        aspect_ratio="9:16",
     )
     provider_prompt = minimax_h3._tagged_prompt(bound, image_count=1)
 
@@ -266,6 +267,7 @@ def test_seedance_binding_contract_round_trips_into_h3_picture_tags() -> None:
     seedance_prompt = video_modes.append_reference_prompt_notes_from_dicts(
         common_prompt,
         refs,
+        aspect_ratio="9:16",
     )
 
     h3_prompt = minimax_h3._tagged_prompt(

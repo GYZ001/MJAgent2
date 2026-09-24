@@ -329,7 +329,7 @@ def test_source_excerpt_failure_gets_bounded_retry_if_scrubber_cannot_repair(
     monkeypatch.setattr(
         compiler, "compile_prompt", lambda shot, *_a, **_k: f"画面动作：{shot.action_desc}"
     )
-    patch_worker_everywhere(monkeypatch, "ensure_source_excerpt_in_prompt", lambda prompt, _shot: prompt
+    patch_worker_everywhere(monkeypatch, "ensure_source_excerpt_in_prompt", lambda prompt, _shot, **_kw: prompt
     )
     monkeypatch.setattr(config, "VIDEO_PREFLIGHT_RETRY_BASE_DELAY", 1.0)
 

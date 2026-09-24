@@ -439,7 +439,7 @@ def test_reference_prompt_numbering_uses_exact_packed_order(monkeypatch) -> None
         ),
     ]
 
-    note = video_modes.append_reference_prompt_notes("PROMPT", assets)
+    note = video_modes.append_reference_prompt_notes("PROMPT", assets, aspect_ratio="9:16")
     packed = video_modes.pack_reference_images_for_seedance([asset.public_dict() for asset in assets])
 
     assert [ref["id"] for ref in packed] == ["early", "late", "scene", "character"]
@@ -465,7 +465,7 @@ def test_reference_prompt_notes_preserve_trailing_technical_suffix() -> None:
         "relatedCharacterIds": ["A"],
     }]
 
-    result = video_modes.append_reference_prompt_notes_from_dicts(prompt, refs)
+    result = video_modes.append_reference_prompt_notes_from_dicts(prompt, refs, aspect_ratio="9:16")
 
     assert result.endswith("--ratio 9:16 --dur 5")
     assert result.index("图片1") < result.rindex("--ratio 9:16 --dur 5")

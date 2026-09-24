@@ -32,11 +32,12 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
                       CASE WHEN status='rejected_static_fallback'
                            THEN 1 ELSE 0 END AS delivery_fallback,
                       CASE WHEN length(image_inputs) <= ? THEN image_inputs END AS image_inputs,
-                      CASE WHEN length(image_inputs) > ? THEN 1 ELSE 0 END AS image_inputs_omitted
+                      CASE WHEN length(image_inputs) > ? THEN 1 ELSE 0 END AS image_inputs_omitted,
+                      CASE WHEN length(image_inputs) <= ? AND json_valid(image_inputs) THEN json_extract(image_inputs,'$.aspect_ratio') END AS aspect_ratio_snapshot
                FROM shot_versions
                WHERE shot_id=? AND status!='cleared'
                ORDER BY version_no DESC""",
-            (_MAX_PUBLIC_IMAGE_INPUT_CHARS, _MAX_PUBLIC_IMAGE_INPUT_CHARS, shot_id),
+            (_MAX_PUBLIC_IMAGE_INPUT_CHARS, _MAX_PUBLIC_IMAGE_INPUT_CHARS, _MAX_PUBLIC_IMAGE_INPUT_CHARS, shot_id),
         ).fetchall()
     else:
         rows = conn.execute(
@@ -51,16 +52,14 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
                         ORDER BY job.attempt_started_at DESC LIMIT 1) AS running_since,
                       CASE WHEN status='rejected_static_fallback'
                            THEN 1 ELSE 0 END AS delivery_fallback,
-                      NULL AS image_inputs
+                      NULL AS image_inputs,
+                      CASE WHEN length(image_inputs) <= ? AND json_valid(image_inputs) THEN json_extract(image_inputs,'$.aspect_ratio') END AS aspect_ratio_snapshot
                FROM shot_versions
                WHERE shot_id=? AND status!='cleared'
                ORDER BY version_no DESC""",
-            (shot_id,),
+            (_MAX_PUBLIC_IMAGE_INPUT_CHARS, shot_id),
         ).fetchall()
-    versions = [
-        version for version in rows_to_dicts(rows)
-        if not bool(version.pop("delivery_fallback", 0))
-    ]
+    versions = [version for version in rows_to_dicts(rows) if not bool(version.pop("delivery_fallback", 0))]
     reference_lineage: dict[str, list[str]] = {}
     if include_inputs:
         for version in versions:
@@ -73,6 +72,10 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
         version["qa"] = json.loads(version["qa_json"]) if version["qa_json"] else None
         version.pop("qa_json", None)
         meta = json.loads(version.get("image_inputs") or "{}") if include_inputs else {}
+        # aspect_ratio 独立于 include_inputs/超长省略取值：轻量查询与被截断的
+        # image_inputs 都不含完整 meta，只有 SQL 侧单独 json_extract 的这一列
+        # 能保证任何情况下都读到真实快照，不会把全部版本误标成 "9:16"。
+        version["aspect_ratio"] = str(version.pop("aspect_ratio_snapshot", None) or "9:16")
         inputs_omitted = bool(version.pop("image_inputs_omitted", 0))
         boundary_contract = (
             meta.get("boundary_pair_qa")

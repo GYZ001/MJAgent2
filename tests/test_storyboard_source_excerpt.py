@@ -58,7 +58,7 @@ def test_storyboard_requires_source_excerpt() -> None:
 def test_compile_prompt_excludes_source_excerpt() -> None:
     """PRD：原文章节不得进入最终 Seedance 提示词。"""
     excerpt = "谷言攥着纸杯，听见曲惜说出那个名字，脸色骤然沉下去。"
-    prompt = compile_prompt(_shot(excerpt), _bible())
+    prompt = compile_prompt(_shot(excerpt), _bible(), aspect_ratio="9:16")
 
     assert SOURCE_EXCERPT_MARKER not in prompt
     assert excerpt not in prompt
@@ -70,7 +70,7 @@ def test_compile_prompt_preserves_model_selected_duration() -> None:
     shot = _shot("谷言攥着纸杯，听见曲惜说出那个名字，脸色骤然沉下去。")
     shot.duration_s = 8
 
-    prompt = compile_prompt(shot, _bible())
+    prompt = compile_prompt(shot, _bible(), aspect_ratio="9:16")
 
     assert "生成 8 秒" in prompt
     assert prompt.endswith("--ratio 9:16 --dur 8")
@@ -82,7 +82,9 @@ def test_legacy_seedance_prompt_strips_source_excerpt() -> None:
         f"固定5秒竖屏漫剧视频段，谷言低头攥紧纸杯。{SOURCE_EXCERPT_MARKER}谷言攥着纸杯。"
         "弱背景提示：咖啡厅 --ratio 9:16 --dur 5"
     )
-    prompt = ensure_source_excerpt_in_prompt(legacy, _shot("谷言攥着纸杯，听见曲惜说出那个名字。"))
+    prompt = ensure_source_excerpt_in_prompt(
+        legacy, _shot("谷言攥着纸杯，听见曲惜说出那个名字。"), aspect_ratio="9:16",
+    )
 
     assert SOURCE_EXCERPT_MARKER not in prompt
     assert prompt.endswith("--ratio 9:16 --dur 5")

@@ -431,15 +431,14 @@ def _duration(prompt_text: str, call_meta: dict[str, Any] | None) -> float:
 
 
 def _output_dimensions(
-    prompt_text: str,
-    connection: H3Connection,
+    prompt_text: str, connection: H3Connection, *, call_meta: dict[str, Any] | None = None,
 ) -> tuple[int, int]:
-    width = connection.width
-    height = connection.height
-    _body, suffix = _split_trailing_video_args(prompt_text)
-    ratio = re.search(r"--ratio\s+(\d+):(\d+)", suffix)
-    if ratio and int(ratio.group(1)) > int(ratio.group(2)) and width < height:
-        return height, width
+    width, height = connection.width, connection.height
+    explicit = str((call_meta or {}).get("aspect_ratio") or "").strip()
+    found = re.search(r"--ratio\s+(\d+):(\d+)", _split_trailing_video_args(prompt_text)[1])
+    match = re.fullmatch(r"(\d+):(\d+)", explicit) or found  # call_meta 优先，其次 prompt 尾部
+    if match and (int(match.group(1)) > int(match.group(2))) != (width > height):
+        return height, width  # 两个方向都按需与连接基线互换（风险 4：不止处理"横屏请求、竖屏基线"单向）
     return width, height
 
 
@@ -708,7 +707,7 @@ async def create_video_task(
     videos = list(video_urls or [])
     mode = _request_mode(images, videos)
     model = conn.model
-    width, height = _output_dimensions(prompt_text, conn)
+    width, height = _output_dimensions(prompt_text, conn, call_meta=call_meta)
     intent = str((call_meta or {}).get("video_input_intent") or "")
     use_source_audio = intent in {"AUDIO_REFERENCE", "CONTINUE_PREVIOUS_TAKE"}
     provider_prompt = _tagged_prompt(

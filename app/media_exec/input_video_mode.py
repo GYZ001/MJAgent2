@@ -208,7 +208,7 @@ async def _ensure_ai_video_prompt(
             or meta.get("mode")
             or video_modes.REFERENCE_IMAGE_MODE
         ),
-        operation_scope=str(version["id"]),
+        operation_scope=str(version["id"]), aspect_ratio=str(meta.get("aspect_ratio") or "9:16"),
         target_provider=target_provider,
         target_model=target_model,
         user_instruction=str(meta.get("prompt_user_instruction") or ""),

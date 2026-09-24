@@ -128,12 +128,12 @@ def test_silent_shot_prose_does_not_create_an_audio_contract() -> None:
     errors = preflight_seedance_gates(shot)
 
     assert not any("发明台词" in error for error in errors)
-    prompt = compile_prompt(shot, _bible())
+    prompt = compile_prompt(shot, _bible(), aspect_ratio="9:16")
     assert "所有人物全程闭口" in prompt
 
 
 def test_silent_prompt_explicitly_forbids_speech_and_lip_motion() -> None:
-    prompt = compile_prompt(_shot(), _bible())
+    prompt = compile_prompt(_shot(), _bible(), aspect_ratio="9:16")
 
     assert "所有人物全程闭口，不做说话口型" in prompt
     assert "不得自行补充问候、应答、语气词" in prompt
@@ -157,7 +157,7 @@ def test_video_prompt_contains_cinematic_generation_contract() -> None:
         },
     )
 
-    prompt = compile_prompt(shot, _bible())
+    prompt = compile_prompt(shot, _bible(), aspect_ratio="9:16")
 
     for section in (
         "[GENERATION GOAL]",
@@ -212,11 +212,11 @@ GEOMETRY_SENTINEL：黑色山门在北侧，铜环固定在门板中央。
     )
 
     prompt = compile_prompt(
-        shot,
-        _bible(),
+        shot, _bible(),
         continuity_mode="same_scene_cut",
         prev_state_out=shot.state_in,
         previous_prompt_text=previous_prompt,
+        aspect_ratio="9:16",
     )
 
     assert "[PREVIOUS SHOT HANDOFF]" in prompt
@@ -239,10 +239,10 @@ def test_scene_change_reads_previous_prompt_without_inheriting_old_geometry() ->
     )
 
     prompt = compile_prompt(
-        shot,
-        _bible(),
+        shot, _bible(),
         continuity_mode="scene_change",
         previous_prompt_text=previous_prompt,
+        aspect_ratio="9:16",
     )
 
     assert "[PREVIOUS SHOT HANDOFF]" in prompt
@@ -278,13 +278,13 @@ def test_first_last_prompt_uses_real_boundary_contract_and_moving_camera() -> No
     )
 
     prompt = compile_prompt(
-        shot,
-        _bible(),
+        shot, _bible(),
         video_generation_mode="FIRST_LAST_FRAME_MODE",
         first_frame_source="PREVIOUS_STATIC_TAIL",
         boundary_relation_edit="reverse_angle",
         boundary_relation_action="starts_new_action",
         boundary_start_state="林风独自站在山门左侧，刚收回按住铜环的右手。",
+        aspect_ratio="9:16",
     )
 
     assert "first_frame 是上一镜已冻结的静态尾帧" in prompt
@@ -349,11 +349,11 @@ def test_compile_prompt_excludes_source_excerpt_and_prev_full_action_when_not_co
     )
 
     prompt = compile_prompt(
-        shot,
-        _bible(),
+        shot, _bible(),
         prev_action=prev_action,
         prev_tail_action=prev_action,
         continuity_mode="reaction_cut",
+        aspect_ratio="9:16",
     )
 
     assert SOURCE_EXCERPT_MARKER not in prompt
@@ -378,7 +378,7 @@ def test_compile_prompt_locks_scene_canonical_and_persistent_landmark_geometry()
         last_frame_desc="同一机位，林风走向后方台阶，中央黑色试炼石碑仍留在原位。",
     )
 
-    prompt = compile_prompt(shot, bible)
+    prompt = compile_prompt(shot, bible, aspect_ratio="9:16")
 
     assert "[PERSISTENT SCENE GEOMETRY]" in prompt
     assert "场景固定锚点：青石山门中央固定矗立一块黑色试炼石碑" in prompt
@@ -400,7 +400,7 @@ def test_legacy_action_detail_does_not_infer_typed_phase_count() -> None:
 
 
 def test_required_text_defaults_to_embedded_prop_generated_by_video_model() -> None:
-    no_text = compile_prompt(_shot(required_text=None), _bible())
+    no_text = compile_prompt(_shot(required_text=None), _bible(), aspect_ratio="9:16")
     assert "按画面描述直接生成" in no_text and "不出现任何文字" not in no_text
     assert "不要生成字幕、名条、标题条、乱码或水印" in no_text and "可读道具字样" not in no_text
 
@@ -413,7 +413,7 @@ def test_required_text_defaults_to_embedded_prop_generated_by_video_model() -> N
             style="古朴刻字",
         )
     )
-    with_text = compile_prompt(with_text_shot, _bible())
+    with_text = compile_prompt(with_text_shot, _bible(), aspect_ratio="9:16")
 
     assert "仅在山门木牌上于 0.5s 起稳定显示指定文字「禁地」" in with_text
     assert "除「禁地」外不要出现字幕或其它文字" in with_text
@@ -425,7 +425,7 @@ def test_deterministic_insert_remains_an_explicit_opt_in() -> None:
         surface="山门木牌", exact_text="禁地", strategy="deterministic_insert",
     ))
 
-    prompt = compile_prompt(shot, _bible())
+    prompt = compile_prompt(shot, _bible(), aspect_ratio="9:16")
 
     assert "精确中文由服务端确定性插入" in prompt
     assert "不要生成字幕、乱码、可读道具字样或水印" in prompt
@@ -439,7 +439,7 @@ def test_offscreen_speaker_keeps_speaker_id_not_narration() -> None:
         dialogues=[Dialogue(speaker="苏婉", line="别碰那扇门", emotion="惊恐", delivery="offscreen_voice")],
     )
 
-    prompt = compile_prompt(shot, _bible())
+    prompt = compile_prompt(shot, _bible(), aspect_ratio="9:16")
 
     assert "苏婉在画外" in prompt
     assert "不得改成通用旁白" in prompt
@@ -509,7 +509,7 @@ def test_do_not_repeat_ids_resolve_to_chinese_before_seedance() -> None:
 
     resolved = resolve_do_not_repeat_texts(current, prior_shots=[prior])
     current.do_not_repeat = resolved
-    prompt = compile_prompt(current, _bible())
+    prompt = compile_prompt(current, _bible(), aspect_ratio="9:16")
 
     assert resolved == ["建立大陆甲规则并交代甲一正在接受测试"]
     assert "不要重复：建立大陆甲规则并交代甲一正在接受测试" in prompt
@@ -546,7 +546,7 @@ def test_required_prompt_sections_not_truncated_when_required_content_over_limit
     )
 
     with pytest.raises(CompileError, match="必填提示词段落总长"):
-        compile_prompt(shot, _bible())
+        compile_prompt(shot, _bible(), aspect_ratio="9:16")
 
 
 def test_reference_role_plan_sequence_for_continuity_modes() -> None:
@@ -803,7 +803,7 @@ def test_dialogue_matching_source_excerpt_prefix_respects_provenance() -> None:
         last_frame_desc="苏婉目光坚定望着林风，嘴唇微合刚说完话。",
     )
 
-    prompt = compile_prompt(shot, _bible(), continuity_mode="same_scene_cut")
+    prompt = compile_prompt(shot, _bible(), continuity_mode="same_scene_cut", aspect_ratio="9:16")
     assert line in prompt
     assert SOURCE_EXCERPT_MARKER not in prompt
     assert not prompt_source_provenance_errors(prompt, shot)
@@ -818,7 +818,7 @@ def test_source_excerpt_in_action_block_fails_provenance() -> None:
         action_desc=excerpt,
         continuity_mode="same_scene_cut",
     )
-    prompt = compile_prompt(shot, _bible(), continuity_mode="same_scene_cut")
+    prompt = compile_prompt(shot, _bible(), continuity_mode="same_scene_cut", aspect_ratio="9:16")
     assert prompt_source_provenance_errors(prompt, shot)
 
 
@@ -848,7 +848,7 @@ def test_final_prompt_scrubber_preserves_allowed_dialogue_and_removes_other_exce
     leaked_middle = excerpt[len(line):]
     prompt = f"[AUDIO TIMELINE]\n苏婉「{line}」\n\n[ONE CURRENT ACTION]\n{leaked_middle}"
 
-    scrubbed = ensure_source_excerpt_in_prompt(prompt, shot)
+    scrubbed = ensure_source_excerpt_in_prompt(prompt, shot, aspect_ratio="9:16")
 
     assert line in scrubbed
     assert leaked_middle not in scrubbed

@@ -736,10 +736,10 @@ def test_narrative_compiler_uses_typed_policy_not_role_name_classifiers() -> Non
     assert not is_collective_role("静默议会")
 
     prompt = compile_prompt(
-        shot,
-        _bible(),
+        shot, _bible(),
         screenplay=screenplay,
         voice_bible=screenplay.voice_bible,
+        aspect_ratio="9:16",
     )
     contract = keyframe_visual_contract(
         shot, _bible(), screenplay=screenplay,
@@ -766,7 +766,7 @@ def test_narrative_compiler_fails_closed_for_undeclared_identity() -> None:
 
     assert not is_functional_extra("医生")
     with pytest.raises(CompileError, match="未在 Bible 或 narrative identity contract 中声明"):
-        compile_prompt(shot, _bible(), screenplay=screenplay)
+        compile_prompt(shot, _bible(), screenplay=screenplay, aspect_ratio="9:16")
 
 
 def test_narrative_compiler_does_not_treat_ambient_source_as_voice_identity() -> None:
@@ -785,10 +785,10 @@ def test_narrative_compiler_does_not_treat_ambient_source_as_voice_identity() ->
     )
 
     prompt = compile_prompt(
-        shot,
-        _bible(),
+        shot, _bible(),
         screenplay=screenplay,
         voice_bible=screenplay.voice_bible,
+        aspect_ratio="9:16",
     )
 
     assert "A metallic impact echoes through the room." in prompt
@@ -807,10 +807,10 @@ def test_narrative_compiler_still_rejects_undeclared_spoken_identity() -> None:
 
     with pytest.raises(CompileError, match="声音身份"):
         compile_prompt(
-            shot,
-            _bible(),
+            shot, _bible(),
             screenplay=screenplay,
             voice_bible=screenplay.voice_bible,
+            aspect_ratio="9:16",
         )
 
 

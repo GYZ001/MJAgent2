@@ -282,7 +282,7 @@ def test_dialogue_with_spatial_action_is_not_collapsed_to_static_closeup() -> No
     assert effective_characters_visible(shot) == ["甲", "乙"]
     assert any("不能用单人大近景替代" in error for error in dialogue_framing_errors(shot))
 
-    prompt = compile_prompt(shot, _bible())
+    prompt = compile_prompt(shot, _bible(), aspect_ratio="9:16")
     assert "动作对白构图" in prompt
     assert "不得只拍站立说话、口型或表情变化来替代动作" in prompt
     assert "全景" in prompt
@@ -318,7 +318,7 @@ def test_narrative_dialogue_compile_ignores_same_speaker_legacy_state_delta() ->
         narrative_authority=True,
     ) == []
 
-    prompt = compile_prompt(shot, _bible(), screenplay=screenplay)
+    prompt = compile_prompt(shot, _bible(), screenplay=screenplay, aspect_ratio="9:16")
 
     assert "dialogue_action_staging" not in shot.risk_tags
     assert "动作对白构图" not in prompt
@@ -337,7 +337,7 @@ def test_dialogue_with_story_prop_keeps_hands_and_prop_in_frame() -> None:
     )
 
     assert dialogue_action_staging_kind(shot) == "prop"
-    prompt = compile_prompt(shot, _bible())
+    prompt = compile_prompt(shot, _bible(), aspect_ratio="9:16")
     assert "中景" in prompt
     assert "双手、剧情道具与接触关系" in prompt
 
@@ -360,7 +360,7 @@ def test_prop_dialogue_prompt_does_not_visualize_unreferenced_listener_state() -
     assert dialogue_action_staging_kind(shot) == "prop"
     assert dialogue_focus_subject(shot) is None
 
-    prompt = compile_prompt(shot, _bible(), with_refs=True)
+    prompt = compile_prompt(shot, _bible(), with_refs=True, aspect_ratio="9:16")
 
     # 叙事连续性仍保存在分镜数据里，但不再作为矛盾的可视要求发送给视频模型。
     assert shot.state_in == original_state_in
@@ -404,7 +404,7 @@ def test_action_staging_recovers_typed_visible_partner_from_continuity_state() -
     assert dialogue_focus_subject(shot) is None
     assert effective_characters_visible(shot) == ["甲", "乙"]
 
-    prompt = compile_prompt(shot, _bible(), with_refs=True)
+    prompt = compile_prompt(shot, _bible(), with_refs=True, aspect_ratio="9:16")
 
     assert "character_identity:甲" in prompt
     assert "character_identity:乙" in prompt
@@ -415,7 +415,7 @@ def test_action_staging_recovers_typed_visible_partner_from_continuity_state() -
 def test_visible_cast_projection_is_inactive_when_visual_states_match_cast() -> None:
     shot = _shot()
 
-    prompt = compile_prompt(shot, _bible(), with_refs=True)
+    prompt = compile_prompt(shot, _bible(), with_refs=True, aspect_ratio="9:16")
 
     assert "[VISIBLE CAST]" not in prompt
     assert shot.state_in in prompt
@@ -550,7 +550,7 @@ def test_video_and_keyframe_prompts_enforce_speaker_only_closeup() -> None:
         last_frame_desc="同一机位，甲说完决定，乙与丙仍留在画外。",
     )
 
-    video_prompt = compile_prompt(shot, _bible(), with_refs=True)
+    video_prompt = compile_prompt(shot, _bible(), with_refs=True, aspect_ratio="9:16")
     keyframe_prompt = reference_generation_prompt(
         shot, _bible(), "plot_key_frame", 1,
     )
@@ -572,12 +572,12 @@ def test_dialogue_cut_keeps_same_scene_previous_video_tail_input() -> None:
     )
 
     prompt = compile_prompt(
-        shot,
-        _bible(),
+        shot, _bible(),
         with_refs=True,
         chained=True,
         continuity_mode="action_continuation",
         prev_state_out="上一镜甲乙同框站在议事厅中央。",
+        aspect_ratio="9:16",
     )
 
     assert shot.continuity_mode == "same_scene_cut"

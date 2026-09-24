@@ -55,8 +55,14 @@ def build_base_image_meta(
     previous_prompt_version, previous_prompt_fingerprint, previous_prompt_text,
     first_frame_source, boundary_source_shot_id, boundary_relation_edit,
     boundary_relation_action, boundary_relation_reason, boundary_start_state,
+    aspect_ratio: str,
 ):
-    """组装 image_inputs 的基础字段（不含 shot_plan 专属字段与可选附加项）。"""
+    """组装 image_inputs 的基础字段（不含 shot_plan 专属字段与可选附加项）。
+
+    ``aspect_ratio``：调用方从项目解析后传入的画幅快照（"9:16"/"16:9"），原样存进
+    ``image_inputs.aspect_ratio``——这是本次任务的权威快照，执行期（run_job）一律
+    读它，不重新查项目，避免任务执行中途改设置导致同一任务前后画幅不一致。
+    """
     from app import video_modes
     from app.compiler import VIDEO_PROMPT_CONTRACT_VERSION
     from app.continuity import shot_contract_dict
@@ -64,7 +70,7 @@ def build_base_image_meta(
 
     return {
         "segment_identity_fingerprint": segment_identity_fingerprint(shot),
-        "mode": decision.mode,
+        "mode": decision.mode, "aspect_ratio": aspect_ratio,
         "mode_decision": video_modes.decision_to_dict(decision),
         "after_shot_id": chain_after_shot_id,
         "after_version_id": chain_after_version_id,

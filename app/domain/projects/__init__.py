@@ -175,3 +175,9 @@ from app.domain.projects.downgrade import (
     sweep_expired_memberships as sweep_expired_memberships,
     trim_projects_to_tier_limit as trim_projects_to_tier_limit,
 )
+
+# 2026-09-23 新增第 12 个子模块（画幅可配置 P0）：切换项目画幅前的只读影响披露，
+# 依赖 constants/listing 已落地的 _project_or_404，不构成新的循环。
+from app.domain.projects.aspect_ratio_impact import (
+    get_project_aspect_ratio_impact as get_project_aspect_ratio_impact,
+)

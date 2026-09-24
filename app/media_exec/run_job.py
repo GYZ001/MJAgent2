@@ -273,7 +273,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             if not is_storyboard_pack_shot:
                 prompt_text = ensure_source_excerpt_in_prompt(
                     prompt_text,
-                    shot_model_for_prompt,
+                    shot_model_for_prompt, aspect_ratio=str(meta.get("aspect_ratio") or "9:16"),
                 )
                 if prompt_text != version["prompt_text"]:
                     _set_version(version["id"], prompt_text=prompt_text)
@@ -498,6 +498,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                                 return_last_frame=False,
                                 call_meta={
                                     "asset_kind": "video",
+                                    "aspect_ratio": meta.get("aspect_ratio"),
                                     "planned_mode": meta.get("planned_mode"),
                                     "actual_mode": meta.get("actual_mode"),
                                     "video_input_intent": meta.get("video_input_intent"),

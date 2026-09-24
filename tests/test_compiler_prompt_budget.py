@@ -86,7 +86,7 @@ def test_long_reference_prompt_compacts_without_losing_story_anchors() -> None:
         continuity_from_prev=False,
     )
 
-    prompt = compile_prompt(shot, _bible(), with_refs=True, prev_state_out=None)
+    prompt = compile_prompt(shot, _bible(), with_refs=True, prev_state_out=None, aspect_ratio="9:16")
 
     assert len(prompt) <= config.PROMPT_CHAR_LIMIT
     assert "石碑表面骤然亮起刺眼白光" in prompt
@@ -130,6 +130,7 @@ def test_silent_shot_compacts_without_forcing_dialogue_pacing(monkeypatch) -> No
         _bible(),
         with_refs=True,
         extra_negative="避免出现：" + "伪影，" * 30 + "手指畸形",
+        aspect_ratio="9:16",
     )
 
     assert len(prompt) <= 920
@@ -208,7 +209,7 @@ def test_large_continuity_snapshot_projects_current_pose_and_changed_props() -> 
         ),
     )
 
-    prompt = compile_prompt(shot, _bible(), with_refs=True)
+    prompt = compile_prompt(shot, _bible(), with_refs=True, aspect_ratio="9:16")
 
     assert len(prompt) <= config.PROMPT_CHAR_LIMIT
     assert "右掌按住石碑" in prompt

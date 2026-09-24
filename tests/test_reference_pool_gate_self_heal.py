@@ -224,7 +224,7 @@ def test_complete_with_healed_assets_writes_ready_state(monkeypatch) -> None:
     monkeypatch.setattr(rpg.video_modes, "dedupe_reference_dicts", lambda items: items)
     monkeypatch.setattr(
         rpg.video_modes, "append_reference_prompt_notes",
-        lambda prompt, _assets, *, duration_s, required_identity_names: prompt + " [NOTES]",
+        lambda prompt, _assets, *, duration_s, aspect_ratio, required_identity_names: prompt + " [NOTES]",
     )
     monkeypatch.setattr(
         "app.media_pipeline.stage_state.set_pipeline_stage",

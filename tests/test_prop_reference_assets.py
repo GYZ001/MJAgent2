@@ -190,7 +190,7 @@ def test_pack_reference_images_for_seedance_includes_prop_and_purpose_text(monke
     assert {ref["id"] for ref in packed} == {"character-a", "prop-catbag"}
 
     prompt = build_seedance_reference_prompt_notes(
-        "少年抱着 @旧猫包 走进院子。", packed, duration_s=5,
+        "少年抱着 @旧猫包 走进院子。", packed, duration_s=5, aspect_ratio="9:16",
     )
     assert "道具旧猫包参考，只用来锁定外观与材质" in prompt
     prop_index = next(i for i, ref in enumerate(packed, 1) if ref["id"] == "prop-catbag")

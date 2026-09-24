@@ -8,6 +8,7 @@ import hashlib
 import re
 
 from app import config
+from app.project_settings import ASPECT_RATIOS
 from app.character_policy import (
     collective_role_anchor,
     functional_extra_anchor,
@@ -151,8 +152,15 @@ def clip_duration(shot: Shot) -> int:
     return clip_duration_value(getattr(shot, "duration_s", None))
 
 
-def normalize_video_args(prompt_text: str, duration: int | None = None) -> str:
-    """移除历史参数并写入当前固定比例与模型选择的合法时长。"""
+def normalize_video_args(prompt_text: str, duration: int | None = None, *, aspect_ratio: str) -> str:
+    """移除历史参数并写入调用方显式声明的画幅与合法时长。
+
+    ``aspect_ratio`` 必传（值域 ``ASPECT_RATIOS``，非法值 ``ValueError``）——历史上这里
+    硬编码字面量 "9:16"，会把 ``compile_prompt`` 等上游已经算对的画幅参数在收尾时静默
+    改回竖屏，是本仓库 2026-09-23 修复的暗雷，不能再复活。
+    """
+    if aspect_ratio not in ASPECT_RATIOS:
+        raise ValueError(f"不支持的画幅：{aspect_ratio!r}")
     if duration is None:
         matches = re.findall(r"(?:^|\s)--dur\s+(\d+(?:\.\d+)?)", prompt_text)
         duration = matches[-1] if matches else config.DEFAULT_VIDEO_DURATION_S
@@ -160,32 +168,36 @@ def normalize_video_args(prompt_text: str, duration: int | None = None) -> str:
     text = re.sub(r"(?:^|\s)--dur\s+\d+(?:\.\d+)?", "", prompt_text).strip()
     text = re.sub(r"(?:^|\s)--ratio\s+\S+", "", text).strip()
     if text:
-        text += " --ratio 9:16"
+        text += f" --ratio {aspect_ratio}"
     else:
-        text = "--ratio 9:16"
+        text = f"--ratio {aspect_ratio}"
     return f"{text} --dur {dur}"
 
 
-def _split_video_args(prompt_text: str, duration: int | None = None) -> tuple[str, str]:
-    normalized = normalize_video_args(prompt_text, duration)
+def _split_video_args(
+    prompt_text: str, duration: int | None = None, *, aspect_ratio: str,
+) -> tuple[str, str]:
+    normalized = normalize_video_args(prompt_text, duration, aspect_ratio=aspect_ratio)
     dur_match = re.search(r"--dur\s+(\d+)$", normalized)
     dur = int(dur_match.group(1)) if dur_match else config.DEFAULT_VIDEO_DURATION_S
-    args = f" --ratio 9:16 --dur {dur}"
+    args = f" --ratio {aspect_ratio} --dur {dur}"
     if normalized.endswith(args):
         return normalized[:-len(args)].strip(), args
     return normalized.strip(), args
 
 
 def sanitize_seedance_prompt(prompt_text: str, *, aggressive: bool = False,
-                             extra_terms: tuple[tuple[str, str], ...] | None = None) -> str:
+                             extra_terms: tuple[tuple[str, str], ...] | None = None,
+                             aspect_ratio: str) -> str:
     """Normalize layout and video arguments without rewriting story content.
 
     ``aggressive`` and ``extra_terms`` remain as compatibility parameters for
     historical callers.  They intentionally do not trigger word-list based
-    mutation or retry behaviour.
+    mutation or retry behaviour.  ``aspect_ratio`` is required (no default) —
+    see ``normalize_video_args`` docstring for why a silent default is unsafe here.
     """
     _ = aggressive, extra_terms
-    body, args = _split_video_args(prompt_text)
+    body, args = _split_video_args(prompt_text, aspect_ratio=aspect_ratio)
     # 保留段落换行（新 Seedance 分段协议）；仅压缩行内空白与多余空行
     if "[" in body and "]" in body and "\n" in body:
         lines = []
@@ -198,19 +210,20 @@ def sanitize_seedance_prompt(prompt_text: str, *, aggressive: bool = False,
     return f"{body}{args}" if body else args.strip()
 
 
-def ensure_source_excerpt_in_prompt(prompt_text: str, shot: Shot) -> str:
+def ensure_source_excerpt_in_prompt(prompt_text: str, shot: Shot, *, aspect_ratio: str) -> str:
     """在最终供应商边界移除非法原文，同时保留合同内合法对白/必现文字。
 
     这是入队与 worker 提交共用的最后一道防线：新编译 prompt、人工 override 和
     历史排队版本都会经过这里。原文重合被替换为确定性的合同提示，不会因为一段
-    脏字段直接让整个镜头失败，也不会把章节原文发送给视频供应商。
+    脏字段直接让整个镜头失败，也不会把章节原文发送给视频供应商。``aspect_ratio``
+    必传，调用方从入队时的版本 meta 快照取值（老任务缺快照按 "9:16" 兜底）。
     """
     from app.continuity import (
         _allowed_prompt_verbatim_texts,
         source_excerpt_overlap_spans,
     )
 
-    body, args = _split_video_args(prompt_text, shot.duration_s)
+    body, args = _split_video_args(prompt_text, shot.duration_s, aspect_ratio=aspect_ratio)
 
     # 历史版本把兜底原文作为末尾独立行；分段 prompt 整行移除，旧单行格式则
     # 从 marker 截到结尾（video args 已由 _split_video_args 单独保存）。
@@ -249,7 +262,7 @@ def ensure_source_excerpt_in_prompt(prompt_text: str, shot: Shot) -> str:
             body = body.replace(token, allowed)
 
     text = f"{body}{args}" if body.strip() else args.strip()
-    return sanitize_seedance_prompt(text)
+    return sanitize_seedance_prompt(text, aspect_ratio=aspect_ratio)
 
 
 def _framing_scale_hint(shot_size: str) -> str:
@@ -827,7 +840,9 @@ def _compile_environment_dynamics(shot: Shot) -> str:
 
 
 def _structured_prompt_sections(prompt_text: str) -> dict[str, str]:
-    body, _args = _split_video_args(prompt_text)
+    # 只解析上一镜正文分段；尾部 --ratio/--dur 参数被丢弃（_args 未使用），
+    # aspect_ratio 传任意合法值都不影响输出，不必从调用方一路穿透。
+    body, _args = _split_video_args(prompt_text, aspect_ratio="9:16")
     matches = list(re.finditer(r"(?m)^\[([^\]]+)\]\s*$", body))
     sections: dict[str, str] = {}
     for index, match in enumerate(matches):
@@ -1102,7 +1117,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
                    voice_bible: list | None = None,
                    screenplay: EpisodeScreenplay | None = None,
                    visual_style: str | None = None,
-                   aspect_ratio: str = "9:16",
+                   aspect_ratio: str,
                    video_generation_mode: str | None = None,
                    first_frame_source: str | None = None,
                    boundary_relation_edit: str | None = None,
@@ -1619,7 +1634,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         if not text.endswith(args):
             text = text.rstrip() + args
 
-    return sanitize_seedance_prompt(text)
+    return sanitize_seedance_prompt(text, aspect_ratio=aspect_ratio)
 
 
 

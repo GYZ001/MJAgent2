@@ -23,8 +23,8 @@ from app.observability.provider_call_payload import compact_exact_request
 # 不传时网关按自身默认档位出片——实测（docs/PROVIDER_CAPABILITY_NOTES.md）15s
 # 竖屏任务在未传 resolution 时落到 720×1280，而不是产品要求的 1080×1920。
 # 分辨率是生成时唯一「省了、后期完全救不回」的参数，必须显式钉死，不依赖供应商
-# 默认值随时间/型号漂移。产品当前固定竖屏 9:16，1080p 档位与既有 --ratio 9:16
-# 组合即得到 1080×1920。
+# 默认值随时间/型号漂移。2026-09-23 起画幅按项目设置（默认 9:16，可选 16:9），
+# 不再固定竖屏——1080p 档位与实际生效的 --ratio 组合，得到 1080×1920 或 1920×1080。
 SEEDANCE_VIDEO_RESOLUTION = "1080p"
 
 
@@ -74,10 +74,10 @@ class SeedanceAdapter:
         payload["resolution"] = SEEDANCE_VIDEO_RESOLUTION
         # 2026-09-03 B 上实测（探测记录见任务报告）：网关认顶层 duration/ratio
         # 字段——带字段出片 1080×1920/5.08s，不带字段落到网关自己的默认值
-        # 1920×1080（横屏，不是产品要的竖屏）。字段与 prompt 尾部 --ratio/--dur
-        # 文本后缀双写：字段是结构化保险，文本后缀留着兼容旧网关/旧行为。
+        # 1920×1080（横屏）。字段与 prompt 尾部 --ratio/--dur 文本后缀双写：
+        # 字段是结构化保险，文本后缀留着兼容旧网关/旧行为。
         # 不 import app.compiler（L4，会造成 L3→L4 上行边）：上游打包时已把
-        # ``--ratio 9:16 --dur N`` 归一化到 prompt 尾部，这里只读尾部参数；
+        # ``--ratio X:Y --dur N`` 归一化到 prompt 尾部，这里只读尾部参数；
         # call_meta.duration_s 是调用方显式给的镜头时长，优先于文本内嵌值。
         dur_matches = re.findall(r"--dur\s+(\d+)", prompt_text)
         ratio_matches = re.findall(r"--ratio\s+(\d+:\d+)", prompt_text)
@@ -86,8 +86,18 @@ class SeedanceAdapter:
             payload["duration"] = int(explicit_duration)
         elif dur_matches:
             payload["duration"] = int(dur_matches[-1])
-        # 产品固定竖屏；探测证明缺 ratio 字段网关会落到横屏默认值，所以没写就补 9:16。
-        payload["ratio"] = ratio_matches[-1] if ratio_matches else "9:16"
+        # 画幅优先级：① call_meta.aspect_ratio——入队时项目画幅的快照，权威来源
+        # （见 app.media_exec.enqueue_persist.build_base_image_meta）；② prompt
+        # 尾部 --ratio——分镜台 2.0.0 段等不经 compiler 的路径，末尾没有结构化
+        # 字段时的兼容读取；③ "9:16"——只兼容本次上线前已入队、meta 里没有画幅
+        # 快照的历史任务（上线前生产全是 9:16），不是新数据的兜底默认值。
+        explicit_aspect_ratio = str((call_meta or {}).get("aspect_ratio") or "").strip()
+        if explicit_aspect_ratio:
+            payload["ratio"] = explicit_aspect_ratio
+        elif ratio_matches:
+            payload["ratio"] = ratio_matches[-1]
+        else:
+            payload["ratio"] = "9:16"
         if return_last_frame:
             payload["return_last_frame"] = True
         if call_meta and call_meta.get("operation_id"):

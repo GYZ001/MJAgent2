@@ -90,6 +90,7 @@ def _compile_raw_prompt(
     incoming_transition, outgoing_transition, prompt_prev_state_out, screenplay,
     shot_plan, decision, first_frame_source, boundary_relation_edit,
     boundary_relation_action, boundary_start_state, previous_prompt_text,
+    aspect_ratio: str,
 ) -> str:
     from app.compiler import compile_prompt
 
@@ -97,6 +98,7 @@ def _compile_raw_prompt(
         shot,
         bible,
         extra_negative,
+        aspect_ratio=aspect_ratio,
         with_refs=True,
         from_scene=False,
         chained=bool(chain_after_shot_id),
@@ -128,11 +130,11 @@ def _compile_raw_prompt(
     )
 
 
-def _scrub_prompt_source(raw_prompt_text: str, shot, preflight_repair):
+def _scrub_prompt_source(raw_prompt_text: str, shot, preflight_repair, *, aspect_ratio: str):
     from app.continuity import prompt_source_provenance_errors
 
     raw_source_errors = prompt_source_provenance_errors(raw_prompt_text, shot)
-    prompt_text = ensure_source_excerpt_in_prompt(raw_prompt_text, shot)
+    prompt_text = ensure_source_excerpt_in_prompt(raw_prompt_text, shot, aspect_ratio=aspect_ratio)
     if raw_source_errors:
         prompt_scrub = {
             "repair": "source_excerpt_prompt_scrub",
@@ -170,9 +172,12 @@ def compile_legacy_prompt(
     chain_after_shot_id, continuity_mode, incoming_transition, outgoing_transition,
     prompt_prev_state_out, shot_plan, decision, first_frame_source,
     boundary_relation_edit, boundary_relation_action, boundary_start_state,
-    previous_prompt_text,
+    previous_prompt_text, aspect_ratio: str,
 ):
-    """非分镜台 2.0.0 镜头：跑校验门 -> compile_prompt -> 原文擦除 -> 再校验。"""
+    """非分镜台 2.0.0 镜头：跑校验门 -> compile_prompt -> 原文擦除 -> 再校验。
+
+    ``aspect_ratio`` 必传，调用方（``enqueue.py``）从所属项目解析一次并传入。
+    """
     _preflight_gate_before_compile(shot, prev_shot, screenplay)
     raw_prompt_text = _compile_raw_prompt(
         shot, bible, extra_negative, critique,
@@ -183,9 +188,11 @@ def compile_legacy_prompt(
         boundary_relation_edit=boundary_relation_edit,
         boundary_relation_action=boundary_relation_action,
         boundary_start_state=boundary_start_state,
-        previous_prompt_text=previous_prompt_text,
+        previous_prompt_text=previous_prompt_text, aspect_ratio=aspect_ratio,
     )
-    prompt_text, preflight_repair = _scrub_prompt_source(raw_prompt_text, shot, preflight_repair)
+    prompt_text, preflight_repair = _scrub_prompt_source(
+        raw_prompt_text, shot, preflight_repair, aspect_ratio=aspect_ratio,
+    )
     _preflight_gate_after_compile(shot, prev_shot, prompt_text, screenplay)
     return prompt_text, preflight_repair
 

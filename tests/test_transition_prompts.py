@@ -75,6 +75,7 @@ def test_video_prompt_contains_incoming_and_outgoing_transition() -> None:
         outgoing_transition="淡出淡入",
         next_scene="首日傍晚，藏书阁",
         next_first_frame_desc="藏书阁暖黄灯光下，甲二儿独坐书案前。",
+        aspect_ratio="9:16",
     )
 
     assert "最终编辑会以「叠化」接入本镜" in prompt

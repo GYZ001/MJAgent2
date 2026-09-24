@@ -126,16 +126,19 @@ def build_seedance_reference_prompt_notes(
     packed_refs: list[dict[str, Any]],
     *,
     duration_s: float | int | None = None,
+    aspect_ratio: str,
 ) -> str:
     """给 prompt_text 做两件事：① 正文里完全匹配的 @角色名/@场景名替换成
     @图片N；② 在正文之后追加一段中文参考图用途说明。没有任何参考图时
     （text-only 回退）原样返回，正文里的 @名字 不受影响。marker 幂等：
-    已经带过说明的 prompt 不重复加。"""
+    已经带过说明的 prompt 不重复加。``aspect_ratio`` 必传（本次任务的版本
+    meta 快照，老任务无快照按 "9:16" 兜底）——省略会让 ``_split_video_args``
+    的画幅还原逻辑无值可用。"""
     from app.compiler import _split_video_args
 
     if REFERENCE_PROMPT_NOTE_MARKER in prompt_text:
         return prompt_text
-    prompt_body, prompt_args = _split_video_args(prompt_text, duration_s)
+    prompt_body, prompt_args = _split_video_args(prompt_text, duration_s, aspect_ratio=aspect_ratio)
     purposes, named_indices = _compose_purposes(packed_refs)
     if not purposes:
         return prompt_text

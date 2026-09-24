@@ -217,7 +217,7 @@ def test_ai_video_prompt_is_physical_and_audio_aligned() -> None:
 
     assert video_prompt_ai.validate_ai_video_prompt(draft, shot=shot) == []
 
-    prompt = video_prompt_ai.render_ai_video_prompt(draft, shot=shot)
+    prompt = video_prompt_ai.render_ai_video_prompt(draft, shot=shot, aspect_ratio="9:16")
 
     assert "[START POSE | 0.0s]" in prompt
     assert "[MOTION]" in prompt
@@ -246,6 +246,7 @@ def test_h3_keyframe_prompt_uses_native_three_field_contract() -> None:
         shot=_shot(),
         prompt_profile=MINIMAX_H3_PROFILE,
         video_generation_mode=video_modes.FIRST_LAST_FRAME_MODE,
+        aspect_ratio="9:16",
     )
 
     assert prompt.startswith(
@@ -266,6 +267,7 @@ def test_h3_reference_prompt_uses_native_six_section_contract() -> None:
         shot=_shot(),
         prompt_profile=MINIMAX_H3_PROFILE,
         video_generation_mode=video_modes.REFERENCE_IMAGE_MODE,
+        aspect_ratio="9:16",
     )
 
     headings = [
@@ -314,6 +316,7 @@ def test_ai_prompt_generation_uses_structured_model_output(monkeypatch) -> None:
         continuity_contract="[START STATE]\n两人尚未接触。",
         video_generation_mode="REFERENCE_IMAGE_MODE",
         operation_scope="ver_test",
+        aspect_ratio="9:16",
     ))
 
     assert generated == draft

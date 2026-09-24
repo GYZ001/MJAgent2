@@ -422,8 +422,14 @@ MAX_SPOKEN_CHARS_PER_SHOT = max_spoken_chars_for_duration(VIDEO_DURATION_MAX_S)
 PROMPT_CHAR_LIMIT = 8000  # 与生成台提示词编辑合同一致
 VIDEO_PRICE_PER_SECOND = 0.8  # CNY，1.0 配置单价
 
-# Seedream 定妆照（实测：尺寸下限 3,686,400 像素；1440x2560 与视频 9:16 同比例）
+# Seedream 定妆照/道具图/角色参考：固定不随项目画幅变（特写身份锚点，模型按 role
+# 引用，不要求与输出画幅一致）。实测：尺寸下限 3,686,400 像素；1440x2560 与竖屏
+# 视频 9:16 同比例。
 REF_IMAGE_SIZE = "1440x2560"
+# 场景图承载空间格局/机位构图，随项目画幅变（2026-09-23）；未验证供应商是否接受
+# 横向尺寸——2560x1440 与 16:9 同比例、像素总量与 REF_IMAGE_SIZE 相同，按同一实测
+# 下限外推，未做真实调用验证。
+SCENE_REF_SIZES = {"9:16": "1440x2560", "16:9": "2560x1440"}
 IMAGE_PRICE_PER_UNIT = 0.2  # CNY
 
 # 可在 settings 表覆盖的默认值

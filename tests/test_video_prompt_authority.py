@@ -106,6 +106,7 @@ def test_payload_carries_the_authoritative_dialogue_when_timeline_is_empty(monke
     asyncio.run(video_prompt_ai.generate_ai_video_prompt(
         shot=shot, bible=_bible(), continuity_contract="[START STATE]\n两人尚未接触。",
         video_generation_mode="REFERENCE_IMAGE_MODE", operation_scope="ver_test",
+        aspect_ratio="9:16",
     ))
 
     authority = captured[0]["shot_contract"]["authoritative_dialogue"]

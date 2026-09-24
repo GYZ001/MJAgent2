@@ -74,7 +74,7 @@ def test_has_contact_action_detects_press() -> None:
 
 def test_compile_prompt_forces_side_view_for_contact() -> None:
     shot = _contact_shot(camera_angle="平视")
-    prompt = compile_prompt(shot, _bible())
+    prompt = compile_prompt(shot, _bible(), aspect_ratio="9:16")
     assert "[CAMERA]" in prompt
     assert "侧面" in prompt
     assert "已接触动作必须从互动轴侧面拍摄" in prompt
@@ -84,12 +84,12 @@ def test_compile_prompt_forces_side_view_for_contact() -> None:
 
 def test_compile_prompt_normalizes_typed_contact_to_side_axis() -> None:
     shot = _contact_shot(camera_angle="侧面俯视")
-    compile_prompt(shot, _bible())
+    compile_prompt(shot, _bible(), aspect_ratio="9:16")
     assert shot.camera_angle == "侧面"
 
 
 def test_compile_prompt_equal_height_for_multi_character() -> None:
-    prompt = compile_prompt(_contact_shot(), _bible())
+    prompt = compile_prompt(_contact_shot(), _bible(), aspect_ratio="9:16")
     assert "站立身高与眼线尽量齐平" in prompt
     assert "禁止同框人物随意一高一低" in prompt
 
@@ -103,12 +103,12 @@ def test_compile_prompt_skips_equal_height_when_diff_stated() -> None:
         risk_tags=["contact_phase:established", "explicit_height_difference"],
     )
     assert has_explicit_height_difference(shot, _bible()) is True
-    prompt = compile_prompt(shot, _bible())
+    prompt = compile_prompt(shot, _bible(), aspect_ratio="9:16")
     assert "站立身高与眼线尽量齐平" not in prompt
     assert "禁止同框人物随意一高一低" not in prompt
 
 
 def test_compile_prompt_skips_equal_height_for_single_character() -> None:
     shot = _contact_shot(characters=["甲一"])
-    prompt = compile_prompt(shot, _bible())
+    prompt = compile_prompt(shot, _bible(), aspect_ratio="9:16")
     assert "站立身高与眼线尽量齐平" not in prompt

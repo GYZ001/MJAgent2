@@ -13,7 +13,7 @@ def test_seedance_normalization_preserves_story_content() -> None:
         "画面结果：黑戒指诡异发光。 --ratio 9:16 --dur 5"
     )
 
-    normalized = sanitize_seedance_prompt(prompt)
+    normalized = sanitize_seedance_prompt(prompt, aspect_ratio="9:16")
 
     assert "十五岁少年" in normalized
     assert "卧室床榻" in normalized
@@ -29,6 +29,7 @@ def test_legacy_retry_parameters_do_not_mutate_content() -> None:
         prompt,
         aggressive=True,
         extra_terms=(("甲二儿", "角色甲"), ("甲一", "角色乙")),
+        aspect_ratio="9:16",
     )
 
     assert "甲二儿追上甲一" in normalized

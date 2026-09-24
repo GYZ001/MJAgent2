@@ -7,6 +7,7 @@ from typing import Any
 
 from app import config, errors, quota, video_modes
 from app.db import get_conn, new_id, now
+from app.project_settings import resolve_aspect_ratio
 from app.orchestration import media_scheduler
 from app.orchestration.media_runs import mark_media_job_state
 
@@ -1436,6 +1437,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     shot_row, ep, project = enqueue_context.load_video_binding_context(
         conn, shot_id, target_video_provider,
     )
+    aspect_ratio = resolve_aspect_ratio(conn, project["id"])
     bible, shot, is_storyboard_pack_shot, screenplay, prior_shots = (
         enqueue_context.resolve_shot_context(conn, shot_row, ep, project, authority_context)
     )
@@ -1479,7 +1481,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
             prompt_prev_state_out=prompt_prev_state_out, shot_plan=shot_plan, decision=decision,
             first_frame_source=first_frame_source, boundary_relation_edit=boundary_relation_edit,
             boundary_relation_action=boundary_relation_action, boundary_start_state=boundary_start_state,
-            previous_prompt_text=previous_prompt_text,
+            previous_prompt_text=previous_prompt_text, aspect_ratio=aspect_ratio,
         )
 
     reference_gallery, current_reference_manifest = enqueue_prompt.resolve_reference_gallery(
@@ -1522,7 +1524,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         previous_prompt_text=previous_prompt_text, first_frame_source=first_frame_source,
         boundary_source_shot_id=boundary_source_shot_id, boundary_relation_edit=boundary_relation_edit,
         boundary_relation_action=boundary_relation_action, boundary_relation_reason=boundary_relation_reason,
-        boundary_start_state=boundary_start_state,
+        boundary_start_state=boundary_start_state, aspect_ratio=aspect_ratio,
     )
     enqueue_persist.apply_shot_plan_meta(image_meta, shot_plan)
     enqueue_persist.apply_optional_meta(

@@ -517,10 +517,14 @@ def evaluate_storyboard_for_confirmation(
     if has_real_bible and not structural_errors:
         try:
             for s in board.shots:
+                # 只读结构校验：确认能编译成功，编译结果本身不使用也不落库，aspect_ratio
+                # 固定合法值即可（"9:16"/"16:9" 等长，不影响 PROMPT_CHAR_LIMIT 判定，也不
+                # 改变是否抛 CompileError）；本函数与 confirm_episode_core 共用、纯只读
+                # （不写库），不为这一处校验新增 conn/project 依赖。
                 compile_prompt(
                     s.model_copy(deep=True),
                     bible,
-                    screenplay=screenplay,
+                    screenplay=screenplay, aspect_ratio="9:16",
                 )
         except Exception as exc:  # noqa: BLE001
             structural_errors.append(f"Prompt 编译失败：{exc}")

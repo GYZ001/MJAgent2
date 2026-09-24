@@ -24,14 +24,15 @@ def _shot(**kw) -> Shot:
 def test_dialogue_only_audio_timeline_ignores_narration_field():
     """历史 narration 字段不得进入编译声轨；只输出角色真实台词。"""
     p = compile_prompt(_shot(narration="次日清晨，新闻和昨晚补的细节吻合",
-                             dialogues=[{"speaker": "王浩", "line": "这不可能", "emotion": "惊恐"}]), _bible())
+                             dialogues=[{"speaker": "王浩", "line": "这不可能", "emotion": "惊恐"}]), _bible(),
+                        aspect_ratio="9:16")
     assert "这不可能" in p
     assert "开口" in p or "对口型" in p
     assert "旁白用独立叙述者嗓音念「次日清晨" not in p
 
 
 def test_audio_timeline_covers_spoken_content():
-    p = compile_prompt(_shot(dialogues=[{"speaker": "王浩", "line": "这不可能", "emotion": "惊恐"}]), _bible())
+    p = compile_prompt(_shot(dialogues=[{"speaker": "王浩", "line": "这不可能", "emotion": "惊恐"}]), _bible(), aspect_ratio="9:16")
     assert "[AUDIO TIMELINE]" in p
     assert "这不可能" in p
     assert "片段结束前完整结束" in p

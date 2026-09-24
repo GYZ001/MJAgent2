@@ -157,7 +157,7 @@ async def _prepare_reference_mode_inputs_impl(
                         video_modes.append_reference_prompt_notes_from_dicts(
                             prompt_text,
                             packed_refs,
-                            duration_s=shot_model.duration_s,
+                            duration_s=shot_model.duration_s, aspect_ratio=str(meta.get("aspect_ratio") or "9:16"),
                         )
                     )
                 set_pipeline_stage(
@@ -284,7 +284,7 @@ async def _prepare_reference_mode_inputs_impl(
             prompt_text = video_modes.append_reference_prompt_notes(
                 prompt_text,
                 assets,
-                duration_s=shot_model.duration_s,
+                duration_s=shot_model.duration_s, aspect_ratio=str(meta.get("aspect_ratio") or "9:16"),
                 required_identity_names=list(
                     meta.get("required_reference_characters") or []
                 ),
@@ -472,7 +472,7 @@ async def _prepare_reference_mode_inputs_impl(
         prompt_text = video_modes.append_reference_prompt_notes(
             prompt_text,
             assets,
-            duration_s=shot_model.duration_s,
+            duration_s=shot_model.duration_s, aspect_ratio=str(meta.get("aspect_ratio") or "9:16"),
             required_identity_names=list(
                 meta.get("required_reference_characters") or []
             ),

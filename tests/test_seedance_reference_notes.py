@@ -35,7 +35,7 @@ def test_at_mention_replaced_with_picture_number_and_trailing_space_kept():
     prompt = "镜头1：固定远景镜头，@李麦麦 20多岁职场女性，蹲在门口。"
     refs = [_character_ref("李麦麦")]
 
-    result = build_seedance_reference_prompt_notes(prompt, refs)
+    result = build_seedance_reference_prompt_notes(prompt, refs, aspect_ratio="9:16")
 
     assert "@图片1 20多岁职场女性" in result
     assert "@李麦麦" not in result
@@ -47,7 +47,7 @@ def test_at_mention_replacement_prefers_longest_name_match():
     prompt = "镜头2：@李麦麦 转身看向 @李麦。"
     refs = [_character_ref("李麦麦"), _character_ref("李麦")]
 
-    result = build_seedance_reference_prompt_notes(prompt, refs)
+    result = build_seedance_reference_prompt_notes(prompt, refs, aspect_ratio="9:16")
 
     assert "@图片1 转身看向 @图片2" in result
     assert "@李麦" not in result and "@李麦麦" not in result
@@ -58,7 +58,7 @@ def test_no_reference_images_leaves_at_mentions_untouched():
     追加任何用途说明。"""
     prompt = "镜头1：@橘座 蹲坐在窗台上。"
 
-    result = build_seedance_reference_prompt_notes(prompt, [])
+    result = build_seedance_reference_prompt_notes(prompt, [], aspect_ratio="9:16")
 
     assert result == prompt
     assert REFERENCE_PROMPT_NOTE_MARKER not in result
@@ -68,7 +68,7 @@ def test_purpose_note_is_chinese_marker_and_covers_scene_and_character():
     prompt = "镜头1：@橘座 蹲坐在窗台上。"
     refs = [_scene_ref(), _character_ref("橘座")]
 
-    result = build_seedance_reference_prompt_notes(prompt, refs)
+    result = build_seedance_reference_prompt_notes(prompt, refs, aspect_ratio="9:16")
 
     assert REFERENCE_PROMPT_NOTE_MARKER in result
     assert "图片1：场景参考，只用来锁定环境外观" in result
@@ -89,7 +89,7 @@ def test_plot_key_frame_purpose_includes_progress_and_target_in_chinese():
         "keyframe_target_desc": "橘座抬头看向镜头",
     }]
 
-    result = build_seedance_reference_prompt_notes(prompt, refs)
+    result = build_seedance_reference_prompt_notes(prompt, refs, aspect_ratio="9:16")
 
     assert "图片1：橘座的关键帧参考" in result
     assert "进度约50%" in result and "第1/3拍" in result
@@ -100,8 +100,8 @@ def test_marker_makes_note_idempotent_on_second_call():
     prompt = "镜头1：@橘座 蹲坐在窗台上。"
     refs = [_character_ref("橘座")]
 
-    once = build_seedance_reference_prompt_notes(prompt, refs)
-    twice = build_seedance_reference_prompt_notes(once, refs)
+    once = build_seedance_reference_prompt_notes(prompt, refs, aspect_ratio="9:16")
+    twice = build_seedance_reference_prompt_notes(once, refs, aspect_ratio="9:16")
 
     assert once == twice
     assert twice.count(REFERENCE_PROMPT_NOTE_MARKER) == 1
@@ -114,7 +114,7 @@ def test_duration_suffix_uses_explicit_shot_duration_when_prompt_lacks_dur():
     prompt = "镜头1：@橘座 蹲坐在窗台上。"
     refs = [_character_ref("橘座")]
 
-    result = build_seedance_reference_prompt_notes(prompt, refs, duration_s=15)
+    result = build_seedance_reference_prompt_notes(prompt, refs, duration_s=15, aspect_ratio="9:16")
 
     assert result.endswith("--ratio 9:16 --dur 15")
 
@@ -123,7 +123,7 @@ def test_subject_definitions_branch_inserts_note_right_after_heading():
     prompt = "subject_definitions:\nReference subjects follow contract. --ratio 9:16 --dur 5"
     refs = [_character_ref("A")]
 
-    result = build_seedance_reference_prompt_notes(prompt, refs)
+    result = build_seedance_reference_prompt_notes(prompt, refs, aspect_ratio="9:16")
 
     assert result.startswith("subject_definitions:\n图片1：角色A的人物参考")
     assert result.endswith("--ratio 9:16 --dur 5")
@@ -135,8 +135,8 @@ def test_seedance_pack_wrapper_delegates_to_new_module():
     prompt = "镜头1：@橘座 蹲坐在窗台上。"
     refs = [_character_ref("橘座")]
 
-    direct = build_seedance_reference_prompt_notes(prompt, refs)
-    via_pack = seedance_pack.append_reference_prompt_notes_from_dicts(prompt, refs)
+    direct = build_seedance_reference_prompt_notes(prompt, refs, aspect_ratio="9:16")
+    via_pack = seedance_pack.append_reference_prompt_notes_from_dicts(prompt, refs, aspect_ratio="9:16")
 
     assert direct == via_pack
 

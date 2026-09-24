@@ -139,7 +139,7 @@ def test_functional_extra_compiles_without_persistent_bible_asset() -> None:
     shot = _real_shot_2()
     normalize_offbible_characters(Storyboard(episode_no=1, shots=[shot]), _bible())
 
-    video_prompt = compile_prompt(shot, _bible())
+    video_prompt = compile_prompt(shot, _bible(), aspect_ratio="9:16")
 
     assert "功能性路人「functional:examiner」" in video_prompt
     assert "functional:examiner" in video_prompt and "甲一，测验力，三段" in video_prompt
@@ -168,6 +168,7 @@ def test_legacy_functional_name_requires_persisted_typed_voice_contract() -> Non
         shot,
         _bible(),
         screenplay=screenplay,
+        aspect_ratio="9:16",
     )
 
     assert "功能性路人「测验员」" in video_prompt
@@ -233,7 +234,7 @@ def test_offbible_normalization_removes_ghost_character_from_full_contract() -> 
     assert shot.reference_roles == ["字符串参考"]
     assert any(change.get("stripped") == "韩枫" for change in changes)
     assert "再说一句废话" in shot.action_desc
-    prompt = compile_prompt(shot, _bible())
+    prompt = compile_prompt(shot, _bible(), aspect_ratio="9:16")
     assert "韩枫" not in prompt
 
 
@@ -246,7 +247,7 @@ def test_prompt_compiler_reports_stale_visible_character_as_contract_error() -> 
     )
     assert any("characters_visible" in error and "韩枫" in error for error in errors)
     with pytest.raises(CompileError, match="韩枫"):
-        compile_prompt(shot, _bible())
+        compile_prompt(shot, _bible(), aspect_ratio="9:16")
 
 
 def test_prompt_compiler_never_leaks_raw_functional_extra_error_without_bible() -> None:
@@ -254,7 +255,7 @@ def test_prompt_compiler_never_leaks_raw_functional_extra_error_without_bible() 
     empty_bible = Bible(characters=[], world=_bible().world)
 
     with pytest.raises(CompileError, match="甲一"):
-        compile_prompt(shot, empty_bible)
+        compile_prompt(shot, empty_bible, aspect_ratio="9:16")
 
 
 def test_validate_storyboard_does_not_strip_characters_when_bible_is_empty() -> None:
@@ -427,5 +428,5 @@ def test_historical_ghost_repair_persists_the_complete_character_contract(
     assert contract["audio_timeline"] == []
     assert contract["reference_roles"] == []
     restored = api._board_from_shot_rows([row], episode_no=1)
-    prompt = compile_prompt(restored.shots[0], _bible())
+    prompt = compile_prompt(restored.shots[0], _bible(), aspect_ratio="9:16")
     assert "韩枫" not in prompt

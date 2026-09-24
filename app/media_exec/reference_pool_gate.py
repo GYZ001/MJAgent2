@@ -149,14 +149,19 @@ def _subjective_pov_note(*, visible_names: list[str], bible: Any, screenplay: An
 
 
 def _append_text_only_reference_notes(
-    prompt_text: str, notes: list[str], *, duration_s: float | int | None,
+    prompt_text: str, notes: list[str], *, duration_s: float | int | None, aspect_ratio: str,
 ) -> str:
-    """把可用的外观/主观视角提示追加进提示词；没有笔记时原样返回，不制造空噪音。"""
+    """把可用的外观/主观视角提示追加进提示词；没有笔记时原样返回，不制造空噪音。
+
+    ``aspect_ratio`` 必传：调用方传本次任务的版本 meta 快照（老任务没有快照按
+    "9:16" 兜底），不能省略——省略会让 ``_split_video_args`` 的画幅还原逻辑无值
+    可用。
+    """
     if not notes or TEXT_ONLY_FALLBACK_NOTE_MARKER in prompt_text:
         return prompt_text
     from app.compiler import _split_video_args
 
-    prompt_body, prompt_args = _split_video_args(prompt_text, duration_s)
+    prompt_body, prompt_args = _split_video_args(prompt_text, duration_s, aspect_ratio=aspect_ratio)
     note = TEXT_ONLY_FALLBACK_NOTE_MARKER + " " + " ".join(notes)
     return prompt_body + " " + note + prompt_args
 
@@ -207,6 +212,7 @@ async def _complete_reference_mode_as_text_only(
         notes = [pov_note, *notes]
     prompt_text = _append_text_only_reference_notes(
         prompt_text, notes, duration_s=shot_model.duration_s,
+        aspect_ratio=str(meta.get("aspect_ratio") or "9:16"),
     )
     meta["mode_decision"] = video_modes.decision_to_dict(decision)
     meta["reference_images"] = []
@@ -342,6 +348,7 @@ async def _complete_reference_mode_with_healed_assets(
     meta.pop("last_frame_path", None)
     prompt_text = video_modes.append_reference_prompt_notes(
         prompt_text, assets, duration_s=shot_model.duration_s,
+        aspect_ratio=str(meta.get("aspect_ratio") or "9:16"),
         required_identity_names=list(meta.get("required_reference_characters") or []),
     )
     try:

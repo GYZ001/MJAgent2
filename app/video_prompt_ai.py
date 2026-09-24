@@ -224,7 +224,7 @@ def _render_seedance_prompt(
     draft: AIVideoPromptDraft,
     *,
     shot: Shot,
-    aspect_ratio: str = "9:16",
+    aspect_ratio: str,
 ) -> str:
     motion = "\n".join(
         (
@@ -280,7 +280,7 @@ def _render_seedance_prompt(
         if content.strip()
     )
     return sanitize_seedance_prompt(
-        f"{body} --ratio {aspect_ratio} --dur {shot.duration_s}"
+        f"{body} --ratio {aspect_ratio} --dur {shot.duration_s}", aspect_ratio=aspect_ratio,
     )
 
 
@@ -416,7 +416,7 @@ def _render_minimax_h3_prompt(
             f"non_diegetic_music:\n{music}"
         )
     return sanitize_seedance_prompt(
-        f"{body} --ratio {aspect_ratio} --dur {shot.duration_s}"
+        f"{body} --ratio {aspect_ratio} --dur {shot.duration_s}", aspect_ratio=aspect_ratio,
     )
 
 
@@ -424,7 +424,7 @@ def render_ai_video_prompt(
     draft: AIVideoPromptDraft,
     *,
     shot: Shot,
-    aspect_ratio: str = "9:16",
+    aspect_ratio: str,
     prompt_profile: VideoPromptProfile = SEEDANCE_2_PROFILE,
     video_generation_mode: str = "REFERENCE_IMAGE_MODE",
 ) -> str:
@@ -460,7 +460,7 @@ async def generate_ai_video_prompt(
     bible: Bible,
     continuity_contract: str,
     video_generation_mode: str,
-    operation_scope: str,
+    operation_scope: str, aspect_ratio: str,
     target_provider: str = "hiagent",
     target_model: str = "",
     user_instruction: str = "",
@@ -531,7 +531,7 @@ async def generate_ai_video_prompt(
         draft,
         shot=shot,
         prompt_profile=prompt_profile,
-        video_generation_mode=video_generation_mode,
+        video_generation_mode=video_generation_mode, aspect_ratio=aspect_ratio,
     )
     if len(prompt) > config.PROMPT_CHAR_LIMIT:
         raise model_gateway.StructuredSemanticError(

@@ -309,7 +309,7 @@ def test_waiting_provider_restart_polls_existing_task_with_new_step(tmp_path) ->
             "poll_delay_s": 0.0,
             "scope": "视频任务",
         }
-        no_source_excerpt = lambda prompt, _shot: prompt
+        no_source_excerpt = lambda prompt, _shot, **_kw: prompt
         no_shot_model = lambda _shot: object()
         _mp = pytest.MonkeyPatch()
         patch_worker_everywhere(_mp, "_assert_review_dependency_fence_async", no_fence)

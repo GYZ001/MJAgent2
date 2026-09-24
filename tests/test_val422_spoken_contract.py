@@ -244,7 +244,7 @@ def test_shot83_onscreen_claim_cannot_pass_episode_gate_after_prompt_compile() -
 
     # The visual prompt can be compiled from syntactically complete data.  That
     # must not be confused with identity/action/episode authority acceptance.
-    assert compile_prompt(shot, _bible())
+    assert compile_prompt(shot, _bible(), aspect_ratio="9:16")
     sync = synchronize_spoken_contract(shot)
     assert not sync.ok
     errors = validate_storyboard(

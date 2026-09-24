@@ -17,6 +17,7 @@ from app.db import get_conn, get_setting, new_id, now
 from app.evidence.txn_guard import rollback_uncommitted_on_error
 from app.portraits.card_owner import resolve_card_owner
 from app.portraits.current_ref import current_portrait_ref
+from app.project_settings import resolve_aspect_ratio
 from app.refs import (
     _safe_name,
     character_visual_style_lock,
@@ -1063,10 +1064,11 @@ async def _save_image_item(item: dict, dest: str) -> None:
         raise hiagent.ProviderError(f"图像响应缺少 url/b64_json：{list(item.keys())}")
 
 
-async def _generate_image(prompt: str, *, seed_inputs: list[str] | None = None, call_meta: dict | None = None) -> dict:
+async def _generate_image(prompt: str, *, seed_inputs: list[str] | None = None, call_meta: dict | None = None,
+                          size: str = config.REF_IMAGE_SIZE) -> dict:
     return await hiagent.generate_image(
         prompt,
-        size=config.REF_IMAGE_SIZE,
+        size=size,
         image_inputs=seed_inputs or None,
         call_meta=call_meta,
     )
@@ -1411,6 +1413,7 @@ async def ensure_scene_multiview_pack(
     if not scene_multiview_enabled():
         return {"status": "disabled", "scene_reference_id": scene_reference_id}
     with rollback_uncommitted_on_error(conn := get_conn(), where="ensure_scene_multiview_pack"):
+        sz = config.SCENE_REF_SIZES.get(resolve_aspect_ratio(conn, project_id), config.REF_IMAGE_SIZE)
         _set_scene_pack_fields(conn, scene_reference_id, pack_status=PACK_STATUS_GENERATING)
         conn.commit()
 
@@ -1421,10 +1424,7 @@ async def ensure_scene_multiview_pack(
         est = existing_views.get("establishing")
         parent = conn.execute("SELECT * FROM scene_references WHERE id=?", (scene_reference_id,)).fetchone()
         base_est = base_views.get("establishing") or {}
-        generation_anchor = scene_multiview_generation_anchor(
-            scene_canonical,
-            parent["prompt"] if parent else None,
-        )
+        generation_anchor = scene_multiview_generation_anchor(scene_canonical, parent["prompt"] if parent else None)
         est_prompt = scene_view_prompt(visual_style, generation_anchor, "establishing")
         est_prompt_for_fp = (parent["prompt"] if parent and parent["prompt"] else est_prompt)
         est_fp = view_input_fingerprint(
@@ -1450,7 +1450,7 @@ async def ensure_scene_multiview_pack(
             else:
                 path = _view_path(project_id, "scene", scene_name, "establishing", ep_start)
                 item = await _generate_image(
-                    est_prompt,
+                    est_prompt, size=sz,
                     call_meta={
                         "asset_kind": "scene_view",
                         "view_role": "establishing",
@@ -1514,7 +1514,7 @@ async def ensure_scene_multiview_pack(
                 seeds.append(hiagent.data_url_from_file(est["image_path"]))
             path = _view_path(project_id, "scene", scene_name, "reverse_angle", ep_start)
             item = await _generate_image(
-                rev_prompt, seed_inputs=seeds or None,
+                rev_prompt, seed_inputs=seeds or None, size=sz,
                 call_meta={
                     "asset_kind": "scene_view",
                     "view_role": "reverse_angle",
@@ -1568,7 +1568,7 @@ async def ensure_scene_multiview_pack(
                     seeds.append(hiagent.data_url_from_file(anchor["image_path"]))
                 path = _view_path(project_id, "scene", scene_name, "action_zone", ep_start)
                 item = await _generate_image(
-                    action_prompt, seed_inputs=seeds or None,
+                    action_prompt, seed_inputs=seeds or None, size=sz,
                     call_meta={
                         "asset_kind": "scene_view",
                         "view_role": "action_zone",
@@ -2143,8 +2143,9 @@ async def regenerate_scene_view(
             parent_revision_id=scene_reference_id,
             seed_hint=f"{est.get('image_path') or ''}|redo:{Path(path).name}",
         )
+        sz = config.SCENE_REF_SIZES.get(resolve_aspect_ratio(conn, project_id), config.REF_IMAGE_SIZE)
         item = await _generate_image(
-            prompt, seed_inputs=seeds or None,
+            prompt, seed_inputs=seeds or None, size=sz,
             call_meta={"asset_kind": "scene_view_redo", "view_role": view_role, "scene_name": row["scene_name"]},
         )
         await _save_image_item(item, path)

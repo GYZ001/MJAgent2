@@ -116,7 +116,7 @@ def test_recovered_provider_poll_persists_stage_progress(monkeypatch) -> None:
     monkeypatch.setattr(worker.errors, "log_error", expose_worker_error)
     patch_worker_everywhere(monkeypatch,
         "ensure_source_excerpt_in_prompt",
-        lambda prompt, _shot: prompt,
+        lambda prompt, _shot, **_kw: prompt,
     )
     patch_worker_everywhere(monkeypatch, "_load_shot_model", lambda _shot: object())
     patch_worker_everywhere(monkeypatch, "_set_version", lambda *_args, **_kwargs: True)

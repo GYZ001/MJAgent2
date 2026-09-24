@@ -332,16 +332,17 @@ def same_scene_anchor(conn, project_id: str, name: str) -> str | None:
 
 
 async def _generate_scene_image(prompt: str, anchor_url: str | None = None, *,
-                                call_meta: dict | None = None) -> dict:
-    """出一张场景图。anchor_url 仅用于【同场景】的 i2i 锚点（由 same_scene_anchor 取该场景自己的旧图），
-    绝不传别的场景的图。带参考图失败则回退纯文生图（与 generate_image 文档约定一致）。"""
+                                call_meta: dict | None = None, aspect_ratio: str) -> dict:
+    """出一张场景图（尺寸随项目画幅变）。anchor_url 仅用于【同场景】的 i2i 锚点
+    （由 same_scene_anchor 取该场景自己的旧图），绝不传别的场景的图；带参考图失败则回退纯文生图。"""
+    size = config.SCENE_REF_SIZES.get(aspect_ratio, config.REF_IMAGE_SIZE)
     if anchor_url:
         try:
             return await hiagent.generate_image(
-                prompt, size=config.REF_IMAGE_SIZE, image_inputs=[anchor_url], call_meta=call_meta)
+                prompt, size=size, image_inputs=[anchor_url], call_meta=call_meta)
         except Exception:  # noqa: BLE001 带参考图失败 → 不带重试
             pass
-    return await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE, call_meta=call_meta)
+    return await hiagent.generate_image(prompt, size=size, call_meta=call_meta)
 
 
 async def _review_scene_ref(
@@ -591,7 +592,7 @@ async def _generate_one_scene_reference(
         if current_state_row and int(current_state_row["ep_start"] or 1) < int(pending_ep_start):
             evolved = await _refresh_scene_on_state_change(
                 project_id, sc.name, int(pending_ep_start), pending_state, style, bible_version,
-                change_meta={
+                aspect_ratio=project["aspect_ratio"], change_meta={
                     "change_type": "approved_scene_state_change",
                     "reason": "待审场景状态变化批准后付费重绘",
                     "persistence": "persistent",
@@ -660,7 +661,7 @@ async def _generate_one_scene_reference(
             item = await _generate_scene_image(
                 prompt,
                 retry_seed,
-                call_meta=call_meta,
+                call_meta=call_meta, aspect_ratio=project["aspect_ratio"],
             )
             await _save_image_item(item, path)
             # ``record_reference_asset`` 会物理删除硬失败候选。先在
@@ -948,7 +949,7 @@ async def _generate_and_register_scene(project_id: str, name: str, scene_canonic
     prior = same_scene_anchor(conn, project_id, name)
     anchor_url = hiagent.data_url_from_file(prior) if prior else None
     project = conn.execute(
-        "SELECT bible_artifact_id FROM projects WHERE id=?", (project_id,)
+        "SELECT bible_artifact_id, aspect_ratio FROM projects WHERE id=?", (project_id,)
     ).fetchone()
     prior_row = conn.execute(
         "SELECT artifact_id FROM scene_references WHERE project_id=? AND scene_name=? ORDER BY ep_start DESC LIMIT 1",
@@ -975,7 +976,7 @@ async def _generate_and_register_scene(project_id: str, name: str, scene_canonic
         try:
             item = await _generate_scene_image(
                 prompt,
-                anchor_url,
+                anchor_url, aspect_ratio=(project["aspect_ratio"] if project else "9:16"),
                 call_meta={
                     "asset_kind": "scene_reference",
                     "scene_name": name,
@@ -1284,7 +1285,7 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
                         },
                     )
                     project_state = conn.execute(
-                        "SELECT bible_version FROM projects WHERE id=?", (project_id,),
+                        "SELECT bible_version, aspect_ratio FROM projects WHERE id=?", (project_id,),
                     ).fetchone()
                     refreshed = await _refresh_scene_on_state_change(
                         project_id,
@@ -1292,7 +1293,7 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
                         episode_no,
                         meta["new_scene_canonical"],
                         current_bible.world.visual_style_canonical,
-                        int(project_state["bible_version"] or 0),
+                        int(project_state["bible_version"] or 0), aspect_ratio=project_state["aspect_ratio"],
                         change_meta={
                             "change_dimensions": meta.get("change_dimensions") or [],
                             "persistence": meta.get("persistence") or "persistent",
@@ -1634,7 +1635,7 @@ shot_only / 未永久变化请 changed=false。new_scene_canonical 须 30~80 字
 async def _refresh_scene_on_state_change(
     project_id: str, name: str, episode_no: int,
     new_canonical: str, style: str, bible_version: int,
-    *, change_meta: dict | None = None,
+    *, change_meta: dict | None = None, aspect_ratio: str,
 ) -> dict | None:
     """永久场景状态变化：临时生成完整多视角包，整包 QA 通过后原子切换。"""
     conn = get_conn()
@@ -1649,7 +1650,7 @@ async def _refresh_scene_on_state_change(
         f"{_safe_name(name)}__ep{episode_no}__{new_id('candidate')}.jpg"
     ))
     item = await _generate_scene_image(
-        base_prompt, anchor_url,
+        base_prompt, anchor_url, aspect_ratio=aspect_ratio,
         call_meta={"asset_kind": "scene_reference", "scene_name": name,
                    "episode_no": episode_no, "scene_ref_mode": "state_evolve"},
     )

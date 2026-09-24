@@ -605,7 +605,7 @@ def test_create_response_without_task_id_waits_for_human_and_never_replays(
     patch_worker_everywhere(monkeypatch, "_await_with_job_lease_heartbeat", direct_await)
     patch_worker_everywhere(monkeypatch, "_ensure_ai_video_prompt", prepare_inputs)
     patch_worker_everywhere(monkeypatch, "_prepare_planned_mode_inputs", prepare_inputs)
-    patch_worker_everywhere(monkeypatch, "ensure_source_excerpt_in_prompt", lambda prompt, _shot: prompt,
+    patch_worker_everywhere(monkeypatch, "ensure_source_excerpt_in_prompt", lambda prompt, _shot, **_kw: prompt,
     )
     patch_worker_everywhere(monkeypatch, "_load_shot_model", lambda _shot: object())
     patch_worker_everywhere(monkeypatch, "_video_image_inputs_from_meta", lambda _meta: [])
