@@ -7,6 +7,7 @@ import sqlite3
 
 from app.portraits import card_rebind
 from app.schemas import Bible, Character, CharacterAlias, World
+from app.voice.store import ensure_tables_on_connection as _ensure_voice_tables
 
 _APPEARANCE = "二十余岁青年，束发，身着靠山宗内门弟子制式灰白衣袍，身形挺拔"
 
@@ -17,6 +18,9 @@ def _conn(*characters: Character) -> sqlite3.Connection:
     conn.execute("CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT, bible_version INTEGER, bible_artifact_id TEXT)")
     conn.execute("CREATE TABLE character_portraits(project_id TEXT, character_name TEXT, ep_start INTEGER)")
     conn.execute("INSERT INTO character_portraits VALUES('p1','陈师兄',1)")
+    # rebind_character_card 在同一事务里迁移 character_voices（角色固定音色
+    # U1）；用真实 DDL 入口建表，不手抄一份 schema 副本。
+    _ensure_voice_tables(conn)
     bible = Bible(world=World(visual_style_canonical="国漫"), characters=list(characters))
     conn.execute(
         "INSERT INTO projects VALUES('p1', ?, 1, NULL)",

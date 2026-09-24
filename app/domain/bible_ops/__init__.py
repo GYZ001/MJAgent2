@@ -233,3 +233,7 @@ from .props_api import (
     list_props as list_props,
     regenerate_prop as regenerate_prop,
 )
+
+# 2026-09-23 角色固定音色：只为让 voice_routes 的路由装饰器在启动时注册到共用 router 而导入
+# 模块，不再导出任何名字（门面不得再长）；调用方一律写 app.domain.bible_ops.voice_routes.<函数>。
+from . import voice_routes  # noqa: F401

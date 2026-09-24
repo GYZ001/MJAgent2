@@ -352,6 +352,11 @@ async def _refs_task(
         )
         if not resume:
             worker.purge_character_video_artifacts(project_id, names)
+        # 声音自动生成钩子（角色固定音色 U1）：后台串行，不 await、不影响本次
+        # 定妆任务的成败判定；_names_needing_voice 内部会再筛一遍"是否已有
+        # current"，这里不必先判断 names 是否为空。
+        from app.voice import service as voice_service
+        voice_service.trigger_auto_generate_after_portrait(project_id, names)
         # refs_status='ready' 必须挂在「人物谱里每个具备定妆资格的角色都真的
         # 有完整定妆包」这个产物信号上，不能挂在「本次生成步骤没抛异常」这个
         # 过程信号上——否则名单口径错配（例如换画风把 character_portraits

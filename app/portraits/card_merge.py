@@ -43,6 +43,7 @@ from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
 from app.schemas import Bible, Character, CharacterAlias
 from app.source_excerpt import index_source_segments
+from app.voice import store as voice_store
 
 from ._db_probe import _has_column, _has_table
 from .card_aliases import _cooccurrence_evidence, alias_is_specific, card_name_is_specific
@@ -339,6 +340,10 @@ def apply_card_merge_alias(
             return False
     if not _cas_write_bible(conn, project_id, row, payload, artifact_supported, next_artifact_id):
         return False
+    # 2026-09-23 新增（角色固定音色 U1）：alias["text"] 若曾以"自己的名字"身份
+    # 生成过声音（例如称呼判定结果反转前的历史数据），随本次别名登记一并把
+    # 那些声音行迁到 character_name 名下，同一事务提交，不单独 commit。
+    voice_store.migrate_character_voices(conn, project_id, alias["text"], character_name)
     conn.commit()
     return True
 

@@ -7,12 +7,16 @@ import sqlite3
 
 from app.portraits import card_commit
 from app.schemas import Bible, Character, World
+from app.voice.store import ensure_tables_on_connection as _ensure_voice_tables
 
 
 def _conn_with_bible(characters: list[Character]) -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT, bible_version INTEGER DEFAULT 0)")
+    # 建卡归并可能触发 apply_card_merge_alias，同一事务迁移 character_voices
+    # （角色固定音色 U1）；用真实 DDL 入口建表，不手抄一份 schema 副本。
+    _ensure_voice_tables(conn)
     bible = Bible(world=World(visual_style_canonical="国漫"), characters=characters)
     conn.execute("INSERT INTO projects(id, bible_json, bible_version) VALUES('p1', ?, 3)",
                  (json.dumps(bible.model_dump(), ensure_ascii=False),))

@@ -298,6 +298,13 @@ allowed_exceptions = []
                  # 来，依赖方向永远是「高层 import 本包」，不能反过来
 "app.audit.api" = 5  # 覆盖 "app.audit" = 2 前缀：挂 APIRouter，只被 app.main
                      # 引用，与 app.auth.admin_api 同一种"路由→域"入口角色
+"app.voice.store" = 2  # 2026-09-23 新增（角色固定音色 U1）：character_voices
+                        # 表的懒建表与读写原语，只 import app.db/app.db_schema/
+                        # app.config（均 <=2）+ stdlib，与 app.audit 同一种
+                        # "纯持久化、无外部调用"角色，同理判 L2，不跟随包根
+                        # app.voice=4（真正发起模型/ffmpeg/语音识别调用的
+                        # service/description/clipping 等才需要 L4）；覆盖
+                        # app.voice=4 前缀（最长前缀匹配优先）
 "app.models_registry.api" = 5  # 2026-09-12 新增（EP-05 §8）：管理界面的只读
                                 # 聚合 + 用途绑定读写路由，挂 APIRouter，只被
                                 # app.main 引用，与 app.audit.api 同一种

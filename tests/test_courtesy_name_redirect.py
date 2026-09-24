@@ -12,6 +12,7 @@ import sqlite3
 
 from app.portraits import card_merge
 from app.schemas import Bible, Character, World
+from app.voice.store import ensure_tables_on_connection as _ensure_voice_tables
 from tests.conftest import patch_portraits_everywhere
 
 INTRO = "其人曰：“吾姓关，名羽，字长生，后改云长，河东解良人也。”"
@@ -22,6 +23,9 @@ def _conn(bible: Bible, chapter: str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT, bible_version INTEGER DEFAULT 0)")
     conn.execute("CREATE TABLE chapters(project_id TEXT, idx INTEGER, content TEXT)")
+    # courtesy_name_redirect 命中时走 apply_card_merge_alias，同一事务迁移
+    # character_voices（角色固定音色 U1）；用真实 DDL 入口建表。
+    _ensure_voice_tables(conn)
     conn.execute("INSERT INTO projects(id, bible_json, bible_version) VALUES('p1', ?, 1)", (json.dumps(bible.model_dump(), ensure_ascii=False),))
     conn.execute("INSERT INTO chapters VALUES('p1', 1, ?)", (chapter,))
     conn.commit()

@@ -20,12 +20,14 @@ from app.capabilities.commands import series as cd_series
 from app.capabilities.commands import storyboard as cd_storyboard
 from app.capabilities.commands import system as cd_system
 from app.capabilities.commands import video as cd_video
+from app.capabilities.commands import voice as cd_voice
 from app.capabilities.registry import HumanOnlySpec, ResourceSpec, UiIntentSpec, get_registry
 
 # 领域顺序沿用原 catalog.py `_register_commands` 里各区块出现的先后次序
 # （项目 -> 账号删除/配额 -> 人物谱/定妆 -> 场景 -> 分集规划 -> 剧本 -> 分镜 ->
 # 视频/参考图 -> 交付 -> Run/Job -> 系统），纯粹为了让 diff 好读，注册顺序本身
-# 对 CommandSpec 的唯一性没有影响（registry 按 name 去重）。
+# 对 CommandSpec 的唯一性没有影响（registry 按 name 去重）。voice 是
+# 2026-09-23 新增的角色固定音色领域，追加在末尾，不打乱既有顺序。
 _COMMAND_DOMAINS = (
     cd_project,
     cd_account,
@@ -39,6 +41,7 @@ _COMMAND_DOMAINS = (
     cd_delivery,
     cd_run,
     cd_system,
+    cd_voice,
 )
 
 _REGISTERED = False

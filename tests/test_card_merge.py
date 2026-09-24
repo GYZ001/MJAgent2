@@ -23,6 +23,7 @@ import sqlite3
 from app import portraits
 from app.harness import model_gateway
 from app.schemas import Bible, Character, World
+from app.voice.store import ensure_tables_on_connection as _ensure_voice_tables
 from tests.conftest import patch_portraits_everywhere
 
 
@@ -39,6 +40,9 @@ def _make_conn() -> sqlite3.Connection:
         "ep_end INTEGER, appearance TEXT, prompt TEXT, image_path TEXT, base_portrait_id TEXT, "
         "bible_version INTEGER, created_at REAL)"
     )
+    # apply_card_merge_alias 在同一事务里迁移 character_voices（角色固定音色
+    # U1）；用真实 DDL 入口建表，不手抄一份 schema 副本，避免两处定义漂移。
+    _ensure_voice_tables(conn)
     return conn
 
 

@@ -25,6 +25,10 @@ closed 抛出可见异常，不允许静默跳过也不允许猜测哪张卡该�
 称谓引用，且两者在同一个 DB 事务里一起提交——bible CAS 失败（并发改写撞车）
 时整个函数直接返回 False，``character_portraits`` 不会被触碰，旧卡原封不动。
 
+2026-09-23 新增（角色固定音色 U1）：``character_voices``（``app.voice.store``）
+是改名后第三个必须同步的表，同一事务内随 ``character_portraits`` 一起迁移
+（``voice_store.migrate_character_voices``），不额外加锁、不单独提交。
+
 内部按接缝拆成四个小函数，``_rebind_character_card_cas`` 只做编排：前置校验
 （``_reject_if_target_name_owned``）、人物谱条目改写
 （``_rewrite_character_entry``）、证据 artifact 落盘（``_create_rebind_artifact``）、
@@ -40,6 +44,7 @@ from app.errors import ContentGenerationError, code_ref
 from app.evidence import repository as evidence_repository
 from app.harness.types import EvidenceArtifact
 from app.schemas import Bible, CharacterAlias
+from app.voice import store as voice_store
 
 from ._db_probe import _has_column, _has_table
 from .card_owner import resolve_card_owner
@@ -207,6 +212,7 @@ def _rebind_character_card_cas(
         "WHERE project_id=? AND character_name=? AND ep_start>=0",
         (to_canonical_name, project_id, from_label),
     )
+    voice_store.migrate_character_voices(conn, project_id, from_label, to_canonical_name)
     conn.commit()
     return True
 

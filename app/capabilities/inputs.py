@@ -477,3 +477,21 @@ class SeriesExportCreateInput(StandardCommandInput):
 
     project_id: str
     task_ids: list[str]
+
+
+class VoiceDescriptionInput(StandardCommandInput):
+    project_id: str
+    character: str
+
+
+class VoiceGenerateInput(StandardCommandInput):
+    project_id: str
+    character: str
+    voice_prompt: str = ""
+    preview_text: str = ""
+
+
+class VoiceAdoptInput(StandardCommandInput):
+    project_id: str
+    character: str
+    voice_id: str
