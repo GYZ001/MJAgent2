@@ -18,6 +18,11 @@ class ProjectImportNovelInput(StandardCommandInput):
     #: 画幅（"9:16"/"16:9"）；省略时按 app.project_settings.ASPECT_RATIOS 默认
     #: "9:16"。2026-09-23 新增：项目级设置三项之一，见 app.project_settings。
     aspect_ratio: str | None = None
+    #: 改编强度档位（"faithful"/"short_drama"）；省略时默认 "short_drama"（用户
+    #: 拍板新项目默认短剧节奏）。同批新增，见 app.project_settings.ADAPTATION_MODES。
+    adaptation_mode: str | None = None
+    #: AI 生成内容标识；省略时默认关闭。同批新增。
+    ai_label_enabled: bool | None = None
 
 
 class ProjectDeleteInput(StandardCommandInput):

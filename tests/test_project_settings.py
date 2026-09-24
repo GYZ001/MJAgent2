@@ -83,6 +83,42 @@ def test_new_project_rejects_invalid_aspect_ratio_with_422():
     assert "画幅" in str(exc_info.value.detail)
 
 
+def test_new_project_accepts_explicit_adaptation_mode_and_ai_label_enabled():
+    created = projects_create._create_project_core(
+        "新建项目测试-显式档位", "story4.txt", "测试正文四。".encode("utf-8"),
+        adaptation_mode="faithful", ai_label_enabled=True,
+    )
+    conn = get_conn()
+    assert resolve_adaptation_mode(conn, created["project_id"]) == "faithful"
+    assert ai_label_enabled(conn, created["project_id"]) is True
+    # 未传画幅，仍是新建默认。
+    assert resolve_aspect_ratio(conn, created["project_id"]) == "9:16"
+
+
+def test_new_project_rejects_invalid_adaptation_mode_with_422():
+    with pytest.raises(HTTPException) as exc_info:
+        projects_create._create_project_core(
+            "坏档位", "story5.txt", "测试正文五。".encode("utf-8"), adaptation_mode="cinematic",
+        )
+    assert exc_info.value.status_code == 422
+    assert "改编强度档位" in str(exc_info.value.detail)
+
+
+def test_ai_label_enabled_command_field_coerces_strings_and_rejects_invalid():
+    """``ai_label_enabled`` 在 REST 表单/JSON body 里可能是字符串；FastAPI/pydantic
+    在 ``ProjectImportNovelInput`` 解析阶段做布尔转换，合法字符串通过、非法字符串
+    在到达 ``_create_project_core`` 之前就以 ValidationError（经命令总线转 422）
+    拒绝——这里直接测该输入模型本身，覆盖两个方向。"""
+    from pydantic import ValidationError
+
+    from app.capabilities.inputs import ProjectImportNovelInput
+
+    assert ProjectImportNovelInput(attachment_token="tok", ai_label_enabled="true").ai_label_enabled is True
+    assert ProjectImportNovelInput(attachment_token="tok", ai_label_enabled="false").ai_label_enabled is False
+    with pytest.raises(ValidationError):
+        ProjectImportNovelInput(attachment_token="tok", ai_label_enabled="not-a-bool")
+
+
 # ---------------------------------------------------------------------------
 # app.project_settings 纯函数契约
 # ---------------------------------------------------------------------------

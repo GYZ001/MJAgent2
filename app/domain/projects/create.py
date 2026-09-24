@@ -18,7 +18,7 @@ from app.novel_formats import (
 )
 from app.orgs import schema as orgs_schema
 from app.orgs import store as orgs_store
-from app.project_settings import ASPECT_RATIOS
+from app.project_settings import ADAPTATION_MODES, ASPECT_RATIOS
 
 
 async def _read_novel_upload(file: UploadFile) -> tuple[str, bytes]:
@@ -153,6 +153,21 @@ def _resolved_creation_aspect_ratio(aspect_ratio: str | None) -> str:
     return resolved
 
 
+def _resolved_creation_adaptation_mode(adaptation_mode: str | None) -> str:
+    """新建项目的改编强度档位：请求值或默认 "short_drama"（2026-09-23 用户拍板新
+    项目默认短剧节奏）；非法值 422，与画幅同口径。"""
+    resolved = adaptation_mode or "short_drama"
+    if resolved not in ADAPTATION_MODES:
+        raise HTTPException(422, f"不支持的改编强度档位：{resolved}")
+    return resolved
+
+
+def _resolved_creation_ai_label_enabled(ai_label_enabled: bool | None) -> bool:
+    """新建项目的 AI 标识开关：请求值或默认关闭。类型层面已经是 bool——FastAPI/
+    pydantic 在参数解析阶段做布尔转换与校验，非法字符串在到达这里之前已经是 422。"""
+    return bool(ai_label_enabled)
+
+
 def _novel_import_outcome(project_id: str, filename: str, report: dict) -> dict:
     """导入结果摘要：project_id + 章节统计 + 来源格式，供落库前占位与幂等回执共用。"""
     return {
@@ -177,6 +192,8 @@ def _create_project_core(
     *,
     import_token_hash: str | None = None,
     aspect_ratio: str | None = None,
+    adaptation_mode: str | None = None,
+    ai_label_enabled: bool | None = None,
 ) -> dict:
     """导入小说的领域逻辑，供 REST 路由与 ``project.import_novel`` Command Handler 共用。"""
     if not raw:
@@ -196,6 +213,8 @@ def _create_project_core(
     if len(project_name) > 120:
         raise HTTPException(422, "项目名称不能超过 120 个字符")
     resolved_aspect_ratio = _resolved_creation_aspect_ratio(aspect_ratio)
+    resolved_adaptation_mode = _resolved_creation_adaptation_mode(adaptation_mode)
+    resolved_ai_label_enabled = _resolved_creation_ai_label_enabled(ai_label_enabled)
     if import_token_hash:
         existing = _novel_import_receipt(import_token_hash)
         if existing is not None:
@@ -213,9 +232,9 @@ def _create_project_core(
         conn.execute(
             "INSERT INTO projects(id, name, status, novel_chars, created_at, owner_user_id, org_id, "
             "adaptation_mode, aspect_ratio, ai_label_enabled) "
-            "VALUES(?,?,'ingested',?,?,?,?,'short_drama',?,0)",
+            "VALUES(?,?,'ingested',?,?,?,?,?,?,?)",
             (project_id, project_name, report["total_chars"], now(), owner_user_id, org_id,
-             resolved_aspect_ratio))
+             resolved_adaptation_mode, resolved_aspect_ratio, int(resolved_ai_label_enabled)))
         # ingest_novel 已经算好本章的小节边界（app.novel.structure._extract_sections），
         # 装在 ch["paratext_json"] 里；此前这里没写这一列，小节信息落地即丢——见
         # app/source_paratext.py::chapter_paratext_offsets 的合并写入注释。
@@ -265,6 +284,8 @@ async def create_project(
     file: UploadFile = File(...),
     style_name: str | None = Form(default=None),
     aspect_ratio: str | None = Form(default=None),
+    adaptation_mode: str | None = Form(default=None),
+    ai_label_enabled: bool | None = Form(default=None),
 ):
     """页面上传入口：内部换发 attachment_token 后统一走 Command Bus，与 Agent/MCP 同一实现。"""
     from app.capabilities.attachments import store_upload
@@ -279,6 +300,8 @@ async def create_project(
             "name": name,
             "style_name": style_name,
             "aspect_ratio": aspect_ratio,
+            "adaptation_mode": adaptation_mode,
+            "ai_label_enabled": ai_label_enabled,
             "idempotency_key": f"novel-import:{token}",
         },
         initiator="ui",
@@ -292,6 +315,8 @@ async def create_project_from_attachment(
     name: str | None = Body(default=None),
     style_name: str | None = Body(default=None),
     aspect_ratio: str | None = Body(default=None),
+    adaptation_mode: str | None = Body(default=None),
+    ai_label_enabled: bool | None = Body(default=None),
 ):
     """用已上传的附件令牌导入小说，确保批准前后的命令参数保持不变。"""
     from app.capabilities.dispatch import dispatch, respond_ui
@@ -303,6 +328,8 @@ async def create_project_from_attachment(
             "name": name,
             "style_name": style_name,
             "aspect_ratio": aspect_ratio,
+            "adaptation_mode": adaptation_mode,
+            "ai_label_enabled": ai_label_enabled,
             # The one-time attachment token is unique for this import. Reusing
             # it as the command key makes response-loss retries replay-safe.
             "idempotency_key": f"novel-import:{attachment_token}",

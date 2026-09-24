@@ -43,10 +43,10 @@ async def import_novel(args: I.ProjectImportNovelInput) -> CommandResult:
         try:
             outcome = await call_guarded(
                 api._create_project_core,
-                args.name,
-                filename,
+                args.name, filename,
                 raw,
                 import_token_hash=token_hash, aspect_ratio=args.aspect_ratio,
+                adaptation_mode=args.adaptation_mode, ai_label_enabled=args.ai_label_enabled,
             )
         except BaseException:
             attachments.release(args.attachment_token)
