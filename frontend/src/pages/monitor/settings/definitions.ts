@@ -73,8 +73,9 @@ export const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
   {
     id: "reference-images",
     title: "参考图与视觉生成",
-    description: "控制人物、场景和镜头参考图的生成速度、批次与输入方式。",
-    affects: ["人物定妆照", "场景参考图", "关键帧与视频输入"],
+    description:
+      "控制人物、场景和镜头参考图的生成速度、批次与输入方式，以及视频生成时是否携带角色参考声音。",
+    affects: ["人物定妆照", "场景参考图", "关键帧与视频输入", "角色声音参考"],
     keys: [
       "reference_pipeline_concurrency",
       "image_request_concurrency",
@@ -83,6 +84,8 @@ export const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
       "use_character_refs",
       "video_reference_batch_prompt",
       "video_reference_role_adaptive",
+      "video_reference_audio_enabled",
+      "video_reference_audio_max_speakers",
     ],
   },
   {
@@ -160,6 +163,10 @@ export const SETTING_FIELD_IMPACTS: Record<string, string> = {
   use_character_refs: "视频生成时是否携带人物定妆照",
   video_reference_batch_prompt: "是否批量生成视频参考图提示词",
   video_reference_role_adaptive: "是否根据镜头角色自动调整参考图策略",
+  video_reference_audio_enabled:
+    "开启后，新生成的视频会带上本段说话角色的参考声音；已生成的视频不受影响",
+  video_reference_audio_max_speakers:
+    "开启参考声音后，每段最多传入几个角色的声音；超出上限的角色本次生成不会带声音参考",
   auto_retake_threshold: "兼容历史配置；质检分数不再触发自动重做",
   max_repair_attempts: "同一问题允许自动修复的最大次数",
   download_concurrency: "同时下载多少个模型生成结果",

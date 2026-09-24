@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { needsCharacterImage } from '../lib/segmentIdentity'
-import type { ReferenceImage, StoryboardPackResources } from '../api'
+import type { ReferenceAudioInput, ReferenceAudioSkip, ReferenceImage, StoryboardPackResources } from '../api'
 import { referenceImageLabel } from '../lib/bibleAssets'
 import ImageCompareModal from './ImageCompareModal'
+import VoicePlayButton from './voice/VoicePlayButton'
 
 /**
  * 生成台专用（WallPage.tsx，用户拍板 2026-08-31，「传入素材」展示重做）：这一次
@@ -33,12 +34,28 @@ import ImageCompareModal from './ImageCompareModal'
  * CSS 放 styles/WallPage.css：本组件只有生成台一个消费方，已登记进
  * scripts/check_css_split.py 的 PAGES['WallPage']，可以直接复用 WallPage 既有的
  * .wall-attempt-issue / .wall-empty-hint 告警与提示样式，不再造第二套。
+ *
+ * 参考音频（U4b，2026-09-24）：另一个代理正在做「生成视频时把本段说话角色的
+ * 参考音频一起传给视频模型」（系统设置 video_reference_audio_enabled 控制，
+ * 默认关闭），这里只做展示，不等后端——image_inputs.reference_audios/
+ * reference_audio_skips 字段名逐字照用后端约定（见 api/storyboard/versions.ts
+ * 的 ReferenceAudioInput/ReferenceAudioSkip）。老版本、开关关闭、或字段本身
+ * 缺失（旧数据）时 audios/audioSkips 都按空数组处理，两者都空时不渲染任何
+ * 东西（不冒出空标题）。versionId 用于给 VoicePlayButton 拼出跨卡片唯一的
+ * id——同一角色的声音可能同时出现在多张分镜卡片上，仅 voice_id 区分不出
+ * 「这是哪张卡片这次生成实际用的那条」；调用方（WallPage.tsx）目前还没有把
+ * 选中版本 id 接进来，留空时退化为只用 voice_id，是已知限制而非缺陷。
  */
-export default function GenerationReferenceGallery({ refs, loading, hasAttempt, declaredResources }: {
+export default function GenerationReferenceGallery({
+  refs, loading, hasAttempt, declaredResources, audios = [], audioSkips = [], versionId = '',
+}: {
   refs: ReferenceImage[]
   loading: boolean
   hasAttempt: boolean
   declaredResources?: StoryboardPackResources
+  audios?: ReferenceAudioInput[]
+  audioSkips?: ReferenceAudioSkip[]
+  versionId?: string
 }) {
   const [preview, setPreview] = useState<{ title: string; images: { src: string; label: string }[] } | null>(null)
   const hasDeclaredResources = Boolean(declaredResources?.characters.some(needsCharacterImage) || declaredResources?.scenes.length)
@@ -80,7 +97,42 @@ export default function GenerationReferenceGallery({ refs, loading, hasAttempt, 
           })}
         </div>
       )}
+      <ReferenceAudioBlock audios={audios} skips={audioSkips} versionId={versionId} />
       {preview && <ImageCompareModal title={preview.title} images={preview.images} onClose={() => setPreview(null)} />}
     </section>
+  )
+}
+
+/** 参考音频小节——拆出来只是为了让上面的主函数别再变长，不是独立文件（不涉及
+ * scripts/check_css_split.py 的页面归属登记）。audios 为空且 skips 也为空时不
+ * 渲染任何东西。 */
+function ReferenceAudioBlock({ audios, skips, versionId }: {
+  audios: ReferenceAudioInput[]
+  skips: ReferenceAudioSkip[]
+  versionId: string
+}) {
+  if (!audios.length && !skips.length) return null
+  return (
+    <div className="genref-audio-block">
+      <div className="genref-audio-head"><b>参考音频</b></div>
+      {!!audios.length && (
+        <ul className="genref-audio-list">
+          {audios.map(item => (
+            <li className="genref-audio-item" key={`${item.voice_id}-${item.index}`}>
+              <span className="genref-audio-label">{`音频${item.index} · ${item.character_name}`}</span>
+              <VoicePlayButton
+                voice={{ id: `${item.voice_id}:${versionId}`, audio_url: '', clip_url: item.clip_url, clip_duration_s: item.clip_duration_s }}
+                label={`${item.character_name}的参考声音`}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
+      {!!skips.length && (
+        <p className="genref-audio-skip">
+          未传声音：{skips.map(skip => `${skip.character_name}（${skip.reason}）`).join('、')}
+        </p>
+      )}
+    </div>
   )
 }

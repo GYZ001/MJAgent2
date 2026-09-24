@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ReferenceImage, ShotVersion } from '../api'
-import { extractReferenceImagesByVersion, shotVersionSignature } from './wallReferences'
+import { extractReferenceAudiosByVersion, extractReferenceImagesByVersion, shotVersionSignature } from './wallReferences'
 
 function version(overrides: Partial<ShotVersion> = {}): ShotVersion {
   return {
@@ -73,5 +73,23 @@ describe('版本指纹触发详情重取', () => {
 
   it('段不存在时返回空串，不抛错', () => {
     expect(shotVersionSignature(undefined)).toBe('')
+  })
+})
+
+describe('参考音频按版本摊平', () => {
+  it('实际传入的声音与未传原因原样摊平，字段名与画廊 props 一致', () => {
+    const audios = [{ index: 1, character_name: '周晚', voice_id: 'voice_1', clip_url: '/media/a.wav', clip_duration_s: 3.9 }]
+    const skips = [{ character_name: '小李', reason: '未配置声音' }]
+    const map = extractReferenceAudiosByVersion({
+      versions: [version({ id: 'v1', image_inputs: { reference_audios: audios, reference_audio_skips: skips } })],
+    })
+    expect(map).toEqual({ v1: { audios, audioSkips: skips } })
+  })
+
+  it('旧版本或开关关闭（字段缺失）时两者为空数组；没有 image_inputs 的版本不出现', () => {
+    const map = extractReferenceAudiosByVersion({
+      versions: [version({ id: 'old', image_inputs: { reference_images: refs } }), version({ id: 'bare' })],
+    })
+    expect(map).toEqual({ old: { audios: [], audioSkips: [] } })
   })
 })

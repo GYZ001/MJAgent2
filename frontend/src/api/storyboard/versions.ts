@@ -1,6 +1,26 @@
 import type { ReferenceImage } from "../bible";
 import type { VideoGenerationMode, VideoInputIntent } from "../video";
 
+/** 视频生成实际携带的参考音频（U4b，2026-09-24；另一个代理同步在做「生成视频
+ *  时把本段说话角色的参考音频一起传给视频模型」，系统设置
+ *  video_reference_audio_enabled 控制、默认关闭）：字段名逐字照用后端约定。
+ *  index 即提示词里的「@音频N」引用序号；voice_id 是该角色当前绑定声音的版本
+ *  id（对应 api/voices.ts 的 VoiceVersion.id）。 */
+export interface ReferenceAudioInput {
+  index: number;
+  character_name: string;
+  voice_id: string;
+  clip_url: string;
+  clip_duration_s: number | null;
+}
+
+/** 本段有台词但这次没能传声音的角色及中文原因（如「未配置声音」「超出每段 3
+ *  个上限」「当前视频模型未接入参考音频」）。 */
+export interface ReferenceAudioSkip {
+  character_name: string;
+  reason: string;
+}
+
 export interface ShotVersion {
   id: string;
   version_no: number;
@@ -62,6 +82,11 @@ export interface ShotVersion {
     required_interaction_reference_characters?: string[];
     reference_image_used?: boolean;
     reference_images?: ReferenceImage[];
+    /** 这个版本实际发给视频模型的参考音频；老版本、开关关闭、或字段本身缺失
+     *  （旧数据）时视同空数组，不代表「本段没有说话角色」。 */
+    reference_audios?: ReferenceAudioInput[];
+    /** 本段有台词但没传声音的角色，缺失同样视同空数组。 */
+    reference_audio_skips?: ReferenceAudioSkip[];
     reference_failure_logs?: {
       type?: string;
       reason?: string;

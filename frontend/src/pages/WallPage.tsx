@@ -17,7 +17,7 @@ import { compactShotStage } from '../shotStatus'
 import { refsBusyPollInterval, type ImageGenTaskLike } from '../lib/bibleAssets'
 import { reconcileProviderTasksAndReport, reusedReasonLabel } from '../lib/providerTaskRecovery'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
-import { extractReferenceImagesByVersion, shotVersionSignature } from '../lib/wallReferences'
+import { extractReferenceAudiosByVersion, extractReferenceImagesByVersion, shotVersionSignature, type VersionAudios } from '../lib/wallReferences'
 import GenerationReferenceGallery from '../components/GenerationReferenceGallery'
 import SegmentResourcePanel from '../components/SegmentResourcePanel'
 import AttemptList from './wall/AttemptList'
@@ -225,7 +225,7 @@ function newIdemKey(prefix: string): string {
 type DetailState =
   | { status: 'idle' }
   | { status: 'loading'; shotId: string }
-  | { status: 'ready'; shotId: string; referenceImages: Record<string, ReferenceImage[]> }
+  | { status: 'ready'; shotId: string; referenceImages: Record<string, ReferenceImage[]>; referenceAudios: Record<string, VersionAudios> }
   | { status: 'error'; shotId: string; message: string }
 
 export default function WallPage() {
@@ -278,7 +278,7 @@ export default function WallPage() {
     try {
       const loaded = await api.getShotReview(shotId)
       if (request !== detailRequest.current) return
-      setDetail({ status: 'ready', shotId, referenceImages: extractReferenceImagesByVersion(loaded) })
+      setDetail({ status: 'ready', shotId, referenceImages: extractReferenceImagesByVersion(loaded), referenceAudios: extractReferenceAudiosByVersion(loaded) })
     } catch (reason) {
       if (request !== detailRequest.current) return
       const value = reason as Error
@@ -532,6 +532,7 @@ function SegmentWorkbench({ shot, context, detail, onRefresh, onToast, project, 
   }
   const rangeText = compressSegmentIndexes(segment.source_segment_indexes ?? [])
   const referenceImages = detail.status === 'ready' && detail.shotId === shot.id ? detail.referenceImages : {}
+  const referenceAudios = detail.status === 'ready' && detail.shotId === shot.id ? detail.referenceAudios : {}
   const detailLoading = detail.status === 'loading' && detail.shotId === shot.id
   const detailError = detail.status === 'error' && detail.shotId === shot.id ? detail.message : null
 
@@ -595,7 +596,7 @@ function SegmentWorkbench({ shot, context, detail, onRefresh, onToast, project, 
       <GenerationPanel
         shot={shot}
         context={context}
-        referenceImages={referenceImages}
+        referenceImages={referenceImages} referenceAudios={referenceAudios}
         detailLoading={detailLoading}
         detailError={detailError}
         onRefresh={onRefresh}
@@ -607,10 +608,10 @@ function SegmentWorkbench({ shot, context, detail, onRefresh, onToast, project, 
   )
 }
 
-export function GenerationPanel({ shot, context, referenceImages, detailLoading, detailError, onRefresh, onToast, goToBoard, projectAspectRatio }: {
+export function GenerationPanel({ shot, context, referenceImages, referenceAudios = {}, detailLoading, detailError, onRefresh, onToast, goToBoard, projectAspectRatio }: {
   shot: Shot
   context: ReviewWallContext | null
-  referenceImages: Record<string, ReferenceImage[]>
+  referenceImages: Record<string, ReferenceImage[]>; referenceAudios?: Record<string, VersionAudios>
   detailLoading: boolean
   detailError: string | null
   onRefresh: () => Promise<void>
@@ -770,6 +771,7 @@ export function GenerationPanel({ shot, context, referenceImages, detailLoading,
               loading={detailLoading || !refsKnown}
               hasAttempt={hasAttempt}
               declaredResources={segment?.resources}
+              {...(selected ? referenceAudios[selected.id] ?? {} : {})} versionId={selected?.id}
             />
           )}
           {selected?.provider_task_id && <p className="wall-empty-hint">供应商任务：{selected.provider_task_id}</p>}

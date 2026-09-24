@@ -1,4 +1,4 @@
-import type { ReferenceImage, Shot } from '../api'
+import type { ReferenceAudioInput, ReferenceAudioSkip, ReferenceImage, Shot } from '../api'
 
 /**
  * 生成台「本次生成实际参考图」面板的两个纯判据（WallPage.tsx 消费）。
@@ -23,6 +23,25 @@ export function extractReferenceImagesByVersion(
     const inputs = version.image_inputs
     if (!inputs || inputs.omitted_for_size) continue
     map[version.id] = inputs.reference_images ?? []
+  }
+  return map
+}
+
+/** 某个版本「实际传给视频模型的参考音频」与「有台词却没传声音的角色及原因」；
+ *  开关关闭、旧版本或字段缺失时两者都是空数组。字段名与 GenerationReferenceGallery
+ *  的 props 同名，调用方可以直接展开传入。 */
+export type VersionAudios = { audios: ReferenceAudioInput[]; audioSkips: ReferenceAudioSkip[] }
+
+/** 与 extractReferenceImagesByVersion 同一口径：只有详情响应带 image_inputs，
+ *  键存在 = 这条版本的声音清单已知。 */
+export function extractReferenceAudiosByVersion(
+  shot: Pick<Shot, 'versions'>,
+): Record<string, VersionAudios> {
+  const map: Record<string, VersionAudios> = {}
+  for (const version of shot.versions ?? []) {
+    const inputs = version.image_inputs
+    if (!inputs || inputs.omitted_for_size) continue
+    map[version.id] = { audios: inputs.reference_audios ?? [], audioSkips: inputs.reference_audio_skips ?? [] }
   }
   return map
 }

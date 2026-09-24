@@ -412,6 +412,40 @@ details.wall-meta-details > :not(summary) {
   color: var(--ink-soft);
   font: 500 11px/1.4 var(--ui);
 }
+/* components/GenerationReferenceGallery.tsx 的 ReferenceAudioBlock（U4b，
+   2026-09-24）：这次生成实际带上的参考音频，复用 VoicePlayButton 全站样式
+   （index.css 的 .voice-play-btn*），这里只排版列表与「未传声音」提示行。 */
+.genref-audio-block {
+  margin-top: 10px;
+}
+.genref-audio-head {
+  margin-bottom: 6px;
+}
+.genref-audio-head b {
+  font: 650 12.5px var(--ui);
+}
+.genref-audio-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.genref-audio-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.genref-audio-label {
+  color: var(--ink-soft);
+  font: 500 11px var(--ui);
+}
+.genref-audio-skip {
+  margin-top: 6px;
+  color: var(--ink-faint);
+  font: 400 11px/1.4 var(--ui);
+}
 
 @media (max-width: 900px) {
   .wall-player-layout {
