@@ -48,6 +48,38 @@ describe('StoryboardAdaptationPanel：有删减', () => {
   })
 })
 
+describe('StoryboardAdaptationPanel：删减复核', () => {
+  it('复核成功且救回内容时展示恢复说明', async () => {
+    vi.mocked(api.getStoryboardAdaptation).mockResolvedValue({
+      ...WITH_DROPS,
+      drop_review: {
+        status: 'ok', reviewed_count: 1, second_pass: true,
+        must_keep: [{ item_id: 'span:1:3-4', kind: 'span', text: '一周后你若到了凝气一层', evidence_quote: '一周后你若到了凝气一层' }],
+      },
+    })
+    const view = await mount()
+    expect(textOf(view.root)).toContain('删减经复核：恢复了 1 处关键内容（一周后你若到了凝气一层）')
+    view.unmount()
+  })
+
+  it('复核调用失败时如实展示未经复核', async () => {
+    vi.mocked(api.getStoryboardAdaptation).mockResolvedValue({
+      ...WITH_DROPS,
+      drop_review: { status: 'failed', reviewed_count: 1, must_keep: [], second_pass: false },
+    })
+    const view = await mount()
+    expect(textOf(view.root)).toContain('复核调用失败，删减未经复核')
+    view.unmount()
+  })
+
+  it('老留档没有 drop_review 字段时不展示任何复核文案', async () => {
+    vi.mocked(api.getStoryboardAdaptation).mockResolvedValue(WITH_DROPS)
+    const view = await mount()
+    expect(textOf(view.root)).not.toContain('复核')
+    view.unmount()
+  })
+})
+
 describe('StoryboardAdaptationPanel：无删减', () => {
   it('没有任何删减时显示「本集没有删减内容」', async () => {
     vi.mocked(api.getStoryboardAdaptation).mockResolvedValue({

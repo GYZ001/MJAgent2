@@ -1,4 +1,4 @@
-import type { StoryboardAdaptationSummary } from '../api'
+import type { StoryboardAdaptationDropReview, StoryboardAdaptationSummary } from '../api'
 
 /** 每段固定 15 秒（2.4.0 起分镜台契约），约合时长按段数直接乘——不是精确时长，
  *  只用于给用户一个数量级参照，与目标时长对比。 */
@@ -51,4 +51,18 @@ export function overTargetText(summary: Pick<StoryboardAdaptationSummary,
   }
   if (summary.planned_over_cap) text += '；模型多次调整后规划段数仍超上限'
   return text
+}
+
+/** 删减复核（2026-09-24）如实说明：复核失败时明确告知「未经复核」，不假装
+ *  复核过；复核成功且确有内容被救回时列出摘录；复核成功但没有必保项、或
+ *  本集从未触发复核（老留档没有这个字段）时不渲染这一行——没有可说的内容
+ *  时不硬造一句话（CLAUDE.md「界面承诺必须与实际行为一致」）。 */
+export function dropReviewText(dropReview: StoryboardAdaptationDropReview | null | undefined): string {
+  if (!dropReview) return ''
+  if (dropReview.status === 'failed') return '复核调用失败，删减未经复核'
+  if (dropReview.status === 'ok' && dropReview.must_keep.length > 0) {
+    const excerpts = dropReview.must_keep.map(item => item.text).join('；')
+    return `删减经复核：恢复了 ${dropReview.must_keep.length} 处关键内容（${excerpts}）`
+  }
+  return ''
 }

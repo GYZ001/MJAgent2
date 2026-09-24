@@ -120,6 +120,10 @@ def storyboard_adaptation_summary(conn, episode_id: str) -> dict:
         "planned_over_cap": bool(adaptation.get("planned_over_cap", False)),
         "kept_dialogue_chars": adaptation.get("kept_dialogue_chars"),
         "dialogue_budget_chars": adaptation.get("dialogue_budget_chars"),
+        # 2026-09-24 新增：删减复核留档（见 app.production.storyboard_short_
+        # drama_review 模块 docstring 的 drop_review 契约）。老留档没有这个
+        # 字段，.get() 降级为 None，前端据此不渲染复核相关文案。
+        "drop_review": adaptation.get("drop_review"),
     }
 
 

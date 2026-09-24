@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { adaptationModeLabel, adaptationPanelTitle, durationComparisonText, overTargetText } from './storyboardAdaptation'
+import { adaptationModeLabel, adaptationPanelTitle, dropReviewText, durationComparisonText, overTargetText } from './storyboardAdaptation'
 
 describe('adaptationModeLabel', () => {
   it('recorded=false 时如实说明是旧分镜，不冒充忠实原著', () => {
@@ -75,5 +75,37 @@ describe('overTargetText', () => {
       kept_dialogue_chars: undefined, dialogue_budget_chars: undefined, planned_over_cap: undefined,
     })
     expect(text).toBe('模型多次调整后仍超出短剧上限')
+  })
+})
+
+describe('dropReviewText', () => {
+  it('没有 drop_review 字段（老留档）时返回空串，不渲染任何复核文案', () => {
+    expect(dropReviewText(undefined)).toBe('')
+    expect(dropReviewText(null)).toBe('')
+  })
+
+  it('复核调用失败时如实说明删减未经复核', () => {
+    const text = dropReviewText({ status: 'failed', reviewed_count: 2, must_keep: [], second_pass: false })
+    expect(text).toBe('复核调用失败，删减未经复核')
+  })
+
+  it('复核成功且救回内容时列出条数与摘录', () => {
+    const text = dropReviewText({
+      status: 'ok', reviewed_count: 3, second_pass: true,
+      must_keep: [
+        { item_id: 'span:1:3-4', kind: 'span', text: '一周后你若到了凝气一层', evidence_quote: '一周后你若到了凝气一层' },
+      ],
+    })
+    expect(text).toBe('删减经复核：恢复了 1 处关键内容（一周后你若到了凝气一层）')
+  })
+
+  it('复核成功但没有必保项时不渲染（没有可说的内容）', () => {
+    const text = dropReviewText({ status: 'ok', reviewed_count: 2, must_keep: [], second_pass: false })
+    expect(text).toBe('')
+  })
+
+  it('复核跳过（无删减/忠实档）时不渲染', () => {
+    const text = dropReviewText({ status: 'skipped', reviewed_count: 0, must_keep: [], second_pass: false })
+    expect(text).toBe('')
   })
 })

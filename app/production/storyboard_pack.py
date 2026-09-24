@@ -78,8 +78,9 @@ from app.production.storyboard_dialects import (
 )
 from app.production.storyboard_beat_sheet import (
     _AiBeat as _AiBeat, _AiBeatSheetDraft as _AiBeatSheetDraft, _AiSegmentPlan as _AiSegmentPlan, _beat_sheet_rules as _beat_sheet_rules,
-    _generate_beat_sheet, _paratext_exclusion_rule as _paratext_exclusion_rule, _paratext_segment_indexes as _paratext_segment_indexes, _source_block_for_prompt as _source_block_for_prompt, _validate_beat_sheet_draft as _validate_beat_sheet_draft,
+    _paratext_exclusion_rule as _paratext_exclusion_rule, _paratext_segment_indexes as _paratext_segment_indexes, _source_block_for_prompt as _source_block_for_prompt, _validate_beat_sheet_draft as _validate_beat_sheet_draft,
 )
+from app.production.storyboard_short_drama_review import generate_beat_sheet_with_drop_review
 from app.production.storyboard_continuity_memo import (
     _AiContinuityMemo, ensure_travel_direction_in_prompt,
     continuity_memo_character_advisories, continuity_memo_errors, continuity_memo_payload,
@@ -1343,7 +1344,7 @@ async def generate_storyboard_pack(
     # 2026-09-23 改编强度档位：档位以生成这一刻的项目设置为准并写进留档
     # （见 StoryboardPack.adaptation），之后项目档位被改只影响以后的生成。
     adaptation_mode = resolve_adaptation_mode(conn, ep["project_id"])
-    beat_draft, projected_segment_count = await _generate_beat_sheet(
+    beat_draft, projected_segment_count, drop_review = await generate_beat_sheet_with_drop_review(
         episode_id=episode_id, episode_no=episode_no, segments=segments, payload=payload,
         dialogue_quotes=dialogue_quotes, contract_version=STORYBOARD_PACK_VERSION,
         adaptation_mode=adaptation_mode,
@@ -1427,13 +1428,16 @@ async def generate_storyboard_pack(
         dialogue_ledger=dialogue_ledger_summary(
             dialogue_quotes, beat_draft.kept_lines, beat_draft.dropped_lines, capacity_normalization,
         ),
-        adaptation=storyboard_short_drama.adaptation_summary(
-            adaptation_mode=adaptation_mode, planned_segment_count=planned_segment_count,
-            segment_count=len(pack_segments), dropped_spans=getattr(beat_draft, "dropped_source_spans", None) or [],
-            dropped_quote_ids=storyboard_short_drama.dropped_line_quote_ids(beat_draft),
-            kept_dialogue_chars=storyboard_short_drama_budget.kept_dialogue_chars(beat_draft.kept_lines, dialogue_quotes),
-            projected_segment_count=projected_segment_count,
-        ),
+        adaptation={
+            **storyboard_short_drama.adaptation_summary(
+                adaptation_mode=adaptation_mode, planned_segment_count=planned_segment_count,
+                segment_count=len(pack_segments), dropped_spans=getattr(beat_draft, "dropped_source_spans", None) or [],
+                dropped_quote_ids=storyboard_short_drama.dropped_line_quote_ids(beat_draft),
+                kept_dialogue_chars=storyboard_short_drama_budget.kept_dialogue_chars(beat_draft.kept_lines, dialogue_quotes),
+                projected_segment_count=projected_segment_count,
+            ),
+            "drop_review": drop_review,
+        },
     )
 
 

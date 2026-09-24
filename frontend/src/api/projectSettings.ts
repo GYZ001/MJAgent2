@@ -77,6 +77,23 @@ export interface StoryboardAdaptationDroppedLine {
   text: string;
 }
 
+/** 删减复核（2026-09-24）留档里的一条必保条目：复核判定为交代了后续剧情
+ *  会用到的信息、因此被强制保留的原文内容——见
+ *  app/production/storyboard_short_drama_review.py 模块 docstring。 */
+export interface StoryboardAdaptationMustKeepItem {
+  item_id: string;
+  kind: string;
+  text: string;
+  evidence_quote: string;
+}
+
+export interface StoryboardAdaptationDropReview {
+  status: "ok" | "failed" | "skipped";
+  reviewed_count: number;
+  must_keep: StoryboardAdaptationMustKeepItem[];
+  second_pass: boolean;
+}
+
 export interface StoryboardAdaptationSummary {
   recorded: boolean;
   adaptation_mode: string;
@@ -93,6 +110,8 @@ export interface StoryboardAdaptationSummary {
   planned_over_cap?: boolean;
   kept_dialogue_chars?: number | null;
   dialogue_budget_chars?: number | null;
+  // 2026-09-24 删减复核：同样是老留档没有的字段，降级为 undefined/null。
+  drop_review?: StoryboardAdaptationDropReview | null;
 }
 
 /** 分镜台「本集删减」面板的只读数据源：GET /episodes/{id}/storyboard-adaptation。
