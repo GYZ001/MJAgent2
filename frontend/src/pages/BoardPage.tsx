@@ -11,6 +11,7 @@ import EpisodeCrumb from '../components/EpisodeCrumb'
 import { ItemTaskTimer, ServerTaskTimer } from '../components/TaskTimer'
 import DecisionDialog from '../components/DecisionDialog'
 import QueryState from '../components/QueryState'; import StaleRefreshBanner from '../components/StaleRefreshBanner'
+import StoryboardAdaptationPanel from '../components/StoryboardAdaptationPanel'
 import StoryboardPackSegmentView from '../components/StoryboardPackSegmentView'
 import { useRefsSettledRefresh } from '../hooks/useRefsSettledRefresh'
 import { useFocusTrap } from '../hooks/useFocusTrap'
@@ -806,6 +807,7 @@ export default function BoardPage() {
       </header>
       {/* 已有 ep 后台轮询失败不再被早退 QueryState 吞掉，见 StaleRefreshBanner 注释 */}
       <StaleRefreshBanner error={error} onRetry={() => void refresh()} objectName="分镜台" />
+      <StoryboardAdaptationPanel episodeId={episodeId!} />
 
       {showLaunchPanel ? (
         <StoryboardLaunchPanel episode={ep} status={status} busy={busy} onPrimary={() => { void runPrimary() }} />

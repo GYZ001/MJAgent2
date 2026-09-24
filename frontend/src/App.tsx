@@ -1022,7 +1022,7 @@ function AppShell() {
           <small>漫剧案头 · 2.0</small>
         </div>
       </aside>
-      <main className={`desk ${view === "board" ? "board-desk" : ""} ${view === "system" ? "system-desk" : ""}`}>
+      <main className={`desk ${view === "board" ? "board-desk" : ""} ${view === "system" ? "system-desk" : ""}`} style={{ "--project-aspect-ratio": currentProject?.aspect_ratio === "16:9" ? "16 / 9" : "9 / 16" } as React.CSSProperties}>
         <ErrorBoundary
           resetKey={`${view}:${projectId}:${episodeId}:${chapterIdx}`}
           actions={

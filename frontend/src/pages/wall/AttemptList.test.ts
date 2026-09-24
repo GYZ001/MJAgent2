@@ -36,12 +36,12 @@ describe("attemptAdoptability", () => {
 
 const BASE_VERSION = { version_no: 1, prompt_text: "", latency_s: 0 };
 
-function renderList(versions: ShotVersion[], adoptedId: string | null) {
+function renderList(versions: ShotVersion[], adoptedId: string | null, projectAspectRatio?: string) {
   let view!: TestRenderer.ReactTestRenderer;
   act(() => {
     view = TestRenderer.create(createElement(AttemptList, {
       shotId: "s1", versions, previewId: null, adoptedId,
-      statusLabel: (s: string) => s, stampClass: () => "stamp",
+      statusLabel: (s: string) => s, stampClass: () => "stamp", projectAspectRatio,
       onPreview: () => {}, onToast: () => {}, onRefresh: async () => {},
     }));
   });
@@ -74,6 +74,51 @@ describe("生成台候选列表：唯一版本是 stale 保留时仍必须可见
     );
     const list = view.root.findAll(n => n.props["aria-label"] === "全部尝试");
     expect(list.length).toBe(0);
+    act(() => view.unmount());
+  });
+});
+
+// 2026-09-23 项目级画幅设置：候选版本的生成画幅与项目当前画幅不同时显示「旧画幅」
+// 提示徽标，只提示不拦采纳；拿不到项目画幅就不显示（宁可不提示也不编造）。
+describe("旧画幅提示徽标", () => {
+  const TWO_VERSIONS = [
+    { ...BASE_VERSION, id: "v1", version_no: 1, status: "succeeded", video_url: "/media/v1.mp4", aspect_ratio: "9:16" },
+    { ...BASE_VERSION, id: "v2", version_no: 2, status: "succeeded", video_url: "/media/v2.mp4", aspect_ratio: "16:9" },
+  ];
+
+  it("版本画幅与项目当前画幅不同时显示旧画幅徽标", () => {
+    const view = renderList(TWO_VERSIONS, "v1", "16:9");
+    const cards = view.root.findAllByType("button").filter(b => b.props["aria-label"]?.startsWith("v"));
+    expect(cards[0].props["aria-label"]).toContain("旧画幅 9:16");
+    expect(cards[1].props["aria-label"]).not.toContain("旧画幅");
+    act(() => view.unmount());
+  });
+
+  it("版本画幅与项目当前画幅相同时不显示徽标", () => {
+    const view = renderList(TWO_VERSIONS, "v1", "9:16");
+    const cards = view.root.findAllByType("button").filter(b => b.props["aria-label"]?.startsWith("v"));
+    expect(cards[0].props["aria-label"]).not.toContain("旧画幅");
+    act(() => view.unmount());
+  });
+
+  it("拿不到项目画幅（未传 projectAspectRatio）时不显示徽标", () => {
+    const view = renderList(TWO_VERSIONS, "v1");
+    const cards = view.root.findAllByType("button").filter(b => b.props["aria-label"]?.startsWith("v"));
+    expect(cards.every(c => !c.props["aria-label"]?.includes("旧画幅"))).toBe(true);
+    act(() => view.unmount());
+  });
+
+  it("版本没有 aspect_ratio 字段时按 9:16 处理（冻结契约：缺失即默认画幅）", () => {
+    const view = renderList(
+      [
+        { ...BASE_VERSION, id: "v1", version_no: 1, status: "succeeded", video_url: "/media/v1.mp4" },
+        { ...BASE_VERSION, id: "v2", version_no: 2, status: "succeeded", video_url: "/media/v2.mp4", aspect_ratio: "16:9" },
+      ],
+      null, "16:9",
+    );
+    const cards = view.root.findAllByType("button").filter(b => b.props["aria-label"]?.startsWith("v"));
+    expect(cards[0].props["aria-label"]).toContain("旧画幅 9:16");
+    expect(cards[1].props["aria-label"]).not.toContain("旧画幅");
     act(() => view.unmount());
   });
 });

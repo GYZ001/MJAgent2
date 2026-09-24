@@ -10,7 +10,9 @@ import { EpisodeStatusStamp, ScreenplayStatusStamp } from '../components/Product
 import OperationError from '../components/OperationError'
 import EpisodeBatchConfirmDialog, { type BatchAction } from '../components/EpisodeBatchConfirmDialog'
 import ProjectCollaboratorsPanel from '../components/ProjectCollaboratorsPanel'
+import ProjectSettingsPanel from '../components/ProjectSettingsPanel'
 import { formatBookTitle } from '../lib/bookTitle'
+import { resolveEpisodePage } from '../lib/episodePaging'
 import { storyboardTaskNotice } from '../lib/productionNotices'
 
 const PAGE_SIZE = 15
@@ -64,24 +66,6 @@ export function canScanPortraitGaps(
   project: Pick<Project, 'bible_status' | 'bible'> | null | undefined,
 ): boolean {
   return project?.bible_status === 'ready' && Boolean(project.bible)
-}
-
-export function resolveEpisodePage(
-  value: string,
-  pageCount: number,
-  currentPage: number,
-): { page: number; message: string } {
-  const raw = Number.parseInt(value.trim(), 10)
-  if (!Number.isFinite(raw)) {
-    return { page: currentPage, message: `请输入 1 到 ${pageCount} 之间的页码` }
-  }
-  const page = Math.min(pageCount, Math.max(1, raw))
-  if (page === currentPage && raw === currentPage) {
-    return { page, message: `当前已是第 ${currentPage} 页` }
-  }
-  if (raw < 1) return { page, message: '页码不能小于 1，已跳到第一页' }
-  if (raw > pageCount) return { page, message: `页码不能超过 ${pageCount}，已跳到最后一页` }
-  return { page, message: `已跳到第 ${page} 页` }
 }
 
 export default function EpisodesPage() {
@@ -600,6 +584,8 @@ export default function EpisodesPage() {
           </div>
         )}
       </section>
+
+      <ProjectSettingsPanel project={p} toast={toast} onSaved={() => void refresh()} />
 
       <details className="project-collaborators-toggle">
         <summary className="btn ghost small">协作者</summary>

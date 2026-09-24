@@ -516,7 +516,10 @@ function SegmentNavItem({ shot, selected, onSelect }: { shot: Shot; selected: bo
 
 function SegmentWorkbench({ shot, context, detail, onRefresh, onToast, project, goToBoard }: {
   shot: Shot
-  project: ImageGenTaskLike | null
+  // & { aspect_ratio?: string }：项目当前画幅，只用于生成台「旧画幅」提示徽标；
+  // 不并入 ImageGenTaskLike 本体（lib/bibleAssets.ts），避免为一个展示用途的可选
+  // 字段牵动它在出图缺口判定等其它调用点的类型面。
+  project: (ImageGenTaskLike & { aspect_ratio?: string }) | null
   context: ReviewWallContext | null
   detail: DetailState
   onRefresh: () => Promise<void>
@@ -598,12 +601,13 @@ function SegmentWorkbench({ shot, context, detail, onRefresh, onToast, project, 
         onRefresh={onRefresh}
         onToast={onToast}
         goToBoard={goToBoard}
+        projectAspectRatio={project?.aspect_ratio}
       />
     </article>
   )
 }
 
-export function GenerationPanel({ shot, context, referenceImages, detailLoading, detailError, onRefresh, onToast, goToBoard }: {
+export function GenerationPanel({ shot, context, referenceImages, detailLoading, detailError, onRefresh, onToast, goToBoard, projectAspectRatio }: {
   shot: Shot
   context: ReviewWallContext | null
   referenceImages: Record<string, ReferenceImage[]>
@@ -612,6 +616,7 @@ export function GenerationPanel({ shot, context, referenceImages, detailLoading,
   onRefresh: () => Promise<void>
   onToast: (message: string, isErr?: boolean) => void
   goToBoard: () => void
+  projectAspectRatio?: string
 }) {
   const segment = shot.storyboard_pack_segment
   const versions = useMemo(
@@ -771,7 +776,7 @@ export function GenerationPanel({ shot, context, referenceImages, detailLoading,
         </div>
         <AttemptList shotId={shot.id} versions={versions} previewId={previewId} adoptedId={shot.adopted_version_id}
           qualificationVersion={context?.upstream.shot_qualification_versions?.[shot.id] ?? context?.upstream.qualification_version}
-          statusLabel={versionStatusLabel} stampClass={stampClassForStatus}
+          statusLabel={versionStatusLabel} stampClass={stampClassForStatus} projectAspectRatio={projectAspectRatio}
           onPreview={setPreviewId} onToast={onToast} onRefresh={onRefresh} />
       </div>
     </section>

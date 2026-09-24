@@ -8,6 +8,9 @@ export interface ShotVersion {
   status: string;
   error?: string;
   video_url?: string;
+  /** 生成这一版时的项目画幅（另一代理实现中，可能缺失）；前端按缺失即 "9:16"
+   *  处理，用于生成台「旧画幅」提示徽标，只提示不拦采纳。 */
+  aspect_ratio?: string;
   qa?: {
     overall: number;
     issues: string[];

@@ -29,6 +29,7 @@ import * as storyboardApi from "./storyboard";
 import * as videoApi from "./video";
 import * as deliveryApi from "./delivery";
 import * as projectsApi from "./projects";
+import * as projectSettingsApi from "./projectSettings";
 import * as seriesApi from "./series";
 import * as systemApi from "./system";
 import { getArtifactLineage, numToCn } from "./common";
@@ -47,6 +48,7 @@ export * from "./storyboard";
 export * from "./video";
 export * from "./delivery";
 export * from "./projects";
+export * from "./projectSettings";
 export * from "./series";
 export * from "./system";
 
@@ -150,7 +152,6 @@ export const api = {
   restoreProject: projectsApi.restoreProject,
   purgeProject: projectsApi.purgeProject,
   purgeAllDeletedProjects: projectsApi.purgeAllDeletedProjects,
-  setStageTextModel: projectsApi.setStageTextModel,
   replanEpisodes: projectsApi.replanEpisodes,
   generateAllScreenplays: projectsApi.generateAllScreenplays,
   generateAllStoryboards: projectsApi.generateAllStoryboards,
@@ -159,6 +160,12 @@ export const api = {
   setEpisodeTargetDuration: projectsApi.setEpisodeTargetDuration,
   getStoryboardMetrics: projectsApi.getStoryboardMetrics,
   listEpisodesPage: projectsApi.listEpisodesPage,
+
+  /* ── 项目设置域（改编强度/画幅/AI 标识，2026-09-23 用户拍板） ── */
+  setStageTextModel: projectSettingsApi.setStageTextModel,
+  updateProjectSettings: projectSettingsApi.updateProjectSettings,
+  getAspectRatioImpact: projectSettingsApi.getAspectRatioImpact,
+  getStoryboardAdaptation: projectSettingsApi.getStoryboardAdaptation,
 
   /* ── 连播台域 ── */
   getSeriesTasks: seriesApi.getSeriesTasks,

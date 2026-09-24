@@ -44,6 +44,7 @@ export default function AttemptList({
   onPreview,
   onToast,
   onRefresh,
+  projectAspectRatio,
 }: {
   shotId: string
   versions: ShotVersion[]
@@ -55,6 +56,8 @@ export default function AttemptList({
   onPreview: (versionId: string) => void
   onToast: (message: string, isErr?: boolean) => void
   onRefresh: () => Promise<void>
+  /** 项目当前画幅；拿不到就不显示「旧画幅」徽标（宁可不提示，也不编造一个画幅）。 */
+  projectAspectRatio?: string
 }) {
   const [adopting, setAdopting] = useState<string | null>(null)
   const adoptingRef = useRef(false)
@@ -96,11 +99,15 @@ export default function AttemptList({
       {versions.map(version => {
         const isAdopted = version.id === adoptedId
         const isStale = version.status === 'stale'
+        // 「旧画幅」只提示不拦采纳：拿不到项目当前画幅（未接入/未加载）就不显示，
+        // 宁可不提示也不编造一个画幅（同 CLAUDE.md「不得兜底填充」）。
+        const versionAspectRatio = version.aspect_ratio || '9:16'
+        const isOutdatedAspect = Boolean(projectAspectRatio) && versionAspectRatio !== projectAspectRatio
         return (
           <button type="button" key={version.id}
             className={`wall-attempt-card${version.id === previewId ? ' selected' : ''}${isAdopted ? ' adopted' : ''}`}
             aria-pressed={version.id === previewId}
-            aria-label={`v${version.version_no}，${isStale ? '已过期，仅供对照，不可采纳' : statusLabel(version.status)}${isAdopted ? '，已采纳' : ''}`}
+            aria-label={`v${version.version_no}，${isStale ? '已过期，仅供对照，不可采纳' : statusLabel(version.status)}${isAdopted ? '，已采纳' : ''}${isOutdatedAspect ? `，旧画幅 ${versionAspectRatio}` : ''}`}
             disabled={adopting != null}
             onClick={() => void select(version)}>
             <span className="wall-attempt-card-top">
@@ -108,6 +115,7 @@ export default function AttemptList({
               <span className={stampClass(version.status)}>{isStale ? '已过期' : statusLabel(version.status)}</span>
               {isAdopted && <span className="stamp ok">已采纳</span>}
               {adopting === version.id && <span className="stamp">采纳中…</span>}
+              {isOutdatedAspect && <span className="stamp grey" title="该版本生成时的画幅与项目当前画幅不同，仅提示，不影响采纳">旧画幅 {versionAspectRatio}</span>}
             </span>
             {isStale && <small>{version.error || STALE_FALLBACK_REASON}</small>}
           </button>

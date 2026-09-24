@@ -1,5 +1,12 @@
 import type { Project } from '../api'
 
+/** 项目卡片的状态徽标：[展示文案, 颜色]。从 Studio.tsx 挪来（2026-09-23，新建
+ *  项目三项设置腾行数用），纯查表常量，与本文件其余纯函数同类。 */
+export const STATUS_LABEL: Record<string, [string, string]> = {
+  created: ['新建', 'grey'], ingested: ['已导入', 'blue'],
+  bible_ready: ['人物谱就绪', 'blue'], planned: ['分集已规划', 'green'],
+}
+
 export interface NovelFileDescriptor {
   name: string
   size: number

@@ -1,9 +1,13 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import {
   canScanPortraitGaps,
   generateFirstThreeEpisodeVideos,
-  resolveEpisodePage,
 } from './EpisodesPage'
+import { resolveEpisodePage } from '../lib/episodePaging'
+
+const source = readFileSync(fileURLToPath(new URL('./EpisodesPage.tsx', import.meta.url)), 'utf-8')
 
 describe('人物定妆缺口扫描门禁', () => {
   it('人物谱未就绪时不请求缺口接口', () => {
@@ -131,5 +135,14 @@ describe('生成前三集视频', () => {
     expect(projectVideoCompletion.mock.calls[0][1]).not.toMatchObject({
       episode_ids: currentFilteredEpisodeIds,
     })
+  })
+})
+
+// 2026-09-23 用户拍板：项目设置面板（改编强度/画幅/AI 标识）挂在分集规划页。
+// 无组件渲染测试基建（同 Studio.test.ts 顶部注释），继续用源码静态扫描守接线；
+// 面板自身的保存/409/画幅确认逻辑由 components/ProjectSettingsPanel.test.ts 覆盖。
+describe('项目设置面板挂载于分集规划页', () => {
+  it('挂载 ProjectSettingsPanel 并传入当前项目、toast 与保存后刷新回调', () => {
+    expect(source).toMatch(/<ProjectSettingsPanel project=\{p\} toast=\{toast\} onSaved=\{\(\) => void refresh\(\)\} \/>/)
   })
 })

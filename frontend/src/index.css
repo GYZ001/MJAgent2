@@ -1018,7 +1018,8 @@ label.f {
 }
 .frame-card video {
   width: 100%;
-  aspect-ratio: 9/16;
+  /* 视频画面跟随项目画幅（2026-09-23），回退 9:16 与此前一致 */
+  aspect-ratio: var(--project-aspect-ratio, 9 / 16);
   background: #1d1a16;
   display: block;
 }
@@ -1144,7 +1145,8 @@ label.f {
 .rev-video {
   width: 252px;
   max-width: 100%;
-  aspect-ratio: 9/16;
+  /* 视频画面跟随项目画幅（2026-09-23），回退 9:16 与此前一致 */
+  aspect-ratio: var(--project-aspect-ratio, 9 / 16);
   background: #1d1a16;
   border-radius: 8px;
   display: block;
@@ -3679,6 +3681,8 @@ table.ledger tr.ledger-detail-row td {
 
 .material-empty-frame {
   flex: 0 0 132px;
+  /* 单镜素材横向画廊混合人物/场景/道具参考图占位骨架，当前无 TSX 消费方
+     （2026-09-23 排查确认）；人物/道具参考图必须固定 9:16，保持固定值不跟随画幅 */
   aspect-ratio: 9 / 16;
   border-radius: 10px;
   border: 1px dashed rgba(159, 138, 105, 0.42);
@@ -3737,6 +3741,7 @@ table.ledger tr.ledger-detail-row td {
 }
 .portrait-view-chip img {
   width: 100%;
+  /* 人物定妆照，固定 9:16，不随项目画幅变（2026-09-23 用户拍板） */
   aspect-ratio: 9/16;
   object-fit: cover;
   display: block;
@@ -3903,7 +3908,8 @@ table.ledger tr.ledger-detail-row td {
   width: auto;
   height: 100%;
   max-width: 100%;
-  aspect-ratio: 9 / 16;
+  /* 视频播放区域跟随项目画幅（2026-09-23），回退 9:16 与此前一致 */
+  aspect-ratio: var(--project-aspect-ratio, 9 / 16);
 }
 .video-player-area .rev-video {
   object-fit: contain;
@@ -4876,6 +4882,8 @@ table.ledger tr.ledger-detail-row td {
 }
 .candidate-card img {
   width: 100%;
+  /* 候选图能力已于 2026-09-01 整体退场，当前无 TSX 消费方（2026-09-23 排查确认）；
+     原用途覆盖人物/场景候选图，含人物定妆照场景须固定，保持固定值不跟随画幅 */
   aspect-ratio: 9/16;
   object-fit: cover;
   border-radius: 5px;
@@ -6352,8 +6360,17 @@ label.f {
   border-radius: 10px;
   background: #e9e7e1;
 }
-.character-portrait,
+.character-portrait {
+  /* 人物定妆照，固定 9:16，不随项目画幅变（2026-09-23 用户拍板） */
+  aspect-ratio: 9 / 16;
+}
 .scene-visual {
+  /* 场景图跟随项目画幅；PropsPage.tsx 复用同一份卡片骨架展示道具图（见下方
+     .scene-card-summary 注释），道具图固定 9:16 不跟随，用 .prop-visual 覆盖 */
+  aspect-ratio: var(--project-aspect-ratio, 9 / 16);
+}
+.scene-visual.prop-visual {
+  /* 道具图固定 9:16；复合选择器保证优先级高于上条 .scene-visual，不依赖声明顺序 */
   aspect-ratio: 9 / 16;
 }
 .character-portrait img,
@@ -6698,8 +6715,13 @@ label.f {
 }
 
 @media (max-width: 720px) {
-  .character-portrait,
+  .character-portrait {
+    aspect-ratio: 9 / 16;
+  }
   .scene-visual {
+    aspect-ratio: var(--project-aspect-ratio, 9 / 16);
+  }
+  .scene-visual.prop-visual {
     aspect-ratio: 9 / 16;
   }
   .generation-params-backdrop {
@@ -10325,4 +10347,60 @@ a.segres-thumb-empty {
 .account-admin-muted {
   color: var(--ink-faint);
   font-size: 12px;
+}
+
+/* 项目设置（2026-09-23 用户拍板：改编强度/画幅/AI 标识）：EpisodesPage 的
+   ProjectSettingsPanel 与 Studio.tsx 新建项目表单的 NewProjectSettingsFields
+   共用同一套字段间距，值本身跨页复用，留在这里而不是任一页的分包样式表。 */
+.project-settings-field {
+  margin-top: 14px;
+}
+.new-project-settings-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 12px;
+}
+.project-settings-field label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.project-settings-field .hint {
+  margin-top: 4px;
+}
+
+/* 分镜台「本集删减」面板（StoryboardAdaptationPanel，BoardPage 专属，2026-09-23）：
+   默认折叠，展开后列删减原文与弃置台词。留在 index.css 而不是
+   styles/BoardPage.css——本类只由该组件使用，但组件文件本身不在
+   check_css_split.py 的 BoardPage 登记目录之外复用，跨页风险为零，且避免
+   为单一新组件新增一份样式表拆分成本。 */
+.storyboard-adaptation-toggle {
+  margin-bottom: 12px;
+}
+.storyboard-adaptation-toggle > summary {
+  cursor: pointer;
+  width: fit-content;
+}
+.storyboard-adaptation-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+.storyboard-adaptation-drop-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.storyboard-adaptation-drop-list li {
+  padding: 8px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+}
+.storyboard-adaptation-drop-list small {
+  color: var(--ink-soft);
 }

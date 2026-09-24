@@ -182,11 +182,11 @@ function PropCard({ item, busy, onRegenerate }: { item: PropItem; busy: boolean;
         <span className={`stamp ${stamp.color}`}>{stamp.label}</span>
       </div>
       {item.image_url ? (
-        <div className="scene-visual">
+        <div className="scene-visual prop-visual">
           <img src={item.image_url} alt={item.name} loading="lazy" decoding="async" />
         </div>
       ) : (
-        <div className="scene-visual scene-image-error" role="status">
+        <div className="scene-visual prop-visual scene-image-error" role="status">
           <span>{item.status === 'failed' ? '参考图生成失败，可重新生成' : '尚未生成参考图'}</span>
         </div>
       )}

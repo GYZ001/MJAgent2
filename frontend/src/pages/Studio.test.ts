@@ -22,6 +22,27 @@ describe('导入面板复用统一画风弹窗，并把选定结果带进创建�
   })
 })
 
+// 2026-09-23 用户拍板：新建项目表单加改编强度/画幅/AI 标识三项，随表单一起提交。
+// 同上，无组件渲染测试基建，继续用源码静态扫描守接线；三项字段本身的默认值/
+// onChange 行为由 components/NewProjectSettingsFields.test.ts 用真实渲染覆盖。
+describe('新建项目表单三项设置随请求一起提交，默认值取短剧节奏/9:16/AI 标识关闭', () => {
+  it('挂载 NewProjectSettingsFields，受控于 projectSettings 状态', () => {
+    expect(source).toMatch(/<NewProjectSettingsFields value=\{projectSettings\} onChange=\{setProjectSettings\}/)
+  })
+
+  it('projectSettings 初始状态取 DEFAULT_NEW_PROJECT_SETTINGS（短剧节奏/9:16/关闭）', () => {
+    expect(source).toMatch(/useState<NewProjectSettingsValue>\(DEFAULT_NEW_PROJECT_SETTINGS\)/)
+  })
+
+  it('提交时把三项设置展开进 importProject 请求体，不遗漏', () => {
+    expect(source).toMatch(/style_name: styleName \|\| undefined, \.\.\.projectSettings,/)
+  })
+
+  it('导入成功后把三项设置重置回默认值，不沿用上一次创建时的选择', () => {
+    expect(source).toMatch(/setProjectSettings\(DEFAULT_NEW_PROJECT_SETTINGS\)/)
+  })
+})
+
 // 真实案例（2026-08-31）：同一项目同一摄影类画风下 8/10 集视频阶段被供应商
 // 隐私政策拒收。导入面板必须在选画风时如实提示——不禁止选择，只是不再沉默。
 describe('摄影类画风在导入面板给出可见提示，非摄影类不提示', () => {

@@ -246,6 +246,13 @@ export interface Project {
   bible_artifact_id?: string | null;
   bible_evidence?: ArtifactEvidence | null;
   harness_engine_enabled?: number | boolean;
+  /** 改编强度：short_drama（短剧节奏，新建默认）/ faithful（忠实原著，存量都是它）；只影响之后新生成的分镜。 */
+  adaptation_mode?: string;
+  /** 画幅："9:16"（默认）/ "16:9"。只影响之后生成的视频与场景图；人物定妆照、
+   *  道具图不随画幅变。改后端更新走 PUT /projects/{id}/settings。 */
+  aspect_ratio?: string;
+  /** AI 生成标识开关；后端给原始 0/1，前端一律 !! 转布尔，同 harness_engine_enabled。 */
+  ai_label_enabled?: number | boolean;
   /** 以下仅在 ?view=picker&episode_limit>0 的窗口模式下返回。
    *  整份分集在千集项目里未压缩 250KB，而切换器最多只展示 60 条，
    *  故服务端只回一个窗口，另外把窗口外仍需要的信息单独带上。 */
@@ -283,6 +290,9 @@ export function importProject(body: {
   attachment_token: string;
   name: string;
   style_name?: string; // 统一画风预设名，导入时一次性选定并落进项目 world
+  adaptation_mode?: string; // "short_drama"（省略即默认）| "faithful"
+  aspect_ratio?: string; // "9:16"（省略即默认）| "16:9"
+  ai_label_enabled?: boolean; // 省略即默认关闭
 }): Promise<{
   project_id: string;
   ingestion: { chapter_count: number; total_chars: number; auto_split?: boolean };
@@ -333,16 +343,6 @@ export function purgeAllDeletedProjects(): Promise<{
   failed: { project_id: string; error_id: string; error: string }[];
 }> {
   return mutate("DELETE", "/projects/deleted");
-}
-
-export function setStageTextModel(
-  projectId: string,
-  body: Partial<Record<
-    "bible_text_provider" | "script_text_provider" | "board_text_provider",
-    string
-  >>,
-) {
-  return mutate("PUT", `/projects/${projectId}/text-models`, body);
 }
 
 export function replanEpisodes(projectId: string) {

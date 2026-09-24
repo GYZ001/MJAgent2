@@ -1,18 +1,14 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { api, Project } from '../api'
 import { useNav, usePoll } from '../App'
+import NewProjectSettingsFields, { DEFAULT_NEW_PROJECT_SETTINGS, type NewProjectSettingsValue } from '../components/NewProjectSettingsFields'
 import QueryState from '../components/QueryState'
 import { RecycleBinDialog } from '../components/RecycleBinDialog'
 import StaleRefreshBanner from '../components/StaleRefreshBanner'
 import VisualStyleDialog from '../components/VisualStyleDialog'
 import { useRecycleBin } from '../hooks/useRecycleBin'
 import { useVisualStyleDialog } from '../hooks/useVisualStyleDialog'
-import { formatFileSize, novelTitleFromFilename, projectEntry, validateNovelFile } from './studioImport'
-
-const STATUS_LABEL: Record<string, [string, string]> = {
-  created: ['新建', 'grey'], ingested: ['已导入', 'blue'],
-  bible_ready: ['人物谱就绪', 'blue'], planned: ['分集已规划', 'green'],
-}
+import { formatFileSize, novelTitleFromFilename, projectEntry, STATUS_LABEL, validateNovelFile } from './studioImport'
 
 type ImportStage = 'idle' | 'selected' | 'uploading' | 'creating' | 'error'
 
@@ -30,6 +26,7 @@ export default function Studio() {
   // 场景库同一份 VisualStyleDialog/useVisualStyleDialog，这里项目还不存在。
   const styleDialog = useVisualStyleDialog(null)
   const [styleName, setStyleName] = useState('')
+  const [projectSettings, setProjectSettings] = useState<NewProjectSettingsValue>(DEFAULT_NEW_PROJECT_SETTINGS)
 
   const importTriggerRef = useRef<HTMLButtonElement | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -114,7 +111,7 @@ export default function Studio() {
       const res = await api.importProject({
         attachment_token: attachmentToken,
         name: projectName,
-        style_name: styleName || undefined,
+        style_name: styleName || undefined, ...projectSettings,
       })
       const planningRunning = res.episode_planning?.status === 'running'
       const assetStatus = res.asset_generation?.status
@@ -126,6 +123,7 @@ export default function Studio() {
       toast(`《${projectName}》导入完成：${res.ingestion.chapter_count} 章，${res.ingestion.total_chars} 字${res.ingestion.auto_split ? '（未识别到章节标题，已按字数切分）' : ''}${bootstrapMessage}`)
       setName('')
       setStyleName('')
+      setProjectSettings(DEFAULT_NEW_PROJECT_SETTINGS)
       setSelectedFile(null)
       setPendingAttachment(null)
       setImportError(null)
@@ -274,6 +272,7 @@ export default function Studio() {
           </button>
           {styleDialog.styleOptions.find(o => o.name === styleName)?.photographic && <p className="warning-banner" role="status">当前画风为照片级真人摄影质感：视频生成阶段有较高概率被供应商隐私政策判定疑似真人而拒收，建议仅用于不出视频的场景，或改选其它画风。</p>}
         </div>
+        <NewProjectSettingsFields value={projectSettings} onChange={setProjectSettings} disabled={uploading} />
         <p id={importHelpId} className="import-guidance">
           选择文件只会在本页预览；确认后才上传并创建项目。现有项目不会被覆盖。
         </p>
