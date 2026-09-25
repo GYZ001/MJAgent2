@@ -39,11 +39,55 @@ _UTTERANCE_VERB_RE = (
     r"|沉吟|嘀咕|自语|嘲|喝|呢喃|咕哝|嘟囔|思忖)"
 )
 
+#: 分句标点，与 storyboard_dialogue_ledger._CLAUSE_RE（，。！？；,.!?;）、
+#: storyboard_voicing_evidence._CLAUSE_SPLIT_RE（，,；;、）同一套标点类别的并集，
+#: 不另造一套判据。
+_CLAUSE_SPLIT_RE = re.compile(r"[，。！？；,.!?;、]")
+
+
+def _leftmost_match(pattern_suffix: str, text: str, ordered: list[str]) -> str:
+    """ordered 里所有满足『name + pattern_suffix』的名字中，先取离锚点（pattern_
+    suffix 用 $ 锚定的冒号/动词那一端）最近的分句，同一分句内再取起始位置最靠左的
+    一个；一个都不匹配返回空串。分句标点见 _CLAUSE_SPLIT_RE。
+
+    「主语 +（介词+宾语）? + 谓语动作 + ：」这类分句里，宾语常常也满足同一条正则——
+    介词短语插在主语和谓语之间，宾语离冒号更近（「林姐冲小满挤挤眼：」里「小满」离
+    冒号只 4 字，「林姐」隔着「冲小满挤挤眼」6 字，两者都满足「名字+至多12字+冒
+    号」），同一分句内取最靠左即取到主语「林姐」。只按全局最靠左还不够——「看着
+    小满，林姐说道：」里「小满」全局位置更靠左，但它在状语分句「看着小满」里，紧邻
+    锚点的分句是「林姐说道：」，取最靠左会把这类「状语在前」的常见句式误判给状语
+    里的宾语；先按「离锚点最近、且含至少一个候选」的分句筛一轮，该分句没有候选才
+    回退到更早的分句（「林姐冲小满挤挤眼，笑着说：」最近分句「笑着说：」没有候选，
+    退到「林姐冲小满挤挤眼」，取其中最靠左的「林姐」）。不逐一列举介词/动词，覆盖
+    任意同构句式；也不再依赖 set 遍历顺序（原实现的非确定性来源，见下方生产实测）。
+
+    2026-09-24 生产实测：`{"林姐","小满"}` 两人时判对，加入小满的「小姑娘/你/我」
+    等别名、names 变成 6 人集合后同一句话判错——别名本身不出现在 before 窗口里，
+    只是把 for name in ordered: return 第一个命中者这种按集合遍历序取值的旧写法
+    的命中顺序翻了过来。
+
+    已知限制：主语后紧跟逗号停顿的句式（「林姐，冲小满挤眼道：」）会把「小满」
+    判定为离锚点更近的分句、可能误选——这类「主语+逗号+谓语」停顿结构与「状语
+    分句，主语+谓语：」结构在标点层面无法区分，需要真正的句法分析才能彻底解决，
+    本次未处理（未见真实语料样本）。"""
+    best_key: tuple[int, int] | None = None
+    best_name = ""
+    for name in ordered:
+        m = re.search(re.escape(name) + pattern_suffix, text)
+        if not m:
+            continue
+        clauses_after = len(_CLAUSE_SPLIT_RE.findall(text[m.start():]))
+        key = (clauses_after, m.start())
+        if best_key is None or key < best_key:
+            best_key, best_name = key, name
+    return best_name
+
 
 def attribute_prose_speaker(segment_text: str, quote_start: int, quote_end: int, names: list[str] | set[str]) -> str:
     """小说体引号台词的说话人。引号后：名字紧接引号（允许 3 字内的标点/副词）且名字后 3 字内有发声/反应
     动词；否则引号前：名字在引号前 8 字内且以冒号引出，或名字后 4 字内有发声动词。窗口在相邻引号处截断；
-    两处都没有证据就返回空串（不猜）。"""
+    多个名字都满足同一条判据时，先取离冒号/动词最近、且含至少一个候选名字的分句，
+    分句内再取最靠左的一个，即语法主语（见 _leftmost_match）；两处都没有证据就返回空串（不猜）。"""
     ordered = _sorted_names(names)
     if not ordered:
         return ""
@@ -51,9 +95,9 @@ def attribute_prose_speaker(segment_text: str, quote_start: int, quote_end: int,
     last_quote = max((m.end() for m in _QUOTE_RE.finditer(before)), default=0)
     before = before[last_quote:]
     # 明确的「角色说：引句」先于引句后的动作，后者可能属于下一位说话人。
-    for name in ordered:
-        if re.search(re.escape(name) + r".{0,12}[：:]\s*[「“『\"]?$", before):
-            return name
+    speaker = _leftmost_match(r".{0,12}[：:]\s*[「“『\"]?$", before, ordered)
+    if speaker:
+        return speaker
     after = segment_text[quote_end:quote_end + POST_WINDOW]
     cut = _QUOTE_RE.search(after)
     if cut:
@@ -71,10 +115,7 @@ def attribute_prose_speaker(segment_text: str, quote_start: int, quote_end: int,
             rest = rest[:min(others)]
         if re.search(_UTTERANCE_VERB_RE, rest):
             return _explicitly_named(after[m.end():], ordered, name) or name
-    for name in ordered:
-        if re.search(re.escape(name) + r".{0,4}?" + _UTTERANCE_VERB_RE + r".{0,4}[「“『\"]?$", before):
-            return name
-    return ""
+    return _leftmost_match(r".{0,4}?" + _UTTERANCE_VERB_RE + r".{0,4}[「“『\"]?$", before, ordered)
 
 
 

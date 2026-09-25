@@ -51,6 +51,71 @@ def test_post_window_stops_at_next_quote_so_opponent_is_not_borrowed():
     assert attribute_prose_speaker(text, start, end, NAMES) == ""
 
 
+_SPEAKER_OBJECT_NAMES = ["林姐", "小满", "小姑娘", "你", "我", "她", "老周"]
+
+
+def test_object_of_coverb_before_colon_is_not_mistaken_for_speaker():
+    """生产实测 proj_112c2467fcc9/ep_49a5d01e5dd6 第 8 段：`林姐冲小满挤挤眼："……"`
+    被判给小满——小满是被示意的对象（原文紧接着喊她「小姑娘」），不是说话人。「名字
+    + 至多 12 字 + 冒号」这条判据不认语法角色，「主语+介词短语+谓语：」结构里宾语
+    离冒号更近、同样满足这条判据。判据改成先取离冒号最近、且含至少一个候选名字的
+    分句，分句内再取最靠左（离句首最近）的那个——中文主谓结构主语在前，不逐一列举
+    「冲/对/朝/向/跟/看着」这些介词/动词，覆盖该结构的任意写法；反过来小满是主语时
+    同样要判对，不是简单地偏向固定某个名字。「看着小满，林姐说道：」这类状语分句在
+    前的句式，全局最靠左会误选状语里的宾语，必须先按分句筛一轮再比位置；最近分句
+    没有候选名字时才回退到更早的分句。"""
+    cases = [
+        ("林姐冲小满挤挤眼：“小姑娘，你运气好，全城只有老周修得了这个。”", "林姐", "冲"),
+        ("林姐对小满说：“小姑娘，你运气好。”", "林姐", "对"),
+        ("林姐朝小满喊：“小姑娘，你运气好。”", "林姐", "朝"),
+        ("林姐看着小满道：“小姑娘，你运气好。”", "林姐", "看着…道"),
+        ("林姐向小满招手：“小姑娘，你运气好。”", "林姐", "向"),
+        ("林姐跟小满说：“小姑娘，你运气好。”", "林姐", "跟"),
+        ("小满冲林姐挤挤眼：“阿姨，你手真巧。”", "小满", "宾语/主语对调"),
+        ("看着小满，林姐说道：“小姑娘，你运气好。”", "林姐", "状语分句在前：全局最靠左会误选状语里的宾语"),
+        ("林姐冲小满挤挤眼，笑着说：“小姑娘，你运气好。”", "林姐", "最近分句无候选名字，回退到上一分句"),
+        ("小满被林姐拉着说：“你别急。”", "小满", "被字句：话题主语在前，宾格标记在后"),
+    ]
+    for text, expected, label in cases:
+        start = text.index("“") + 1
+        end = text.index("”")
+        assert attribute_prose_speaker(text, start, end, _SPEAKER_OBJECT_NAMES) == expected, label
+
+
+def test_speaker_tie_break_does_not_depend_on_unrelated_alias_count():
+    """同一对名字的判定结果不该因人物谱里多挂了几个不相关别名就翻转——旧实现遇到
+    第一个正则命中的名字就返回，长度相同时先命中谁取决于 set 的遍历顺序，
+    只因 names 集合大小变化就可能整个翻转（与这句话本身的语义毫无关系）。"""
+    text = "林姐冲小满挤挤眼：“小姑娘，你运气好，全城只有老周修得了这个。”"
+    start = text.index("“") + 1
+    end = text.index("”")
+    minimal = ["林姐", "小满"]
+    with_unrelated_aliases = ["林姐", "小满", "小姑娘", "你", "我", "她"]
+    assert attribute_prose_speaker(text, start, end, minimal) == "林姐"
+    assert attribute_prose_speaker(text, start, end, with_unrelated_aliases) == "林姐"
+
+
+def test_prose_extraction_attributes_coverb_object_sentence_to_the_subject():
+    """全链路：_extract_prose_segment → extract_dialogue_targets 接上 attribute_
+    prose_speaker 之后产出同样正确——小说体（speaker 由代码确定性推导，不留空等
+    第二阶段猜）。"""
+    text = "林姐冲小满挤挤眼：“小姑娘，你运气好，全城只有老周修得了这个。”"
+    quotes = extract_dialogue_targets([_seg(text)], set(), speaker_names=_SPEAKER_OBJECT_NAMES)
+    assert quotes and quotes[0].speaker == "林姐"
+
+
+def test_screenplay_format_coverb_note_does_not_confuse_speaker_line_match():
+    """剧本体（「说话人（备注）：台词」）夹具：介词宾语出现在备注里不会被误当说话人。
+    这条走的是完全独立的抽取路径（_extract_script_segment 按行首字面命中
+    speaker_names），不经过 attribute_prose_speaker，确认两条路径分工清楚、
+    互不影响、剧本体这条本就不受本次改动触及。"""
+    text = "林姐（冲小满挤挤眼）：小姑娘，你运气好，全城只有老周修得了这个。"
+    names = ["林姐", "小满", "小姑娘", "老周"]
+    quotes = extract_dialogue_targets([_seg(text)], set(), speaker_names=names)
+    assert [q.speaker for q in quotes] == ["林姐"]
+    assert quotes[0].text == "小姑娘，你运气好，全城只有老周修得了这个。"
+
+
 def test_prose_extraction_carries_speaker_into_required_dialogue():
     text = "“按照许师姐的说法，为何我的瓶颈提前了？”孟浩盘膝坐在洞府内，皱着眉头沉吟起来。"
     quotes = extract_dialogue_targets([_seg(text)], set(), speaker_names=NAMES)
