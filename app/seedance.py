@@ -336,8 +336,12 @@ class SeedanceAdapter:
         )
 
     def capability_snapshot_is_current(self, snapshot) -> bool:
-        """Seedance 快照是静态基线，存下来就一直有效。"""
-        return True
+        """Seedance 快照是静态基线，存下来就一直有效（人工撤销某项能力也照样生效）。
+        唯一例外：快照存于基线新增字段之前（2026-09-24 参考音频）——那些字段从未写进
+        库、读出来只是默认的「不支持」，必须判旧重建，否则线上永远判「未接入参考音频」。
+        靠 ``model_fields_set`` 区分「字段缺失」与「显式存了不支持」，后者照旧生效。"""
+        added_later = ("supports_reference_audio", "max_reference_audios", "max_reference_audio_total_s")
+        return all(name in snapshot.model_fields_set for name in added_later)
 
     def prompt_profile(self):
         from app.video_prompt_profiles import SEEDANCE_2_PROFILE

@@ -41,6 +41,10 @@ def freeze_segment_reference_audios(
     说明追加进 prompt_text 并落库——返回值必须由调用方回写自己的 ``prompt_text``
     局部变量，否则实际提交的仍是没有声音说明的旧版本。
     """
+    if conn is None:
+        # 连接必须由调用方显式给出（CLAUDE.md「Ownership Must Be Explicit」）：run_job 传的是
+        # 任务自己的 conn，不是给续租心跳子任务用、生产上恒为 None 的 operation_conn。
+        raise TypeError("freeze_segment_reference_audios 需要调用方显式传入数据库连接")
     if "reference_audios" in meta:
         return prompt_text
     if hiagent._latest_provider_operation_request("video_create", operation_id) is not None:
@@ -51,8 +55,9 @@ def freeze_segment_reference_audios(
     if segment is None:
         return prompt_text
     provider = hiagent.active_provider("video")
+    # 快照缺失/过期时会自建并自行提交：用它自己的连接语义，不在调用方连接上留下未提交的写入。
     capability = current_capability_snapshot(
-        provider=provider, model=hiagent.active_model("video", provider), conn=conn,
+        provider=provider, model=hiagent.active_model("video", provider), conn=None,
     )
     refs, skips = resolve_segment_reference_audios(
         conn=conn, project_id=job["project_id"], segment=segment,
@@ -70,7 +75,6 @@ def freeze_segment_reference_audios(
     _set_version(
         version["id"], image_inputs=json.dumps(meta, ensure_ascii=False), prompt_text=prompt_text,
     )
-    conn.commit()
     return prompt_text
 
 

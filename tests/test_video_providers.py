@@ -190,7 +190,26 @@ def test_seedance_adapter_defers_ownership_to_prefixed_adapters() -> None:
     assert adapter.owns_task_id("anything") is False
     assert adapter.owns_output_url("https://cdn.example.test/a.mp4") is False
     assert adapter.serial_generation is False
-    assert adapter.capability_snapshot_is_current(object()) is True
+
+
+def test_seedance_snapshot_missing_audio_fields_is_stale_but_explicit_values_are_honored() -> None:
+    """上线前存的旧快照根本没有参考音频字段（读出来默认不支持）→ 判旧重建；
+    字段存在（包括人工显式存了「不支持」）→ 照旧有效，不冲掉人工撤销。"""
+    from app.video_plan.models import ProviderVideoCapabilitySnapshot
+
+    adapter = seedance.SeedanceAdapter()
+    fresh = adapter.capability_snapshot(provider="hiagent", model="seedance-test")
+    assert fresh.max_reference_audios == 3 and fresh.max_reference_audio_total_s == 15.0
+    added = {"supports_reference_audio", "max_reference_audios", "max_reference_audio_total_s"}
+    legacy = ProviderVideoCapabilitySnapshot.model_validate(
+        {k: v for k, v in fresh.model_dump().items() if k not in added}
+    )
+    withdrawn = ProviderVideoCapabilitySnapshot.model_validate(
+        {**fresh.model_dump(), "supports_reference_audio": False, "max_reference_audios": 0}
+    )
+    assert adapter.capability_snapshot_is_current(legacy) is False
+    assert adapter.capability_snapshot_is_current(fresh) is True
+    assert adapter.capability_snapshot_is_current(withdrawn) is True
 
 
 def test_seedance_wait_policy_leaves_the_generic_budget_untouched() -> None:

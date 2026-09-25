@@ -14,6 +14,8 @@ from pathlib import Path
 import json
 import sqlite3
 
+import pytest
+
 from app import db
 from app.media_exec.input_reference_audio import freeze_segment_reference_audios
 from app.voice import segment_refs, store as voice_store
@@ -193,3 +195,53 @@ def test_fresh_freeze_writes_meta_appends_note_and_persists(monkeypatch) -> None
     persisted_meta = json.loads(persisted["image_inputs"])
     assert persisted_meta["reference_audios"][0]["character_name"] == "张三"
     assert persisted["prompt_text"] == result
+
+
+def test_fresh_freeze_with_stale_persisted_snapshot(monkeypatch) -> None:
+    """复现线上（2026-09-24 测试集）：库里存着上线前的旧能力快照（没有参考音频字段，读出来
+    默认「不支持」），不能再挡住声音参考。"""
+    from app import hiagent
+    from app.video_plan.capability_snapshot import save_capability_snapshot
+    from app.video_plan.models import ProviderVideoCapabilitySnapshot
+    from app.video_providers import resolve as resolve_adapter
+
+    _enable(monkeypatch)
+    _adopt_voice("张三")
+    provider = hiagent.active_provider("video")
+    model = hiagent.active_model("video", provider)
+    fresh = resolve_adapter(provider).capability_snapshot(provider=provider, model=model)
+    old = ProviderVideoCapabilitySnapshot.model_validate({**fresh.model_dump(), "id": "cap_old_without_audio"})
+    conn = _conn()
+    save_capability_snapshot(old, conn=conn)
+    # 模拟上线前的库行：capabilities_json 里根本没有参考音频这三个键
+    row = conn.execute(
+        "SELECT capabilities_json FROM provider_video_capability_snapshots WHERE id=?", ("cap_old_without_audio",),
+    ).fetchone()
+    legacy_json = {k: v for k, v in json.loads(row["capabilities_json"]).items()
+                   if k not in ("supports_reference_audio", "max_reference_audios", "max_reference_audio_total_s")}
+    conn.execute(
+        "UPDATE provider_video_capability_snapshots SET capabilities_json=? WHERE id=?",
+        (json.dumps(legacy_json), "cap_old_without_audio"),
+    )
+    conn.commit()
+    job, version, shot_row = _seed_chain("shot_6", segment=_segment_with_speaker("张三"))
+    meta = dict(_REAL_META)
+
+    result = freeze_segment_reference_audios(
+        _conn(), job, version, shot_row, meta, "镜头1：@张三 说话。 --ratio 9:16 --dur 15", operation_id=_OP,
+    )
+
+    assert [a["character_name"] for a in meta["reference_audios"]] == ["张三"]
+    assert meta["reference_audio_skips"] == []
+    assert "声音参考：" in result
+
+
+def test_missing_conn_fails_loudly_instead_of_deep_attribute_error() -> None:
+    """线上 run_job 曾把给续租心跳子任务用、生产上恒为 None 的 operation_conn 传进来，
+    在函数深处炸成 AttributeError；现在连接必须显式给出，缺了在入口就报 TypeError。"""
+    job, version, shot_row = _seed_chain("shot_7", segment=_segment_with_speaker("张三"))
+    with pytest.raises(TypeError):
+        freeze_segment_reference_audios(
+            None, job, version, shot_row, dict(_REAL_META), "原文 --ratio 9:16 --dur 15", operation_id=_OP,
+        )
+
