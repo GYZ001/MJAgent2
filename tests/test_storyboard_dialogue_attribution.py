@@ -54,54 +54,108 @@ def test_post_window_stops_at_next_quote_so_opponent_is_not_borrowed():
 _SPEAKER_OBJECT_NAMES = ["林姐", "小满", "小姑娘", "你", "我", "她", "老周"]
 
 
-def test_object_of_coverb_before_colon_is_not_mistaken_for_speaker():
-    """生产实测 proj_112c2467fcc9/ep_49a5d01e5dd6 第 8 段：`林姐冲小满挤挤眼："……"`
-    被判给小满——小满是被示意的对象（原文紧接着喊她「小姑娘」），不是说话人。「名字
-    + 至多 12 字 + 冒号」这条判据不认语法角色，「主语+介词短语+谓语：」结构里宾语
-    离冒号更近、同样满足这条判据。判据改成先取离冒号最近、且含至少一个候选名字的
-    分句，分句内再取最靠左（离句首最近）的那个——中文主谓结构主语在前，不逐一列举
-    「冲/对/朝/向/跟/看着」这些介词/动词，覆盖该结构的任意写法；反过来小满是主语时
-    同样要判对，不是简单地偏向固定某个名字。「看着小满，林姐说道：」这类状语分句在
-    前的句式，全局最靠左会误选状语里的宾语，必须先按分句筛一轮再比位置；最近分句
-    没有候选名字时才回退到更早的分句。"""
+def test_same_clause_multiple_candidates_defers_instead_of_guessing():
+    """2026-09-24 复盘：生产实测 proj_112c2467fcc9/ep_49a5d01e5dd6 第 8 段
+    `林姐冲小满挤挤眼："……"` 被判给小满；第一版修法（按「最靠左」当主语）在这句上
+    碰巧判对，但结构判据分不清同一分句里谁是主语、谁是介词宾语——反例是神墓「辰南
+    想起了他父亲对他说的话：」，「辰南」（主句主语）最靠左但真正说话人是嵌在从句里
+    的「他父亲」（见 test_embedded_clause_speaker_is_not_confused_with_matrix_
+    subject）。按 CLAUDE.md「确定不了时不猜，空着至少是诚实的」：离冒号最近、且含
+    候选名字的分句里出现 ≥2 个不同候选就留空，交给读了完整原文的第二阶段模型判断；
+    这意味着原本「判对」的「林姐冲小满挤挤眼：」现在也留空——不为了保住一个只在
+    部分结构上凑巧对的位置启发式而放松「不确定就不猜」。不逐一列举「冲/对/朝/向/
+    跟/看着」这些介词/动词，覆盖该结构任意写法；反过来小满是主语时同样留空，不是
+    偏向固定某个名字。"""
     cases = [
-        ("林姐冲小满挤挤眼：“小姑娘，你运气好，全城只有老周修得了这个。”", "林姐", "冲"),
-        ("林姐对小满说：“小姑娘，你运气好。”", "林姐", "对"),
-        ("林姐朝小满喊：“小姑娘，你运气好。”", "林姐", "朝"),
-        ("林姐看着小满道：“小姑娘，你运气好。”", "林姐", "看着…道"),
-        ("林姐向小满招手：“小姑娘，你运气好。”", "林姐", "向"),
-        ("林姐跟小满说：“小姑娘，你运气好。”", "林姐", "跟"),
-        ("小满冲林姐挤挤眼：“阿姨，你手真巧。”", "小满", "宾语/主语对调"),
-        ("看着小满，林姐说道：“小姑娘，你运气好。”", "林姐", "状语分句在前：全局最靠左会误选状语里的宾语"),
-        ("林姐冲小满挤挤眼，笑着说：“小姑娘，你运气好。”", "林姐", "最近分句无候选名字，回退到上一分句"),
-        ("小满被林姐拉着说：“你别急。”", "小满", "被字句：话题主语在前，宾格标记在后"),
+        ("林姐冲小满挤挤眼：“小姑娘，你运气好，全城只有老周修得了这个。”", "冲"),
+        ("林姐对小满说：“小姑娘，你运气好。”", "对"),
+        ("林姐朝小满喊：“小姑娘，你运气好。”", "朝"),
+        ("林姐看着小满道：“小姑娘，你运气好。”", "看着…道"),
+        ("林姐向小满招手：“小姑娘，你运气好。”", "向"),
+        ("林姐跟小满说：“小姑娘，你运气好。”", "跟"),
+        ("小满冲林姐挤挤眼：“阿姨，你手真巧。”", "宾语/主语对调"),
+        ("林姐冲小满挤挤眼，笑着说：“小姑娘，你运气好。”", "回退到上一分句后仍有 2 个候选"),
+        ("小满被林姐拉着说：“你别急。”", "被字句：同一分句两个候选"),
     ]
-    for text, expected, label in cases:
+    for text, label in cases:
         start = text.index("“") + 1
         end = text.index("”")
-        assert attribute_prose_speaker(text, start, end, _SPEAKER_OBJECT_NAMES) == expected, label
+        assert attribute_prose_speaker(text, start, end, _SPEAKER_OBJECT_NAMES) == "", label
+
+
+def test_clause_retreat_finds_the_sole_candidate_in_an_earlier_clause():
+    """「看着小满，林姐说道：」离冒号最近的分句「林姐说道：」只有一个候选「林姐」——
+    不用回退也不构成歧义，仍应判出（与上面「同一分句 2 个候选」的留空场景对照）。"""
+    text = "看着小满，林姐说道：“小姑娘，你运气好。”"
+    start = text.index("“") + 1
+    end = text.index("”")
+    assert attribute_prose_speaker(text, start, end, _SPEAKER_OBJECT_NAMES) == "林姐"
+
+
+def test_repeated_name_occurrence_is_attributed_by_its_nearest_clause():
+    """2026-09-24 B 上历史台词只读排查：三国演义 EP1 第 19 段「刘备惊问张飞，张飞
+    道：「如此害民贼……」」被判给刘备——「张飞」在窗口里出现两次（先做「惊问」的
+    宾语，后做「道」的主语），旧实现用 re.search 按 name 整体找一次匹配起点，扫到
+    的是「张飞」的第一次（宾语）出现就已经能拼出合法匹配（拿「，张飞道」当填充），
+    于是把「张飞」错误定位到更早的分句，与「刘备」的分句序打平后按位置选中了刘备。
+    改成直接按分句做子串包含检查后，离冒号最近的分句「张飞道：」只含「张飞」一个
+    候选（「刘备」「督邮」都只在更早的分句里），不再受重复出现次数影响。"""
+    text = "刘备听见门前喧闹，急忙出去观看，见被捆打的正是督邮。刘备惊问张飞，张飞道：“如此害民贼，不打死留着干什么！”"
+    names = ["张飞", "刘备", "督邮"]
+    start = text.index("“") + 1
+    end = text.index("”")
+    assert attribute_prose_speaker(text, start, end, names) == "张飞"
+
+
+def test_embedded_clause_speaker_is_not_confused_with_matrix_subject():
+    """2026-09-24 B 上历史台词只读排查：神墓 EP1 第 24 段「辰南想起了他父亲对他说的
+    话：「辰南你要记住……」」真正说话人是嵌在同位语从句里的「他父亲」，而离冒号最近
+    的分句「辰南想起了他父亲对他说的话：」同时含「辰南」（主句主语）与「他父亲」
+    （从句主语，真正的说话人）两个候选——结构启发式分不清主句主语与从句主语，按
+    「≥2 个不同候选就留空」不会再把这类嵌套句式误判给主句主语。"""
+    text = "辰南想起了他父亲对他说的话：“辰南你要记住，能够看透我们家传玄功内息流转的人都不简单。”"
+    names = ["辰南", "他父亲"]
+    start = text.index("“") + 1
+    end = text.index("”")
+    assert attribute_prose_speaker(text, start, end, names) == ""
 
 
 def test_speaker_tie_break_does_not_depend_on_unrelated_alias_count():
     """同一对名字的判定结果不该因人物谱里多挂了几个不相关别名就翻转——旧实现遇到
-    第一个正则命中的名字就返回，长度相同时先命中谁取决于 set 的遍历顺序，
-    只因 names 集合大小变化就可能整个翻转（与这句话本身的语义毫无关系）。"""
+    第一个正则命中的名字就返回，长度相同时先命中谁取决于 set 的遍历顺序，只因
+    names 集合大小变化就可能整个翻转（与这句话本身的语义毫无关系）。改成分句内按
+    子串包含判定候选集合后，集合运算与遍历顺序无关，两种 names 集合结果一致——
+    同一分句里仍是 2 个不同候选，按当前判据都应留空。"""
     text = "林姐冲小满挤挤眼：“小姑娘，你运气好，全城只有老周修得了这个。”"
     start = text.index("“") + 1
     end = text.index("”")
     minimal = ["林姐", "小满"]
     with_unrelated_aliases = ["林姐", "小满", "小姑娘", "你", "我", "她"]
-    assert attribute_prose_speaker(text, start, end, minimal) == "林姐"
-    assert attribute_prose_speaker(text, start, end, with_unrelated_aliases) == "林姐"
+    assert attribute_prose_speaker(text, start, end, minimal) == ""
+    assert attribute_prose_speaker(text, start, end, with_unrelated_aliases) == ""
 
 
-def test_prose_extraction_attributes_coverb_object_sentence_to_the_subject():
-    """全链路：_extract_prose_segment → extract_dialogue_targets 接上 attribute_
-    prose_speaker 之后产出同样正确——小说体（speaker 由代码确定性推导，不留空等
-    第二阶段猜）。"""
+def test_prose_extraction_leaves_ambiguous_quote_speaker_empty_and_required_dialogue_omits_it():
+    """全链路：同一分句 2 个候选时，_extract_prose_segment → extract_dialogue_
+    targets 产出 speaker=""，required_dialogue_for_segments 因此不写 speaker/
+    speaker_identity_id 键（storyboard_dialogue_ledger.required_dialogue_for_
+    segments 用 `**({"speaker": quote.speaker} if quote.speaker else {})`，空串
+    不写键，不是写一个空字符串）——与「原文本就没点名说话人」的既有形态完全一致，
+    第二阶段模型据此自行判断，不会因为多出一个「已归属但是错的」字段把模型锁死。"""
     text = "林姐冲小满挤挤眼：“小姑娘，你运气好，全城只有老周修得了这个。”"
     quotes = extract_dialogue_targets([_seg(text)], set(), speaker_names=_SPEAKER_OBJECT_NAMES)
-    assert quotes and quotes[0].speaker == "林姐"
+    assert quotes and quotes[0].speaker == "" and quotes[0].speaker_identity_id == ""
+    kept = [SimpleNamespace(quote_id=quotes[0].quote_id, segment_no=1)]
+    required = required_dialogue_for_segments(kept, quotes)
+    assert "speaker" not in required[1][0] and "speaker_identity_id" not in required[1][0]
+
+
+def test_prose_extraction_attributes_unambiguous_repeated_name_to_the_subject():
+    """全链路对照：张飞重复出现但离冒号最近的分句唯一候选是张飞（同上一条 attribute_
+    prose_speaker 单测），extract_dialogue_targets 接上后仍正确产出非空 speaker。"""
+    text = "刘备听见门前喧闹，急忙出去观看，见被捆打的正是督邮。刘备惊问张飞，张飞道：“如此害民贼，不打死留着干什么！”"
+    quotes = extract_dialogue_targets([_seg(text)], set(), speaker_names=["张飞", "刘备", "督邮"])
+    assert quotes and quotes[0].speaker == "张飞"
 
 
 def test_screenplay_format_coverb_note_does_not_confuse_speaker_line_match():

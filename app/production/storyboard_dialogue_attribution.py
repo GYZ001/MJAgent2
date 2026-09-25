@@ -43,51 +43,49 @@ _UTTERANCE_VERB_RE = (
 #: storyboard_voicing_evidence._CLAUSE_SPLIT_RE（，,；;、）同一套标点类别的并集，
 #: 不另造一套判据。
 _CLAUSE_SPLIT_RE = re.compile(r"[，。！？；,.!?;、]")
+_COLON_ANCHOR_RE = re.compile(r"[：:]\s*[「“『\"]?$")
+_VERB_ANCHOR_RE = re.compile(_UTTERANCE_VERB_RE + r".{0,4}[「“『\"]?$")
 
 
-def _leftmost_match(pattern_suffix: str, text: str, ordered: list[str]) -> str:
-    """ordered 里所有满足『name + pattern_suffix』的名字中，先取离锚点（pattern_
-    suffix 用 $ 锚定的冒号/动词那一端）最近的分句，同一分句内再取起始位置最靠左的
-    一个；一个都不匹配返回空串。分句标点见 _CLAUSE_SPLIT_RE。
+def _nearest_clause_speaker(anchor_re: re.Pattern[str], text: str, ordered: list[str]) -> str:
+    """anchor_re 在 text 末尾没有命中（没有冒号/动词锚点）直接返回空串；命中时按分句
+    （标点见 _CLAUSE_SPLIT_RE）从离锚点最近的一个往前找，取第一个含候选名字的分句：
+    该分句只有 1 个不同候选就是答案；≥2 个不同候选时结构判据本身分不清谁是主语、
+    谁是从句/介词宾语，返回空串交给读了完整原文的第二阶段模型判断，不按位置强判。
 
-    「主语 +（介词+宾语）? + 谓语动作 + ：」这类分句里，宾语常常也满足同一条正则——
-    介词短语插在主语和谓语之间，宾语离冒号更近（「林姐冲小满挤挤眼：」里「小满」离
-    冒号只 4 字，「林姐」隔着「冲小满挤挤眼」6 字，两者都满足「名字+至多12字+冒
-    号」），同一分句内取最靠左即取到主语「林姐」。只按全局最靠左还不够——「看着
-    小满，林姐说道：」里「小满」全局位置更靠左，但它在状语分句「看着小满」里，紧邻
-    锚点的分句是「林姐说道：」，取最靠左会把这类「状语在前」的常见句式误判给状语
-    里的宾语；先按「离锚点最近、且含至少一个候选」的分句筛一轮，该分句没有候选才
-    回退到更早的分句（「林姐冲小满挤挤眼，笑着说：」最近分句「笑着说：」没有候选，
-    退到「林姐冲小满挤挤眼」，取其中最靠左的「林姐」）。不逐一列举介词/动词，覆盖
-    任意同构句式；也不再依赖 set 遍历顺序（原实现的非确定性来源，见下方生产实测）。
+    2026-09-24 生产实测两个根因，都出在「按 name 逐个 re.search 找位置」这一步，
+    不是分句/留空判据本身：
 
-    2026-09-24 生产实测：`{"林姐","小满"}` 两人时判对，加入小满的「小姑娘/你/我」
-    等别名、names 变成 6 人集合后同一句话判错——别名本身不出现在 before 窗口里，
-    只是把 for name in ordered: return 第一个命中者这种按集合遍历序取值的旧写法
-    的命中顺序翻了过来。
+    ① 候选名字在窗口里重复出现时，re.search 只返回它扫到的第一个匹配起点，未必是
+    离锚点最近的那次出现——「刘备惊问张飞，张飞道："……」，"张飞"先以宾语身份出现
+    在"刘备惊问张飞"，re.search 从这次出现就已经能拼出合法匹配（拿"，张飞道"当
+    填充），于是把"张飞"错误定位到较早分句，与"刘备"的分句序打平后按位置把"刘备"
+    选成了说话人。本函数改为直接按分句切文本、逐分句做子串包含检查，不再从某一次
+    re.search 命中的位置反推分句归属，一个名字出现几次都不影响判断。
 
-    已知限制：主语后紧跟逗号停顿的句式（「林姐，冲小满挤眼道：」）会把「小满」
-    判定为离锚点更近的分句、可能误选——这类「主语+逗号+谓语」停顿结构与「状语
-    分句，主语+谓语：」结构在标点层面无法区分，需要真正的句法分析才能彻底解决，
-    本次未处理（未见真实语料样本）。"""
-    best_key: tuple[int, int] | None = None
-    best_name = ""
-    for name in ordered:
-        m = re.search(re.escape(name) + pattern_suffix, text)
-        if not m:
+    ② 同一分句内有 ≥2 个不同候选时，"取最靠左"曾被当主语判据，但结构启发式分不清
+    主句主语与从句/介词宾语——「辰南想起了他父亲对他说的话："……」：分句里"辰南"
+    （主句主语）在前、"他父亲"（真正的说话人，嵌在同位语从句里）在后，取最靠左会
+    判成辰南；反过来"林姐冲小满挤挤眼："这类介宾结构里"取最靠左"能蒙对主语，但
+    两种结构标点层面无法区分——继续按位置强判等于对前一种结构保证判错。按 CLAUDE.
+    md「确定不了时不猜，空着至少是诚实的」，≥2 个不同候选一律留空；这意味着"林姐
+    冲小满挤挤眼："也从"判对"变成"留空"——用测试锁住这条取舍，不保留一个只在
+    部分结构上凑巧对的位置启发式。"""
+    if not anchor_re.search(text):
+        return ""
+    for clause in reversed(_CLAUSE_SPLIT_RE.split(text)):
+        found = {name for name in ordered if name in clause}
+        if not found:
             continue
-        clauses_after = len(_CLAUSE_SPLIT_RE.findall(text[m.start():]))
-        key = (clauses_after, m.start())
-        if best_key is None or key < best_key:
-            best_key, best_name = key, name
-    return best_name
+        return next(iter(found)) if len(found) == 1 else ""
+    return ""
 
 
 def attribute_prose_speaker(segment_text: str, quote_start: int, quote_end: int, names: list[str] | set[str]) -> str:
     """小说体引号台词的说话人。引号后：名字紧接引号（允许 3 字内的标点/副词）且名字后 3 字内有发声/反应
-    动词；否则引号前：名字在引号前 8 字内且以冒号引出，或名字后 4 字内有发声动词。窗口在相邻引号处截断；
-    多个名字都满足同一条判据时，先取离冒号/动词最近、且含至少一个候选名字的分句，
-    分句内再取最靠左的一个，即语法主语（见 _leftmost_match）；两处都没有证据就返回空串（不猜）。"""
+    动词；否则引号前：名字所在分句离冒号最近、且是该分句里唯一的候选人物。多个名字都满足同一条判据、
+    且落在同一个分句里时，结构判据分不清主语/从句主语/宾语，返回空串不猜（见 _nearest_clause_speaker）；
+    两处都没有证据也返回空串。"""
     ordered = _sorted_names(names)
     if not ordered:
         return ""
@@ -95,7 +93,7 @@ def attribute_prose_speaker(segment_text: str, quote_start: int, quote_end: int,
     last_quote = max((m.end() for m in _QUOTE_RE.finditer(before)), default=0)
     before = before[last_quote:]
     # 明确的「角色说：引句」先于引句后的动作，后者可能属于下一位说话人。
-    speaker = _leftmost_match(r".{0,12}[：:]\s*[「“『\"]?$", before, ordered)
+    speaker = _nearest_clause_speaker(_COLON_ANCHOR_RE, before, ordered)
     if speaker:
         return speaker
     after = segment_text[quote_end:quote_end + POST_WINDOW]
@@ -115,7 +113,7 @@ def attribute_prose_speaker(segment_text: str, quote_start: int, quote_end: int,
             rest = rest[:min(others)]
         if re.search(_UTTERANCE_VERB_RE, rest):
             return _explicitly_named(after[m.end():], ordered, name) or name
-    return _leftmost_match(r".{0,4}?" + _UTTERANCE_VERB_RE + r".{0,4}[「“『\"]?$", before, ordered)
+    return _nearest_clause_speaker(_VERB_ANCHOR_RE, before, ordered)
 
 
 
