@@ -90,14 +90,21 @@ def _enable(monkeypatch) -> None:
     monkeypatch.setattr(segment_refs, "get_setting", lambda key: "true" if key == segment_refs.SETTING_KEY_ENABLED else "")
 
 
+# 真实流水线的形态（2026-09-24 线上测试集实测）：分镜台 2.x 的参考图在入队时已从素材库
+# 拼好，运行时走快路径，meta 里只有 reference_manifest_frozen、没有
+# video_input_manifest_frozen。旧判据挂在后者上，线上 9 段一段都没带上声音。
+_REAL_META = {"reference_manifest_frozen": True, "reference_images": [{"id": "img1"}], "aspect_ratio": "9:16"}
+_OP = "video-create-ver_test"
+
+
 def test_disabled_setting_is_a_pure_noop(monkeypatch) -> None:
     # 默认开启；只有显式关闭才是纯 no-op
     monkeypatch.setattr(segment_refs, "get_setting", lambda key: "false" if key == segment_refs.SETTING_KEY_ENABLED else "")
     job, version, shot_row = _seed_chain("shot_1", segment=_segment_with_speaker("张三"))
-    meta = {"video_input_manifest_frozen": True, "reference_images": [{"id": "img1"}]}
+    meta = dict(_REAL_META)
 
     result = freeze_segment_reference_audios(
-        _conn(), job, version, shot_row, meta, "原文 --ratio 9:16 --dur 15", already_frozen=False,
+        _conn(), job, version, shot_row, meta, "原文 --ratio 9:16 --dur 15", operation_id=_OP,
     )
 
     assert result == "原文 --ratio 9:16 --dur 15"
@@ -105,32 +112,33 @@ def test_disabled_setting_is_a_pure_noop(monkeypatch) -> None:
     assert "reference_audio_skips" not in meta
 
 
-def test_already_frozen_is_a_pure_noop_even_when_enabled(monkeypatch) -> None:
-    """老版本重试的核心场景：即便这次 meta 显示已冻结，只要 already_frozen=True
-    （调用前就已冻结），一律不重新计算——防止请求形状漂移触发供应商幂等冲突。"""
+def test_already_decided_version_is_reused_verbatim(monkeypatch) -> None:
+    """重试的核心场景：本版本已决定过声音清单（哪怕决定为空），一律原样复用，不重新解析。"""
     _enable(monkeypatch)
     _adopt_voice("张三")
     job, version, shot_row = _seed_chain("shot_2", segment=_segment_with_speaker("张三"))
-    meta = {"video_input_manifest_frozen": True, "reference_images": [{"id": "img1"}]}
+    meta = {**_REAL_META, "reference_audios": [], "reference_audio_skips": [{"character_name": "张三", "reason": "未配置声音"}]}
 
     result = freeze_segment_reference_audios(
-        _conn(), job, version, shot_row, meta, "原文 --ratio 9:16 --dur 15", already_frozen=True,
+        _conn(), job, version, shot_row, meta, "原文 --ratio 9:16 --dur 15", operation_id=_OP,
     )
 
     assert result == "原文 --ratio 9:16 --dur 15"
-    assert "reference_audios" not in meta
+    assert meta["reference_audios"] == []
 
 
-def test_not_yet_frozen_this_call_is_a_noop(monkeypatch) -> None:
-    """本次调用还没有真正完成参考图冻结（video_input_manifest_frozen 仍为假），
-    即使开关打开也不计算——避免对等待中的半成品 meta 抢先写入音频键。"""
+def test_version_already_submitted_to_provider_is_not_changed(monkeypatch) -> None:
+    """上线前就发过创建请求的在途版本：不再补上声音，避免请求形状变化被幂等核对拦截。"""
+    from app import hiagent
+
     _enable(monkeypatch)
     _adopt_voice("张三")
+    monkeypatch.setattr(hiagent, "_latest_provider_operation_request", lambda kind, op: {"content": []})
     job, version, shot_row = _seed_chain("shot_3", segment=_segment_with_speaker("张三"))
-    meta = {"video_input_manifest_frozen": False, "reference_images": []}
+    meta = dict(_REAL_META)
 
     result = freeze_segment_reference_audios(
-        _conn(), job, version, shot_row, meta, "原文 --ratio 9:16 --dur 15", already_frozen=False,
+        _conn(), job, version, shot_row, meta, "原文 --ratio 9:16 --dur 15", operation_id=_OP,
     )
 
     assert result == "原文 --ratio 9:16 --dur 15"
@@ -140,10 +148,10 @@ def test_not_yet_frozen_this_call_is_a_noop(monkeypatch) -> None:
 def test_legacy_shot_without_storyboard_pack_segment_is_a_noop(monkeypatch) -> None:
     _enable(monkeypatch)
     job, version, shot_row = _seed_chain("shot_4", segment=None)
-    meta = {"video_input_manifest_frozen": True, "reference_images": [{"id": "img1"}]}
+    meta = dict(_REAL_META)
 
     result = freeze_segment_reference_audios(
-        _conn(), job, version, shot_row, meta, "原文 --ratio 9:16 --dur 15", already_frozen=False,
+        _conn(), job, version, shot_row, meta, "原文 --ratio 9:16 --dur 15", operation_id=_OP,
     )
 
     assert result == "原文 --ratio 9:16 --dur 15"
@@ -154,14 +162,11 @@ def test_fresh_freeze_writes_meta_appends_note_and_persists(monkeypatch) -> None
     _enable(monkeypatch)
     _adopt_voice("张三")
     job, version, shot_row = _seed_chain("shot_5", segment=_segment_with_speaker("张三"))
-    meta = {
-        "video_input_manifest_frozen": True, "reference_images": [{"id": "img1"}],
-        "aspect_ratio": "9:16",
-    }
+    meta = dict(_REAL_META)  # 真实 2.x 形态：没有 video_input_manifest_frozen 也必须决定声音
     prompt_text = "镜头1：@张三 说话。 --ratio 9:16 --dur 15"
 
     result = freeze_segment_reference_audios(
-        _conn(), job, version, shot_row, meta, prompt_text, already_frozen=False,
+        _conn(), job, version, shot_row, meta, prompt_text, operation_id=_OP,
     )
 
     assert meta["reference_audios"] == [{

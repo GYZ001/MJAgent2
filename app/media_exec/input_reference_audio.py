@@ -4,11 +4,15 @@
 （不是 ``.input_reference``——那个文件与 ``.run_job`` 都在行数棘轮基线零余量，
 这次改动索性放到独立新文件，两边各只需一行调用/一行回写）。
 
-只在本次调用刚完成一次全新的参考图冻结时才计算音频清单：已经冻结过参考
-图的版本原样跳过，不重新解析、不改写 meta，也不再往 prompt_text 追加声音
-说明——这是防止在途/重试任务因为设置中途被打开而悄悄改变请求形状（触发
-Seedance ``idempotency_request_mismatch``）的唯一判据，见
-``app.voice.segment_refs`` 模块文档与 U3 派单第 4 条。
+每个版本只决定一次声音清单：meta 里还没有 ``reference_audios``、且这个版本
+还没向供应商发过创建请求时才解析并冻结；此后重试一律原样复用（不重新解析、
+不改写 meta、不再追加声音说明），避免请求形状变化触发 Seedance
+``idempotency_request_mismatch``。
+
+判据**不看**参考图走的是哪条冻结路径：分镜台 2.x 的参考图在入队时就已从素材库
+拼好，运行时走快路径，只写 ``reference_manifest_frozen``、不写
+``video_input_manifest_frozen``——2026-09-24 线上测试集 9 段因旧判据一段都没
+带上声音。
 """
 from __future__ import annotations
 
@@ -29,17 +33,17 @@ from .job_state import _set_version
 
 
 def freeze_segment_reference_audios(
-    conn, job, version, shot, meta: dict[str, Any], prompt_text: str, *, already_frozen: bool,
+    conn, job, version, shot, meta: dict[str, Any], prompt_text: str, *, operation_id: str,
 ) -> str:
-    """``already_frozen``：调用方在调用 ``_prepare_planned_mode_inputs`` 之前
-    捕获的 ``meta.get("video_input_manifest_frozen")``——为真表示这个版本此前
-    已经成功冻结过一次参考图（无论这次走的是快路复用还是重新命中同样结果），
-    必须原样跳过，绝不给老版本"补上"音频键，避免同一版本重试时请求形状发生
-    变化。只有本次调用让它从"未冻结"变为"已冻结"才计算并写入，并把声音说明
-    追加进 prompt_text——返回值必须由调用方回写自己的 ``prompt_text`` 局部
-    变量，否则实际提交的仍是没有声音说明的旧版本。
+    """``operation_id``：本版本的供应商创建操作号（``run_job`` 里的
+    ``provider_operation_id``）。meta 已有 ``reference_audios``（决定过，含决定为
+    空）或该操作号已有创建请求落账（发过）时原样返回；否则解析、写 meta、把声音
+    说明追加进 prompt_text 并落库——返回值必须由调用方回写自己的 ``prompt_text``
+    局部变量，否则实际提交的仍是没有声音说明的旧版本。
     """
-    if already_frozen or not meta.get("video_input_manifest_frozen"):
+    if "reference_audios" in meta:
+        return prompt_text
+    if hiagent._latest_provider_operation_request("video_create", operation_id) is not None:
         return prompt_text
     if not reference_audio_enabled():
         return prompt_text

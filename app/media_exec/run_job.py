@@ -298,7 +298,6 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     job_id=job_id,
                     owner=owner,
                 )
-                frozen = bool(meta.get("video_input_manifest_frozen"))
                 meta, prompt_text = await _await_with_job_lease_heartbeat(
                     _prepare_planned_mode_inputs(
                         operation_conn, job, version, shot, ep, meta, prompt_text,
@@ -309,7 +308,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 )
                 if meta.get("mode") == video_modes.REFERENCE_IMAGE_MODE:
                     prompt_text = freeze_segment_reference_audios(
-                        operation_conn, job, version, shot, meta, prompt_text, already_frozen=frozen)
+                        operation_conn, job, version, shot, meta, prompt_text, operation_id=provider_operation_id)
         except _ContinuityWait as wait_exc:
             wait = 15.0
             note = wait_exc.reason
