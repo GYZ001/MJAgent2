@@ -60,6 +60,7 @@ _ACTIVE_TASK_KIND_BY_WORKFLOW_TYPE: dict[str, str] = {
     "character_bible": "bible",
     "scene_bible": "scene_bible",
     "character_references": "refs",
+    "character_voices": "voice_bulk_generate",
     "scene_references": "scene_refs",
     "episode_video_completion": "video_completion",
     "project_video_completion_queue": "video_completion_project",

@@ -21,6 +21,7 @@ from typing import Any
 from app import task_registry
 from app.db import get_conn
 from app.media_urls import build_media_url
+from app.orchestration.engine import WorkflowRecorder, fingerprint
 from app.schemas import Bible, Character, character_is_portrait_eligible
 
 from app.voice import store
@@ -244,6 +245,46 @@ async def _finish_generation(
     return to_version_dict(row)
 
 
+async def generate_voice_for_character_run(
+    project_id: str, character_name: str, *, voice_prompt: str, preview_text: str,
+    created_by: str, trigger_type: str = "manual", parent_run_id: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    """REST/命令单角色生成入口的编排壳：一次运行一个步骤，返回 (声音结果, run_id)。
+
+    批量路径（``_generate_missing_task``）不走这里——它自己持有跨全部角色的
+    单个运行，每个角色是其中一个步骤，不能让每个角色各开一个运行。"""
+    recorder = WorkflowRecorder.create(
+        workflow_type="character_voices", scope_type="project", scope_id=project_id,
+        input_fingerprint=fingerprint(
+            project_id, character_name, voice_prompt, preview_text, "character_voices",
+        ),
+        requested_by=created_by, trigger_type=trigger_type,
+        config_snapshot={"character_name": character_name}, parent_run_id=parent_run_id,
+    )
+    recorder.start()
+    try:
+        _, voice = await recorder.step(
+            "voice_generate",
+            lambda: generate_voice_for_character(
+                project_id, character_name, voice_prompt=voice_prompt, preview_text=preview_text,
+                created_by=created_by,
+            ),
+            context_manifest={"character_name": character_name},
+        )
+    except asyncio.CancelledError:
+        message = (
+            "服务重启，声音生成已中断，请重新点击生成"
+            if task_registry.shutdown_in_progress() else "运行已取消"
+        )
+        recorder.cancel(message, conn=None)
+        raise
+    except Exception as exc:  # noqa: BLE001 -- 已由 recorder.step 记过步骤失败，这里补记运行失败后原样上抛
+        recorder.fail(exc, conn=None)
+        raise
+    recorder.succeed(f"角色「{character_name}」的声音已生成", conn=None)
+    return voice, recorder.run_id
+
+
 async def adopt_voice(
     project_id: str, character_name: str, voice_id: str, *, adopted_by: str,
 ) -> dict[str, Any]:
@@ -274,39 +315,94 @@ def _names_needing_voice(conn, project_id: str, candidate_names: list[str]) -> l
     return out
 
 
-async def _generate_missing_task(project_id: str, names: list[str], *, triggered_by: str) -> None:
-    for name in names:
-        try:
-            await generate_voice_for_character(
-                project_id, name, voice_prompt="", preview_text="", created_by=triggered_by,
-            )
-        except Exception:  # noqa: BLE001 -- 单个角色失败不影响其余角色继续跑，原因已落在该行上
-            continue
+def _bulk_result_message(succeeded: list[str], failed: list[tuple[str, str]]) -> str:
+    if not failed:
+        return f"已为 {len(succeeded)} 个角色生成声音"
+    reasons = "、".join(f"{name}（{reason}）" for name, reason in failed)
+    return f"成功 {len(succeeded)} 个、失败 {len(failed)} 个：{reasons}"
 
 
-async def generate_missing_for_project(project_id: str, *, triggered_by: str) -> tuple[int, list[str]]:
-    """后台串行为所有还没有 current 的具名角色生成声音，立即返回受理数量。
-    未配置模型、或同项目已有批量任务在跑时明确报错（界面据此给出原因），不静默返回 0。"""
+def _cancel_quietly(recorder: WorkflowRecorder, message: str) -> None:
+    try:
+        recorder.cancel(message, conn=None)
+    except Exception:  # noqa: BLE001 -- 收尾动作，取消本身失败不能再抛给调用方
+        pass
+
+
+async def _generate_missing_task(
+    project_id: str, names: list[str], *, triggered_by: str, recorder: WorkflowRecorder,
+) -> None:
+    """批量补齐/定妆钩子共用的任务体：一次运行覆盖整批角色，每个角色各是
+    其中一个 ``voice_generate`` 步骤——单个角色失败只记该步骤失败，其余角色
+    继续；服务重启/任务取消时不留在 RUNNING，直接标成已取消（角色固定音色
+    没有自动续跑，需要用户重新点击）。"""
+    recorder.start()
+    succeeded: list[str] = []
+    failed: list[tuple[str, str]] = []
+    try:
+        for name in names:
+            try:
+                await recorder.step(
+                    "voice_generate",
+                    lambda name=name: generate_voice_for_character(
+                        project_id, name, voice_prompt="", preview_text="", created_by=triggered_by,
+                    ),
+                    context_manifest={"character_name": name},
+                )
+            except Exception as exc:  # noqa: BLE001 -- 单个角色失败不影响其余角色继续跑，原因已落在该步骤上
+                failed.append((name, str(exc)[:200]))
+                continue
+            succeeded.append(name)
+    except asyncio.CancelledError:
+        message = (
+            "服务重启，请重新点击批量生成为角色补齐声音"
+            if task_registry.shutdown_in_progress() else "运行已取消"
+        )
+        recorder.cancel(message, conn=None)
+        raise
+    message = _bulk_result_message(succeeded, failed)
+    if not failed:
+        recorder.succeed(message, conn=None)
+    elif succeeded:
+        recorder.partial(message, conn=None)
+    else:
+        recorder.fail_result(message, failure_code="ALL_CHARACTERS_FAILED", conn=None)
+
+
+async def generate_missing_for_project(
+    project_id: str, *, triggered_by: str,
+) -> tuple[int, list[str], str | None]:
+    """后台串行为所有还没有 current 的具名角色生成声音，立即返回受理数量与
+    可在观测台查看进度的 run_id。未配置模型、或同项目已有批量任务在跑时明确
+    报错（界面据此给出原因），不静默返回 0。"""
     if not voice_model_configured():
         raise VoiceProviderError("未配置声音生成模型，请在模型中心添加并绑定", failure_kind="not_configured")
     conn = get_conn()
     targets = _names_needing_voice(conn, project_id, _character_roster(_project_bible(conn, project_id)))
     if not targets:
-        return 0, []
+        return 0, [], None
+    recorder = WorkflowRecorder.create(
+        workflow_type="character_voices", scope_type="project", scope_id=project_id,
+        input_fingerprint=fingerprint(project_id, targets, "character_voices", "generate_missing"),
+        requested_by=triggered_by, trigger_type="manual",
+        config_snapshot={"characters": targets},
+    )
+    coro = _generate_missing_task(project_id, targets, triggered_by=triggered_by, recorder=recorder)
     try:
-        task_registry.spawn(
-            _VOICE_BULK_TASK_KIND, project_id,
-            _generate_missing_task(project_id, targets, triggered_by=triggered_by),
-            project_id=project_id,
-        )
+        task_registry.spawn(_VOICE_BULK_TASK_KIND, project_id, coro, project_id=project_id)
     except RuntimeError:
+        coro.close()
+        _cancel_quietly(recorder, "已有同项目声音批量生成任务在进行中，本次未启动")
         raise ValueError("已有声音批量生成任务在进行中，完成后刷新即可看到结果") from None
-    return len(targets), targets
+    return len(targets), targets, recorder.run_id
 
 
-def trigger_auto_generate_after_portrait(project_id: str, character_names: list[str]) -> None:
+def trigger_auto_generate_after_portrait(
+    project_id: str, character_names: list[str], *, parent_run_id: str | None = None,
+) -> None:
     """定妆批次成功后台触发同批角色的声音自动生成；不阻塞定妆流程，失败不
-    外抛。挂钩点见 ``app.domain.bible_ops.refs_generation._refs_task``。"""
+    外抛。挂钩点见 ``app.domain.bible_ops.refs_generation._refs_task``，
+    ``parent_run_id`` 传的是触发它的那次定妆运行 id。"""
     if not character_names or not voice_auto_generate_enabled() or not voice_model_configured():
         return
     try:
@@ -317,11 +413,17 @@ def trigger_auto_generate_after_portrait(project_id: str, character_names: list[
     targets = _names_needing_voice(conn, project_id, character_names)
     if not targets:
         return
+    recorder = WorkflowRecorder.create(
+        workflow_type="character_voices", scope_type="project", scope_id=project_id,
+        input_fingerprint=fingerprint(project_id, targets, "character_voices", "auto_after_portrait"),
+        requested_by="system", trigger_type="auto_after_portrait",
+        config_snapshot={"characters": targets}, parent_run_id=parent_run_id,
+    )
+    coro = _generate_missing_task(
+        project_id, targets, triggered_by="system:auto_after_portrait", recorder=recorder,
+    )
     try:
-        task_registry.spawn(
-            _VOICE_BULK_TASK_KIND, project_id,
-            _generate_missing_task(project_id, targets, triggered_by="system:auto_after_portrait"),
-            project_id=project_id,
-        )
+        task_registry.spawn(_VOICE_BULK_TASK_KIND, project_id, coro, project_id=project_id)
     except RuntimeError:
-        return  # 已有同项目自动生成/补齐任务在跑，交给那一轮处理
+        coro.close()
+        _cancel_quietly(recorder, "已有同项目声音生成任务在进行中，本次自动触发未启动")

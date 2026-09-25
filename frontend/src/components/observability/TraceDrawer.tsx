@@ -99,7 +99,7 @@ const LEGACY_NODE_LABELS: Record<string, string> = {
   storyboard: "生成分镜",
   video_generation: "生成镜头视频",
   scene_references: "生成场景参考图",
-  character_references: "生成人物参考图",
+  character_references: "生成人物参考图", character_voices: "生成角色声音", voice_generate: "生成角色声音",
   character_bible: "生成人物设定",
   "character_bible.iteration": "执行人物设定生成",
   "character_bible_roster.iteration": "执行人物名单生成",

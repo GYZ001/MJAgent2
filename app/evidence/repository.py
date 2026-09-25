@@ -74,7 +74,7 @@ _WORKFLOW_LABELS: dict[str, str] = {
     "character_bible": "人物谱生成",
     "character_references": "人物定妆照",
     "scene_bible": "场景设定",
-    "scene_references": "场景参考图",
+    "scene_references": "场景参考图", "character_voices": "角色声音生成",
     "episode_mapping": "分集规划",
     # 与 app/observability/api.py 的 _TRACE_WORKFLOW_LABELS 保持同义：
     # workflow_type 仍叫 screenplay，产出已是映射包。

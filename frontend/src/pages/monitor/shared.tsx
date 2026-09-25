@@ -59,7 +59,7 @@ export const WORKFLOW_LABELS: Record<string, string> = {
   character_bible: "人物谱",
   character_references: "人物定妆照",
   scene_bible: "场景设定",
-  scene_references: "场景参考图",
+  scene_references: "场景参考图", character_voices: "角色声音生成",
   episode_mapping: "分集规划",
   // workflow_type 仍叫 screenplay（改 key 会让历史 workflow_runs 认不出来），
   // 但这条链路产出的是映射包，不再产出剧本。这里报它现在实际在做的事。

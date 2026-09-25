@@ -21,5 +21,6 @@ describe('面向用户的状态文案', () => {
   it('翻译产物枚举', () => {
     expect(artifactTypeLabel('episode_screenplay')).toBe('剧本')
     expect(artifactTypeLabel('unknown_asset')).toBe('其他产物')
+    expect(artifactTypeLabel('character_voices')).toBe('角色声音')
   })
 })

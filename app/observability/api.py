@@ -186,6 +186,7 @@ _TRACE_WORKFLOW_LABELS = {
     "character_references": "人物定妆照",
     "scene_bible": "场景设定",
     "scene_references": "场景参考图",
+    "character_voices": "角色声音生成",
     "episode_mapping": "分集规划",
     # workflow_type 仍叫 screenplay（app/domain/screenplay_ops.py 写入，改 key 会
     # 让历史 workflow_runs 认不出来），但这条链路 48e01ff 之后产出的是映射包

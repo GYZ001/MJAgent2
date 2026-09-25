@@ -348,12 +348,13 @@ def test_generate_missing_for_project_generates_all_eligible_characters(monkeypa
     _check_passed(monkeypatch)
     _fake_description(monkeypatch)
 
-    accepted, names = asyncio.run(_run_and_drain(
+    accepted, names, run_id = asyncio.run(_run_and_drain(
         voice_service.generate_missing_for_project("p_missing", triggered_by="tester"), "p_missing",
     ))
 
     assert accepted == 2
     assert set(names) == {"甲", "乙"}
+    assert run_id
     for name in ("甲", "乙"):
         assert voice_store.current_for(db.get_conn(), "p_missing", name) is not None
 
@@ -413,12 +414,13 @@ def test_generate_missing_for_project_skips_characters_that_already_have_current
     ))
     ding_before = voice_store.current_for(db.get_conn(), "p_missing_partial", "丁")
 
-    accepted, names = asyncio.run(_run_and_drain(
+    accepted, names, run_id = asyncio.run(_run_and_drain(
         voice_service.generate_missing_for_project("p_missing_partial", triggered_by="tester"),
         "p_missing_partial",
     ))
     assert accepted == 1
     assert names == ["戊"]
+    assert run_id
     # 背景任务真的跑完了：戊 现在有 current，丁 的 current 没被重复生成打扰。
     assert voice_store.current_for(db.get_conn(), "p_missing_partial", "戊") is not None
     assert voice_store.current_for(db.get_conn(), "p_missing_partial", "丁")["id"] == ding_before["id"]

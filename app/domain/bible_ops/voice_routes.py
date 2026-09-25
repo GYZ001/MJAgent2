@@ -64,7 +64,7 @@ async def generate_character_voice(project_id: str, character_name: str, body: d
     if not idempotency_key:
         raise HTTPException(422, "生成声音需要提供 idempotency_key")
     try:
-        voice = await voice_service.generate_voice_for_character(
+        voice, run_id = await voice_service.generate_voice_for_character_run(
             project_id, character_name, voice_prompt=voice_prompt, preview_text=preview_text,
             created_by=current_actor_name(),
         )
@@ -72,7 +72,7 @@ async def generate_character_voice(project_id: str, character_name: str, body: d
         raise HTTPException(404, str(exc)) from exc
     except VoiceProviderError as exc:
         raise _provider_error_to_http(exc) from exc
-    return {"voice": voice}
+    return {"voice": voice, "run_id": run_id}
 
 
 @router.post("/projects/{project_id}/characters/{character_name}/voices/{voice_id}/adopt")
@@ -105,11 +105,11 @@ async def generate_missing_voices(project_id: str):
         return routed
     _project_or_404(project_id)
     try:
-        accepted, names = await voice_service.generate_missing_for_project(
+        accepted, names, run_id = await voice_service.generate_missing_for_project(
             project_id, triggered_by=current_actor_name(fallback="system"),
         )
     except VoiceProviderError as exc:
         raise _provider_error_to_http(exc) from exc
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    return {"accepted": accepted, "characters": names}
+    return {"accepted": accepted, "characters": names, "run_id": run_id}

@@ -147,6 +147,9 @@ _STEP_PRESENTATIONS: dict[str, WorkflowStepPresentation] = {
     "scene_references": WorkflowStepPresentation(
         "生成场景参考图", "根据场景设定生成后续画面使用的视觉参考",
     ),
+    "voice_generate": WorkflowStepPresentation(
+        "生成角色声音", "调用声音生成模型为角色生成候选声音并做语音识别核验",
+    ),
     "episode_mapping": WorkflowStepPresentation(
         "规划分集内容", "把原始故事规划为连续且完整的分集结构",
     ),

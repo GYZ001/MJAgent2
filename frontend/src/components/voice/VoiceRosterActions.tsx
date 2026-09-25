@@ -23,6 +23,7 @@ export default function VoiceRosterActions({ projectId }: { projectId: string })
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [accepted, setAccepted] = useState<{ count: number; runId: string | null } | null>(null)
 
   if (!data) return null
   if (!data.voice_model_configured) {
@@ -44,8 +45,10 @@ export default function VoiceRosterActions({ projectId }: { projectId: string })
     setConfirmOpen(false)
     setSubmitting(true)
     setError(null)
+    setAccepted(null)
     try {
-      await generateMissingVoices(projectId)
+      const result = await generateMissingVoices(projectId)
+      setAccepted({ count: result.accepted, runId: result.run_id })
       refresh()
     } catch (err) {
       setError(describeError(err))
@@ -60,6 +63,19 @@ export default function VoiceRosterActions({ projectId }: { projectId: string })
         {submitting ? '正在受理…' : `为未配置声音的角色生成（${missing.length} 个）`}
       </button>
       {error && <span className="voice-error">{error}</span>}
+      {accepted && (
+        <span className="voice-accepted-hint" role="status">
+          {`已开始为 ${accepted.count} 个角色生成声音，可在`}
+          {accepted.runId ? (
+            <a href={`/projects/${encodeURIComponent(projectId)}/observability/runs?run_id=${encodeURIComponent(accepted.runId)}`}>
+              观测
+            </a>
+          ) : (
+            '观测'
+          )}
+          查看进度
+        </span>
+      )}
       {confirmOpen && (
         <DecisionDialog
           title="批量生成声音"

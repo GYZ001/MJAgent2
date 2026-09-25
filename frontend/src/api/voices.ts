@@ -58,12 +58,13 @@ export function suggestVoiceDescription(
 
 /** 生成一版声音（付费，约 10 秒同步返回）：描述留空时后端自动写。没有当前声音时
  *  第一个通过校验的候选自动成为当前；已有当前声音时只进候选，需人工采用。
- *  409/502/404 的 detail 是可以直接展示给用户的中文原因。 */
+ *  409/502/404 的 detail 是可以直接展示给用户的中文原因。run_id 对应观测台的一次
+ *  「角色声音生成」运行（一次运行一个步骤），可据此跳转查看进度。 */
 export function generateCharacterVoice(
   projectId: string,
   characterName: string,
   body: { voice_prompt: string; preview_text: string; idempotency_key: string },
-): Promise<{ voice: VoiceVersion }> {
+): Promise<{ voice: VoiceVersion; run_id: string }> {
   return mutate(
     "POST",
     `/projects/${encodeURIComponent(projectId)}/characters/${encodeURIComponent(characterName)}/voices`,
@@ -83,9 +84,11 @@ export function adoptCharacterVoice(
 }
 
 /** 批量补齐：为人物谱里所有"没有当前声音也没在生成中"的具名角色各触发一次生成，
- *  后台执行、立即返回受理结果，不在这次请求里等待完成。 */
+ *  后台执行、立即返回受理结果，不在这次请求里等待完成。run_id 对应观测台的一次
+ *  「角色声音生成」运行（一次运行、每个角色一个步骤）；accepted 为 0 时没有可生成
+ *  的角色，run_id 为 null。 */
 export function generateMissingVoices(
   projectId: string,
-): Promise<{ accepted: number; characters: string[] }> {
+): Promise<{ accepted: number; characters: string[]; run_id: string | null }> {
   return mutate("POST", `/projects/${encodeURIComponent(projectId)}/voices/generate-missing`);
 }

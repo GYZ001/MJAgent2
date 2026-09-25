@@ -50,6 +50,7 @@ const ARTIFACT_TYPE_MAP: Record<string, string> = {
   character_bible: '人物谱',
   character_portrait: '人物定妆照',
   character_references: '人物参考图',
+  character_voices: '角色声音',
   scene_bible: '场景设定',
   scene: '场景',
   scene_reference: '场景参考图',

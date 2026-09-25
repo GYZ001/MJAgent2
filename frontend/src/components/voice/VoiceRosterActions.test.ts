@@ -79,6 +79,37 @@ describe('VoiceRosterActions', () => {
     view.unmount()
   })
 
+  it('受理成功后提示可在观测查看进度，并给出跳到该运行的链接', async () => {
+    // 用独立 projectId：useProjectVoices 的缓存按 projectId 分槽且模块级持久，
+    // 与相邻用例共用默认 id 会让本用例点击后触发的 refresh() 竞态污染下一个
+    // 用例读到的缓存数据（曾实测导致"没有缺口时不渲染任何内容"误报有缺口）。
+    mockApi.getProjectVoices.mockResolvedValue({
+      voice_model_configured: true, auto_generate: true,
+      items: [emptyVoiceItem('张三'), emptyVoiceItem('李四')],
+    } satisfies ProjectVoices)
+    mockApi.generateMissingVoices.mockResolvedValue({
+      accepted: 2, characters: ['张三', '李四'], run_id: 'run_voice_abc123',
+    })
+    const view = await mount('proj-roster-accepted')
+
+    const button = view.root.findAllByType('button')[0]
+    await act(async () => { button.props.onClick(); await Promise.resolve() })
+    const confirmBtn = view.root.findAllByType('button').find(b => b.children.join('') === '确认生成')
+    await act(async () => {
+      confirmBtn!.props.onClick()
+      await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+    })
+
+    expect(treeText(view)).toContain('已开始为 2 个角色生成声音')
+    expect(treeText(view)).toContain('可在')
+    expect(treeText(view)).toContain('查看进度')
+    const runLink = view.root.findAllByType('a').find(a => a.children.join('') === '观测')
+    expect(runLink?.props.href).toBe(
+      '/projects/proj-roster-accepted/observability/runs?run_id=run_voice_abc123',
+    )
+    view.unmount()
+  })
+
   it('没有缺口时不渲染任何内容', async () => {
     mockApi.getProjectVoices.mockResolvedValue({
       voice_model_configured: true, auto_generate: true,

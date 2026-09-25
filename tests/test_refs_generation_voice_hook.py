@@ -65,7 +65,7 @@ def test_refs_task_success_triggers_voice_auto_generate_with_batch_names(monkeyp
     monkeypatch.setattr(refs_module, "generate_refs", fake_generate_refs)
     monkeypatch.setattr(
         voice_service, "trigger_auto_generate_after_portrait",
-        lambda pid, names: captured.append((pid, list(names))),
+        lambda pid, names, **_kw: captured.append((pid, list(names))),
     )
 
     asyncio.run(_refs_task(project_id, None))
@@ -89,7 +89,7 @@ def test_refs_task_partial_failure_still_triggers_hook_for_batch_names(monkeypat
     monkeypatch.setattr(refs_module, "generate_refs", fake_generate_refs)
     monkeypatch.setattr(
         voice_service, "trigger_auto_generate_after_portrait",
-        lambda pid, names: captured.append((pid, list(names))),
+        lambda pid, names, **_kw: captured.append((pid, list(names))),
     )
 
     asyncio.run(_refs_task(project_id, None))

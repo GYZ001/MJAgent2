@@ -10452,6 +10452,14 @@ a.voice-chip-text {
   align-items: center;
   gap: 8px;
 }
+.voice-accepted-hint {
+  margin: 4px 0;
+  color: var(--ink-soft);
+  font: 400 12px/1.5 var(--ui);
+}
+.voice-accepted-hint a {
+  color: var(--cinnabar-deep);
+}
 
 /* EP-01 第二阶段：项目设置里的「协作者」区块（ProjectCollaboratorsPanel）。 */
 .project-collaborators-toggle {
