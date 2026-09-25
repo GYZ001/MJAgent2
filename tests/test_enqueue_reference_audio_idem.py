@@ -13,6 +13,9 @@
 """
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 from pathlib import Path
 
 from app import db, video_modes
@@ -82,12 +85,21 @@ class _Shot:
         self.storyboard_pack_segment = segment
 
 
+def _real_clip(name: str) -> str:
+    """参考片段必须真实存在才会被传入（文件缺失的声音按「声音文件缺失」跳过）。"""
+    path = Path(tempfile.gettempdir()) / "mj_voice_test_clips" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt ")
+    return str(path)
+
+
 def _manifest_with_visual_reference() -> dict:
     return {"scene": {"selected_views": [{"id": "s1"}]}, "characters": []}
 
 
 def test_disabled_setting_returns_empty_fingerprint(monkeypatch) -> None:
-    monkeypatch.setattr(segment_refs, "get_setting", lambda key: "")
+    # 默认开启；只有显式关闭才返回空指纹
+    monkeypatch.setattr(segment_refs, "get_setting", lambda key: "false" if key == segment_refs.SETTING_KEY_ENABLED else "")
     _seed_project_and_episode()
     shot = _Shot({"dialogue": [{"speaker_identity_id": "bible:张三"}], "resources": {"characters": []}})
 
@@ -121,7 +133,7 @@ def test_enabled_with_voice_matches_fingerprint_reference_audios(monkeypatch) ->
     conn.commit()
     voice_store.mark_finished(
         conn, PROJECT_ID, voice_id, status=voice_store.STATUS_CANDIDATE,
-        clip_path="/tmp/a_clip.wav", clip_sha256="sha-a", clip_duration_s=3.0,
+        clip_path=_real_clip("a_clip.wav"), clip_sha256="sha-a", clip_duration_s=3.0,
     )
     conn.commit()
     voice_store.set_current(conn, PROJECT_ID, "张三", voice_id, adopted_by="tester")

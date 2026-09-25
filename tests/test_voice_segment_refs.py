@@ -6,6 +6,9 @@
 """
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import pytest
 
 from app import db
@@ -22,6 +25,14 @@ from app.voice.segment_refs import (
 )
 
 PROJECT_ID = "p1"
+
+
+def _real_clip(name: str) -> str:
+    """参考片段必须真实存在才会被传入（文件缺失的声音按「声音文件缺失」跳过）。"""
+    path = Path(tempfile.gettempdir()) / "mj_voice_test_clips" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt ")
+    return str(path)
 
 
 def _conn():
@@ -64,7 +75,7 @@ def _adopt_voice(character_name: str, *, anchor_key: str = "", clip_sha256: str 
     conn.commit()
     voice_store.mark_finished(
         conn, PROJECT_ID, voice_id, status=voice_store.STATUS_CANDIDATE,
-        clip_path=f"/tmp/{voice_id}_clip.wav", clip_sha256=clip_sha256, clip_duration_s=clip_duration_s,
+        clip_path=_real_clip(f"{voice_id}_clip.wav"), clip_sha256=clip_sha256, clip_duration_s=clip_duration_s,
     )
     conn.commit()
     voice_store.set_current(conn, PROJECT_ID, character_name, voice_id, anchor_key, adopted_by="tester")
@@ -242,13 +253,15 @@ def test_fingerprint_is_stable_and_sensitive_to_voice_change() -> None:
     assert fingerprint_reference_audios([]) == ""
 
 
-def test_settings_default_off_and_default_cap_three(monkeypatch) -> None:
+def test_settings_default_on_and_default_cap_three(monkeypatch) -> None:
     # segment_refs.py 是 get_setting 唯一消费方（from app.db import get_setting 的名字
     # 拷贝），打在 db 模块本体上对它无效，必须打在它自己的命名空间——同
     # tests/test_voice_service.py 模块 docstring 说明的「安全单一绑定点」。
     monkeypatch.setattr(segment_refs, "get_setting", lambda key: "")
-    assert reference_audio_enabled() is False
+    assert reference_audio_enabled() is True  # 用户 2026-09-24：参考音频默认就走
     assert configured_max_speakers() == DEFAULT_MAX_SPEAKERS == 3
+    monkeypatch.setattr(segment_refs, "get_setting", lambda key: "false")
+    assert reference_audio_enabled() is False  # 只有显式关闭才关
 
 
 def test_settings_honor_explicit_values(monkeypatch) -> None:
@@ -265,3 +278,23 @@ def test_max_speakers_setting_clamped_to_1_3(monkeypatch) -> None:
     assert configured_max_speakers() == 1
     monkeypatch.setattr(segment_refs, "get_setting", lambda key: "not-a-number")
     assert configured_max_speakers() == DEFAULT_MAX_SPEAKERS
+
+
+def test_voice_row_with_missing_clip_file_is_skipped_not_sent() -> None:
+    """人物卡声音记录还在、片段文件却没了：跳过并写明原因，不让整段视频提交失败。"""
+    voice_id = _adopt_voice("甲")
+    Path(_real_clip(f"{voice_id}_clip.wav")).unlink()
+    refs, skips = _resolve(_segment(_dialogue("bible:甲")))
+    assert refs == []
+    assert skips == [{"character_name": "甲", "reason": "声音文件缺失，请在人物谱重新生成"}]
+
+
+def test_speakers_without_voice_do_not_consume_the_cap() -> None:
+    """名额只算真正传入的声音：排第一的没配声音，不该把后面配了声音的角色挤成「超出上限」。"""
+    for name in ("乙", "丙"):
+        _adopt_voice(name)
+    segment = _segment(_dialogue("bible:甲", "bible:乙", "bible:丙"))
+    refs, skips = _resolve(segment, max_speakers=2)
+    assert [r["character_name"] for r in refs] == ["乙", "丙"]
+    assert skips == [{"character_name": "甲", "reason": "未配置声音"}]
+

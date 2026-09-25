@@ -159,9 +159,9 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "storyboard_source_rebind_enabled": _boolean("分镜原文重绑定", "true", experimental=True),
     "video_reference_batch_prompt": _boolean("批量参考图提示词", "true"),
     "video_reference_role_adaptive": _boolean("质量角色自适应", "false", experimental=True),
-    # 角色固定音色 U3（2026-09-24）：视频请求接入参考音频，默认关闭；见
+    # 角色固定音色 U3（2026-09-24）：视频请求接入参考音频，默认开启（用户要求默认就走，没有声音的角色逐个跳过）；见
     # docs/角色固定音色_声音生成接口调研与实施方案_2026-09-23.md §5.3。
-    "video_reference_audio_enabled": _boolean("生成视频时传入角色声音参考", "false"),
+    "video_reference_audio_enabled": _boolean("生成视频时传入角色声音参考", "true"),
     "video_reference_audio_max_speakers": _number(
         "每段最多传入几个角色的声音", "3", 1, 3, unit="人",
         description="受供应商上限约束（Seedance 2.0 最多 3 个、总时长 15 秒），实际生效值取两者较小。",

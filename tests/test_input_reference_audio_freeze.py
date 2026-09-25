@@ -8,6 +8,9 @@ snapshot`` 走真实 Seedance 静态快照（无网络）。
 """
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import json
 import sqlite3
 
@@ -52,6 +55,14 @@ def _seed_chain(shot_id: str, *, segment: dict | None) -> tuple[dict, dict, obje
     return {"project_id": PROJECT_ID}, {"id": version_id}, shot_row
 
 
+def _real_clip(name: str) -> str:
+    """参考片段必须真实存在才会被传入（文件缺失的声音按「声音文件缺失」跳过）。"""
+    path = Path(tempfile.gettempdir()) / "mj_voice_test_clips" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt ")
+    return str(path)
+
+
 def _adopt_voice(character_name: str) -> None:
     conn = _conn()
     voice_id = voice_store.insert_generating(
@@ -61,7 +72,7 @@ def _adopt_voice(character_name: str) -> None:
     conn.commit()
     voice_store.mark_finished(
         conn, PROJECT_ID, voice_id, status=voice_store.STATUS_CANDIDATE,
-        clip_path=f"/tmp/{voice_id}_clip.wav", clip_sha256="sha-1", clip_duration_s=4.0,
+        clip_path=_real_clip(f"{voice_id}_clip.wav"), clip_sha256="sha-1", clip_duration_s=4.0,
     )
     conn.commit()
     voice_store.set_current(conn, PROJECT_ID, character_name, voice_id, adopted_by="tester")
@@ -80,7 +91,8 @@ def _enable(monkeypatch) -> None:
 
 
 def test_disabled_setting_is_a_pure_noop(monkeypatch) -> None:
-    monkeypatch.setattr(segment_refs, "get_setting", lambda key: "")
+    # 默认开启；只有显式关闭才是纯 no-op
+    monkeypatch.setattr(segment_refs, "get_setting", lambda key: "false" if key == segment_refs.SETTING_KEY_ENABLED else "")
     job, version, shot_row = _seed_chain("shot_1", segment=_segment_with_speaker("张三"))
     meta = {"video_input_manifest_frozen": True, "reference_images": [{"id": "img1"}]}
 
@@ -154,7 +166,7 @@ def test_fresh_freeze_writes_meta_appends_note_and_persists(monkeypatch) -> None
 
     assert meta["reference_audios"] == [{
         "index": 1, "character_name": "张三", "anchor_key": "", "voice_id": meta["reference_audios"][0]["voice_id"],
-        "clip_path": f"/tmp/{meta['reference_audios'][0]['voice_id']}_clip.wav", "clip_sha256": "sha-1",
+        "clip_path": _real_clip(f"{meta['reference_audios'][0]['voice_id']}_clip.wav"), "clip_sha256": "sha-1",
         "clip_duration_s": 4.0,
     }]
     assert meta["reference_audio_skips"] == []

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from pathlib import Path
 from typing import Any
 
 from app.db import get_setting
@@ -36,9 +37,11 @@ _BIBLE_PREFIX = "bible:"
 
 
 def reference_audio_enabled() -> bool:
-    """默认关闭；settings 表显式写 1/true/on/yes 才开启。"""
+    """默认开启（用户 2026-09-24：参考音频「必须是默认就走」）；只有设置里显式写了
+    0/false/off/no 才关闭。人物卡没有声音或声音文件缺失的角色在解析时逐个跳过，
+    不影响出片。"""
     raw = str(get_setting(SETTING_KEY_ENABLED) or "").strip().lower()
-    return raw in {"1", "true", "on", "yes"}
+    return raw not in {"0", "false", "off", "no"}
 
 
 def configured_max_speakers() -> int:
@@ -137,16 +140,22 @@ def resolve_segment_reference_audios(
     cap = max(0, min(int(max_speakers), int(max_reference_audios)))
     skips: list[dict[str, Any]] = []
     accepted: list[dict[str, Any]] = []
-    for position, (identity_id, name) in enumerate(ranked):
-        if position >= cap:
-            skips.append({"character_name": name, "reason": f"超出每段 {cap} 个上限"})
-            continue
+    for identity_id, name in ranked:
         portrait_id = _portrait_id_for_identity(segment, identity_id)
         anchor_key = _portrait_anchor_key(conn, project_id, portrait_id) if portrait_id else ""
         voice = voice_store.current_for(conn, project_id, name, anchor_key)
         if voice is None:
             reason = "该年龄段未绑定声音" if anchor_key else "未配置声音"
             skips.append({"character_name": name, "reason": reason})
+            continue
+        clip_path = str(voice["clip_path"] or "")
+        if not clip_path or not Path(clip_path).is_file():
+            skips.append({"character_name": name, "reason": "声音文件缺失，请在人物谱重新生成"})
+            continue
+        # 名额只算真正传入的声音：没配声音的说话人不占位，否则排在后面、配了声音的
+        # 角色会被误判「超出上限」。
+        if len(accepted) >= cap:
+            skips.append({"character_name": name, "reason": f"超出每段 {cap} 个上限"})
             continue
         accepted.append({
             "character_name": name, "anchor_key": anchor_key,
