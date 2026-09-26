@@ -188,6 +188,76 @@ def test_regenerate_calls_model_only_for_selected_segment(fixture,monkeypatch):
     assert read_independent("SELECT * FROM shots") == before
 
 
+@pytest.fixture
+def narrative_authority_fixture(tmp_path):
+    """叙事权威集：episode.screenplay_json 不带 prep_pack_version 标记。
+
+    ``is_prep_pack_payload``（app/production/screenplay_authority.py）与
+    ``load_identity_workspace`` 共用同一个判据——payload 里有没有
+    ``prep_pack_version`` 键；没有这个键就是仍在跑 narrative_plan 权威链的
+    集（合同 major 3-5，见 ``screenplay_contract_requires_narrative``），
+    与 prep_pack（major>=6）互斥。用这个最小信号构造夹具，不重建完整
+    narrative_plan schema，因为要锁住的正是 identity_workspace 这一道门。
+    """
+    conn = db.get_conn()
+    payload = {"episode_no": 5, "narrative_plan": {"marker": "legacy-authority"}}
+    conn.execute("INSERT INTO projects(id,name,bible_json,created_at) VALUES('p','本地回归','{}',?)", (db.now(),))
+    conn.execute("INSERT INTO chapters(project_id,idx,title,content) VALUES('p',1,'第五章',?)", ('孟浩（OS）：我一定会回来。\n\n山风吹过。',))
+    conn.execute("INSERT INTO episodes(id,project_id,episode_no,title,source_chapters,status,screenplay_json,created_at) VALUES('ep','p',5,'第五集','[1]','confirmed',?,?)", (json.dumps(payload),db.now()))
+    segment = dict(segment_no=1,synopsis="孟浩自述",source_segment_indexes=[1],beat_ids=["B1"],
+                   beats=[{"beat_id":"B1","summary":"孟浩自述","segment_indexes":[1]}],shot_count=1,duration_s=15,
+                   target_model="seedance_2",degraded_capabilities=[],prompt_text="镜头1：远处山风。{{speech:U01}}",
+                   dialogue=[dict(utterance_id="U01",speaker_identity_id="bible:孟浩",line="我一定会回来。",source_segment_index=1,delivery="offscreen_voice",delivery_kind="inner_monologue")],
+                   resources={"characters":[dict(identity_id="bible:孟浩",display_name="孟浩",subject_kind="character",visibility="voice_only")],"scenes":[],"props":[]})
+    render_segment_speech(segment,dialect="seedance")
+    stamp_identity_contract(segment)
+    conn.execute("INSERT INTO shots(id,episode_id,shot_no,duration_s,shot_size,camera_move,scene_setting,action_desc,narration,characters,dialogues,source_excerpt,shot_contract_json,adopted_version_id) VALUES('s1', 'ep',1,15,'','','','','','[]','[]',?,?,NULL)", ('孟浩（OS）：我一定会回来。',json.dumps({"storyboard_pack_segment":segment})))
+    conn.commit()
+    return conn, segment
+
+
+def test_load_identity_workspace_rejects_narrative_authority_episode(narrative_authority_fixture):
+    """叙事权威集不得进片段身份复核工作区——直接读取就要拒绝。"""
+    conn, _segment = narrative_authority_fixture
+    with pytest.raises(ValueError, match="叙事权威分镜请走原有受控修订流程"):
+        workspace.load_identity_workspace(conn, "s1")
+
+
+def test_apply_rejects_narrative_authority_episode_same_as_preview(narrative_authority_fixture):
+    """apply（save_identity_candidate）与 preview 共用同一道 load_identity_workspace 拦截。
+
+    两条独立调用点都要挡住：``_assert_idle_current`` 与
+    ``prepare_identity_candidate`` 各自都会先调用 ``load_identity_workspace``，
+    不存在只有只读路径校验、写入路径绕过的缺口。
+    """
+    conn, segment = narrative_authority_fixture
+    candidate = candidate_of(segment)
+    baseline = identity_contract_fingerprint(segment)
+    before = read_independent("SELECT * FROM shots")
+    with pytest.raises(ValueError, match="叙事权威分镜请走原有受控修订流程"):
+        workspace.prepare_identity_candidate(conn, shot_id="s1", candidate=candidate)
+    with pytest.raises(ValueError, match="叙事权威分镜请走原有受控修订流程"):
+        workspace.save_identity_candidate(conn, shot_id="s1", baseline=baseline, candidate=candidate)
+    assert read_independent("SELECT * FROM shots") == before
+
+
+def test_http_identity_review_routes_reject_narrative_authority_episode(narrative_authority_fixture):
+    """四条路由（GET 复核 + POST regenerate/preview/apply）全部要 409，不止预览。"""
+    _conn, segment = narrative_authority_fixture
+    client = SessionTestClient(TestClient(app))
+    get_response = client.get("/api/shots/s1/identity-review")
+    assert get_response.status_code == 409, get_response.text
+    assert "叙事权威分镜请走原有受控修订流程" in get_response.text
+    candidate = candidate_of(segment)
+    for action in ("regenerate", "preview", "apply"):
+        response = client.post(
+            f"/api/shots/s1/identity-review/{action}",
+            json={"baseline": "any", "candidate": candidate},
+        )
+        assert response.status_code == 409, (action, response.text)
+        assert "叙事权威分镜请走原有受控修订流程" in response.text, (action, response.text)
+
+
 def test_regenerate_http_uses_project_stage_provider(fixture,monkeypatch):
     conn,_,_,_ = fixture
     from app.domain.storyboard_ops import identity_review as routes
