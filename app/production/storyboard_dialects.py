@@ -161,6 +161,13 @@ JSON 字段或分点罗列）。
   系统按句号、问号、感叹号拆成一句一个引号，保持同一说话人、同一条 dialogue[]。
   画外音展开后人物嘴唇闭合无张合动作；画内对白只有发声主体开口。
   全片贯穿段只汇总环境音、配乐、风格和约束，台词占位符留在对应的镜头中。
+- 关键台词写 {{{{speech:U01}}}} 占位符之前，在同一个「镜头N」动作链里先写一句
+  这句话具体怎么说出来的可执行描述：音量（压低声音/提高音量/维持平常音量）、
+  语速（放慢语速/连贯快速/一字一顿）、停顿（说完前半句停顿一拍再继续/抢在
+  对方说完前打断）、气息（喘着气说/声音发颤/贴近耳边低声说）四项里至少选一项，
+  写成具体动作（例如「压低声音，放慢语速，一字一顿」），不写「愤怒地说」
+  「无奈地说」这类抽象情绪副词——这类词模型没有稳定映射，说出来的语气和文字
+  描述的表情一样容易失控。
 - 本段 required_dialogue 给出的台词是上一阶段已经按 15 秒容量分配好的必保
   台词，原话完整写入 dialogue[]，每句占位符写进 prompt_text，不得因为篇幅紧张
   自行取舍或省略；只有当你还想在这些必保台词之外再补充原文里的其它对话、
@@ -251,6 +258,17 @@ Rules:
   (S1) speaker IDs, says: <d>[Chinese] original words</d> blocks, and mouth
   instructions from this same contract. An off-screen voiceover states that
   all on-screen lips remain fully closed with no movement.
+- Before the {{{{speech:U01}}}} placeholder for a key line, write one executable
+  sentence in the same [Shot N] description stating exactly how it is spoken:
+  pick at least one of volume (lowers voice / raises voice / keeps a normal
+  volume), pace (slows down / speaks in a rapid rush / speaks haltingly, word
+  by word), a pause (holds for a beat before continuing / cuts in before the
+  other finishes), or breath (speaks between gasps / voice breaking / leans in
+  close and speaks quietly), and phrase it as a concrete action (e.g. "lowers
+  her voice, slows down, and speaks word by word"). Do not write an abstract
+  mood adverb such as "angrily" or "helplessly" -- those have no stable
+  mapping for the model, the same risk as an abstract emotion word for a
+  facial expression.
 - Every required_dialogue line appears verbatim in dialogue[] and has one
   placeholder in integrated_multimodal_description. The system inserts each
   exact line there after validation. Additional dialogue stays within the

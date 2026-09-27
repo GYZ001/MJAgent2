@@ -385,3 +385,12 @@ def test_reverse_angle_mention_rule_present_symmetrically_in_both_dialects():
     assert "stripped back to plain text and never becomes a real reference image" in H3_FLAT
 
 
+def test_speech_manner_rule_present_symmetrically_in_both_dialects():
+    """P1「台词怎么说具象化」：关键台词占位符之前要写可执行的语气描述
+    （音量/语速/停顿/气息），不写抽象情绪副词——两个方言块都要有。"""
+    assert "音量（压低声音/提高音量/维持平常音量）" in SEEDANCE_FLAT
+    assert "写成具体动作" in SEEDANCE_FLAT
+    assert "不写「愤怒地说」「无奈地说」这类抽象情绪副词" in SEEDANCE_FLAT
+    assert "pick at least one of volume (lowers voice / raises voice / keeps a normal volume)" in H3_FLAT
+    assert "Do not write an abstract mood adverb such as \"angrily\" or \"helplessly\"" in H3_FLAT
+    assert "those have no stable mapping for the model" in H3_FLAT
