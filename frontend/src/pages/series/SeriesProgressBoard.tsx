@@ -1,6 +1,7 @@
 import { useNav } from '../../App'
 import OperationError from '../../components/OperationError'
 import type { EpisodeEntry, EpisodeStage, Stage, StageState } from '../../api'
+import { episodePartialFilmText } from './seriesPartialFilm'
 
 type SeriesStageTone = 'grey' | 'gold' | 'green' | 'red'
 
@@ -109,11 +110,20 @@ export default function SeriesProgressBoard({
                   {SERIES_STAGE_COLUMNS.map(col => {
                     const state = ep.stages[col.key]
                     const isCurrentCell = isCurrentEpisode && currentStage === col.key
+                    const partialText = col.key === 'final' ? episodePartialFilmText(ep) : null
                     return (
                       <td key={col.key} className={isCurrentCell ? 'series-board-cell-current' : ''}>
                         <span className={seriesStageStampClass(state)} title={state === 'running' && ep.waiting ? ep.waiting : undefined}>
                           {seriesStageMeta(state).label}{state === 'running' && ep.waiting ? ' · 续跑中' : ''}
                         </span>
+                        {partialText && (
+                          <p className="series-task-partial" role="status">
+                            {partialText}
+                            <button type="button" className="btn small" onClick={() => go('cinema', projectId, ep.episode_id)}>
+                              去成片台
+                            </button>
+                          </p>
+                        )}
                       </td>
                     )
                   })}

@@ -6,6 +6,7 @@ import OperationError from '../../components/OperationError'
 import StaleRefreshBanner from '../../components/StaleRefreshBanner'
 import SeriesProgressBoard from './SeriesProgressBoard'
 import SeriesFilmPlayer from './SeriesFilmPlayer'
+import { seriesTaskPartialFilmSummary } from './seriesPartialFilm'
 import { seriesTaskProgressLabel, seriesTaskStatusLabel, seriesTaskStatusTone, seriesTaskTitle } from './seriesTaskText'
 
 const detailPollInterval = (detail: SeriesTaskDetailType | null) =>
@@ -71,6 +72,13 @@ export default function SeriesTaskDetail({ projectId, taskId }: { projectId: str
           variant="warning"
           title="成片已过期"
           guidance="区间内有集重新生成过，当前成片的输入指纹已不是最新，重新执行任务后会替换。"
+        />
+      )}
+      {data.partial_episodes.length > 0 && (
+        <OperationError
+          variant="warning"
+          title="部分集成片缺段"
+          guidance={seriesTaskPartialFilmSummary(data.partial_episodes) ?? ''}
         />
       )}
       <SeriesProgressBoard

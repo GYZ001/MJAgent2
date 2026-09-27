@@ -81,6 +81,7 @@ const task = (overrides: Partial<SeriesTaskSummary> = {}): SeriesTaskSummary => 
   error: null,
   film: null,
   film_stale: false,
+  partial_episodes: [],
   updated_at: 0,
   finished_at: null,
   ...overrides,
@@ -214,6 +215,7 @@ describe('连播任务详情页渲染', () => {
       updated_at: 0,
       finished_at: null,
       film_stale: false,
+      partial_episodes: [],
       film: {
         url: '/media/proj1/series/st_1/film.mp4',
         duration_s: 125,
@@ -231,6 +233,10 @@ describe('连播任务详情页渲染', () => {
           title: '',
           stages: { screenplay: 'done', storyboard: 'running', confirm: 'pending', video: 'pending', final: 'pending' },
           error: null,
+          final_is_partial: false,
+          skipped_shot_nos: [],
+          skip_reasons: {},
+          final_video_stale: false,
         },
         {
           episode_id: 'ep-2',
@@ -238,6 +244,10 @@ describe('连播任务详情页渲染', () => {
           title: '',
           stages: { screenplay: 'pending', storyboard: 'pending', confirm: 'pending', video: 'pending', final: 'pending' },
           error: null,
+          final_is_partial: false,
+          skipped_shot_nos: [],
+          skip_reasons: {},
+          final_video_stale: false,
         },
       ],
     }

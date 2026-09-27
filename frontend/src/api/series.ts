@@ -39,6 +39,10 @@ export interface EpisodeEntry {
   title: string;
   stages: Record<EpisodeStage, StageState>;
   error: string | null;
+  final_is_partial: boolean; // 与 CinemaPage 的 MixStatus 同名字段、同一份持久化结果，不是另算的第二套
+  skipped_shot_nos: number[];
+  skip_reasons: Record<string, string>;
+  final_video_stale: boolean; // 采纳新镜头只打 .stale、不改上面三个字段；为真时它们是旧报告，前端要改说"可能已过期"
 }
 
 export interface FilmChapter {
@@ -88,6 +92,7 @@ export interface SeriesEpisodesRange {
   max_no: number;
 }
 
+export type SeriesTaskPartialEpisode = Pick<EpisodeEntry, "episode_no" | "skipped_shot_nos" | "skip_reasons" | "final_video_stale"> & { final_is_partial: true }; // 字段含义见下方 partial_episodes 注释
 export interface SeriesTaskSummary {
   task_id: string;
   index: number;
@@ -114,6 +119,7 @@ export interface SeriesTaskSummary {
   /** 成片存在但输入指纹已变（区间里某一集的成片后来重做过）——此时任务可以重新
    *  入队重合一次，列表/详情都必须标出来，不能被「已完成」三个字盖住。 */
   film_stale: boolean;
+  partial_episodes: SeriesTaskPartialEpisode[]; // 区间内成片缺段的集；空数组=逐集查过、全齐，不是没查
   updated_at: number;
   finished_at: number | null;
 }

@@ -41,7 +41,7 @@ PACKAGE_DIR = Path(__file__).resolve().parent.parent / "app" / "domain" / "serie
 
 # These hold state/behaviour tests stub out; they must only ever be
 # reached via ``from . import <name>`` + attribute access.
-GUARDED_MODULES = {"stages", "merge", "orchestrator", "state", "tasks", "queue", "exports"}
+GUARDED_MODULES = {"stages", "merge", "orchestrator", "state", "tasks", "queue", "exports", "final_status"}
 
 
 def _iter_package_files() -> list[Path]:

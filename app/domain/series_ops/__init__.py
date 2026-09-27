@@ -19,6 +19,9 @@ Layer：``app.domain.series_ops`` = 5（``app/LAYERS.toml``），与 ``app.domai
 - ``queue``：项目级串行 runner、入队/出队/暂停/继续、连续失败自动停队。
 - ``state``：单任务进度树的形状与持久化（写进 ``series_tasks.progress_json``）。
 - ``stages``：映射/分镜/确认/生成/成片五个步骤的完成判据、启动与等待。
+- ``final_status``：本集成片是否缺段、这份缺段信息是否已因采纳新镜头等操作
+  过期（``final_video_stale``）——复用 ``app.media_exec.concat`` 已持久化的
+  产物与判据，供连播任务列表/详情投影直接引用。
 - ``merge``：五步全部完成后，把各集成片用 ffmpeg 拼接为连播成片。
 - ``orchestrator``：跑一个任务的五台 + merge 主循环。
 - ``exports``：打包导出（硬链接 + manifest + 下载清单）的生成与列举。

@@ -108,6 +108,14 @@
   color: var(--cinnabar);
 }
 
+/* 成片已合成但缺段：区别于 .series-task-missing（缺集，不能入队），这里是
+ * 已经出片但个别镜头被跳过——预警色而不是错误色，用户仍能重新入队补拍。 */
+.series-task-partial {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--gold);
+}
+
 .series-task-progress {
   display: flex;
   flex-direction: column;

@@ -9,6 +9,10 @@ function ep(no: number, stages: Partial<EpisodeEntry['stages']>): EpisodeEntry {
     title: '',
     stages: { screenplay: 'skipped', storyboard: 'skipped', confirm: 'skipped', video: 'skipped', final: 'skipped', ...stages },
     error: null,
+    final_is_partial: false,
+    skipped_shot_nos: [],
+    skip_reasons: {},
+    final_video_stale: false,
   }
 }
 

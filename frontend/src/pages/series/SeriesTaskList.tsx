@@ -2,6 +2,7 @@ import { useState } from 'react'
 import DecisionDialog from '../../components/DecisionDialog'
 import type { SeriesTaskSummary } from '../../api'
 import { formatFilmDuration } from './SeriesFilmPlayer'
+import { seriesTaskPartialFilmSummary } from './seriesPartialFilm'
 import {
   formatFilmSize,
   seriesTaskProgressLabel,
@@ -64,6 +65,11 @@ function SeriesTaskRow({
           ? `${formatFilmDuration(task.film.duration_s)} · ${formatFilmSize(task.film.size_bytes)}`
             + (task.film_stale ? ' · 成片已过期，可重新执行' : '')
           : '尚无成片'}
+        {task.partial_episodes.length > 0 && (
+          <p className="series-task-partial" role="status">
+            {seriesTaskPartialFilmSummary(task.partial_episodes)}
+          </p>
+        )}
       </td>
       <td className="series-task-actions">
         <button

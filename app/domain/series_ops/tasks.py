@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from app.db import new_id, now
 from app.observability import machine_watermark
 
-from . import merge, state
+from . import final_status, merge, state
 
 SERIES_MAX_SPAN = 10
 DEFAULT_GROUP_SIZE = 10
@@ -215,12 +215,15 @@ def film_state(row: dict, film: dict | None) -> tuple[str, bool]:
 
 
 def task_summary(
-    row: dict, index: int, queue_positions: dict[str, int], missing_episode_nos: list[int],
+    conn, row: dict, index: int, queue_positions: dict[str, int], missing_episode_nos: list[int],
 ) -> dict:
     progress = state.load_progress(row)
     episode_count = row["episode_to"] - row["episode_from"] + 1
     film = merge.film_for_range(row["project_id"], row["episode_from"], row["episode_to"])
     status, film_stale = film_state(row, film)
+    partial_episodes = final_status.partial_episodes_in_range(
+        conn, row["project_id"], row["episode_from"], row["episode_to"], missing_episode_nos,
+    )
     return {
         "task_id": row["id"], "index": index,
         "title": row["title"] or _default_title(row["episode_from"], row["episode_to"]),
@@ -236,6 +239,10 @@ def task_summary(
         "steps_done": state.steps_done(progress), "steps_total": episode_count * 5,
         "error": row.get("error") or progress.get("error"),
         "film": film,
+        # 区间内每集成片各自的完整度（与 film/film_stale 是两回事：film 是拼起来的
+        # 连播长片，这里是逐集 final/episode.mp4 有没有缺段）；空列表=逐集查过、
+        # 全齐，不是没查（CLAUDE.md「空集合不等于无需检查」）。
+        "partial_episodes": partial_episodes,
         "updated_at": row["updated_at"], "finished_at": row.get("finished_at"),
     }
 
@@ -252,7 +259,7 @@ def list_tasks(conn, project_id: str, offset: int, limit: int) -> dict:
     for i, row in enumerate(rows):
         row = dict(row)
         _ordered, missing = fetch_range_episodes(conn, project_id, row["episode_from"], row["episode_to"])
-        tasks_out.append(task_summary(row, offset + i + 1, queue_positions, missing))
+        tasks_out.append(task_summary(conn, row, offset + i + 1, queue_positions, missing))
     totals_rows = conn.execute(
         "SELECT status, COUNT(*) AS n FROM series_tasks WHERE project_id=? GROUP BY status",
         (project_id,),
@@ -301,7 +308,7 @@ def task_detail(conn, project_id: str, task_id: str) -> dict:
         raise HTTPException(404, f"连播任务不存在：{task_id}")
     ordered, missing = fetch_range_episodes(conn, project_id, row["episode_from"], row["episode_to"])
     summary = task_summary(
-        row, _task_index(conn, project_id, task_id), _queue_positions(conn, project_id), missing,
+        conn, row, _task_index(conn, project_id, task_id), _queue_positions(conn, project_id), missing,
     )
     progress = state.load_progress(row)
     progress_by_id = {e["episode_id"]: e for e in progress.get("episodes") or []}
@@ -310,12 +317,18 @@ def task_detail(conn, project_id: str, task_id: str) -> dict:
         entry = progress_by_id.get(episode_row["id"]) or state.new_episode_entry(
             episode_row["id"], episode_row["episode_no"],
         )
+        # final_is_partial/skipped_shot_nos/skip_reasons/final_video_stale：字段名
+        # 与 CinemaPage 的 MixStatus 一致（同一份 final_status.final_partial_status），
+        # 详情页要逐集给出「缺哪几段、为什么、是否已过期」，不能只在任务级留一句
+        # 「缺段」不说是哪一集。
+        partial_fields = final_status.final_partial_status(conn, row["project_id"], episode_row["episode_no"])
         episodes_out.append({
             "episode_id": episode_row["id"], "episode_no": episode_row["episode_no"],
             "title": episode_row.get("title"), "stages": entry["stages"], "error": entry.get("error"),
+            **partial_fields,
         })
     summary["episodes"] = episodes_out
-    # film / film_stale 由 task_summary 一处算出（同一判据不留第二份实现）。
+    # film / film_stale / partial_episodes 由 task_summary 一处算出（同一判据不留第二份实现）。
     return summary
 
 

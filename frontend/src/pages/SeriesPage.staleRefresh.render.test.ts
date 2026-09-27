@@ -62,6 +62,7 @@ const listResponse = (): SeriesTaskListResponse => ({
     task_id: 'st_1', index: 1, title: '', episode_from: 1, episode_to: 10, episode_count: 10,
     missing_episode_nos: [], status: 'idle', queue_position: null, current_episode_no: null,
     current_stage: null, steps_done: 0, steps_total: 50, error: null, film: null, film_stale: false,
+    partial_episodes: [],
     updated_at: 0, finished_at: null,
   }],
 })
@@ -70,11 +71,11 @@ const detailResponse = (): SeriesTaskDetailData => ({
   task_id: 'st_1', index: 1, title: '', episode_from: 1, episode_to: 2, episode_count: 2,
   missing_episode_nos: [], status: 'running', queue_position: null, current_episode_no: 1,
   current_stage: 'storyboard', steps_done: 3, steps_total: 10, error: null, updated_at: 0,
-  finished_at: null, film_stale: false, film: null,
+  finished_at: null, film_stale: false, partial_episodes: [], film: null,
   episodes: [{
     episode_id: 'ep-1', episode_no: 1, title: '',
     stages: { screenplay: 'done', storyboard: 'running', confirm: 'pending', video: 'pending', final: 'pending' },
-    error: null,
+    error: null, final_is_partial: false, skipped_shot_nos: [], skip_reasons: {}, final_video_stale: false,
   }],
 })
 
