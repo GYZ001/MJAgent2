@@ -94,7 +94,7 @@ max_lines_tests = 500
 "app/domain/video_ops/completion_core.py" = 562
 "app/domain/video_ops/confirm_episode.py" = 558
 "app/domain/video_ops/confirmation_eval.py" = 548
-"app/domain/video_ops/generate.py" = 545
+"app/domain/video_ops/generate.py" = 544
 "app/evidence/media.py" = 559
 "app/evidence/repository.py" = 1242
 "app/final_edit.py" = 574
@@ -148,7 +148,7 @@ max_lines_tests = 500
 "app/production/screenplay_authority.py" = 2502
 "app/production/screenplay_document.py" = 1704
 "app/production/screenplay_repair/llm_field_patch.py" = 593
-"app/production/storyboard_pack.py" = 1936
+"app/production/storyboard_pack.py" = 1934
 # 2.1.0（对白台账/必保台词/受控画外音/镜头数放宽）：方言约束两段指令文本 +
 # _dialect_for_target_video_model 拆到新模块 app.production.storyboard_dialects，
 # 腾出的行数让本文件净减 1 行（2087→2086）——棘轮只降不升，收紧后如实记账。
@@ -157,7 +157,7 @@ max_lines_tests = 500
 # 腾行数，净变化后实测再降 1 行（2086→2085）。
 "app/quota.py" = 559
 "app/refs.py" = 538
-"app/scenes.py" = 1738
+"app/scenes.py" = 1736
 "app/screenplay_ir/prompt_context.py" = 517
 "app/screenplay_scene_shards/generate_shards.py" = 603
 "app/screenplay_scene_shards/input_contracts.py" = 599
@@ -346,7 +346,7 @@ max_lines_tests = 500
 "app/domain/video_ops/confirm_episode.py" = 317
 "app/domain/video_ops/confirmation_eval.py" = 235
 "app/domain/video_ops/confirmation_gate.py" = 87
-"app/domain/video_ops/generate.py" = 308
+"app/domain/video_ops/generate.py" = 307
 "app/domain/video_ops/misc.py" = 71
 "app/domain/video_ops/plan.py" = 89
 "app/domain/video_ops/project_queue_complete.py" = 401
@@ -390,7 +390,7 @@ max_lines_tests = 500
 "app/minimax_h3.py" = 225
 "app/model_migration.py" = 80
 "app/monitoring.py" = 63
-"app/multiview.py" = 203
+"app/multiview.py" = 184
 "app/narrative/plan_index.py" = 121
 "app/narrative/screenplay_validate_actions.py" = 92
 "app/narrative/screenplay_validate_characters.py" = 70
@@ -508,7 +508,7 @@ max_lines_tests = 500
 "app/rejected_media.py" = 73
 "app/renderability_score.py" = 69
 "app/repair_router.py" = 219
-"app/scenes.py" = 223
+"app/scenes.py" = 222
 # 2026-09-01 app/schemas.py 拆成 app/schemas/ 包后，这一条 251 换成下面 5 条。
 # 数字没有变差：per-file 基线只记「该文件最长的那个函数」，2571 行里另外 4 个超标函数
 # 一直被这条掩盖着；拆开后各自现形，同一批函数、同一份实现，一行代码没改。
@@ -610,7 +610,7 @@ max_lines_tests = 500
 "app/video_modes/continuity_tail.py" = 96
 "app/video_modes/keyframe_contract.py" = 120
 "app/video_modes/mode_selection.py" = 65
-"app/video_modes/reference_assemble.py" = 155
+"app/video_modes/reference_assemble.py" = 115
 "app/video_modes/reference_generate.py" = 69
 "app/video_modes/reference_prompt.py" = 151
 "app/video_modes/seedance_pack.py" = 139
