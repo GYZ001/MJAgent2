@@ -51,6 +51,11 @@ def reverse_check_passed(view: Mapping[str, Any]) -> bool:
     return isinstance(check, dict) and check.get("checked") is True and check.get("passed") is True
 
 
+def reverse_view_draft(view: Mapping[str, Any]) -> str:
+    """生成反打图时视觉模型起草的「转过身看到的另一侧」描述（qa_json.draft）；没有则空串。"""
+    return str(_qa_dict(view).get("draft") or "").strip()
+
+
 def reverse_mention(scene_name: str) -> str:
     return f"@{scene_name}{REVERSE_MENTION_SUFFIX}"
 

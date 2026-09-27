@@ -127,3 +127,19 @@ def test_storyboard_sees_reverse_availability_when_manifest_lacks_scene_referenc
     ]}}
     _enrich_asset_manifest_canonical_visuals(conn, payload, bible=None, project_id="proj-1")
     assert payload["asset_manifest"]["scenes"][0]["reverse_angle_available"] is expected
+
+
+def test_manifest_scene_annotation_carries_reverse_view_description(tmp_path) -> None:
+    """只给布尔标记时模型不知道反打画面有什么；可用时要把起草的另一侧描述一并给分镜模型。"""
+    from app.scene_reverse.segment_views import annotate_manifest_scene
+
+    conn = db.get_conn()
+    qa = {**_PASSED, "draft": "门口朝里看：挂钟墙与玻璃柜台"}
+    _seed(conn, tmp_path, reverse_qa=qa)
+    scene = {"scene_id": "scene:修表铺", "display_name": "修表铺", "scene_reference_id": None}
+    annotate_manifest_scene(conn, scene, project_id="proj-1", episode_no=1)
+    assert scene["reverse_angle_available"] is True
+    assert scene["reverse_angle_view"] == "门口朝里看：挂钟墙与玻璃柜台"
+    missing = {"scene_id": "scene:后院", "display_name": "后院", "scene_reference_id": None}
+    annotate_manifest_scene(conn, missing, project_id="proj-1", episode_no=1)
+    assert missing["reverse_angle_available"] is False and "reverse_angle_view" not in missing

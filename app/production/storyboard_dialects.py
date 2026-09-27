@@ -99,14 +99,15 @@ JSON 字段或分点罗列）。
   （年龄区间、体型脸型、发型头饰、服装颜色材质、随身物里挑），靠文字自己把
   长相钉住。判据只看 relevant_assets.characters 里查不查得到这个人，不看他
   戏份多少。
-- relevant_assets.scenes 里某个场景带 reverse_angle_available=true，且本段确实
-  有一镜是从与这个场景主视角相对的方向拍它（对话正反打、人物回头望向来处这类），
-  在那一镜的场景部分写 @场景名·反打（名字逐字取自这条 scene 的 display_name，
-  紧跟这三个字，不加空格、不改写）；这一镜会换用这个场景的反打视角参考图。本段
-  其余镜头仍从主视角方向拍这个场景时，照常直接写场景描述，不加这个后缀。某个
-  场景的 reverse_angle_available 不是 true、或这一镜其实还是主视角方向，都不要
-  写「·反打」——没有对应反打图的点名会被原样剥除成普通文字，变不成一张真实
-  参考图。
+- relevant_assets.scenes 里某个场景带 reverse_angle_available=true 时，它的
+  scene_canonical 是主视角机位看到的画面，reverse_angle_view 是转过身朝原机位
+  方向看到的另一侧。本段在这个场景里有两人面对面对话、或人物回头望向来处时，把
+  「背对主视角机位的那一方」拍正脸的镜头、以及望向来处的镜头写成反打：在那一镜
+  的场景部分写 @场景名·反打（名字逐字取自这条 scene 的 display_name，紧跟这三个
+  字，不加空格、不改写），这一镜的背景按 reverse_angle_view 来写，会换用这个场景
+  的反打视角参考图；其余镜头照常直接写场景描述，不加这个后缀。某个场景的
+  reverse_angle_available 不是 true 时不写「·反打」——没有对应反打图的点名会被
+  原样剥除成普通文字，变不成一张真实参考图。
 - relevant_assets.props 里每件道具若带 appearance 字段，且内容是一段具体
   描述，那就是这件道具在本集的标准外观锚点：第一次出现时必须逐字沿用这段
   描述本身，不得改写、精简或按本段情境调整（与角色 appearance 同一条规则，
@@ -346,10 +347,12 @@ Rules:
   give each reference material exactly one stated role, never let two
   references' roles overlap. The one exception to "no @ token in this
   dialect": if relevant_assets.scenes marks a scene reverse_angle_available=
-  true and one Shot in this segment is genuinely framed from the direction
-  opposite that scene's primary angle (a shot/reverse-shot dialogue pair, a
-  character looking back toward where they came from), write "@SceneName·反打"
-  for that Shot's scene mention -- copy the scene's display_name verbatim,
+  true (its scene_canonical is what the primary camera sees; reverse_angle_view
+  is the opposite side seen after turning around), then in a face-to-face
+  dialogue in that scene the Shot showing the face of the person whose back is
+  to the primary camera, and a Shot looking back toward where someone came
+  from, are reverse-angle Shots: write "@SceneName·反打" for that Shot's scene
+  mention and describe its background from reverse_angle_view -- copy the scene's display_name verbatim,
   followed by these two Chinese characters, no space -- and this one token
   switches that Shot to the scene's reverse-angle reference image; every
   other Shot that still frames the scene from its primary angle keeps the

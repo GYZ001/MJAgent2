@@ -35,6 +35,35 @@ def _ready_reverse_view(conn: Any, scene_reference_id: str | None) -> dict[str, 
     return view if image_path and os.path.exists(image_path) else None
 
 
+def annotate_manifest_scene(conn: Any, scene: dict, *, project_id: str | None, episode_no: int | None) -> None:
+    """分镜生成期，给映射包里的一条场景原地写 ``reverse_angle_available``，可用时再写
+    ``reverse_angle_view``（生成反打图时起草的「转过身看到的另一侧」描述）。
+
+    只给一个布尔标记时，模型不知道反打画面里有什么、也就判断不了哪一镜该换——
+    2026-09-27《顾念长安》第 2–10 集 42 次可用机会一次都没被点名。
+    """
+    view = _manifest_reverse_view(conn, scene, project_id=project_id, episode_no=episode_no)
+    scene["reverse_angle_available"] = view is not None
+    draft = reverse_evidence.reverse_view_draft(view) if view is not None else ""
+    if draft:
+        scene["reverse_angle_view"] = draft
+
+
+def _manifest_reverse_view(
+    conn: Any, scene: Mapping, *, project_id: str | None, episode_no: int | None,
+) -> dict[str, Any] | None:
+    if not reverse_evidence.reverse_angle_reference_enabled():
+        return None
+    ref_id = scene.get("scene_reference_id")
+    if not ref_id and project_id and episode_no is not None:
+        # 函数内导入：app.multiview 在模块级导入本模块，模块级反向导入会成环。
+        from app.multiview import scene_row_for_episode
+
+        row = scene_row_for_episode(project_id, str(scene.get("display_name") or ""), int(episode_no), conn=conn)
+        ref_id = row["id"] if row else None
+    return _ready_reverse_view(conn, ref_id)
+
+
 def scene_reverse_angle_available_for_manifest(
     conn: Any, scene: Mapping, *, project_id: str | None, episode_no: int | None,
 ) -> bool:
@@ -45,14 +74,7 @@ def scene_reverse_angle_available_for_manifest(
     ``reverse_angle_available`` 恒为 false、反打永远用不上。缺失时按「场景名 + 集号」解析
     当集生效的场景记录——与装配期 ``_resolve_scene_entry`` 同一条规则，两边不会判出两个结果。
     """
-    ref_id = scene.get("scene_reference_id")
-    if not ref_id and project_id and episode_no is not None:
-        # 函数内导入：app.multiview 在模块级导入本模块，模块级反向导入会成环。
-        from app.multiview import scene_row_for_episode
-
-        row = scene_row_for_episode(project_id, str(scene.get("display_name") or ""), int(episode_no), conn=conn)
-        ref_id = row["id"] if row else None
-    return scene_reverse_angle_available(conn, ref_id)
+    return _manifest_reverse_view(conn, scene, project_id=project_id, episode_no=episode_no) is not None
 
 
 def scene_reverse_angle_available(conn: Any, scene_reference_id: str | None) -> bool:
