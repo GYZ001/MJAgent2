@@ -367,3 +367,21 @@ def test_seedance_dialect_keeps_gore_out_of_prompts_as_a_positive_rule():
     assert "血腥与凶险只用光影、人物神色与环境音表现" in SEEDANCE_FLAT
     assert "死亡用倒地不动、旁人色变、镜头切走来交代" in SEEDANCE_FLAT
 
+
+# ---------------------------------------------------------------------------
+# 反打视角点名（分镜台 2.x → 视频请求）：@场景名·反打，H3 的唯一 @ 例外
+# ---------------------------------------------------------------------------
+
+def test_reverse_angle_mention_rule_present_symmetrically_in_both_dialects():
+    """两个方言都要教模型「reverse_angle_available=true 时怎么点反打」，且
+    H3 块要显式声明这是本方言唯一允许 @ 语法的例外（不是随手抄了个中文后缀）。
+    """
+    assert "reverse_angle_available=true" in SEEDANCE_FLAT
+    assert "@场景名·反打" in SEEDANCE_FLAT
+    assert "没有对应反打图的点名会被原样剥除成普通文字" in SEEDANCE_FLAT
+    assert "reverse_angle_available=" in H3_FLAT
+    assert '@SceneName·反打' in H3_FLAT
+    assert "The one exception to \"no @ token in this dialect\"" in H3_FLAT
+    assert "stripped back to plain text and never becomes a real reference image" in H3_FLAT
+
+

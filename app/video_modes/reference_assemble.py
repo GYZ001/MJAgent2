@@ -42,6 +42,12 @@ def select_library_references(
     道具是新加的第三类，永远排在人物与场景之后选取；人物/场景的既有排序与
     去重行为原样保留，只是从 ``_build_library_reference_assets`` 内联搬出来，
     让那个函数腾出预算接住道具这第三类分支，见该函数调用处）。
+
+    场景一栏按 ``entity_name`` 去重、逐个收纳，不是只挑一张——多场景转场段
+    的 ``additional_scenes`` 各自建立镜与本段被点名的反打视角（entity_name
+    带「·反打」后缀，见 ``app.scene_reverse.segment_views.scene_anchor_
+    entity_name``）互为不同名字，天然都能进来；单场景且没有反打点名时
+    ``ordered`` 里只有一个 scene 资产，行为与改动前逐条相同。
     """
     role_priority = {
         "front_full": 0, "three_quarter": 1, "profile": 2, "side_full": 2,
@@ -69,9 +75,15 @@ def select_library_references(
             continue
         selected_names.add(key)
         selected.append(asset)
-    scene_asset = next((a for a in ordered if (a.entity_type or a.type) == "scene"), None)
-    if scene_asset is not None and len(selected) < max_images:
-        selected.append(scene_asset)
+    scene_keys_seen: set[str] = set()
+    for asset in ordered:
+        if len(selected) >= max_images or (asset.entity_type or asset.type) != "scene":
+            continue
+        key = str(asset.entity_name or "").strip() or asset.path or asset.id
+        if key in scene_keys_seen:
+            continue
+        scene_keys_seen.add(key)
+        selected.append(asset)
     prop_names: set[str] = set()
     for asset in ordered:
         if len(selected) >= max_images or (asset.entity_type or asset.type) != "prop":

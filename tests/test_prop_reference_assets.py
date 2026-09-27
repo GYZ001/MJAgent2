@@ -142,6 +142,22 @@ def test_select_library_references_orders_character_scene_then_prop() -> None:
     assert kinds == ["character", "scene", "prop"]
 
 
+def test_select_library_references_keeps_every_named_scene_not_just_first() -> None:
+    """多场景转场段（additional_scenes）与本段被点名的反打视角（entity_name
+    带「·反打」后缀）互为不同名字，都应该进最终选取，不是只挑第一个场景。
+    单场景（本用例的既有兄弟测试 test_..._orders_character_scene_then_prop）
+    输出保持逐条不变，锁住改动前行为。"""
+    assets = [
+        _asset("character", "少年"),
+        _asset("scene", "山顶", view_role="establishing"),
+        _asset("scene", "山顶·反打", view_role="reverse_angle"),
+        _asset("scene", "老宅", view_role="establishing"),
+    ]
+    selected = select_library_references(assets, ["少年"], max_images=9)
+    scene_names = {a.entity_name for a in selected if a.entity_type == "scene"}
+    assert scene_names == {"山顶", "山顶·反打", "老宅"}
+
+
 def test_select_library_references_drops_props_first_when_over_cap() -> None:
     assets = [
         _asset("character", "少年"),

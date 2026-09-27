@@ -31,8 +31,7 @@ def _seed_bible_project(conn, *, with_scene: bool = False) -> Bible:
         world=World(visual_style_canonical="cinematic animation"),
         characters=[
             Character(
-                name="Hero",
-                role="lead",
+                name="Hero", role="lead",
                 appearance_canonical="young hero, short black hair, blue coat, tall build",
             )
         ],
@@ -43,8 +42,7 @@ def _seed_bible_project(conn, *, with_scene: bool = False) -> Bible:
     )
     conn.execute(
         "INSERT INTO projects(id, name, status, bible_json, bible_version, created_at) "
-        "VALUES('proj_bootstrap', 'Bootstrap', 'bible_ready', ?, 1, 1)",
-        (bible.model_dump_json(),),
+        "VALUES('proj_bootstrap', 'Bootstrap', 'bible_ready', ?, 1, 1)", (bible.model_dump_json(),),
     )
     conn.commit()
     return bible
@@ -652,6 +650,8 @@ def test_scene_multiview_generation_uses_candidate_scoped_recovery_operations(
         return {"b64_json": encoded}
 
     monkeypatch.setattr(multiview, "_generate_image", fake_generate)
+    monkeypatch.setattr(multiview, "draft_behind_camera_note", lambda **_k: asyncio.sleep(0, result=""))
+    monkeypatch.setattr(multiview, "judge_reverse_angle", lambda **_k: asyncio.sleep(0, result={"checked": True, "passed": True, "reason": "反打方向确实相反", "error": None}))
 
     result = asyncio.run(multiview.ensure_scene_multiview_pack(
         project_id="proj_bootstrap",

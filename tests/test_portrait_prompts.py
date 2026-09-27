@@ -9,7 +9,7 @@ from app.refs import (
     production_appearance_anchor,
     scene_visual_style_lock,
 )
-from app.multiview import character_view_prompt
+from app.multiview import character_view_prompt, scene_view_prompt
 from app.portraits import bible_for_episode
 from app.schemas import Bible, Character, World
 from app.visual_styles import visual_style_prompt
@@ -66,6 +66,41 @@ def test_character_and_scene_style_lock_stay_non_photographic_for_cg_presets() -
     assert "CG/动画/漫画/插画类非真人渲染" in char_lock
     assert "明显动画化比例和非照片级卡通/CG 渲染材质" in char_lock
     assert "动画/插画/CG 场景渲染" in scene_lock
+
+
+def test_scene_view_prompt_does_not_fight_photographic_style_preset() -> None:
+    """同一类根因 bug，发生在 app.multiview.scene_view_prompt 而不是 app.refs.portrait_prompt：
+    改动前对所有画风一律追加"不得切换成真人实景、实拍布光或照片背景"，与
+    scene_visual_style_lock 刚刚给写实画风声明的"必须保持摄影级实景渲染"直接矛盾。"""
+    real_photo_style = visual_style_prompt("真人摄影风")
+    prompt = scene_view_prompt(real_photo_style, "老旧修表铺，柜台后有一排挂钟", "establishing")
+
+    assert "实景摄影质感渲染" in prompt
+    assert "不得切换成真人实景、实拍布光或照片背景" not in prompt
+
+
+def test_scene_view_prompt_normalizes_style_before_photographic_check() -> None:
+    """回归：scene_view_prompt 判定"是否写实画风"必须先做与 scene_visual_style_lock
+    同款的 normalize_prompt_text 规范化，否则脏字符（重复标点/空白）会让两处对同一
+    visual_style 判出两个结果——lock 认定写实、要求摄影级渲染，scene_view_prompt
+    却仍追加"不得切换成真人实景"，自相矛盾。"""
+    real_photo_style = visual_style_prompt("真人摄影风")
+    dirty_style = real_photo_style + "。"  # 模拟规范化前会出现的重复标点脏数据
+
+    lock = scene_visual_style_lock(dirty_style)
+    prompt = scene_view_prompt(dirty_style, "老旧修表铺，柜台后有一排挂钟", "establishing")
+
+    assert "实景摄影质感渲染" in lock
+    assert "不得切换成真人实景、实拍布光或照片背景" not in prompt
+
+
+def test_scene_view_prompt_keeps_non_photographic_wording_byte_identical() -> None:
+    """非写实画风必须逐字节不变——保证存量动画项目 establishing/action_zone 的
+    幂等指纹不因这次改动失效；只有 reverse_angle 的镜头说明按设计改变（预期内失效）。"""
+    guoman_style = visual_style_prompt("国漫电影风")
+    prompt = scene_view_prompt(guoman_style, "老旧修表铺，柜台后有一排挂钟", "establishing")
+
+    assert "不得切换成真人实景、实拍布光或照片背景。" in prompt
 
 
 def test_portrait_prompt_preserves_approved_identity_contract_verbatim() -> None:

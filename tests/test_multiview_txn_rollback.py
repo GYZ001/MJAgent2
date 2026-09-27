@@ -99,6 +99,14 @@ async def _fake_generate_image(*_args: Any, **_kwargs: Any) -> dict[str, str]:
     return {"b64_json": ENCODED_IMAGE}
 
 
+async def _fake_draft_note(**_kwargs: Any) -> str:
+    return ""
+
+
+async def _fake_judge_passes(**_kwargs: Any) -> dict[str, Any]:
+    return {"checked": True, "passed": True, "reason": "反打方向确实相反", "error": None}
+
+
 def _boom_after_real_write(monkeypatch, target_name: str) -> None:
     """打桩：真正执行一次 upsert（模拟"写已经落到连接上"），再抛异常（模拟
     upsert 之后、commit 之前的下一步失败）——比直接跳过写入更贴近真实故障：
@@ -291,6 +299,8 @@ def test_regenerate_scene_view_rolls_back_pending_write_on_error(
     _seed_scene(conn, project_id="proj_scene2", scene_id="scene_2", image_path=str(est_path))
     _seed_scene_view(conn, scene_id="scene_2", view_role="establishing", image_path=str(est_path))
     monkeypatch.setattr(multiview, "_generate_image", _fake_generate_image)
+    monkeypatch.setattr(multiview, "draft_behind_camera_note", _fake_draft_note)
+    monkeypatch.setattr(multiview, "judge_reverse_angle", _fake_judge_passes)
     _boom_after_real_write(monkeypatch, "_upsert_scene_view")
 
     async def _run() -> None:

@@ -23,11 +23,17 @@ from app.refs import (
     character_visual_style_lock,
     effective_portrait_prompt,
     ensure_portrait_clothing_contract,
+    normalize_prompt_text,
     portrait_override_appearance_anchor,
     production_appearance_anchor,
     scene_visual_style_lock,
 )
+from app.scene_reverse.draft import draft_behind_camera_note
+from app.scene_reverse.judge import judge_reverse_angle
+from app.scene_reverse.produce import produce_reverse_angle_view
+from app.scene_reverse.segment_views import augment_scene_entry_with_reverse_angle, mentioned_reverse_scene_names, scene_anchor_entity_name
 from app.validators import match_scene_name
+from app.visual_styles import is_photographic_style_prompt
 
 # ---------- 视角角色常量 ----------
 
@@ -218,14 +224,16 @@ def character_view_prompt(
 def scene_view_prompt(visual_style: str, scene_canonical: str, view_role: str) -> str:
     camera = {
         "establishing": "建立镜头，完整展示空间关系与主标志物",
-        "reverse_angle": "与建立视角相对的反打方向，相同几何与标志物，禁止简单复制原构图",
+        # 正面陈述反打做实策略（见 app.scene_reverse.produce），会让存量反打图指纹失效。
+        "reverse_angle": "反打方向：机位置于建立视角画面深处一侧，朝原机位方向回看；画面呈现原机位背后那一侧的墙面、门窗、陈设与地面；光源方位与建立视角保持同一物理方向，材质与色调保持一致；不出现人物",
         "action_zone": "最常发生动作的局部区域，保留可识别标志物",
     }.get(view_role, "环境定场镜头")
+    tail = "" if is_photographic_style_prompt(normalize_prompt_text(visual_style or "").strip()) else "不得切换成真人实景、实拍布光或照片背景。"  # 与 scene_visual_style_lock 同一套规范化再判定，避免脏字符让两处判出两个结果
     return (
         f"{scene_visual_style_lock(visual_style)}。"
         f"场景多视角定场图（{VIEW_ROLE_LABELS.get(view_role, view_role)}）：{scene_canonical}。"
         f"{camera}。9:16 竖屏，环境为主，画面中不出现任何人物。"
-        "不得切换成真人实景、实拍布光或照片背景。"
+        f"{tail}"
         "禁止文字、字幕、水印、logo。"
     )
 
@@ -522,7 +530,7 @@ def _storyboard_pack_asset_dependencies(
             "input_fingerprint": scene_reference_id,
             "purposes": [PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, PURPOSE_VIDEO_INPUT],
         } if usable else None
-        return {
+        entry = {
             "name": sname,
             "asset_required": has_card,
             "scene_revision_id": scene_reference_id,
@@ -534,7 +542,9 @@ def _storyboard_pack_asset_dependencies(
             "selected_views": [selected_view] if selected_view else [],
             "available_view_roles": ["establishing"] if selected_view else [],
             "missing_required": [] if (selected_view or not has_card) else ["establishing"],
-        }
+        }  # 正文点名 @场景名·反打 且有带通过证据的反打图时追加该视角（app.scene_reverse.segment_views）
+        return augment_scene_entry_with_reverse_angle(entry, conn=conn, scene_reference_id=scene_reference_id, scene_name=sname, purposes=[PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, PURPOSE_VIDEO_INPUT],
+                                                      mentioned_scene_names=mentioned_reverse_scene_names(str(segment.get("prompt_text") or ""), scene_entries, display_name=_display_name))
 
     # 一段可以在中途转场到第二个（甚至更多）场景——之前这里写死只取
     # scene_entries[0]，多场景转场镜实测（EP2 段2/shot_53d87e5d107d，两个
@@ -950,7 +960,7 @@ def library_anchor_assets_from_manifest(manifest: dict[str, Any]) -> list[dict[s
             if not path or not Path(path).exists():
                 continue
             anchors.append({
-                "entity_type": "scene", "entity_name": scene.get("name"),
+                "entity_type": "scene", "entity_name": scene_anchor_entity_name(scene.get("name"), view.get("view_role")),
                 "library_revision_id": scene.get("scene_revision_id"), "library_view_id": view.get("id"),
                 "view_role": view.get("view_role"), "image_path": path,
                 "purposes": list(view.get("purposes") or [PURPOSE_QA_ANCHOR, PURPOSE_KEYFRAME_SEED]),
@@ -1494,12 +1504,8 @@ async def ensure_scene_multiview_pack(
         rev_prompt = scene_view_prompt(visual_style, generation_anchor, "reverse_angle")
         base_rev = base_views.get("reverse_angle") or {}
         rev_fp = view_input_fingerprint(
-            view_role="reverse_angle",
-            prompt=rev_prompt,
-            anchor_text=scene_canonical,
-            parent_revision_id=scene_reference_id,
-            base_view_id=base_rev.get("id"),
-            seed_hint=est.get("image_path"),
+            view_role="reverse_angle", prompt=rev_prompt, anchor_text=scene_canonical,
+            parent_revision_id=scene_reference_id, base_view_id=base_rev.get("id"), seed_hint=est.get("image_path"),
         )
         if _pending_view_can_be_reviewed(rev, rev_fp):
             # 历史遗留的 qa_pending/unverified 行：文件已存在且指纹匹配，直接晋升为 ready。
@@ -1509,33 +1515,18 @@ async def ensure_scene_multiview_pack(
             )
             conn.commit()
         elif not _ready_view_matches_fingerprint(rev, rev_fp):
-            seeds = []
-            if est.get("image_path") and Path(est["image_path"]).exists():
-                seeds.append(hiagent.data_url_from_file(est["image_path"]))
-            path = _view_path(project_id, "scene", scene_name, "reverse_angle", ep_start)
-            item = await _generate_image(
-                rev_prompt, seed_inputs=seeds or None, size=sz,
-                call_meta={
-                    "asset_kind": "scene_view",
-                    "view_role": "reverse_angle",
-                    "scene_name": scene_name,
-                    "operation_id": view_generation_operation_id(
-                        asset_kind="scene_view",
-                        view_role="reverse_angle",
-                        prompt=rev_prompt,
-                        seed_inputs=seeds,
-                        fallback_identity=f"{scene_reference_id}:{rev_fp}",
-                    ),
-                    "reuse_successful_operation": True,
-                },
+            # 策略见 app.scene_reverse.produce；fp 仍按不含起草文本的 rev_prompt 算。
+            produced = await produce_reverse_angle_view(
+                scene_canonical=scene_canonical, visual_style=visual_style, base_prompt=rev_prompt, op_identity=rev_fp,
+                establishing_image_path=est.get("image_path") or "", scene_reference_id=scene_reference_id, scene_name=scene_name, size=sz,
+                make_path=lambda: _view_path(project_id, "scene", scene_name, "reverse_angle", ep_start),
+                generate_image=_generate_image, save_image_item=_save_image_item, discard_path=_discard_rejected_candidate,
+                draft_fn=draft_behind_camera_note, judge_fn=judge_reverse_angle,
             )
-            await _save_image_item(item, path)
-            # 技术产物存在即 ready：图片已成功落盘，不再等待 VLM 评审。
+            # 技术产物存在即 ready；判定结果只进 qa_json.reverse_check，不阻塞。
             _upsert_scene_view(
-                conn, scene_reference_id=scene_reference_id, view_role="reverse_angle",
-                camera_axis="reverse", image_path=path, prompt=rev_prompt, qa=None, artifact_id=None,
-                base_view_id=base_rev.get("id"),
-                status="ready", fingerprint=rev_fp,
+                conn, scene_reference_id=scene_reference_id, view_role="reverse_angle", camera_axis="reverse",
+                image_path=produced["image_path"], prompt=produced["prompt"], qa=produced["qa"], artifact_id=None, base_view_id=base_rev.get("id"), status="ready", fingerprint=rev_fp,
             )
             conn.commit()
         elif rev and not rev.get("input_fingerprint"):
@@ -2133,29 +2124,41 @@ async def regenerate_scene_view(
             canonical = row["state_canonical"]
         existing = {v["view_role"]: v for v in list_scene_views(scene_reference_id, conn=conn)}
         est = existing.get("establishing") or {}
-        seeds = []
-        if view_role != "establishing" and est.get("image_path") and Path(est["image_path"]).exists():
-            seeds.append(hiagent.data_url_from_file(est["image_path"]))
-        prompt = scene_view_prompt(style, canonical, view_role)
-        path = _view_path(project_id, "scene", row["scene_name"], view_role, row["ep_start"])
+        base_prompt = scene_view_prompt(style, canonical, view_role)
+        # 手动重做无幂等诉求，fp 只需每次不同；反打图落盘路径由 produce 内部决定，不能先算好单一 path 再喂进 fp。
         fp = view_input_fingerprint(
-            view_role=view_role, prompt=prompt, anchor_text=canonical,
-            parent_revision_id=scene_reference_id,
-            seed_hint=f"{est.get('image_path') or ''}|redo:{Path(path).name}",
+            view_role=view_role, prompt=base_prompt, anchor_text=canonical, parent_revision_id=scene_reference_id,
+            seed_hint=f"{est.get('image_path') or ''}|redo:{new_id('redo')}",
         )
         sz = config.SCENE_REF_SIZES.get(resolve_aspect_ratio(conn, project_id), config.REF_IMAGE_SIZE)
-        item = await _generate_image(
-            prompt, seed_inputs=seeds or None, size=sz,
-            call_meta={"asset_kind": "scene_view_redo", "view_role": view_role, "scene_name": row["scene_name"]},
-        )
-        await _save_image_item(item, path)
+        stored_prompt, qa = base_prompt, None
+        if view_role == "reverse_angle":
+            # 策略见 app.scene_reverse.produce；fp 仍按 base_prompt（不含起草文本）算。
+            produced = await produce_reverse_angle_view(
+                scene_canonical=canonical, visual_style=style, base_prompt=base_prompt, op_identity=fp,
+                establishing_image_path=est.get("image_path") or "", scene_reference_id=scene_reference_id, scene_name=row["scene_name"], size=sz,
+                make_path=lambda: _view_path(project_id, "scene", row["scene_name"], "reverse_angle", row["ep_start"]),
+                generate_image=_generate_image, save_image_item=_save_image_item, discard_path=_discard_rejected_candidate,
+                draft_fn=draft_behind_camera_note, judge_fn=judge_reverse_angle,
+            )
+            path, stored_prompt, qa = produced["image_path"], produced["prompt"], produced["qa"]
+        else:
+            seeds = []
+            if view_role != "establishing" and est.get("image_path") and Path(est["image_path"]).exists():
+                seeds.append(hiagent.data_url_from_file(est["image_path"]))
+            path = _view_path(project_id, "scene", row["scene_name"], view_role, row["ep_start"])
+            item = await _generate_image(
+                base_prompt, seed_inputs=seeds or None, size=sz,
+                call_meta={"asset_kind": "scene_view_redo", "view_role": view_role, "scene_name": row["scene_name"]},
+            )
+            await _save_image_item(item, path)
         # 技术产物存在即可用：VLM 图片质检已下线，图片成功落盘即可替换旧视角。
         if not Path(path).exists():
             return {"status": "failed", "view_role": view_role, "preserved_previous": True}
 
         candidate = dict(existing.get(view_role) or {})
         candidate.update({
-            "view_role": view_role, "image_path": path, "prompt": prompt,
+            "view_role": view_role, "image_path": path, "prompt": stored_prompt,
             "status": "ready", "input_fingerprint": fp,
         })
         candidate_views = [candidate if v.get("view_role") == view_role else v for v in existing.values()]
@@ -2181,7 +2184,7 @@ async def regenerate_scene_view(
             conn, scene_reference_id=scene_reference_id, view_role=view_role,
             camera_axis="establishing" if view_role == "establishing" else (
                 "reverse" if view_role == "reverse_angle" else "action"),
-            image_path=path, prompt=prompt, qa=None, artifact_id=None,
+            image_path=path, prompt=stored_prompt, qa=qa, artifact_id=None,
             base_view_id=(existing.get(view_role) or {}).get("id"),
             status="ready", fingerprint=fp,
         )

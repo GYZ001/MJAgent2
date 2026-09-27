@@ -28,6 +28,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.scene_reverse import evidence as reverse_evidence
+
 REFERENCE_PROMPT_NOTE_MARKER = "参考图说明："
 REFERENCE_SINGLE_INSTANCE_NOTE = (
     "参考图只用来锁定身份与环境外观；每个具名角色在画面里只出现一次。"
@@ -48,14 +50,19 @@ _TYPE_PURPOSE_ZH: dict[str, str] = {
 
 def _related_names(ref: dict[str, Any]) -> list[str]:
     """与 seedance_pack._reference_identity_names 同一套取名逻辑：优先取
-    relatedCharacterIds/related_character_ids，角色类型再补entity_name。"""
+    relatedCharacterIds/related_character_ids，角色类型再补 entity_name；
+    场景类型只在反打视角（entity_name 带「·反打」后缀）时补——这是把正文里
+    的 @场景名·反打 替换成 @图片N 的唯一入口，主视角场景描述不用 @ 语法，
+    不需要这条。"""
     related = [
         str(name).strip()
         for name in (ref.get("relatedCharacterIds") or ref.get("related_character_ids") or [])
         if str(name).strip()
     ]
     entity_name = str(ref.get("entity_name") or "").strip()
-    if ref.get("type") == "character" and entity_name and entity_name not in related:
+    ref_type = ref.get("type")
+    is_reverse_scene = ref_type == "scene" and ref.get("view_role") == reverse_evidence.REVERSE_ANGLE_VIEW_ROLE
+    if (ref_type == "character" or is_reverse_scene) and entity_name and entity_name not in related:
         related.append(entity_name)
     return related
 
@@ -77,8 +84,26 @@ def _plot_key_frame_purpose_zh(ref: dict[str, Any], who: str) -> str:
     return purpose
 
 
-def _reference_purpose_zh(ref: dict[str, Any]) -> tuple[str, list[str]]:
-    """返回 (这张参考图的中文用途说明, 它绑定的具名人物/场景列表)。"""
+def _scene_multi_purpose_zh(ref: dict[str, Any]) -> str:
+    """两张及以上场景参考图时的用途说明：写清各自是哪个场景、哪个方向——
+    只有一张时维持 ``_TYPE_PURPOSE_ZH["scene"]`` 逐字不变的既有文案（冻结
+    特征测试锁住），模型只有在能分清 @图片N 对应哪个场景/方向时才用得上。
+    """
+    name = str(ref.get("entity_name") or "").strip()
+    if ref.get("view_role") == reverse_evidence.REVERSE_ANGLE_VIEW_ROLE and name.endswith(
+        reverse_evidence.REVERSE_MENTION_SUFFIX
+    ):
+        name = name[: -len(reverse_evidence.REVERSE_MENTION_SUFFIX)]
+        return f"场景「{name}」参考，只用来锁定环境外观（与主视角相对方向的反打视角）"
+    return f"场景「{name}」参考，只用来锁定环境外观（主视角）"
+
+
+def _reference_purpose_zh(ref: dict[str, Any], *, scene_count: int = 1) -> tuple[str, list[str]]:
+    """返回 (这张参考图的中文用途说明, 它绑定的具名人物/场景列表)。
+
+    ``scene_count``：本次打包的场景类参考图总数，只有两张及以上（主视角 +
+    被点名的反打视角）才需要写清各自是哪个场景、哪个方向。
+    """
     ref_type = str(ref.get("type") or "reference")
     related = _related_names(ref)
     who = "、".join(related)
@@ -88,9 +113,24 @@ def _reference_purpose_zh(ref: dict[str, Any]) -> tuple[str, list[str]]:
         template = _TYPE_PURPOSE_ZH["character" if who else "character_no_name"]
     elif ref_type == "prop":
         template = _TYPE_PURPOSE_ZH["prop" if who else "prop_no_name"]
+    elif ref_type == "scene" and scene_count > 1:
+        return _scene_multi_purpose_zh(ref), related
     else:
         template = _TYPE_PURPOSE_ZH.get(ref_type, f"{ref_type}参考")
     return template.format(who=who), related
+
+
+def _sub_at_mentions(
+    body: str, ordered_names: list[str], named_indices: dict[str, int], boundary: str,
+) -> str:
+    """按 ``ordered_names``（已按长度降序排好）与 ``boundary`` 结尾边界，把匹配到的
+    @名字 替换成 @图片N。EP1 重跑实测：模型从第 5 段起把 @李麦麦 写成了 @bible:李麦麦
+    （identity_id 前缀漏进正文），精确匹配 @名字 全部落空，Seedance 拿到的是一串无绑定
+    的 @bible:xxx。可选的「字母:」前缀一并吃掉，替换结果仍是 @图片N。"""
+    if not ordered_names:
+        return body
+    pattern = re.compile("@(?:[A-Za-z_]+:)?(" + "|".join(re.escape(name) for name in ordered_names) + ")" + boundary)
+    return pattern.sub(lambda m: f"@图片{named_indices[m.group(1)]}", body)
 
 
 def _replace_at_mentions_with_picture_numbers(
@@ -99,26 +139,50 @@ def _replace_at_mentions_with_picture_numbers(
     """把正文里完全匹配的 @名字 确定性替换成 @图片N，名字后面的空格/标点
     原样保留——只替换 "@名字" 这一段本身。按名字长度降序建正则候选：更长
     的名字先参与匹配，避免短名字先命中、把长名字截断成"短名字+残留字符"。
+
+    结尾边界分两档、且反打名字先处理（避免裸名字那一档抢先部分命中反打名字的前缀）：
+    ① 带「·反打」后缀的反打点名用只排除 ASCII 字母/数字/下划线的宽松边界——它是从
+    relevant_assets 逐字取用的封闭集合，中文散文里紧跟在它后面直接续写不加分隔符是
+    常态（例如"@修表铺·反打门口回望"，"打"后面紧跟"门"没有空格），用 Python re 默认按
+    Unicode 匹配、汉字也算 \\w 的边界会把这类完全合法、无歧义的点名一并挡在外面，
+    整个 @ 点名原样残留、一个能替换的候选都没有（2026-09-27 审查实测复现）。
+    ② 其余（不带反打后缀的）裸名字仍用严格边界（汉字续写也算越界），因为裸名字后面
+    紧跟的汉字可能是原文里另一个未登记的词的一部分而不是这个名字本身——
+    tests/test_segment_identity_contract.py::
+    test_exact_image_subject_token_does_not_match_a_name_prefix 钉住这条：
+    "@孟浩同门"里的"孟浩"不能被误当成登记名"孟浩"命中，"孟浩同门"是原文另一个
+    未登记的词，不是"孟浩"本人；反打点名没有这层歧义，因为它必须完整写出「场景名+
+    ·反打」这个封闭组合，不存在"其实是更长的未登记反打词"的可能。
     """
     if not named_indices:
         return body
-    ordered = sorted(named_indices, key=len, reverse=True)
-    # EP1 重跑实测：模型从第 5 段起把 @李麦麦 写成了 @bible:李麦麦（identity_id 前缀漏进
-    # 正文），精确匹配 @名字 全部落空，Seedance 拿到的是一串无绑定的 @bible:xxx。可选的
-    # 「字母:」前缀一并吃掉，替换结果仍是 @图片N。
-    pattern = re.compile("@(?:[A-Za-z_]+:)?(" + "|".join(re.escape(name) for name in ordered) + r")(?![\w])")
-    return pattern.sub(lambda m: f"@图片{named_indices[m.group(1)]}", body)
+    reverse_names = [n for n in named_indices if n.endswith(reverse_evidence.REVERSE_MENTION_SUFFIX)]
+    plain_names = [n for n in named_indices if n not in reverse_names]
+    body = _sub_at_mentions(
+        body, sorted(reverse_names, key=len, reverse=True), named_indices, r"(?![A-Za-z0-9_])",
+    )
+    return _sub_at_mentions(body, sorted(plain_names, key=len, reverse=True), named_indices, r"(?![\w])")
 
 
 def _compose_purposes(packed_refs: list[dict[str, Any]]) -> tuple[list[str], dict[str, int]]:
     purposes: list[str] = []
     named_indices: dict[str, int] = {}
+    scene_count = sum(1 for ref in packed_refs if str(ref.get("type") or "") == "scene")
     for idx, ref in enumerate(packed_refs, 1):
-        purpose, related = _reference_purpose_zh(ref)
+        purpose, related = _reference_purpose_zh(ref, scene_count=scene_count)
         purposes.append(f"图片{idx}：{purpose}")
         for name in related:
             named_indices.setdefault(name, idx)
     return purposes, named_indices
+
+
+def _demote_residual_reverse_mentions(text: str) -> str:
+    """没换成 @图片N 的 ``@场景名·反打``（反打图这次没装进请求：开关关闭、证据
+    失效、文件丢失、用户整段改写过提示词）降级成普通文字，不把没有对应图片的
+    @ 点名发给视频供应商。"""
+    suffix = reverse_evidence.REVERSE_MENTION_SUFFIX
+    residual = reverse_evidence.unmatched_reverse_mentions(text, ())
+    return reverse_evidence.demote_reverse_mentions(text, [m[1:-len(suffix)] for m in residual])
 
 
 def build_seedance_reference_prompt_notes(
@@ -141,8 +205,8 @@ def build_seedance_reference_prompt_notes(
     prompt_body, prompt_args = _split_video_args(prompt_text, duration_s, aspect_ratio=aspect_ratio)
     purposes, named_indices = _compose_purposes(packed_refs)
     if not purposes:
-        return prompt_text
-    prompt_body = _replace_at_mentions_with_picture_numbers(prompt_body, named_indices)
+        return _demote_residual_reverse_mentions(prompt_text)
+    prompt_body = _demote_residual_reverse_mentions(_replace_at_mentions_with_picture_numbers(prompt_body, named_indices))
     purpose_list = "；".join(purposes) + "；" + REFERENCE_SINGLE_INSTANCE_NOTE
     if prompt_body.startswith("subject_definitions:\n"):
         heading, body = prompt_body.split("\n", 1)

@@ -54,6 +54,7 @@ from app.production import storyboard_short_drama
 from app.production import storyboard_short_drama_budget
 from app.production import storyboard_short_drama_hooks
 from app.project_settings import resolve_adaptation_mode
+from app.scene_reverse import segment_views as reverse_segment_views
 from app.production.storyboard_capacity_normalize import normalize_and_assert_capacity
 from app.production.storyboard_identity_contract import canonical_segment_identities, visible_character_ids
 from app.production.storyboard_identity_scope import bind_quote_identities
@@ -686,6 +687,7 @@ def _enrich_asset_manifest_canonical_visuals(
             conn, scene.get("scene_reference_id"),
             bible_scene_canonical=bible_scenes.get(str(scene.get("display_name") or "")),
         ) or _NO_CANONICAL_SCENE_NOTE
+        scene["reverse_angle_available"] = reverse_segment_views.scene_reverse_angle_available(conn, scene.get("scene_reference_id"))
     enrich_prop_manifest_entries(conn, manifest, bible=bible, project_id=project_id, episode_no=payload.get("episode_no"))
 
 
@@ -785,6 +787,7 @@ def _validate_segment_draft(
     delivered_lines: list[tuple[int, str, str]],
     reserved_lines: list[tuple[int, str]],
     current_segment_no: int,
+    relevant_scenes: list[dict[str, Any]],
     previous_memo: _AiContinuityMemo | None = None,
     segment_source_text: str = "",
     name_to_identity: dict[str, str] | None = None,
@@ -821,18 +824,15 @@ def _validate_segment_draft(
     if not draft.prompt_text.strip():
         errors.append("prompt_text 为空")
     elif len(draft.prompt_text) > config.PROMPT_CHAR_LIMIT:
-        errors.append(
-            f"prompt_text 长度 {len(draft.prompt_text)} 超过上限 {config.PROMPT_CHAR_LIMIT}"
-        )
+        errors.append(f"prompt_text 长度 {len(draft.prompt_text)} 超过上限 {config.PROMPT_CHAR_LIMIT}")
     errors.extend(prompt_reference_prefix_errors(draft.prompt_text))
     errors.extend(reference_mention_errors(draft.prompt_text, draft.resources))
+    errors.extend(reverse_segment_views.reverse_mention_errors(draft.prompt_text, relevant_scenes))
     if dialect_render_format == "minimax_h3_native_fields":
         for field in ("integrated_multimodal_description:", "overall_soundscape:", "non_diegetic_music:"):
             if field not in draft.prompt_text:
                 errors.append(f"prompt_text 缺少 H3 固定字段「{field}」")
-    errors.extend(required_dialogue_missing_errors(
-        required_dialogue, [line.line for line in draft.dialogue],
-    ))
+    errors.extend(required_dialogue_missing_errors(required_dialogue, [line.line for line in draft.dialogue]))
     errors.extend(continuity_memo_errors(draft.continuity_memo, previous_memo, segment_source_text))
     errors.extend(dialogue_speaker_errors(draft, required_dialogue, name_to_identity or {}, segment_source_text))
     errors.extend(repaired_repeated_delivery_errors(
@@ -1139,9 +1139,9 @@ async def _generate_all_segment_prompts(
             model_type=_AiStoryboardSegmentDraft,
             validate=lambda value, _req=required_dialogue, _pm=previous_memo, _struct=structure,
             _st=source_payload["source_text_by_segment"], _dl=list(delivered_lines), _rv=reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no),
-            _no=plan.segment_no, _n2i=manifest_name_to_identity(payload, plan.source_segment_indexes), _sx=plan.source_segment_indexes, _ch=staging_chain, _syn=plan.synopsis, _dp=canonical_phrases(payload), _sg=staging_gate: [*ensure_travel_direction_in_prompt(value), *strip_extra_reference_markers(value, payload), *overlay_text_errors(value), *required_beats_errors(value, _struct["required_beats"]), *_validate_segment_draft(
+            _no=plan.segment_no, _n2i=manifest_name_to_identity(payload, plan.source_segment_indexes), _sx=plan.source_segment_indexes, _ch=staging_chain, _syn=plan.synopsis, _dp=canonical_phrases(payload), _sg=staging_gate, _rs=relevant_assets["scenes"]: [*ensure_travel_direction_in_prompt(value), *strip_extra_reference_markers(value, payload), *overlay_text_errors(value), *required_beats_errors(value, _struct["required_beats"]), *_validate_segment_draft(
                 value, dialect_render_format=profile.render_format, required_dialogue=_req, name_to_identity=_n2i,
-                previous_memo=_pm, segment_source_text=_st, delivered_lines=_dl, reserved_lines=_rv, current_segment_no=_no,
+                previous_memo=_pm, segment_source_text=_st, delivered_lines=_dl, reserved_lines=_rv, current_segment_no=_no, relevant_scenes=_rs,
             ), *generated_identity_errors(value, payload=payload, source_indexes=_sx, required_dialogue=_req, dialect=profile.render_format),
             *_sg.filter(repeated_staging_errors(_ch, value.prompt_text, current_segment_no=_no, synopsis=_syn, drop_phrases=_dp))],
             operation_id=f"storyboard_pack_segment_{episode_id}_{plan.segment_no}_{fingerprint}",

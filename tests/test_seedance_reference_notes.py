@@ -143,6 +143,46 @@ def test_seedance_pack_wrapper_delegates_to_new_module():
     assert direct == via_pack
 
 
+def _reverse_scene_ref(name: str) -> dict:
+    return {"type": "scene", "view_role": "reverse_angle", "entity_name": f"{name}·反打"}
+
+
+def test_reverse_angle_scene_mention_replaced_and_purpose_names_direction():
+    """反打场景 ref（entity_name 带「·反打」后缀）能被 @场景名·反打 命中替换
+    成 @图片N；两张及以上场景图时用途文案要写清各自是哪个场景、哪个方向；
+    单张场景（69 行既有用例）文案保持逐字不变。"""
+    prompt = "镜头1：@修表铺 柜台前。镜头2：@修表铺·反打 门口回望。"
+    refs = [
+        {"type": "scene", "view_role": "establishing", "entity_name": "修表铺"},
+        _reverse_scene_ref("修表铺"),
+    ]
+
+    result = build_seedance_reference_prompt_notes(prompt, refs, aspect_ratio="9:16")
+
+    assert "@图片2 门口回望" in result and "@修表铺·反打" not in result
+    assert "@修表铺 柜台前" in result  # 主视角场景没有 @ 语法，正文原样保留
+    assert "场景「修表铺」参考，只用来锁定环境外观（主视角）" in result
+    assert "场景「修表铺」参考，只用来锁定环境外观（与主视角相对方向的反打视角）" in result
+
+
+def test_reverse_angle_scene_mention_replaced_without_separator():
+    """2026-09-27 审查实测复现：中文散文里 @场景名·反打 后面常常直接接汉字续写、不加
+    空格或标点（例如"@修表铺·反打门口回望"），此时"反打"与紧跟着的"门"之间没有天然
+    词边界。旧实现用 Python re 的 \\w（对汉字也算 \\w）当结尾边界，会判定这不是一次
+    完整匹配、进而回退命中裸名字"修表铺"，把长名字腰斩成"@图片N·反打"两截，@ 点名
+    完全没有被替换成图片编号，供应商收到一个解析不了的裸 @ 标记。"""
+    prompt = "镜头1：@修表铺柜台前。镜头2：@修表铺·反打门口回望，暮色橙红。"
+    refs = [
+        {"type": "scene", "view_role": "establishing", "entity_name": "修表铺"},
+        _reverse_scene_ref("修表铺"),
+    ]
+
+    result = build_seedance_reference_prompt_notes(prompt, refs, aspect_ratio="9:16")
+
+    assert "@图片2门口回望" in result
+    assert "反打" not in result.split(REFERENCE_PROMPT_NOTE_MARKER)[0]
+
+
 def test_at_mention_with_identity_prefix_is_still_replaced():
     """EP1 重跑实测：模型写成 @bible:李麦麦，替换不能落空。"""
     from app.video_modes.seedance_reference_notes import _replace_at_mentions_with_picture_numbers
