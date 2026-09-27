@@ -73,12 +73,34 @@ def _nearest_clause_speaker(anchor_re: re.Pattern[str], text: str, ordered: list
     部分结构上凑巧对的位置启发式。"""
     if not anchor_re.search(text):
         return ""
-    for clause in reversed(_CLAUSE_SPLIT_RE.split(text)):
-        found = {name for name in ordered if name in clause}
+    clauses = _CLAUSE_SPLIT_RE.split(text)
+    for index in range(len(clauses) - 1, -1, -1):
+        found = {name for name in ordered if name in clauses[index]}
         if not found:
             continue
-        return next(iter(found)) if len(found) == 1 else ""
+        if len(found) != 1:
+            return ""
+        name = next(iter(found))
+        if clauses[index].lstrip().startswith(name):
+            return name
+        return "" if _other_candidate_earlier_in_sentence(text, clauses, index, name, ordered) else name
     return ""
+
+
+def _other_candidate_earlier_in_sentence(
+    text: str, clauses: list[str], index: int, name: str, ordered: list[str],
+) -> bool:
+    """最近的含名分句里名字不在分句开头时（「打电话给顾屿」「对顾屿说」这类，名字可能是宾语），
+    同一句更早的分句里若出现另一个候选人，说明主语另有其人——证据冲突，交给模型判断。
+
+    2026-09-27《顾念长安》第 4 集：「陆一舟见她许久没回消息，……，赶紧打电话给顾屿，急声说：」
+    旧判据取最近分句里唯一的「顾屿」，硬拦下模型正确的「陆一舟」，整集分镜失败。名字在分句开头
+    （「张飞道」）或同句没有别的候选（「这时顾屿说」）时判据不变。句界用 _SENTENCE_SPLIT_RE。
+    """
+    offset = sum(len(c) + 1 for c in clauses[:index])
+    sentence_start = max((m.end() for m in _SENTENCE_SPLIT_RE.finditer(text[:offset])), default=0)
+    earlier = text[sentence_start:offset]
+    return any(other != name and other in earlier for other in ordered)
 
 
 def attribute_prose_speaker(segment_text: str, quote_start: int, quote_end: int, names: list[str] | set[str]) -> str:
