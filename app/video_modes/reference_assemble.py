@@ -237,7 +237,19 @@ async def _build_library_reference_assets(
         meta.pop(key, None)
     if on_progress is not None:
         on_progress(list(assets), [])
-    return assets if selected else []
+    # P0 修复：``warnings``（= assert_manifest_allows_production 对本镜 manifest
+    # 的判定）逐条目标出"asset_required=True 却缺必需视角"的人物/场景——之前只
+    # 写进 meta 供事后排查，从不影响返回值，于是同段里只要另一个角色的图在，
+    # selected 就非空，缺图角色被这里的 continue（library_anchor_assets_from_
+    # manifest 里跳过它、character_reference_assets 回退分支又因为"已有一个
+    # character 资产"被短路）静默漏掉，出片时该角色直接没有参考图。数据推导、
+    # 不写名单：manifest 每个条目自带 asset_required/missing_required/
+    # selected_views，warnings 就是逐条目扫描的结果，不是新发明的规则。warnings
+    # 非空时整体判空，交回调用方既有的候选池判空 → 自愈 → 待人工拦截路径
+    # （app.media_exec.reference_pool_gate.finish_reference_mode_without_assets，
+    # 该路径已经会先按 blockers 指向的人物/场景各自动补生成一次，仍缺才拦），
+    # 而不是以"缺一个必需角色"悄悄收尾成功。全齐（warnings 为空）时行为不变。
+    return [] if warnings else (assets if selected else [])
 
 
 async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int, episode_id: str,
