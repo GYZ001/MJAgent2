@@ -509,6 +509,8 @@ DEFAULT_SETTINGS = {
     # 人物多视角资产与关键帧生成总开关（VLM 一致性质检已下线，见 docs 中相关说明）
     "character_multiview_enabled": "true",
     "scene_multiview_enabled": "true",
+    # 反打视角图进分镜可选资源与视频请求的总开关；只有带「确实反向」判定证据的图才会被用
+    "scene_reverse_angle_reference_enabled": "true",
     "narrative_keyframe_required": "true",
 }
 

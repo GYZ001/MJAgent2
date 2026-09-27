@@ -590,6 +590,10 @@ allowed_exceptions = []
 "app.renderability" = 4
 "app.renderability_score" = 4
 "app.repair_router" = 4
+"app.scene_reverse" = 4  # 2026-09-27 新增：场景反打视角生成与使用两侧共用的约定、
+                          # 视觉起草与二值判定；只 import app.db/app.hiagent/
+                          # app.harness 等 <=4 的模块，被 app.multiview/
+                          # app.production/app.video_modes 同层调用
 "app.scenes" = 4
 "app.screenplay_scene_shards" = 4  # 前缀：覆盖全部 20 个拆包子模块
 "app.source_facts" = 4
