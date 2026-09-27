@@ -53,7 +53,7 @@ from app.harness import model_gateway
 from app.production import storyboard_short_drama
 from app.production import storyboard_short_drama_budget
 from app.production import storyboard_short_drama_hooks
-from app.project_settings import resolve_adaptation_mode
+from app.project_settings import resolve_adaptation_mode, resolve_aspect_ratio
 from app.scene_reverse import segment_views as reverse_segment_views
 from app.production.storyboard_capacity_normalize import normalize_and_assert_capacity
 from app.production.storyboard_identity_contract import canonical_segment_identities, visible_character_ids
@@ -1004,7 +1004,7 @@ async def _generate_all_segment_prompts(
     bible: Bible | None,
     required_dialogue_by_segment_no: dict[int, list[dict[str, Any]]],
     conn: Any,
-    project_id: str,
+    project_id: str, aspect_ratio: str,
     reuse_segments: dict[int, _AiStoryboardSegmentDraft] | None = None,
 ) -> dict[int, _AiStoryboardSegmentDraft]:
     """逐段独立调用产出全部段落的 prompt_text（2.0.8 起，替代整集批量调用）。
@@ -1107,7 +1107,7 @@ async def _generate_all_segment_prompts(
             "previous_segment_prompt": previous_draft.prompt_text if previous_draft is not None else None,
             "previous_continuity_memo": continuity_memo_payload(previous_memo),
             "recent_camera_language": camera_history,
-            "visual_style": visual_style,
+            "visual_style": visual_style, "aspect_ratio": aspect_ratio,
             "target_video_model": target_model_literal,
             "dialect_instructions": dialect_instructions,
             # app.video_prompt_profiles 的 SEEDANCE_2_PROFILE/MINIMAX_H3_PROFILE 是
@@ -1380,7 +1380,7 @@ async def generate_storyboard_pack(
         target_video_model=target_video_model,
         bible=bible,
         required_dialogue_by_segment_no=required_dialogue_by_segment_no,
-        conn=conn, project_id=ep["project_id"],
+        conn=conn, project_id=ep["project_id"], aspect_ratio=resolve_aspect_ratio(conn, ep["project_id"]),
     )
     pack_segments = [
         StoryboardPackSegment(

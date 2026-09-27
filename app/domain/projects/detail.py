@@ -275,7 +275,7 @@ def project_detail(
             s["scene_prompt_effective"] = soverride or scene_ref_prompt(
                 style,
                 s.get("scene_canonical", ""),
-                scene_name=s.get("name", ""),
+                scene_name=s.get("name", ""), aspect_ratio=p.get("aspect_ratio") or "9:16",
             )
     p["key_timeline"] = (
         json.loads(p["key_timeline"]) if p["key_timeline"] and (full or view == "bible") else []

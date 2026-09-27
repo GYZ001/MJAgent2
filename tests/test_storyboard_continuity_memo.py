@@ -317,7 +317,7 @@ async def test_generate_passes_previous_continuity_memo_into_next_segment_payloa
 
     await _generate_all_segment_prompts(
         episode_id="ep-memo-chain", episode_no=1, beat_draft=beat_draft, segments=source,
-        payload={}, target_video_model="hiagent", bible=None, conn=None, project_id="",
+        payload={}, target_video_model="hiagent", bible=None, conn=None, project_id="", aspect_ratio="9:16",
         required_dialogue_by_segment_no={},
     )
 
@@ -368,7 +368,7 @@ async def test_generate_repairs_segment_that_changes_time_of_day_without_quote(m
 
     result = await _generate_all_segment_prompts(
         episode_id="ep-memo-retry", episode_no=1, beat_draft=beat_draft, segments=source,
-        payload={}, target_video_model="hiagent", bible=None, conn=None, project_id="",
+        payload={}, target_video_model="hiagent", bible=None, conn=None, project_id="", aspect_ratio="9:16",
         required_dialogue_by_segment_no={},
     )
 

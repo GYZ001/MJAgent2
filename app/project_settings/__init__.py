@@ -11,6 +11,7 @@ from app.project_settings.store import (
     ADAPTATION_MODES as ADAPTATION_MODES,
     ASPECT_RATIOS as ASPECT_RATIOS,
     ai_label_enabled as ai_label_enabled,
+    canvas_phrase as canvas_phrase,
     canvas_size as canvas_size,
     resolve_adaptation_mode as resolve_adaptation_mode,
     resolve_aspect_ratio as resolve_aspect_ratio,

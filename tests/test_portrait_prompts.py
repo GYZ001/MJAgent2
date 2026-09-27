@@ -73,7 +73,7 @@ def test_scene_view_prompt_does_not_fight_photographic_style_preset() -> None:
     改动前对所有画风一律追加"不得切换成真人实景、实拍布光或照片背景"，与
     scene_visual_style_lock 刚刚给写实画风声明的"必须保持摄影级实景渲染"直接矛盾。"""
     real_photo_style = visual_style_prompt("真人摄影风")
-    prompt = scene_view_prompt(real_photo_style, "老旧修表铺，柜台后有一排挂钟", "establishing")
+    prompt = scene_view_prompt(real_photo_style, "老旧修表铺，柜台后有一排挂钟", "establishing", aspect_ratio="9:16")
 
     assert "实景摄影质感渲染" in prompt
     assert "不得切换成真人实景、实拍布光或照片背景" not in prompt
@@ -88,7 +88,7 @@ def test_scene_view_prompt_normalizes_style_before_photographic_check() -> None:
     dirty_style = real_photo_style + "。"  # 模拟规范化前会出现的重复标点脏数据
 
     lock = scene_visual_style_lock(dirty_style)
-    prompt = scene_view_prompt(dirty_style, "老旧修表铺，柜台后有一排挂钟", "establishing")
+    prompt = scene_view_prompt(dirty_style, "老旧修表铺，柜台后有一排挂钟", "establishing", aspect_ratio="9:16")
 
     assert "实景摄影质感渲染" in lock
     assert "不得切换成真人实景、实拍布光或照片背景" not in prompt
@@ -98,7 +98,7 @@ def test_scene_view_prompt_keeps_non_photographic_wording_byte_identical() -> No
     """非写实画风必须逐字节不变——保证存量动画项目 establishing/action_zone 的
     幂等指纹不因这次改动失效；只有 reverse_angle 的镜头说明按设计改变（预期内失效）。"""
     guoman_style = visual_style_prompt("国漫电影风")
-    prompt = scene_view_prompt(guoman_style, "老旧修表铺，柜台后有一排挂钟", "establishing")
+    prompt = scene_view_prompt(guoman_style, "老旧修表铺，柜台后有一排挂钟", "establishing", aspect_ratio="9:16")
 
     assert "不得切换成真人实景、实拍布光或照片背景。" in prompt
 
@@ -233,3 +233,21 @@ def test_world_era_fallback_makes_costume_constraint_modern() -> None:
     prompt = portrait_prompt("国漫风", "二十岁出头的年轻男性，黑色短发，身着深灰连帽卫衣配牛仔裤", "现代都市")
     assert "年代服饰硬约束：现代都市" in prompt
     assert "禁止现代" not in prompt
+
+
+def test_scene_prompts_follow_project_aspect_ratio() -> None:
+    """横屏项目的场景图提示词写横屏；竖屏项目与改造前写死的文字逐字相同（存量指纹不变）。"""
+    import pytest
+
+    from app.project_settings import canvas_phrase
+    from app.scenes import scene_ref_prompt
+
+    style = visual_style_prompt("国漫电影风")
+    portrait = scene_view_prompt(style, "老旧修表铺", "establishing", aspect_ratio="9:16")
+    landscape = scene_view_prompt(style, "老旧修表铺", "establishing", aspect_ratio="16:9")
+    assert "9:16 竖屏，环境为主" in portrait and "横屏" not in portrait
+    assert "16:9 横屏，环境为主" in landscape and "竖屏" not in landscape
+    assert "9:16 竖屏，构图完整的环境定场镜头" in scene_ref_prompt(style, "老旧修表铺", scene_name="修表铺", aspect_ratio="9:16")
+    assert "16:9 横屏，构图完整的环境定场镜头" in scene_ref_prompt(style, "老旧修表铺", scene_name="修表铺", aspect_ratio="16:9")
+    with pytest.raises(ValueError):
+        canvas_phrase("4:3")

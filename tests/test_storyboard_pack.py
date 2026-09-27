@@ -2698,7 +2698,7 @@ async def test_generate_calls_model_once_per_segment_strictly_sequential(monkeyp
         segments=source,
         payload={},
         target_video_model="hiagent",
-        bible=None, conn=None, project_id="",
+        bible=None, conn=None, project_id="", aspect_ratio="9:16",
         required_dialogue_by_segment_no={},
     )
 
@@ -2749,7 +2749,7 @@ async def test_generate_camera_digest_window_excludes_segments_outside_window(mo
         segments=source,
         payload={},
         target_video_model="hiagent",
-        bible=None, conn=None, project_id="",
+        bible=None, conn=None, project_id="", aspect_ratio="9:16",
         required_dialogue_by_segment_no={},
     )
 
@@ -2792,7 +2792,7 @@ async def test_generate_appearance_rule_tells_model_to_copy_fresh_not_from_memor
         segments=source,
         payload={},
         target_video_model="hiagent",
-        bible=None, conn=None, project_id="",
+        bible=None, conn=None, project_id="", aspect_ratio="9:16",
         required_dialogue_by_segment_no={},
     )
 
@@ -2852,7 +2852,7 @@ async def test_generate_passes_required_dialogue_into_payload_and_rules(monkeypa
         segments=source,
         payload={},
         target_video_model="hiagent",
-        bible=None, conn=None, project_id="",
+        bible=None, conn=None, project_id="", aspect_ratio="9:16",
         required_dialogue_by_segment_no=required,
     )
 
@@ -2912,7 +2912,7 @@ async def test_generate_marks_first_and_final_segment_and_carries_palette_arc(mo
         segments=source,
         payload={},
         target_video_model="hiagent",
-        bible=None, conn=None, project_id="",
+        bible=None, conn=None, project_id="", aspect_ratio="9:16",
         required_dialogue_by_segment_no={},
     )
 
@@ -2976,7 +2976,7 @@ async def test_generate_raises_before_any_call_when_budget_cannot_fit_first_segm
             segments=source,
             payload={},
             target_video_model="hiagent",
-            bible=None, conn=None, project_id="",
+            bible=None, conn=None, project_id="", aspect_ratio="9:16",
             required_dialogue_by_segment_no={},
         )
 

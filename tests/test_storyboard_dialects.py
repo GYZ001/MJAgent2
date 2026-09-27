@@ -394,3 +394,13 @@ def test_speech_manner_rule_present_symmetrically_in_both_dialects():
     assert "pick at least one of volume (lowers voice / raises voice / keeps a normal volume)" in H3_FLAT
     assert "Do not write an abstract mood adverb such as \"angrily\" or \"helplessly\"" in H3_FLAT
     assert "those have no stable mapping for the model" in H3_FLAT
+
+
+
+def test_aspect_ratio_composition_rule_present_symmetrically_in_both_dialects():
+    """横屏项目：两个方言都要按 task.aspect_ratio 写构图（16:9 横向铺开、左右站位），
+    竖屏沿用其余规则；画幅比例本身由请求参数传，正文不写比例数字。"""
+    assert "构图按aspect_ratio（本项目画幅）来写：16:9横屏时" in SEEDANCE_FLAT.replace(" ", "")
+    assert "9:16竖屏时沿用本方言其余规则" in SEEDANCE_FLAT.replace(" ", "")
+    assert "Frame every shot for the task aspect_ratio" in H3_FLAT
+    assert "when it is 9:16 portrait the rest of this dialect applies unchanged" in H3_FLAT

@@ -47,6 +47,10 @@ JSON 字段或分点罗列）。
   identity_id（bible:黄总、entity:… 这类带前缀的 id）只用于 dialogue[] 的
   speaker_identity_id 与 resources，不写进 prompt_text——正文里出现 @bible:黄总
   会让人物参考图绑不上，这个人的长相就没有来源了。
+- 构图按 aspect_ratio（本项目画幅）来写：16:9 横屏时，两人对话优先同框左右
+  站位或过肩正反打，远景与大全景横向铺开、交代城市地标与空间纵深，人物沿
+  画面横向走位；9:16 竖屏时沿用本方言其余规则。画幅比例由请求参数单独传给
+  视频模型，正文只写构图本身。
 - 一场戏的第一段——本段 previous_continuity_memo 为空，或本段
   source_segment_indexes 与上一段的 source_segment_indexes 不同，两者之一
   即视为换场——第一个镜头必须是能看清全部关键家具与关键道具摆位的定场
@@ -227,6 +231,13 @@ overall_soundscape: <1-4 English sentences>
 non_diegetic_music: <1-3 English sentences, or N/A>
 
 Rules:
+- Frame every shot for the task aspect_ratio (this project's canvas): when it
+  is 16:9 landscape, stage two-person dialogue side by side in one frame or as
+  over-the-shoulder shot/reverse-shot, spread wide and extreme-wide shots
+  horizontally to show city landmarks and depth, and move characters laterally
+  across the frame; when it is 9:16 portrait the rest of this dialect applies
+  unchanged. The ratio itself is sent as a request parameter, so the prose
+  describes composition only.
 - integrated_multimodal_description opens with "[Shot 1]" (no timestamp),
   first declaring the overall style (e.g. "Live-action, cinematic" or
   "2D-animated"), then subsequent shots use "[Shot N] At 00:SS.sss, the

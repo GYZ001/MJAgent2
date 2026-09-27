@@ -17,7 +17,7 @@ from app.db import get_conn, get_setting, new_id, now
 from app.evidence.txn_guard import rollback_uncommitted_on_error
 from app.portraits.card_owner import resolve_card_owner
 from app.portraits.current_ref import current_portrait_ref
-from app.project_settings import resolve_aspect_ratio
+from app.project_settings import canvas_phrase, resolve_aspect_ratio
 from app.refs import (
     _safe_name,
     character_visual_style_lock,
@@ -221,7 +221,7 @@ def character_view_prompt(
     )
 
 
-def scene_view_prompt(visual_style: str, scene_canonical: str, view_role: str) -> str:
+def scene_view_prompt(visual_style: str, scene_canonical: str, view_role: str, *, aspect_ratio: str) -> str:
     camera = {
         "establishing": "建立镜头，完整展示空间关系与主标志物",
         # 正面陈述反打做实策略（见 app.scene_reverse.produce），会让存量反打图指纹失效。
@@ -232,7 +232,7 @@ def scene_view_prompt(visual_style: str, scene_canonical: str, view_role: str) -
     return (
         f"{scene_visual_style_lock(visual_style)}。"
         f"场景多视角定场图（{VIEW_ROLE_LABELS.get(view_role, view_role)}）：{scene_canonical}。"
-        f"{camera}。9:16 竖屏，环境为主，画面中不出现任何人物。"
+        f"{camera}。{canvas_phrase(aspect_ratio)}，环境为主，画面中不出现任何人物。"
         f"{tail}"
         "禁止文字、字幕、水印、logo。"
     )
@@ -1423,7 +1423,7 @@ async def ensure_scene_multiview_pack(
     if not scene_multiview_enabled():
         return {"status": "disabled", "scene_reference_id": scene_reference_id}
     with rollback_uncommitted_on_error(conn := get_conn(), where="ensure_scene_multiview_pack"):
-        sz = config.SCENE_REF_SIZES.get(resolve_aspect_ratio(conn, project_id), config.REF_IMAGE_SIZE)
+        sz = config.SCENE_REF_SIZES.get(ar := resolve_aspect_ratio(conn, project_id), config.REF_IMAGE_SIZE)
         _set_scene_pack_fields(conn, scene_reference_id, pack_status=PACK_STATUS_GENERATING)
         conn.commit()
 
@@ -1435,7 +1435,7 @@ async def ensure_scene_multiview_pack(
         parent = conn.execute("SELECT * FROM scene_references WHERE id=?", (scene_reference_id,)).fetchone()
         base_est = base_views.get("establishing") or {}
         generation_anchor = scene_multiview_generation_anchor(scene_canonical, parent["prompt"] if parent else None)
-        est_prompt = scene_view_prompt(visual_style, generation_anchor, "establishing")
+        est_prompt = scene_view_prompt(visual_style, generation_anchor, "establishing", aspect_ratio=ar)
         est_prompt_for_fp = (parent["prompt"] if parent and parent["prompt"] else est_prompt)
         est_fp = view_input_fingerprint(
             view_role="establishing",
@@ -1501,7 +1501,7 @@ async def ensure_scene_multiview_pack(
 
         # reverse_angle（含 fingerprint 幂等）
         rev = existing_views.get("reverse_angle")
-        rev_prompt = scene_view_prompt(visual_style, generation_anchor, "reverse_angle")
+        rev_prompt = scene_view_prompt(visual_style, generation_anchor, "reverse_angle", aspect_ratio=ar)
         base_rev = base_views.get("reverse_angle") or {}
         rev_fp = view_input_fingerprint(
             view_role="reverse_angle", prompt=rev_prompt, anchor_text=scene_canonical,
@@ -1539,7 +1539,7 @@ async def ensure_scene_multiview_pack(
         if "action_zone" in requested_optional:
             existing_views = {v["view_role"]: v for v in list_scene_views(scene_reference_id, conn=conn)}
             action = existing_views.get("action_zone")
-            action_prompt = scene_view_prompt(visual_style, generation_anchor, "action_zone")
+            action_prompt = scene_view_prompt(visual_style, generation_anchor, "action_zone", aspect_ratio=ar)
             action_fp = view_input_fingerprint(
                 view_role="action_zone", prompt=action_prompt, anchor_text=scene_canonical,
                 parent_revision_id=scene_reference_id,
@@ -2124,7 +2124,7 @@ async def regenerate_scene_view(
             canonical = row["state_canonical"]
         existing = {v["view_role"]: v for v in list_scene_views(scene_reference_id, conn=conn)}
         est = existing.get("establishing") or {}
-        base_prompt = scene_view_prompt(style, canonical, view_role)
+        base_prompt = scene_view_prompt(style, canonical, view_role, aspect_ratio=resolve_aspect_ratio(conn, project_id))
         # 手动重做无幂等诉求，fp 只需每次不同；反打图落盘路径由 produce 内部决定，不能先算好单一 path 再喂进 fp。
         fp = view_input_fingerprint(
             view_role=view_role, prompt=base_prompt, anchor_text=canonical, parent_revision_id=scene_reference_id,

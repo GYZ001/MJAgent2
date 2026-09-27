@@ -29,6 +29,19 @@ def canvas_size(aspect_ratio: str) -> tuple[int, int]:
         raise ValueError(f"不支持的画幅：{aspect_ratio!r}") from None
 
 
+#: 写进生图提示词的画幅短语；"9:16" 与改造前写死的文字逐字相同（存量竖屏项目的
+#: 场景图提示词与幂等指纹不变）。
+_CANVAS_PHRASES: dict[str, str] = {"9:16": "9:16 竖屏", "16:9": "16:9 横屏"}
+
+
+def canvas_phrase(aspect_ratio: str) -> str:
+    """画幅 -> 生图提示词里的画幅短语；非法画幅 ``ValueError``（与 ``canvas_size`` 同口径）。"""
+    try:
+        return _CANVAS_PHRASES[aspect_ratio]
+    except KeyError:
+        raise ValueError(f"不支持的画幅：{aspect_ratio!r}") from None
+
+
 def resolve_adaptation_mode(conn: Any, project_id: str) -> str:
     """读出项目的改编强度档位。
 

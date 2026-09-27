@@ -27,6 +27,7 @@ from app.atomic_io import atomic_write_bytes
 from app.bible_store import mutate_bible_json
 from app.errors import ContentGenerationError, code_ref
 from app.db import get_conn, new_id, now
+from app.project_settings import canvas_phrase
 from app.evidence import repository as evidence_repository
 from app.evidence.media import record_reference_asset
 from app.harness import model_gateway
@@ -175,9 +176,9 @@ def scene_ref_prompt(
     visual_style: str,
     scene_canonical: str,
     *,
-    scene_name: str = "",
+    scene_name: str = "", aspect_ratio: str,
 ) -> str:
-    """场景定场图生成词：纯环境、无人物，作为跨集复用的场景锚点。"""
+    """场景定场图生成词：纯环境、无人物，作为跨集复用的场景锚点。``aspect_ratio`` 为项目画幅。"""
     location_identity = (
         f"规范地点名称：{scene_name.strip()}。"
         "地点名是独立且最高优先级的场景语义输入：必须逐项识别名称中的建筑功能、"
@@ -195,7 +196,7 @@ def scene_ref_prompt(
         f"场景定场图（纯环境、画面中不出现任何人物）："
         f"{location_identity}{generation_canonical}",
         functional_constraints,
-        "9:16 竖屏，构图完整的环境定场镜头，空间纵深清晰，光影与色调统一，电影质感，高清",
+        f"{canvas_phrase(aspect_ratio)}，构图完整的环境定场镜头，空间纵深清晰，光影与色调统一，电影质感，高清",
         "画面必须无人物；不得生成任何文字、字幕、招牌字、角标、水印或 logo",
         f"再次确认：地点是「{scene_name.strip()}」，画风是「{visual_style.strip()}」"
         if scene_name.strip() and visual_style.strip()
@@ -205,7 +206,7 @@ def scene_ref_prompt(
 
 async def _provider_visual_scene_retry_prompt(
     visual_style: str,
-    scene_canonical: str,
+    scene_canonical: str, *, aspect_ratio: str,
 ) -> str:
     """Re-express an approved scene contract after a technical image failure.
 
@@ -247,7 +248,7 @@ async def _provider_visual_scene_retry_prompt(
         scene_visual_style_lock(visual_style) if visual_style.strip() else "",
         "场景定场图（纯环境、画面中不出现任何人物）："
         + visual_environment,
-        "9:16 竖屏，构图完整的环境定场镜头，空间纵深清晰，光影与色调统一，电影质感，高清",
+        f"{canvas_phrase(aspect_ratio)}，构图完整的环境定场镜头，空间纵深清晰，光影与色调统一，电影质感，高清",
         "画面必须无人物；不得生成任何文字、字幕、招牌字、角标、水印或 logo",
     )
 
@@ -626,7 +627,7 @@ async def _generate_one_scene_reference(
     sc.ref_image_path = None
     base_prompt = (
         (sc.scene_prompt_override or "").strip()
-        or scene_ref_prompt(style, sc.scene_canonical, scene_name=sc.name)
+        or scene_ref_prompt(style, sc.scene_canonical, scene_name=sc.name, aspect_ratio=project["aspect_ratio"])
     )
     last_error: Exception | None = None
     retry_prompt: str | None = None
@@ -943,7 +944,6 @@ def _append_scene_alias(conn, project_id: str, scene_name: str, alias: str) -> b
 async def _generate_and_register_scene(project_id: str, name: str, scene_canonical: str,
                                        style: str, *, ep_start: int, bible_version: int) -> str | None:
     """为新场景出一张定场图并登记到 scene_references（适用集 ep_start~ 至今）。出图失败返回 None。"""
-    base_prompt = scene_ref_prompt(style, scene_canonical, scene_name=name)
     conn = get_conn()
     # 同场景参考：若该场景已有更早分段的图（同一地点跨集演化），以它做 i2i 锚点保持一致；全新场景则为 None → 纯文生图。
     prior = same_scene_anchor(conn, project_id, name)
@@ -951,6 +951,7 @@ async def _generate_and_register_scene(project_id: str, name: str, scene_canonic
     project = conn.execute(
         "SELECT bible_artifact_id, aspect_ratio FROM projects WHERE id=?", (project_id,)
     ).fetchone()
+    base_prompt = scene_ref_prompt(style, scene_canonical, scene_name=name, aspect_ratio=(project["aspect_ratio"] if project else "9:16"))
     prior_row = conn.execute(
         "SELECT artifact_id FROM scene_references WHERE project_id=? AND scene_name=? ORDER BY ep_start DESC LIMIT 1",
         (project_id, name),
@@ -1001,10 +1002,7 @@ async def _generate_and_register_scene(project_id: str, name: str, scene_canonic
         except Exception:  # noqa: BLE001 技术失败不伪装成 QA 问题
             if attempt == 1:
                 try:
-                    retry_prompt = await _provider_visual_scene_retry_prompt(
-                        style,
-                        scene_canonical,
-                    )
+                    retry_prompt = await _provider_visual_scene_retry_prompt(style, scene_canonical, aspect_ratio=(project["aspect_ratio"] if project else "9:16"))
                 except Exception:  # noqa: BLE001 改写失败时不扩大重试
                     retry_prompt = None
                     break
@@ -1643,7 +1641,7 @@ async def _refresh_scene_on_state_change(
     if not cur or cur["ep_start"] >= episode_no:
         return None
 
-    base_prompt = scene_ref_prompt(style, new_canonical, scene_name=name)
+    base_prompt = scene_ref_prompt(style, new_canonical, scene_name=name, aspect_ratio=aspect_ratio)
     prior = cur["image_path"] if cur["image_path"] and Path(cur["image_path"]).exists() else None
     anchor_url = hiagent.data_url_from_file(prior) if prior else None
     dest = str(Path(scene_ref_path(project_id, name, episode_no)).with_name(
