@@ -55,14 +55,19 @@ build_dist() {
 # 2) 把某个 rev 落到 B：推对象 → reset --hard → 同步 dist → 装依赖 → 重启
 push_rev() {
   local rev="$1"
-  git -C "$ROOT" push -q "$B:/root/MJAgent2" "$rev:refs/remotes/a/main"
+  # 强制推：refs/remotes/a/main 只是部署用的指针，回滚时要把它指回更早的提交；
+  # 不加 -f 会被 non-fast-forward 拒绝（2026-09-26 回滚时实测），日志一片报错掩盖真实原因。
+  git -C "$ROOT" push -q -f "$B:/root/MJAgent2" "$rev:refs/remotes/a/main"
   ssh "$B" "cd /root/MJAgent2 && git reset -q --hard $rev && git clean -qfd && echo $rev > DEPLOYED_REV"
   rsync -az --delete "$REL/$rev/dist/" "$B:/root/MJAgent2/frontend/dist/"
   ssh "$B" 'cd /root/MJAgent2 && .venv/bin/pip install -q -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt && systemctl restart mjagent2-backend'
 }
+# 健康等待：B 的库已过 2GB，冷启动时 init_db 可能超过 40s（2026-09-26 定时部署实测新进程
+# 60s 仍在启动、回滚那次也超过 40s 才起来），40s 窗口会把正常的慢启动误判成失败并触发回滚。
+HEALTH_WAIT_S="${HEALTH_WAIT_S:-300}"
 healthy() {
   local i code
-  for i in $(seq 1 40); do
+  for i in $(seq 1 "$HEALTH_WAIT_S"); do
     code="$(curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:18230/ || true)"
     [ "$code" = 200 ] && return 0
     sleep 1
@@ -85,7 +90,7 @@ if healthy; then
   log "选路冒烟未通过（见上方输出）：部署已生效，但有职责选路为空或密钥失效，需人工处理"
   exit 4
 fi
-log "部署 $NEW 后 40s 内健康检查未通过"
+log "部署 $NEW 后 ${HEALTH_WAIT_S}s 内健康检查未通过"
 if [ "$OLD" != none ] && [ -d "$REL/$OLD/dist" ]; then
   push_rev "$OLD" && healthy && { log "已回滚到 $OLD"; exit 3; }
   log "回滚到 $OLD 也失败——需要人工介入：ssh $B 'systemctl status mjagent2-backend; tail -50 /root/MJAgent2/logs/backend.log'"
