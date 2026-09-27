@@ -15,7 +15,7 @@ from app import config, hiagent
 from app.atomic_io import atomic_write_bytes
 from app.bible_store import mutate_bible_json
 from app.db import get_conn, new_id, now
-from app.errors import ContentGenerationError, code_ref
+from app.errors import code_ref
 from app.evidence.media import record_reference_asset
 from app.harness.types import EvidenceArtifact
 from app.portraits.card_owner import resolve_card_owner
@@ -31,6 +31,7 @@ from ._db_probe import (
 from ._identity_tokens import _visual_entity_id_for_resolution_safe
 from .constants import STAGED_INITIAL_EP_START
 from .current_ref import portrait_for_episode
+from .portrait_candidate_complete import _complete_discovered_candidate
 
 # ---------- 定妆照落盘 / 登记 ----------
 
@@ -437,81 +438,15 @@ async def _generate_discovered_character_portrait(
         (project_id, name, ep_start),
     ).fetchone()
 
-    async def _complete_candidate(
-        row,
-        *,
-        primary_qa: dict | None = None,
-        purge_on_failure: bool,
-    ) -> dict:
-        """补齐并发布同一个候选；重启恢复时不得再占用相同分段键。"""
-        portrait_id = str(row["id"])
-        image_path = str(row["image_path"] or "")
-        candidate_appearance = str(row["appearance"] or appearance)
-        if pack_supported and str(row["pack_status"] or "") == "ready" and row["ep_end"] is None:
-            # 包已就绪且已是开区间：纯复用、不写库。分镜前的补齐重试走到这里时若再写库，撞上写锁
-            # 就会被外层当成「定妆包生成失败」（ERR-20260902-30223f 刘备：三视角齐全却报失败）。
-            return {"portrait_id": portrait_id, "image_path": image_path, "pack_status": "ready", "reused": True, "gate_retry_exhausted": False}
-        try:
-            if pack_supported:
-                from app.multiview import ensure_character_multiview_pack, pack_result_ok
-
-                existing_status = str(row["pack_status"] or "")
-                if existing_status == "ready":
-                    pack = {"status": "ready", "portrait_id": portrait_id, "reused": True}
-                else:
-                    pack = await ensure_character_multiview_pack(
-                        project_id=project_id, portrait_id=portrait_id, character_name=name,
-                        appearance=candidate_appearance, visual_style=style, ep_start=ep_start,
-                        base_portrait_id=row["base_portrait_id"], primary_qa=primary_qa,
-                    )
-                if not pack_result_ok(pack):
-                    conn.execute(
-                        "UPDATE character_portraits SET pack_status='failed' WHERE id=?",
-                        (portrait_id,),
-                    )
-                    conn.commit()
-                    raise ContentGenerationError(f"角色多视角包结构不完整：{name}")
-
-                # 候选在多视角完成前只占本集闭区间。发布时再原子切换为开区间；
-                # 服务重启后重复执行本段仍更新同一 portrait_id，不会触发唯一键冲突。
-                current = _open_portrait(conn, project_id, name)
-                if current and current["id"] != portrait_id:
-                    if int(current["ep_start"] or 1) < ep_start:
-                        conn.execute(
-                            "UPDATE character_portraits SET ep_end=? WHERE id=?",
-                            (ep_start - 1, current["id"]),
-                        )
-                    else:
-                        conn.execute("DELETE FROM character_portraits WHERE id=?", (current["id"],))
-                conn.execute(
-                    "UPDATE character_portraits SET ep_end=NULL,pack_status=? WHERE id=?",
-                    ("ready", portrait_id),
-                )
-                conn.commit()
-
-            _update_bible_appearance(conn, project_id, name, candidate_appearance, image_path)
-            conn.commit()
-        except Exception:
-            # 新候选在本调用内失败可沿用原清理语义；重启前已经付费落盘的候选必须保留，
-            # 让下一次恢复继续使用，不能因为恢复代码自身异常再次烧图。
-            if purge_on_failure:
-                from app.rejected_media import purge_character_portrait
-                purge_character_portrait(conn, portrait_id)
-            raise
-        return {
-            "portrait_id": portrait_id,
-            "image_path": image_path,
-            "pack_status": "ready",
-            "reused": not purge_on_failure,
-            "gate_retry_exhausted": False,
-        }
-
     # 服务重启可能发生在主图和候选行已落盘、侧视角尚未完成之间。此时该行以
     # ep_start=ep_end 占用候选槽；必须在原 portrait_id 上续补，不能重生主图后重复 INSERT。
     if candidate is not None:
         candidate_path = str(candidate["image_path"] or "")
         if candidate_path and Path(candidate_path).is_file():
-            return await _complete_candidate(candidate, purge_on_failure=False)
+            return await _complete_discovered_candidate(
+                conn, project_id, name, style, appearance, candidate,
+                ep_start=ep_start, pack_supported=pack_supported, purge_on_failure=False,
+            )
         from app.rejected_media import purge_character_portrait
         purge_character_portrait(conn, str(candidate["id"]))
 
@@ -584,9 +519,9 @@ async def _generate_discovered_character_portrait(
     if pack_supported:
         values["pack_status"] = "generating"
     inserted = insert_portrait_row_or_existing(conn, values)
-    return await _complete_candidate(
-        inserted,
-        primary_qa=qa,
+    return await _complete_discovered_candidate(
+        conn, project_id, name, style, appearance, inserted,
+        ep_start=ep_start, pack_supported=pack_supported, primary_qa=qa,
         # 槽位被并行任务抢先时续做的是别人的行，失败不能替别人清场。
         purge_on_failure=str(inserted["id"]) == portrait_id,
     )

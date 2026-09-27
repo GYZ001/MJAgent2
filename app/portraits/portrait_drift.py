@@ -21,6 +21,9 @@ from .discovery_resample import (
     extract_character_fragments,
     screen_appearance_changes,
 )
+from .portrait_coverage_guard import (
+    _close_portrait_segment, _delete_portrait_segment, _uncovered_episode_snapshot, _warn_if_new_coverage_gap,
+)
 from .portrait_io import (
     _generate_discovered_character_portrait,
     _open_portrait,
@@ -91,6 +94,7 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
         cur = _open_portrait(conn, project_id, name)
         if not cur or cur["ep_start"] >= episode_no:
             return None  # 并发已处理，或本集（之后）才登场的图，无需切分
+        before_uncovered = _uncovered_episode_snapshot(conn, project_id, name)
         new_path, new_prompt = await _redraw_portrait(
             project_id, name, style, new_appearance, base_path=cur["image_path"], ep_start=episode_no)
         persistence = (change_meta or {}).get("persistence") or "persistent"
@@ -145,10 +149,10 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
             stale_end = stale_segment["ep_end"]
             if stale_end is None or int(stale_end) >= episode_no:
                 return None
-            conn.execute(
-                "DELETE FROM character_portraits WHERE id=?",
-                (stale_segment["id"],),
-            )
+            _delete_portrait_segment(
+                conn, character_name=name, portrait_id=stale_segment["id"],
+                before_ep_start=episode_no, before_ep_end=stale_end,
+                caller_episode_no=episode_no, reason="drift_stale_placeholder_cleanup")
 
         new_portrait_id = new_id("portrait")
         change_json = json.dumps(change_meta or {}, ensure_ascii=False) if change_meta else None
@@ -177,39 +181,35 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
 
         pack_status = "ready"
         if pack_supported:
-            from app.multiview import (
-                PACK_STATUS_FAILED,
-                ensure_character_multiview_pack,
-                pack_result_ok,
-            )
+            from app.multiview import PACK_STATUS_FAILED, ensure_character_multiview_pack, pack_result_ok
+
+            def _mark_new_segment_failed(reason: str) -> None:
+                # 新段临时占本集闭区间，多视角失败即收窄到 ep_end<ep_start（不再覆盖任何集，
+                # 真实丢失覆盖需要告警）；cur（旧当前行）此时还没被动过，不会因此断档。
+                _close_portrait_segment(
+                    conn, character_name=name, portrait_id=new_portrait_id, before_ep_start=episode_no,
+                    before_ep_end=episode_no, new_ep_end=episode_no - 1, caller_episode_no=episode_no,
+                    reason=reason, pack_status=PACK_STATUS_FAILED)
+
             try:
                 pack = await ensure_character_multiview_pack(
-                    project_id=project_id,
-                    portrait_id=new_portrait_id,
-                    character_name=name,
-                    appearance=new_appearance,
-                    visual_style=style,
-                    ep_start=episode_no,
-                    base_portrait_id=cur["id"],
-                    primary_qa=qa,
-                )
+                    project_id=project_id, portrait_id=new_portrait_id, character_name=name,
+                    appearance=new_appearance, visual_style=style, ep_start=episode_no,
+                    base_portrait_id=cur["id"], primary_qa=qa)
             except Exception:
-                conn.execute(
-                    "UPDATE character_portraits SET ep_end=?,pack_status=? WHERE id=?",
-                    (episode_no - 1, PACK_STATUS_FAILED, new_portrait_id),
-                )
+                _mark_new_segment_failed("drift_multiview_pack_exception")
                 conn.commit()
                 raise
             if not pack_result_ok(pack):
-                conn.execute(
-                    "UPDATE character_portraits SET ep_end=?,pack_status=? WHERE id=?",
-                    (episode_no - 1, PACK_STATUS_FAILED, new_portrait_id),
-                )
+                _mark_new_segment_failed("drift_multiview_pack_incomplete")
                 conn.commit()
                 raise ContentGenerationError(f"角色多视角包结构不完整：{name}")
             pack_status = "ready"
             # 原子切换：关闭旧区间，开放新区间
-            conn.execute("UPDATE character_portraits SET ep_end=? WHERE id=?", (episode_no - 1, cur["id"]))
+            _close_portrait_segment(
+                conn, character_name=name, portrait_id=cur["id"], before_ep_start=cur["ep_start"],
+                before_ep_end=cur["ep_end"], new_ep_end=episode_no - 1, caller_episode_no=episode_no,
+                reason="drift_new_segment_supersedes_current")
             new_ep_end = episode_no if persistence == "episode" else None
             conn.execute(
                 "UPDATE character_portraits SET ep_end=?, pack_status=? WHERE id=?",
@@ -219,29 +219,24 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
             if persistence == "episode":
                 from app.multiview import bind_ready_portrait_reuse
                 bind_ready_portrait_reuse(
-                    conn,
-                    project_id=project_id,
-                    character_name=name,
-                    source_portrait_id=cur["id"],
-                    ep_start=episode_no + 1,
-                    bible_version=bible_version,
-                )
+                    conn, project_id=project_id, character_name=name, source_portrait_id=cur["id"],
+                    ep_start=episode_no + 1, bible_version=bible_version)
             conn.commit()
         else:
-            conn.execute("UPDATE character_portraits SET ep_end=? WHERE id=?", (episode_no - 1, cur["id"]))
+            _close_portrait_segment(
+                conn, character_name=name, portrait_id=cur["id"], before_ep_start=cur["ep_start"],
+                before_ep_end=cur["ep_end"], new_ep_end=episode_no - 1, caller_episode_no=episode_no,
+                reason="drift_new_segment_supersedes_current_legacy")
             conn.commit()
 
         if persistence == "episode":
             _update_bible_appearance(
-                conn,
-                project_id,
-                name,
-                str(cur["appearance"] or ""),
-                str(cur["image_path"] or ""),
-            )
+                conn, project_id, name, str(cur["appearance"] or ""), str(cur["image_path"] or ""))
         else:
             _update_bible_appearance(conn, project_id, name, new_appearance, new_path)
         conn.commit()
+        _warn_if_new_coverage_gap(conn, project_id=project_id, character_name=name,
+                                   caller_episode_no=episode_no, before_uncovered=before_uncovered)
         return {"ep_start": episode_no, "image_path": new_path, "pack_status": pack_status,
                 "portrait_id": new_portrait_id}
 
