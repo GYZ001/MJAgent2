@@ -112,3 +112,18 @@ def test_prompt_notes_replace_attached_mention_and_demote_unattached_one() -> No
 def test_prompt_without_any_reference_still_demotes_reverse_mentions() -> None:
     out = build_seedance_reference_prompt_notes("镜头2：背景是@修表铺·反打门口。", [], aspect_ratio="9:16")
     assert out == "镜头2：背景是修表铺反打方向门口。"
+
+
+@pytest.mark.parametrize("reverse_qa,expected", [(_PASSED, True), (None, False)])
+def test_storyboard_sees_reverse_availability_when_manifest_lacks_scene_reference_id(tmp_path, reverse_qa, expected) -> None:
+    """生产映射包的 scene_reference_id 通常为空（场景图映射后才异步登记）；可用判定必须
+    按场景名 + 集号解析，与装配期同一规则——否则 reverse_angle_available 恒为 false。"""
+    from app.production.storyboard_pack import _enrich_asset_manifest_canonical_visuals
+
+    conn = db.get_conn()
+    _seed(conn, tmp_path, reverse_qa=reverse_qa)
+    payload = {"episode_no": 1, "asset_manifest": {"scenes": [
+        {"scene_id": "scene:修表铺", "display_name": "修表铺", "scene_reference_id": None},
+    ]}}
+    _enrich_asset_manifest_canonical_visuals(conn, payload, bible=None, project_id="proj-1")
+    assert payload["asset_manifest"]["scenes"][0]["reverse_angle_available"] is expected

@@ -35,6 +35,26 @@ def _ready_reverse_view(conn: Any, scene_reference_id: str | None) -> dict[str, 
     return view if image_path and os.path.exists(image_path) else None
 
 
+def scene_reverse_angle_available_for_manifest(
+    conn: Any, scene: Mapping, *, project_id: str | None, episode_no: int | None,
+) -> bool:
+    """分镜生成期，按映射包里的一条场景判定反打是否可用。
+
+    映射包 ``asset_manifest.scenes[].scene_reference_id`` 在生产里通常为空（场景图在映射
+    之后异步登记，2026-09-27《顾念长安》第 1 集 8 个场景全为 None），只认这个字段会让
+    ``reverse_angle_available`` 恒为 false、反打永远用不上。缺失时按「场景名 + 集号」解析
+    当集生效的场景记录——与装配期 ``_resolve_scene_entry`` 同一条规则，两边不会判出两个结果。
+    """
+    ref_id = scene.get("scene_reference_id")
+    if not ref_id and project_id and episode_no is not None:
+        # 函数内导入：app.multiview 在模块级导入本模块，模块级反向导入会成环。
+        from app.multiview import scene_row_for_episode
+
+        row = scene_row_for_episode(project_id, str(scene.get("display_name") or ""), int(episode_no), conn=conn)
+        ref_id = row["id"] if row else None
+    return scene_reverse_angle_available(conn, ref_id)
+
+
 def scene_reverse_angle_available(conn: Any, scene_reference_id: str | None) -> bool:
     """分镜生成期：这个场景此刻是否有可用的反打视角图，写进
     ``relevant_assets.scenes[].reverse_angle_available`` 给模型看。总开关关闭时

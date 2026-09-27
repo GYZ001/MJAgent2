@@ -687,7 +687,7 @@ def _enrich_asset_manifest_canonical_visuals(
             conn, scene.get("scene_reference_id"),
             bible_scene_canonical=bible_scenes.get(str(scene.get("display_name") or "")),
         ) or _NO_CANONICAL_SCENE_NOTE
-        scene["reverse_angle_available"] = reverse_segment_views.scene_reverse_angle_available(conn, scene.get("scene_reference_id"))
+        scene["reverse_angle_available"] = reverse_segment_views.scene_reverse_angle_available_for_manifest(conn, scene, project_id=project_id, episode_no=payload.get("episode_no"))
     enrich_prop_manifest_entries(conn, manifest, bible=bible, project_id=project_id, episode_no=payload.get("episode_no"))
 
 
