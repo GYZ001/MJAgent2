@@ -504,3 +504,44 @@ details.wall-meta-details > :not(summary) {
 :where(:root[data-theme="dark"]) .wall-attempt-card:hover {
   background: var(--surface-muted);
 }
+
+/* 生成台：带意见重拍（CritiqueRetakePanel）与已采纳版本调速（PlaybackRateControl） */
+.wall-critique-panel {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  color: var(--ink);
+  font: 12px/1.5 var(--ui);
+}
+
+.wall-critique-panel textarea {
+  min-height: 64px;
+  resize: vertical;
+  font: 13px/1.5 var(--ui);
+}
+
+.wall-hint {
+  margin: 0;
+  color: var(--ink-soft);
+  font: 12px/1.5 var(--ui);
+}
+
+.wall-critique-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.wall-playback-rate {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--ink);
+  font: 12px/1.5 var(--ui);
+}
+
+.wall-playback-rate small {
+  flex-basis: 100%;
+  color: var(--ink-soft);
+}

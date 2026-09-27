@@ -21,6 +21,8 @@ import { extractReferenceAudiosByVersion, extractReferenceImagesByVersion, shotV
 import GenerationReferenceGallery from '../components/GenerationReferenceGallery'
 import SegmentResourcePanel from '../components/SegmentResourcePanel'
 import AttemptList from './wall/AttemptList'
+import CritiqueRetakePanel from './wall/CritiqueRetakePanel'
+import PlaybackRateControl from './wall/PlaybackRateControl'
 import '../styles/WallPage.css'
 
 export { referenceImageLabel } from '../lib/bibleAssets'
@@ -70,9 +72,7 @@ export function stampClassForStatus(status: string): string {
 export function resolveCurrentVersion(shot: Pick<Shot, 'versions' | 'adopted_version_id'>): ShotVersion | null {
   const versions = shot.versions ?? []
   if (!versions.length) return null
-  const adopted = shot.adopted_version_id
-    ? versions.find(version => version.id === shot.adopted_version_id)
-    : undefined
+  const adopted = shot.adopted_version_id ? versions.find(version => version.id === shot.adopted_version_id) : undefined
   if (adopted) return adopted
   return [...versions].sort((a, b) => b.version_no - a.version_no)[0]
 }
@@ -138,9 +138,7 @@ export function segmentGenerateDisabledReason(params: {
   blockers: string[]
 }): string {
   if (params.submitting) return '正在提交生成请求'
-  if (params.currentStatus && ACTIVE_VERSION_STATUSES.includes(params.currentStatus)) {
-    return '当前已有任务在处理中'
-  }
+  if (params.currentStatus && ACTIVE_VERSION_STATUSES.includes(params.currentStatus)) return '当前已有任务在处理中'
   if (params.eligible === null) return '正在核对生成资格'
   if (!params.eligible) return params.blockers.join('；') || '当前生成资格未通过'
   return ''
@@ -527,9 +525,7 @@ function SegmentWorkbench({ shot, context, detail, onRefresh, onToast, project, 
   goToBoard: () => void
 }) {
   const segment = shot.storyboard_pack_segment
-  if (!segment) {
-    return <article className="card wall-segment"><p className="wall-empty-hint">本段暂无数据</p></article>
-  }
+  if (!segment) return <article className="card wall-segment"><p className="wall-empty-hint">本段暂无数据</p></article>
   const rangeText = compressSegmentIndexes(segment.source_segment_indexes ?? [])
   const referenceImages = detail.status === 'ready' && detail.shotId === shot.id ? detail.referenceImages : {}
   const referenceAudios = detail.status === 'ready' && detail.shotId === shot.id ? detail.referenceAudios : {}
@@ -625,6 +621,8 @@ export function GenerationPanel({ shot, context, referenceImages, referenceAudio
     [shot.versions],
   )
   const current = resolveCurrentVersion(shot)
+  // 调速控件只对「已采纳版本」显示，与预览中的 current（可能回退到最新尝试）分开算。
+  const adoptedVersion = shot.adopted_version_id ? versions.find(version => version.id === shot.adopted_version_id) ?? null : null
   const [previewId, setPreviewId] = useState<string | null>(current?.id ?? versions[0]?.id ?? null)
   useEffect(() => {
     setPreviewId(prev => (prev && versions.some(version => version.id === prev)) ? prev : (current?.id ?? versions[0]?.id ?? null))
@@ -649,21 +647,19 @@ export function GenerationPanel({ shot, context, referenceImages, referenceAudio
   })
   const hasAttempt = versions.length > 0
   const runningSince = current?.running_since ?? null
+  // 按本镜作用域的资格版本：兄弟镜新增素材会改变整集范围的 qualification_version，
+  // 但不改变本镜自己这一份，避免"点段1生成 -> 段2立刻被拒"的自我作废（CON-409）；
+  // 取不到本镜版本时（旧后端兼容）回退整集版本。「重新生成」/带意见重拍/调速共用。
+  const shotQualificationVersion =
+    context?.upstream.shot_qualification_versions?.[shot.id] ?? context?.upstream.qualification_version
 
   const runGenerate = async () => {
     if (!context || submittingRef.current) return
     submittingRef.current = true
     setSubmitting(true)
     try {
-      // 按本镜作用域的资格版本提交：兄弟镜新增素材会改变整集范围的
-      // qualification_version，但不改变本镜自己这一份，避免"点段1生成 ->
-      // 段2立刻被拒"的自我作废（CON-409）。取不到本镜版本时（旧后端兼容）
-      // 回退整集版本。
-      const shotQualificationVersion =
-        context.upstream.shot_qualification_versions?.[shot.id]
-        ?? context.upstream.qualification_version
       const result = await api.shotGenerate(
-        shot.id, undefined, true, false,
+        shot.id, undefined, true, undefined,
         shotQualificationVersion,
         newIdemKey(`wall-generate:${shot.id}`),
       ) as { reused?: boolean; reused_reason?: ReusedReason; job_id?: string }
@@ -709,6 +705,8 @@ export function GenerationPanel({ shot, context, referenceImages, referenceAudio
           onClick={() => void runGenerate()}>
           {submitting ? '提交中…' : hasAttempt ? '重新生成' : '生成'}
         </button>
+        <CritiqueRetakePanel shotId={shot.id} disabled={Boolean(disabledReason) || !hasAttempt}
+          qualificationVersion={shotQualificationVersion} onToast={onToast} onRefresh={onRefresh} />
       </div>
 
       {current && ACTIVE_VERSION_STATUSES.includes(current.status) && (
@@ -777,9 +775,11 @@ export function GenerationPanel({ shot, context, referenceImages, referenceAudio
           {selected?.provider_task_id && <p className="wall-empty-hint">供应商任务：{selected.provider_task_id}</p>}
         </div>
         <AttemptList shotId={shot.id} versions={versions} previewId={previewId} adoptedId={shot.adopted_version_id}
-          qualificationVersion={context?.upstream.shot_qualification_versions?.[shot.id] ?? context?.upstream.qualification_version}
+          qualificationVersion={shotQualificationVersion}
           statusLabel={versionStatusLabel} stampClass={stampClassForStatus} projectAspectRatio={projectAspectRatio}
           onPreview={setPreviewId} onToast={onToast} onRefresh={onRefresh} />
+        <PlaybackRateControl shotId={shot.id} version={adoptedVersion}
+          qualificationVersion={shotQualificationVersion} onToast={onToast} onRefresh={onRefresh} />
       </div>
     </section>
   )

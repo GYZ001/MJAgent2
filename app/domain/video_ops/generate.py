@@ -472,13 +472,10 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
         plan = await generate_episode_plan(
             shot_row["episode_id"], conn=conn, deterministic_only=True,
         )
-        if (
-            body.get("reroll")
-            or body.get("prompt_override")
-        ):
+        if body.get("reroll") or body.get("prompt_override") or body.get("critique"):
             replan_reason = (
-                "prompt_override_redo"
-                if body.get("prompt_override")
+                "prompt_override_redo" if body.get("prompt_override")
+                else "critique_redo" if body.get("critique")
                 else "single_shot_reroll"
             )
             plan = create_local_replan_revision(
@@ -505,6 +502,7 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
             prompt_override=body.get("prompt_override"),
             extra_negative=body.get("extra_negative"),
             reroll=bool(body.get("reroll")),
+            critique=body.get("critique"),
             after_shot_id=after,
             dependency_snapshot=qualification,
             operation_idempotency_key=body.get("idempotency_key"),
@@ -524,6 +522,7 @@ async def generate_shot(shot_id: str, body: dict | None = None):
             "shot_id": shot_id,
             "prompt_override": body.get("prompt_override"),
             "reroll": bool(body.get("reroll")),
+            "critique": body.get("critique"),
             "qualification_version": body.get("qualification_version"),
             "idempotency_key": body.get("idempotency_key"),
             "request_id": body.get("request_id"),

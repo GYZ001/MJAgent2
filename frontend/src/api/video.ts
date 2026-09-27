@@ -193,18 +193,21 @@ export const api_video = {
     }),
   projectVideoCompletion: (projectId: string, body?: Record<string, unknown>) =>
     request("POST", `/projects/${projectId}/video-completion`, body || {}),
+  /** critique：带意见重拍的一次性追加通道（不改台词、不回写分镜，见
+   *  app/media_exec/enqueue_prompt.py::storyboard_pack_prompt_text）；一次最多 6 条，
+   *  后端只取前 6 条。此前的 withCritique 是从未被后端读取的死参数，本次替换掉。 */
   shotGenerate: (
     shotId: string,
     promptOverride?: string,
     reroll?: boolean,
-    withCritique?: boolean,
+    critique?: string[],
     qualificationVersion?: string,
     idempotencyKey?: string,
   ) =>
     request("POST", `/shots/${shotId}/generate`, {
       prompt_override: promptOverride,
       reroll,
-      with_critique: Boolean(withCritique),
+      critique,
       qualification_version: qualificationVersion,
       idempotency_key: idempotencyKey,
     }),
@@ -213,18 +216,23 @@ export const api_video = {
       "GET",
       `/episodes/${episodeId}/review-context`,
     ) as Promise<ReviewWallContext>,
-  /** 人工采纳某个已成功且过技术门禁的版本（POST /shots/{id}/adopt）；成片合成只用采纳版本。 */
+  /** 人工采纳某个已成功且过技术门禁的版本（POST /shots/{id}/adopt）；成片合成只用采纳版本。
+   *  playbackRate（0.5–2.0，默认 1.0）只影响成片合成时的播放速度、不重新生成、不消耗视频
+   *  额度（app/domain/video_ops/adopt.py::_adopt_version_core 全程不预留视频时长额度）；
+   *  对已是采纳版本的 version_id 重新调用本接口只改倍速也是允许的合法用法。 */
   shotAdoptVersion: (
     shotId: string,
     versionId: string,
     reason: string,
     qualificationVersion?: string,
     idempotencyKey?: string,
+    playbackRate?: number,
   ) =>
     request("POST", `/shots/${shotId}/adopt`, {
       version_id: versionId,
       reason,
       qualification_version: qualificationVersion,
       idempotency_key: idempotencyKey,
+      playback_rate: playbackRate,
     }) as Promise<{ adopted: string; reason: string }>,
 };

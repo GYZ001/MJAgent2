@@ -277,6 +277,7 @@ class VideoGenerateShotInput(StandardCommandInput):
     shot_id: str
     prompt_override: str | None = None
     reroll: bool = False
+    critique: list[str] | None = None  # 带意见重拍：追加在段落末尾，不改台词、不回写分镜（一次性生效）
     qualification_version: str | None = None
 
 

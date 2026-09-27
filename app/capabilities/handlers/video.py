@@ -269,6 +269,7 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
     body = {
         "prompt_override": args.prompt_override,
         "reroll": args.reroll,
+        "critique": args.critique,
         "qualification_version": args.qualification_version,
         "idempotency_key": args.idempotency_key,
         "request_id": args.request_id,
