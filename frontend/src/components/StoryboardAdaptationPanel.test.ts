@@ -155,6 +155,29 @@ describe('StoryboardAdaptationPanel：over_target', () => {
   })
 })
 
+describe('StoryboardAdaptationPanel：开篇/结尾钩子', () => {
+  it('status=warning 时展示未通过核验的具体问题', async () => {
+    vi.mocked(api.getStoryboardAdaptation).mockResolvedValue({
+      ...WITH_DROPS,
+      hooks: {
+        status: 'warning',
+        opening: { beat_id: 'b1', evidence_quote: '他冲进火场', problems: ['引用的节拍 b1 不是 importance=key'] },
+        ending: { beat_id: 'b9', evidence_quote: '门缓缓合上', problems: [] },
+      },
+    })
+    const view = await mount()
+    expect(textOf(view.root)).toContain('开篇/结尾钩子模型多次调整后仍未通过核验：引用的节拍 b1 不是 importance=key')
+    view.unmount()
+  })
+
+  it('status=ok 或老留档没有 hooks 字段时不展示任何钩子文案', async () => {
+    vi.mocked(api.getStoryboardAdaptation).mockResolvedValue(WITH_DROPS)
+    const view = await mount()
+    expect(textOf(view.root)).not.toContain('钩子')
+    view.unmount()
+  })
+})
+
 describe('StoryboardAdaptationPanel：加载失败', () => {
   it('接口失败时展示错误而不是空白折叠面板', async () => {
     vi.mocked(api.getStoryboardAdaptation).mockRejectedValue(new Error('网络错误'))

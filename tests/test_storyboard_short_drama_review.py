@@ -400,10 +400,12 @@ async def test_faithful_mode_calls_model_once_and_skips_review(monkeypatch):
 @pytest.mark.asyncio
 async def test_short_drama_without_drops_skips_review(monkeypatch):
     def _no_drop_draft():
-        from app.production.storyboard_short_drama_schemas import _AiShortDramaBeatSheetDraft
+        from app.production.storyboard_short_drama_schemas import _AiHookNomination, _AiShortDramaBeatSheetDraft
+        hook = _AiHookNomination(beat_id="B1", evidence_quote="x")
         return _AiShortDramaBeatSheetDraft(
             beat_sheet=[_AiShortDramaBeat(beat_id="B1", summary="x", segment_indexes=[1], importance="key")],
             segments=[{"segment_no": 1, "synopsis": "x", "source_segment_indexes": [1]}],
+            opening_hook=hook, ending_hook=hook,
         )
 
     calls = []

@@ -306,6 +306,28 @@ def test_summary_gracefully_degrades_when_old_record_lacks_new_fields() -> None:
     assert summary["dialogue_budget_chars"] is None
 
 
+def test_summary_carries_hooks_field_through_unchanged() -> None:
+    """2026-09-27 新增字段：只读透出留档里的 hooks，不重新计算——本模块只读，
+    不产出、不修改（见模块 docstring）。"""
+    conn = _conn("甲" * 300)
+    content = _adaptation_content(spans=[_span(start=100, end=300, chars=200)])
+    content["hooks"] = {
+        "status": "ok",
+        "opening": {"beat_id": "B1", "evidence_quote": "少年站在山顶", "problems": []},
+        "ending": {"beat_id": "B9", "evidence_quote": "门缓缓合上", "problems": []},
+    }
+    _write_adaptation(conn, content=content)
+    summary = storyboard_adaptation_summary(conn, "e")
+    assert summary["hooks"] == content["hooks"]
+
+
+def test_summary_hooks_degrades_to_none_when_old_record_lacks_it() -> None:
+    conn = _conn("甲" * 300)
+    _write_adaptation(conn, content=_adaptation_content(spans=[_span(start=100, end=300, chars=200)]))
+    summary = storyboard_adaptation_summary(conn, "e")
+    assert summary["hooks"] is None
+
+
 def test_summary_without_adaptation_still_returns_ledger_drops() -> None:
     """没有改编留档的老分集：recorded=false、mode=faithful、删减为空；台账若
     有仍照常返回弃置台词（把只写不读的台账接活）。"""

@@ -49,6 +49,17 @@ class _AiDroppedSourceSpan(BaseModel):
     beat_id: str = Field(min_length=1)
 
 
+class _AiHookNomination(BaseModel):
+    """开篇/结尾钩子提名（阶段一草稿字段，模型提名、代码核验见
+    ``app.production.storyboard_short_drama_hooks``）。不给默认值：整集必须
+    显式提名一个开篇钩子和一个结尾钩子，不允许模型漏填后被悄悄当成"没有
+    钩子"处理——同 ``importance`` 字段的立场（见下）。"""
+
+    beat_id: str = Field(min_length=1)
+    #: 逐字取自该节拍 segment_indexes 覆盖的原文本身，核验用 textmatch.condense。
+    evidence_quote: str = Field(min_length=1)
+
+
 class _AiShortDramaBeat(_AiBeat):
     #: key=推动主线/人物关系/关键设定/章末钩子，必须被某段的 beat_ids 引用；
     #: optional=可删的闲笔、重复、过场。不给默认值：每个节拍都必须显式分类，
@@ -81,6 +92,10 @@ class _AiShortDramaBeatSheetDraft(_AiBeatSheetDraft):
     #: 模型声明要整块删掉的非关键原文区间；忠实档没有这个字段（getattr 判断
     #: 「是不是短剧档草稿」时以此为准，见 storyboard_short_drama 模块）。
     dropped_source_spans: list[_AiDroppedSourceSpan] = Field(default_factory=list)
+    #: 开篇/结尾钩子提名（2026-09-27），核验见 storyboard_short_drama_hooks；
+    #: 忠实档没有这两个字段，同上用 getattr 判断。
+    opening_hook: _AiHookNomination
+    ending_hook: _AiHookNomination
 
 
 def verify_dropped_source_spans(

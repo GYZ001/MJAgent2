@@ -67,9 +67,13 @@ from app.production.storyboard_pack import (
     _segment_continuity_rules,
     _segment_source_block,
     StoryboardPackBudgetError,
+    _assemble_adaptation_summary,
     _strip_paratext_from_beat_draft,
     _validate_segment_draft,
     persist_storyboard_pack,
+)
+from app.production.storyboard_short_drama_schemas import (
+    _AiHookNomination, _AiShortDramaBeat, _AiShortDramaBeatSheetDraft,
 )
 from app.schemas import Bible, Shot, Storyboard, World
 from app.source_excerpt import SourceSegment, index_source_segments
@@ -233,6 +237,47 @@ def test_strip_paratext_from_beat_draft_noop_when_no_paratext():
     notes = _strip_paratext_from_beat_draft(draft, set())
     assert notes == []
     assert draft.beat_sheet[0].segment_indexes == [1]
+
+
+# ---------------------------------------------------------------------------
+# _assemble_adaptation_summary：generate_storyboard_pack 抽出的留档组装，
+# 2026-09-27 新增 hooks 字段（见 storyboard_short_drama_hooks.hook_summary）。
+# ---------------------------------------------------------------------------
+
+def test_assemble_adaptation_summary_faithful_mode_has_no_hooks_key_value():
+    draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[1])],
+        segments=[_AiSegmentPlan(segment_no=1, synopsis="x", source_segment_indexes=[1])],
+    )
+    result = _assemble_adaptation_summary(
+        adaptation_mode="faithful", planned_segment_count=1, beat_draft=draft, dialogue_quotes=[],
+        projected_segment_count=None, drop_review=None, segments=[SourceSegment(segment_id="s1", text="少年站在山顶。", start_offset=0, end_offset=7)],
+    )
+    assert result["adaptation_mode"] == "faithful"
+    assert result["drop_review"] is None
+    assert result["hooks"] is None
+
+
+def test_assemble_adaptation_summary_short_drama_carries_hooks_from_final_draft():
+    """hooks 按最终持久化的 beat_draft 事后重算，与 storyboard_short_drama_
+    hooks.hook_summary 直接调用的结果一致（同一份数据不应算出两套答案）。"""
+    hook = _AiHookNomination(beat_id="B1", evidence_quote="少年站在山顶")
+    draft = _AiShortDramaBeatSheetDraft(
+        beat_sheet=[_AiShortDramaBeat(beat_id="B1", summary="x", segment_indexes=[1], importance="key")],
+        segments=[_AiSegmentPlan(segment_no=1, synopsis="x", source_segment_indexes=[1], beat_ids=["B1"])],
+        opening_hook=hook, ending_hook=hook,
+    )
+    segments = [SourceSegment(segment_id="s1", text="少年站在山顶。", start_offset=0, end_offset=7)]
+    result = _assemble_adaptation_summary(
+        adaptation_mode="short_drama", planned_segment_count=1, beat_draft=draft, dialogue_quotes=[],
+        projected_segment_count=1, drop_review=None, segments=segments,
+    )
+    assert result["hooks"] == {
+        "status": "ok",
+        "opening": {"beat_id": "B1", "evidence_quote": "少年站在山顶", "problems": []},
+        "ending": {"beat_id": "B1", "evidence_quote": "少年站在山顶", "problems": []},
+    }
+    assert result["segment_count"] == len(draft.segments)
 
 
 # ---------------------------------------------------------------------------

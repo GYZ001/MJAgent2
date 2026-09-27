@@ -94,6 +94,20 @@ export interface StoryboardAdaptationDropReview {
   second_pass: boolean;
 }
 
+/** 开篇/结尾钩子（2026-09-27）单条提名的核验结果——problems 非空即未通过
+ *  确定性核验；见 app/production/storyboard_short_drama_hooks.py 模块 docstring。 */
+export interface StoryboardAdaptationHookNomination {
+  beat_id: string;
+  evidence_quote: string;
+  problems: string[];
+}
+
+export interface StoryboardAdaptationHooks {
+  status: "ok" | "warning";
+  opening: StoryboardAdaptationHookNomination;
+  ending: StoryboardAdaptationHookNomination;
+}
+
 export interface StoryboardAdaptationSummary {
   recorded: boolean;
   adaptation_mode: string;
@@ -112,6 +126,9 @@ export interface StoryboardAdaptationSummary {
   dialogue_budget_chars?: number | null;
   // 2026-09-24 删减复核：同样是老留档没有的字段，降级为 undefined/null。
   drop_review?: StoryboardAdaptationDropReview | null;
+  // 2026-09-27 开篇/结尾钩子：老留档没有这个字段，降级为 undefined/null，
+  // 前端据此不渲染钩子相关文案（同 drop_review 既有模式）。
+  hooks?: StoryboardAdaptationHooks | null;
 }
 
 /** 分镜台「本集删减」面板的只读数据源：GET /episodes/{id}/storyboard-adaptation。

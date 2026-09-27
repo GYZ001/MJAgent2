@@ -35,7 +35,7 @@ from typing import Any
 from app import config
 from app.harness import model_gateway
 from app.production.storyboard_context_segments import (
-    context_only_segment_errors, context_segment_indexes, context_segment_rule,
+    context_only_segment_errors, context_segment_indexes, context_segment_rule, manifest_brief_for_prompt,
 )
 from app.production.storyboard_dialogue_ledger import (
     DialogueQuote,
@@ -80,6 +80,7 @@ from app.production.storyboard_short_drama_schemas import (
 )
 from app.production import storyboard_short_drama as _short_drama
 from app.production import storyboard_short_drama_budget as _short_drama_budget
+from app.production import storyboard_short_drama_hooks as _short_drama_hooks
 from app.production.storyboard_short_drama_beat_guard import restore_dropped_lines_with_invalid_beat
 
 
@@ -162,42 +163,6 @@ def _validate_beat_sheet_draft(
     errors.extend(kept_line_unit_binding_errors(draft.kept_lines, dialogue_quotes, draft.segments, source_segments))
     errors.extend(palette_scene_consistency_errors(draft.segments))
     return errors
-
-
-def _manifest_brief_for_prompt(payload: dict[str, Any]) -> dict[str, Any]:
-    """Compact asset_manifest summary handed to the model as light context.
-
-    Only names/ids/segment_indexes -- not portrait binaries or provenance --
-    so phase 1 (which only needs to recognize named entities while drafting
-    the beat sheet) doesn't pay for the full manifest payload twice.
-    """
-    manifest = payload.get("asset_manifest") or {}
-    return {
-        "characters": [
-            {
-                "identity_id": c.get("identity_id"),
-                "display_name": c.get("display_name"),
-                "aliases": c.get("aliases") or [],
-                "segment_indexes": c.get("segment_indexes") or [],
-            }
-            for c in (manifest.get("characters") or [])
-        ],
-        "scenes": [
-            {
-                "scene_id": s.get("scene_id"),
-                "display_name": s.get("display_name"),
-                "segment_indexes": s.get("segment_indexes") or [],
-            }
-            for s in (manifest.get("scenes") or [])
-        ],
-        "props": [
-            {
-                "label": p.get("label"),
-                "segment_indexes": p.get("segment_indexes") or [],
-            }
-            for p in (manifest.get("props") or [])
-        ],
-    }
 
 
 def _paratext_segment_indexes(payload: dict[str, Any]) -> set[int]:
@@ -307,7 +272,7 @@ def _beat_sheet_rules(
     rules.extend(rule for rule in extra if rule is not None)
     if adaptation_mode == "short_drama":
         rules = _short_drama.adjust_faithful_rules_for_short_drama(rules)
-        rules.extend(_short_drama.short_drama_beat_sheet_rules())
+        rules.extend([*_short_drama.short_drama_beat_sheet_rules(), *_short_drama_hooks.short_drama_hook_rules()])
     return rules
 
 
@@ -374,7 +339,7 @@ def _beat_sheet_task_payload(
         ),
         "rules": rules,
         "episode_no": episode_no,
-        "known_assets": _manifest_brief_for_prompt(payload),
+        "known_assets": manifest_brief_for_prompt(payload),
         "source_text_by_segment": _source_block_for_prompt(segments, paratext_indexes),
         **_dialogue_targets_payload(dialogue_quotes),
         **extra,
@@ -423,6 +388,7 @@ async def _generate_beat_sheet(
     budget_cap = _short_drama_budget.DialogueBudgetSoftCap(
         adaptation_mode=adaptation_mode, retry_limit=_BEAT_SHEET_SEMANTIC_RETRY_LIMIT, quotes=dialogue_quotes,
     )
+    hook_check = _short_drama_hooks.HookBeatSoftCheck(adaptation_mode=adaptation_mode, retry_limit=_BEAT_SHEET_SEMANTIC_RETRY_LIMIT, source_segments=segments)
     return await model_gateway.chat_structured(
         [
             {"role": "system", "content": "你是短剧分镜师。只输出符合 Schema 的一个 JSON 对象，不输出 Markdown或解释。"},
@@ -436,6 +402,7 @@ async def _generate_beat_sheet(
             ),
             *soft_cap.errors(value),
             *budget_cap.errors(value),
+            *hook_check.errors(value),
         ],
         normalize_payload=_normalize_beat_sheet_payload,
         operation_id=f"storyboard_pack_beat_sheet_{episode_id}_{fingerprint}",

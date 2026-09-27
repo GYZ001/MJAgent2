@@ -29,8 +29,16 @@ import pytest
 from app.harness import model_gateway
 from app.production.storyboard_dialogue_ledger import DialogueQuote
 from app.production.storyboard_short_drama_review import generate_beat_sheet_with_drop_review
-from app.production.storyboard_short_drama_schemas import _AiShortDramaBeat
+from app.production.storyboard_short_drama_schemas import _AiHookNomination, _AiShortDramaBeat
 from tests.test_storyboard_short_drama import _draft, _range_plan, _sources
+
+#: 本文件的第二遍候选草稿都会真的走 HookBeatSoftCheck（见 _make_dispatcher
+#: 对 validate 的直接调用），必须给出对各自 beat_sheet/segments/原文都成立
+#: 的钩子提名，不能沿用 tests.test_storyboard_short_drama._PLACEHOLDER_HOOK
+#: （那个占位值只保证 schema 合法，不保证语义核验通过）。B1 覆盖两个用例的
+#: 全部原文段，evidence_quote 分别取自各自原文段一段落首/尾，逐字子串。
+_HOOK_B1_OPEN = _AiHookNomination(beat_id="B1", evidence_quote="老王早起去砍柴")
+_HOOK_B1_END = _AiHookNomination(beat_id="B1", evidence_quote="远处飘来阵阵炊烟")
 
 
 def _payload():
@@ -83,6 +91,7 @@ def _partial_case_draft():
             "source_segment_index": 1, "from_unit": 3, "to_unit": 4,
             "reason": "次要支线，压缩篇幅", "beat_id": "B2",
         }],
+        opening_hook=_HOOK_B1_OPEN, ending_hook=_HOOK_B1_END,
     )
 
 
@@ -137,6 +146,7 @@ async def test_second_pass_task_payload_carries_must_keep_and_candidates(monkeyp
             [plan1, plan2], beat_sheet=_beat_sheet(),
             dropped_source_spans=[{"source_segment_index": 1, "from_unit": 3, "to_unit": 4, "reason": "次要支线", "beat_id": "B2"}],
             dropped_lines=[{"quote_id": "Q9", "reason": "寒暄，画面已交代", "beat_id": "B2"}],
+            opening_hook=_HOOK_B1_OPEN, ending_hook=_HOOK_B1_END,
         )
 
     first_pass_draft = _first_pass_with_candidate()
@@ -198,6 +208,10 @@ async def test_second_pass_ignores_disallowed_new_line_drop_keeps_candidate_drop
         {"item_id": "line:Q2", "must_keep": False, "evidence_quote": ""},
     ]
 
+    # 本用例只有一段，首段=末段，B1（key，覆盖 segment_indexes=[1]）同时满足
+    # 开篇/结尾钩子的引用要求；evidence_quote 取自唯一原文段自身的逐字子串。
+    hook = _AiHookNomination(beat_id="B1", evidence_quote="句一")
+
     def _second_pass_candidate():
         return _draft(
             [_base_plan()], beat_sheet=beat_sheet,
@@ -206,6 +220,7 @@ async def test_second_pass_ignores_disallowed_new_line_drop_keeps_candidate_drop
                 {"quote_id": "Q2", "reason": "与主线无关的寒暄", "beat_id": "B2"},
                 {"quote_id": "Q3", "reason": "模型这次新弃置的，从未送审", "beat_id": "B2"},
             ],
+            opening_hook=hook, ending_hook=hook,
         )
 
     calls, dispatch = _make_dispatcher(first_pass_draft, review_items, _second_pass_candidate)
@@ -270,9 +285,17 @@ async def test_second_pass_payload_unit_granularity_two_of_ten_must_keep(monkeyp
     ]
 
     def _compliant_second_pass():
-        kept_plan = _range_plan(1, 1, 1, 10, beat_ids=["B2"])
+        # B1（key，覆盖 segment_indexes=[1,2]）必须同时被首段与末段引用才能
+        # 通过开篇/结尾钩子核验——kept_plan 原本只挂 B2（optional），这里补上
+        # B1（一段声明多个 beat_ids 是既有合法形状，不影响本用例其余断言）。
+        kept_plan = _range_plan(1, 1, 1, 10, beat_ids=["B1", "B2"])
         anchor_plan = _range_plan(2, 2, 1, 1, beat_ids=["B1"])
-        return _draft([kept_plan, anchor_plan], beat_sheet=_beat_sheet_ten_units())
+        opening_hook = _AiHookNomination(beat_id="B1", evidence_quote="这是可以删掉的第1句闲笔内容")
+        ending_hook = _AiHookNomination(beat_id="B1", evidence_quote="句尾锚点")
+        return _draft(
+            [kept_plan, anchor_plan], beat_sheet=_beat_sheet_ten_units(),
+            opening_hook=opening_hook, ending_hook=ending_hook,
+        )
 
     calls, dispatch = _make_dispatcher(first_pass_draft, review_items, _compliant_second_pass)
     monkeypatch.setattr(model_gateway, "chat_structured", dispatch)

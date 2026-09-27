@@ -113,6 +113,7 @@ from app.production.storyboard_context_segments import context_segment_indexes
 from app.production.storyboard_dialogue_ledger import DialogueQuote, _AiKeptLine
 from app.production import storyboard_short_drama as _short_drama
 from app.production import storyboard_short_drama_budget as _short_drama_budget
+from app.production import storyboard_short_drama_hooks as _short_drama_hooks
 from app.production.storyboard_short_drama_beat_guard import _find_covering_segment_no
 from app.production.storyboard_repair_context import storyboard_repair_context
 from app.production.storyboard_segment_ranges import quote_unit_index
@@ -407,6 +408,7 @@ async def _generate_second_pass(
     budget_cap = _short_drama_budget.DialogueBudgetSoftCap(
         adaptation_mode=adaptation_mode, retry_limit=_BEAT_SHEET_SEMANTIC_RETRY_LIMIT, quotes=dialogue_quotes,
     )
+    hook_check = _short_drama_hooks.HookBeatSoftCheck(adaptation_mode=adaptation_mode, retry_limit=_BEAT_SHEET_SEMANTIC_RETRY_LIMIT, source_segments=segments)
     allowed_quote_ids, allowed_span_units = _allowed_sets(candidates)
 
     def _validate(value: Any) -> list[str]:
@@ -418,7 +420,7 @@ async def _generate_second_pass(
                 value, source_segments=segments, dialogue_quotes=dialogue_quotes,
                 context_indexes=context_indexes, paratext_indexes=paratext_indexes, adaptation_mode=adaptation_mode,
             ),
-            *soft_cap.errors(value), *budget_cap.errors(value),
+            *soft_cap.errors(value), *budget_cap.errors(value), *hook_check.errors(value),
         ]
 
     draft = await model_gateway.chat_structured(

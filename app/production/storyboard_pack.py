@@ -52,6 +52,7 @@ from app.db import new_id
 from app.harness import model_gateway
 from app.production import storyboard_short_drama
 from app.production import storyboard_short_drama_budget
+from app.production import storyboard_short_drama_hooks
 from app.project_settings import resolve_adaptation_mode
 from app.production.storyboard_capacity_normalize import normalize_and_assert_capacity
 from app.production.storyboard_identity_contract import canonical_segment_identities, visible_character_ids
@@ -92,7 +93,7 @@ from app.production.storyboard_dialogue_extract import extract_dialogue_targets
 from app.production.storyboard_dialogue_attribution import (dialogue_speaker_errors, manifest_name_to_identity,
                                                              repair_draft_tail)
 from app.production.storyboard_dialogue_ledger import (
-    dialogue_ledger_summary,
+    DialogueQuote, dialogue_ledger_summary,
     required_dialogue_for_segments,
     required_dialogue_missing_errors,
     required_dialogue_rule,
@@ -1284,8 +1285,8 @@ def _manifest_speaker_names(payload: dict[str, Any]) -> list[str]:
     """本集人物谱正名 + 别名，供 storyboard_dialogue_extract 判定"说话人行"用。
 
     取自 ``payload["asset_manifest"]["characters"][].display_name``/``aliases``
-    ——与 ``_manifest_brief_for_prompt``（storyboard_beat_sheet.py）读的是同一
-    份数据，取值域来自映射台已经解析好的人物谱，不新造一套判定逻辑。
+    ——与 ``manifest_brief_for_prompt``（storyboard_context_segments.py）读的
+    是同一份数据，取值域来自映射台已经解析好的人物谱，不新造一套判定逻辑。
     """
     names: list[str] = ["旁白"]
     names.extend(str(e["label"]) for e in (payload.get("asset_manifest") or {}).get("functional_extras") or [] if e.get("label"))
@@ -1428,17 +1429,23 @@ async def generate_storyboard_pack(
         dialogue_ledger=dialogue_ledger_summary(
             dialogue_quotes, beat_draft.kept_lines, beat_draft.dropped_lines, capacity_normalization,
         ),
-        adaptation={
-            **storyboard_short_drama.adaptation_summary(
-                adaptation_mode=adaptation_mode, planned_segment_count=planned_segment_count,
-                segment_count=len(pack_segments), dropped_spans=getattr(beat_draft, "dropped_source_spans", None) or [],
-                dropped_quote_ids=storyboard_short_drama.dropped_line_quote_ids(beat_draft),
-                kept_dialogue_chars=storyboard_short_drama_budget.kept_dialogue_chars(beat_draft.kept_lines, dialogue_quotes),
-                projected_segment_count=projected_segment_count,
-            ),
-            "drop_review": drop_review,
-        },
+        adaptation=_assemble_adaptation_summary(
+            adaptation_mode=adaptation_mode, planned_segment_count=planned_segment_count, beat_draft=beat_draft,
+            dialogue_quotes=dialogue_quotes, projected_segment_count=projected_segment_count, drop_review=drop_review, segments=segments,
+        ),
     )
+
+
+def _assemble_adaptation_summary(
+    *, adaptation_mode: str, planned_segment_count: int, beat_draft: Any, dialogue_quotes: list[DialogueQuote],
+    projected_segment_count: int | None, drop_review: Any, segments: list[SourceSegment],
+) -> dict[str, Any]:
+    """adaptation 留档字典组装，从 generate_storyboard_pack 抽出腾 function_lines（已顶 baseline 153）；hooks 见 storyboard_short_drama_hooks.hook_summary（按最终 beat_draft 事后重算，忠实档恒 None）。"""
+    return {**storyboard_short_drama.adaptation_summary(
+        adaptation_mode=adaptation_mode, planned_segment_count=planned_segment_count, segment_count=len(beat_draft.segments),
+        dropped_spans=getattr(beat_draft, "dropped_source_spans", None) or [], dropped_quote_ids=storyboard_short_drama.dropped_line_quote_ids(beat_draft),
+        kept_dialogue_chars=storyboard_short_drama_budget.kept_dialogue_chars(beat_draft.kept_lines, dialogue_quotes), projected_segment_count=projected_segment_count,
+    ), "drop_review": drop_review, "hooks": storyboard_short_drama_hooks.hook_summary(beat_draft, segments, adaptation_mode=adaptation_mode)}
 
 
 def _resource_identity_display_names(payload: dict[str, Any], identity_ids: list[str]) -> list[str]:

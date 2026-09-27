@@ -1,4 +1,4 @@
-import type { StoryboardAdaptationDropReview, StoryboardAdaptationSummary } from '../api'
+import type { StoryboardAdaptationDropReview, StoryboardAdaptationHooks, StoryboardAdaptationSummary } from '../api'
 
 /** 每段固定 15 秒（2.4.0 起分镜台契约），约合时长按段数直接乘——不是精确时长，
  *  只用于给用户一个数量级参照，与目标时长对比。 */
@@ -65,4 +65,15 @@ export function dropReviewText(dropReview: StoryboardAdaptationDropReview | null
     return `删减经复核：恢复了 ${dropReview.must_keep.length} 处关键内容（${excerpts}）`
   }
   return ''
+}
+
+/** 开篇/结尾钩子（2026-09-27）如实说明：status="warning" 时列出未通过的
+ *  具体问题（模型多次调整后仍不满足，代码放行但留痕，不是静默通过）；
+ *  status="ok"、或老留档没有这个字段（hooks 为 null/undefined）时不渲染
+ *  这一行——没有可说的问题时不硬造一句话，同 dropReviewText 既有模式。 */
+export function hooksWarningText(hooks: StoryboardAdaptationHooks | null | undefined): string {
+  if (!hooks || hooks.status !== 'warning') return ''
+  const problems = [...hooks.opening.problems, ...hooks.ending.problems]
+  if (problems.length === 0) return ''
+  return `开篇/结尾钩子模型多次调整后仍未通过核验：${problems.join('；')}`
 }

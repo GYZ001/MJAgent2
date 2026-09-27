@@ -40,6 +40,44 @@ def context_segment_rule(context_indexes: set[int]) -> str | None:
     )
 
 
+def manifest_brief_for_prompt(payload: dict[str, Any]) -> dict[str, Any]:
+    """Compact asset_manifest summary handed to the model as light context.
+
+    Only names/ids/segment_indexes -- not portrait binaries or provenance --
+    so phase 1 (which only needs to recognize named entities while drafting
+    the beat sheet) doesn't pay for the full manifest payload twice. 从
+    ``storyboard_beat_sheet.py`` 搬来（2026-09-27，给该文件腾行数余量——它
+    在棘轮基线上零余量，见该模块 docstring），纯移动不改行为。
+    """
+    manifest = payload.get("asset_manifest") or {}
+    return {
+        "characters": [
+            {
+                "identity_id": c.get("identity_id"),
+                "display_name": c.get("display_name"),
+                "aliases": c.get("aliases") or [],
+                "segment_indexes": c.get("segment_indexes") or [],
+            }
+            for c in (manifest.get("characters") or [])
+        ],
+        "scenes": [
+            {
+                "scene_id": s.get("scene_id"),
+                "display_name": s.get("display_name"),
+                "segment_indexes": s.get("segment_indexes") or [],
+            }
+            for s in (manifest.get("scenes") or [])
+        ],
+        "props": [
+            {
+                "label": p.get("label"),
+                "segment_indexes": p.get("segment_indexes") or [],
+            }
+            for p in (manifest.get("props") or [])
+        ],
+    }
+
+
 def context_only_segment_errors(
     segments: list[Any], context_indexes: set[int], paratext_indexes: set[int],
 ) -> list[str]:

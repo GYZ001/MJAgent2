@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { adaptationModeLabel, adaptationPanelTitle, dropReviewText, durationComparisonText, overTargetText } from './storyboardAdaptation'
+import {
+  adaptationModeLabel, adaptationPanelTitle, dropReviewText, durationComparisonText, hooksWarningText, overTargetText,
+} from './storyboardAdaptation'
 
 describe('adaptationModeLabel', () => {
   it('recorded=false 时如实说明是旧分镜，不冒充忠实原著', () => {
@@ -107,5 +109,30 @@ describe('dropReviewText', () => {
   it('复核跳过（无删减/忠实档）时不渲染', () => {
     const text = dropReviewText({ status: 'skipped', reviewed_count: 0, must_keep: [], second_pass: false })
     expect(text).toBe('')
+  })
+})
+
+describe('hooksWarningText', () => {
+  it('没有 hooks 字段（老留档）时返回空串，不渲染任何钩子文案', () => {
+    expect(hooksWarningText(undefined)).toBe('')
+    expect(hooksWarningText(null)).toBe('')
+  })
+
+  it('status=ok 时不渲染（钩子核验通过，没有可说的问题）', () => {
+    const text = hooksWarningText({
+      status: 'ok',
+      opening: { beat_id: 'b1', evidence_quote: '他冲进火场', problems: [] },
+      ending: { beat_id: 'b9', evidence_quote: '门缓缓合上', problems: [] },
+    })
+    expect(text).toBe('')
+  })
+
+  it('status=warning 时列出开篇/结尾两侧的具体问题', () => {
+    const text = hooksWarningText({
+      status: 'warning',
+      opening: { beat_id: 'b1', evidence_quote: '他冲进火场', problems: ['引用的节拍 b1 不是 importance=key'] },
+      ending: { beat_id: 'b9', evidence_quote: '门缓缓合上', problems: [] },
+    })
+    expect(text).toBe('开篇/结尾钩子模型多次调整后仍未通过核验：引用的节拍 b1 不是 importance=key')
   })
 })

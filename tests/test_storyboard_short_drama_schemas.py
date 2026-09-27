@@ -23,6 +23,7 @@ from app.production.storyboard_beat_sheet import _AiBeat, _AiBeatSheetDraft, _ge
 from app.production.storyboard_dialogue_ledger import DialogueQuote, _AiDroppedLine
 from app.production.storyboard_short_drama_schemas import (
     _AiDroppedSourceSpan,
+    _AiHookNomination,
     _AiShortDramaBeat,
     _AiShortDramaBeatSheetDraft,
     _AiShortDramaDroppedLine,
@@ -83,9 +84,11 @@ async def test_short_drama_operation_id_fingerprint_differs_from_faithful(monkey
 
     async def _stub(*args, **kwargs):
         captured["operation_id"] = kwargs["operation_id"]
+        hook = _AiHookNomination(beat_id="B1", evidence_quote="x")
         return _AiShortDramaBeatSheetDraft(
             beat_sheet=[_AiShortDramaBeat(beat_id="B1", summary="x", segment_indexes=[1], importance="key")],
             segments=[{"segment_no": 1, "synopsis": "x", "source_segment_indexes": [1]}],
+            opening_hook=hook, ending_hook=hook,
         )
 
     monkeypatch.setattr(model_gateway, "chat_structured", _stub)
@@ -132,6 +135,28 @@ def test_short_drama_dropped_line_requires_beat_id():
         _AiShortDramaDroppedLine(quote_id="Q1", reason="x")  # 缺 beat_id 必须拒绝
     assert _AiShortDramaDroppedLine(quote_id="Q1", reason="x", beat_id="B1").beat_id == "B1"
     assert _AiShortDramaBeatSheetDraft.model_fields["dropped_lines"].annotation == list[_AiShortDramaDroppedLine]
+
+
+def test_short_drama_draft_requires_opening_and_ending_hook():
+    """2026-09-27：opening_hook/ending_hook 不给默认值，模型必须显式提名，
+    不允许漏填后被悄悄当成「没有钩子」处理（同 importance 字段的立场）。"""
+    schema = _AiShortDramaBeatSheetDraft.model_json_schema()
+    assert "opening_hook" in schema.get("required", [])
+    assert "ending_hook" in schema.get("required", [])
+    hook = _AiHookNomination(beat_id="B1", evidence_quote="x")
+    with pytest.raises(Exception):
+        _AiShortDramaBeatSheetDraft(
+            beat_sheet=[_AiShortDramaBeat(beat_id="B1", summary="x", segment_indexes=[1], importance="key")],
+            segments=[{"segment_no": 1, "synopsis": "x", "source_segment_indexes": [1]}],
+            ending_hook=hook,  # 缺 opening_hook 必须拒绝
+        )
+
+
+def test_hook_nomination_requires_nonempty_beat_id_and_evidence_quote():
+    with pytest.raises(Exception):
+        _AiHookNomination(beat_id="", evidence_quote="x")
+    with pytest.raises(Exception):
+        _AiHookNomination(beat_id="B1", evidence_quote="")
 
 
 def test_dropped_source_span_reason_is_required():

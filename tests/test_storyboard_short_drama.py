@@ -24,7 +24,9 @@ from app.production.storyboard_short_drama import (
     reconcile_dropped_units,
     required_beat_protected_units,
 )
-from app.production.storyboard_short_drama_schemas import _AiShortDramaBeat, _AiShortDramaBeatSheetDraft
+from app.production.storyboard_short_drama_schemas import (
+    _AiHookNomination, _AiShortDramaBeat, _AiShortDramaBeatSheetDraft,
+)
 from app.production.storyboard_segment_ranges import split_source_units
 from app.source_excerpt import SourceSegment
 
@@ -33,7 +35,16 @@ def _sources(*texts: str) -> list[SourceSegment]:
     return [SourceSegment(segment_id=f"s{i}", text=t, start_offset=0, end_offset=len(t)) for i, t in enumerate(texts, start=1)]
 
 
-def _draft(segments, *, dropped_source_spans=(), kept_lines=(), dropped_lines=(), beat_sheet=None):
+#: 绝大多数用例不关心开篇/结尾钩子（那两个字段的核验见
+#: tests/test_storyboard_short_drama_hooks.py），这里给一个 schema 合法但
+#: 不必语义成立的占位提名，让 _draft() 的调用方不用逐个补这两个必填字段。
+_PLACEHOLDER_HOOK = _AiHookNomination(beat_id="B1", evidence_quote="x")
+
+
+def _draft(
+    segments, *, dropped_source_spans=(), kept_lines=(), dropped_lines=(), beat_sheet=None,
+    opening_hook=_PLACEHOLDER_HOOK, ending_hook=_PLACEHOLDER_HOOK,
+):
     if beat_sheet is None:
         # optional（非 key）：绝大多数用例的 dropped_source_spans 都以 B1 为
         # beat_id，区间 beat 归属核验（见 storyboard_short_drama_schemas.
@@ -42,7 +53,7 @@ def _draft(segments, *, dropped_source_spans=(), kept_lines=(), dropped_lines=()
         beat_sheet = [_AiShortDramaBeat(beat_id="B1", summary="x", segment_indexes=[1], importance="optional")]
     return _AiShortDramaBeatSheetDraft(
         beat_sheet=beat_sheet, segments=segments, kept_lines=list(kept_lines), dropped_lines=list(dropped_lines),
-        dropped_source_spans=list(dropped_source_spans),
+        dropped_source_spans=list(dropped_source_spans), opening_hook=opening_hook, ending_hook=ending_hook,
     )
 
 
