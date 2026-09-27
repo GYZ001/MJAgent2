@@ -1860,6 +1860,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_versions_active_video_shot
 CREATE INDEX IF NOT EXISTS idx_provider_calls_operation ON provider_calls(operation_id, attempt_no);
 CREATE INDEX IF NOT EXISTS idx_provider_calls_project ON provider_calls(project_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_provider_calls_ts ON provider_calls(ts, id);
+CREATE INDEX IF NOT EXISTS idx_provider_calls_supersedes ON provider_calls(supersedes_call_id); CREATE INDEX IF NOT EXISTS idx_provider_calls_superseded_by ON provider_calls(superseded_by_call_id);  -- 自引用外键子列：无索引时清理过期调用每删一行全表扫两遍（2026-09-27 B 启动卡 5 分钟）
 CREATE INDEX IF NOT EXISTS idx_monitor_audit_object ON monitor_audit(object_type, object_id, ts);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_chapters_project_idx ON chapters(project_id, idx);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_episodes_project_no ON episodes(project_id, episode_no);
