@@ -27,6 +27,8 @@ beat_sheet``/``storyboard_short_drama`` 里换算，而这两个模块都不能 
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from .storyboard_dialogue_ledger import _AiDroppedLine, _AiKeptLine
@@ -55,6 +57,43 @@ class _AiBeat(BaseModel):
     segment_indexes: list[int] = Field(min_length=1)
 
 
+class _AiEmotionalTurn(BaseModel):
+    """人物情绪转折/重大决定节拍提名（P0-A，2026-09-27）。忠实档/短剧档共用
+    （挂在基类 ``_AiBeatSheetDraft``）：核验见
+    ``app.production.storyboard_beat_causality``。
+
+    ``stimulus_beat_id``/``stimulus_evidence_quote``/``stimulus_missing_
+    reason`` 三个字段构成一个平铺的"恰好二选一"约束，不用嵌套判别联合
+    （代码层核验即可，见 ``storyboard_beat_causality._turn_problems``）：
+    - 原文写清楚了促使这次决定/转折发生的具体刺激时：``stimulus_beat_id``
+      填刺激所在的节拍（可以与转折是同一个节拍）、``stimulus_evidence_
+      quote`` 逐字取自该节拍覆盖的原文，``stimulus_missing_reason`` 留空
+      （``""``）；
+    - 确实找不到原文写出的诱因时：``stimulus_beat_id``/``stimulus_
+      evidence_quote`` 都留空（``""``），``stimulus_missing_reason`` 如实
+      说明原文缺了什么——不为了凑因果链编造原文没写的刺激。
+    两个默认值都是 ``""`` 而不是 ``None``：空串在两种情形下语义相同（"没有
+    值"），且与本类其余字段、``_AiHookNomination`` 等既有 schema 的空值口径
+    一致，不必再多判断一种 ``None``。
+    """
+
+    beat_id: str = Field(min_length=1)
+    turn_kind: Literal["decisive_action", "emotional_reaction"]
+    turn_evidence_quote: str = Field(min_length=1)  # 逐字取自 beat_id 覆盖原文
+    stimulus_beat_id: str = ""
+    stimulus_evidence_quote: str = ""
+    stimulus_missing_reason: str = ""
+
+
+class _AiForeshadowingBeat(BaseModel):
+    """伏笔/悬念/类型信号节拍提名（P0-C，2026-09-27）。忠实档/短剧档共用。
+    核验见 ``app.production.storyboard_beat_foreshadowing``。"""
+
+    beat_id: str = Field(min_length=1)
+    signal_kind: Literal["foreshadowing", "genre_signal"]
+    evidence_quote: str = Field(min_length=1)
+
+
 class _AiBeatSheetDraft(BaseModel):
     beat_sheet: list[_AiBeat] = Field(min_length=1)
     segments: list[_AiSegmentPlan] = Field(min_length=1)
@@ -62,6 +101,10 @@ class _AiBeatSheetDraft(BaseModel):
     #: _validate_beat_sheet_draft 的 dialogue_ledger_errors 检查兜底。
     kept_lines: list[_AiKeptLine] = Field(default_factory=list)
     dropped_lines: list[_AiDroppedLine] = Field(default_factory=list)
+    #: 2026-09-27（P0-A/C）：数量因章而异，不强设最小值——原文里有几个就提名
+    #: 几个，也可能确实一个都没有（见各自模块的三态 summary）。
+    emotional_turns: list[_AiEmotionalTurn] = Field(default_factory=list)
+    foreshadowing_beats: list[_AiForeshadowingBeat] = Field(default_factory=list)
 
 
 #: 固定 15 秒/段，不引入分档（用户 09-03 已拍板保留原设计）；短剧档段数目标由

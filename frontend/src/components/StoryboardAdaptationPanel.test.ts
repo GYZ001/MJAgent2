@@ -178,6 +178,57 @@ describe('StoryboardAdaptationPanel：开篇/结尾钩子', () => {
   })
 })
 
+describe('StoryboardAdaptationPanel：情绪因果/伏笔', () => {
+  it('causality status=warning 时标题追加"需核查"计数，正文给出汇总提示', async () => {
+    vi.mocked(api.getStoryboardAdaptation).mockResolvedValue({
+      ...WITH_DROPS,
+      causality: { status: 'warning', problem_count: 2 },
+    })
+    const view = await mount()
+    expect(textOf(view.root.findByType('summary'))).toBe('本集删减 · 1 处原文 / 2 句台词 · 需核查 2 处')
+    expect(textOf(view.root)).toContain('情绪因果核验模型多次调整后仍有 2 处未通过，请人工核查（具体见对应分镜段的能力降级提示）')
+    view.unmount()
+  })
+
+  it('causality status=no_turns_nominated 与 foreshadowing status=warning 叠加计入标题', async () => {
+    vi.mocked(api.getStoryboardAdaptation).mockResolvedValue({
+      ...WITH_DROPS,
+      causality: { status: 'no_turns_nominated', problem_count: 0 },
+      foreshadowing: { status: 'warning', problem_count: 1 },
+    })
+    const view = await mount()
+    expect(textOf(view.root.findByType('summary'))).toBe('本集删减 · 1 处原文 / 2 句台词 · 需核查 2 处')
+    const text = textOf(view.root)
+    expect(text).toContain('本集没有识别到任何情绪转折/决定性动作节拍——如果原文确实有，请人工核查是否被遗漏')
+    expect(text).toContain('伏笔核验模型多次调整后仍有 1 处未通过，请人工核查（具体见对应分镜段的能力降级提示）')
+    view.unmount()
+  })
+
+  it('两者都 status=ok 或老留档没有字段时标题不带"需核查"，正文不渲染汇总提示', async () => {
+    vi.mocked(api.getStoryboardAdaptation).mockResolvedValue({
+      ...WITH_DROPS,
+      causality: { status: 'ok', problem_count: 0 },
+      foreshadowing: { status: 'ok', problem_count: 0 },
+    })
+    const view = await mount()
+    expect(textOf(view.root.findByType('summary'))).toBe('本集删减 · 1 处原文 / 2 句台词')
+    expect(textOf(view.root)).not.toContain('需核查')
+    view.unmount()
+  })
+
+  it('忠实档也能拿到 causality/foreshadowing 字段（不像 hooks 那样忠实档恒 null）', async () => {
+    vi.mocked(api.getStoryboardAdaptation).mockResolvedValue({
+      recorded: true, adaptation_mode: 'faithful', target_duration_s: null, segment_count: null,
+      over_target: false, dropped_source_spans: [], dropped_lines: [],
+      causality: { status: 'warning', problem_count: 1 }, foreshadowing: { status: 'ok', problem_count: 0 },
+    })
+    const view = await mount()
+    expect(textOf(view.root.findByType('summary'))).toBe('本集删减 · 0 处原文 / 0 句台词 · 需核查 1 处')
+    expect(textOf(view.root)).toContain('情绪因果核验模型多次调整后仍有 1 处未通过')
+    view.unmount()
+  })
+})
+
 describe('StoryboardAdaptationPanel：加载失败', () => {
   it('接口失败时展示错误而不是空白折叠面板', async () => {
     vi.mocked(api.getStoryboardAdaptation).mockRejectedValue(new Error('网络错误'))

@@ -28,6 +28,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app import textmatch
 from app.source_excerpt import SourceSegment
 
 #: 占位说明不含任何原文字符（2.0.4 立下的底线，沿用至今）：paratext 段落的
@@ -416,3 +417,30 @@ def reassign_kept_lines_to_covering_segments(
                       "to_segment_no": target, "unit": unit_no})
         item.segment_no = target
     return moves
+
+
+def evidence_quote_unit_keys(quote: str, segment_indexes: list[int], source_segments: list[Any]) -> set[tuple[int, int]]:
+    """``evidence_quote`` 落在 beat 覆盖的原文段里的哪些 ``(source_segment_
+    index, unit_no)`` 句单元——双向 ``condense`` 子串包含判定单元覆盖（quote
+    落在一个单元内，或恰好覆盖若干个整单元），容忍标点/空白差异。没有任何
+    命中时返回空集，调用方据此跳过删减单元核验，不构成误报（quote 可能横跨
+    单元边界、condense 后恰好没有完整包含任一单元，宁可漏检也不误报）。
+
+    2026-09-27 从 ``storyboard_short_drama_hooks._quote_unit_keys`` 逐字提升
+    为本模块的公开原语（逻辑不变）：钩子核验、情绪因果核验、伏笔核验三处
+    共用同一份判据，不再各自复制一份（``storyboard_short_drama_hooks`` 改用
+    ``as`` 自别名继续导出 ``_quote_unit_keys`` 这个名字，既有测试零改动）。
+    """
+    condensed_quote = textmatch.condense(quote)
+    if not condensed_quote:
+        return set()
+    hits: set[tuple[int, int]] = set()
+    for index in segment_indexes:
+        if not (1 <= index <= len(source_segments)):
+            continue
+        text = source_segments[index - 1].text
+        for unit_no, (start, end) in enumerate(split_source_units(text), start=1):
+            condensed_unit = textmatch.condense(text[start:end])
+            if condensed_unit and (condensed_unit in condensed_quote or condensed_quote in condensed_unit):
+                hits.add((index, unit_no))
+    return hits

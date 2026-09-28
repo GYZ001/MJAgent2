@@ -1,4 +1,7 @@
-import type { StoryboardAdaptationDropReview, StoryboardAdaptationHooks, StoryboardAdaptationSummary } from '../api'
+import type {
+  StoryboardAdaptationCausality, StoryboardAdaptationDropReview, StoryboardAdaptationForeshadowing,
+  StoryboardAdaptationHooks, StoryboardAdaptationSummary,
+} from '../api'
 
 /** 每段固定 15 秒（2.4.0 起分镜台契约），约合时长按段数直接乘——不是精确时长，
  *  只用于给用户一个数量级参照，与目标时长对比。 */
@@ -11,9 +14,32 @@ export function adaptationModeLabel(summary: Pick<StoryboardAdaptationSummary, '
   return summary.adaptation_mode
 }
 
-/** 面板标题：折叠态也要能一眼看出有没有删减、删了多少（用户要求带计数）。 */
-export function adaptationPanelTitle(spanCount: number, lineCount: number): string {
-  return `本集删减 · ${spanCount} 处原文 / ${lineCount} 句台词`
+/** 单个信号（causality/foreshadowing）折算成标题要计的"需核查"处数：
+ *  warning 时用后端给出的 problem_count（后端保证 warning ⇒ problem_count>0）；
+ *  no_turns_nominated/no_signals_nominated 没有数字化的问题条数，但"模型完全
+ *  没提名"本身就是一处需要人工核查的信号（可能原文没有，也可能是模型漏标，
+ *  代码判不出，算 1 处）；ok 或字段缺失（老留档/尚未生成）不计入。 */
+function attentionCountFor(entry: { status: string; problem_count: number } | null | undefined): number {
+  if (!entry || entry.status === 'ok') return 0
+  return entry.status === 'warning' ? entry.problem_count : 1
+}
+
+/** 情绪因果 + 伏笔两个信号合计需要人工核查的处数，供 adaptationPanelTitle
+ *  在折叠标题上体现——否则这两类信号会被"删减"标题盖住看不见。 */
+export function adaptationAttentionCount(
+  causality: StoryboardAdaptationCausality | null | undefined,
+  foreshadowing: StoryboardAdaptationForeshadowing | null | undefined,
+): number {
+  const missingStimulus = causality?.missing_stimulus_count ?? 0
+  return attentionCountFor(causality) + missingStimulus + attentionCountFor(foreshadowing)
+}
+
+/** 面板标题：折叠态也要能一眼看出有没有删减、删了多少（用户要求带计数），
+ *  以及情绪因果/伏笔是否有需要人工核查的信号（2026-09-27 追加，attentionCount
+ *  为 0 时不追加这一段，不给老留档/一切正常的分集编造"需核查"）。 */
+export function adaptationPanelTitle(spanCount: number, lineCount: number, attentionCount = 0): string {
+  const base = `本集删减 · ${spanCount} 处原文 / ${lineCount} 句台词`
+  return attentionCount > 0 ? `${base} · 需核查 ${attentionCount} 处` : base
 }
 
 /** 段数 × 15 秒 与目标时长的对比文案；segmentCount 为 null（老分集未记录）时
@@ -76,4 +102,38 @@ export function hooksWarningText(hooks: StoryboardAdaptationHooks | null | undef
   const problems = [...hooks.opening.problems, ...hooks.ending.problems]
   if (problems.length === 0) return ''
   return `开篇/结尾钩子模型多次调整后仍未通过核验：${problems.join('；')}`
+}
+
+/** 情绪因果核验（2026-09-27，P0-A）如实说明：具体是哪个节拍/哪一段的问题，
+ *  已经能在对应分镜段的"能力降级"提示里看到，这里只给情节级汇总——status=ok
+ *  或老留档没有这个字段（causality 为 null/undefined）时不渲染，同 hooksWarningText
+ *  既有模式。no_turns_nominated 与 warning 都要给出路（人工核查该看哪里），
+ *  不断言"模型做错了"——也可能是原文确实没有这类节拍。 */
+export function causalityWarningText(causality: StoryboardAdaptationCausality | null | undefined): string {
+  if (!causality) return ''
+  if (causality.status === 'no_turns_nominated') {
+    return '本集没有识别到任何情绪转折/决定性动作节拍——如果原文确实有，请人工核查是否被遗漏'
+  }
+  const parts: string[] = []
+  if (causality.status === 'warning') {
+    parts.push(`情绪因果核验模型多次调整后仍有 ${causality.problem_count} 处未通过，请人工核查（具体见对应分镜段的能力降级提示）`)
+  }
+  const missing = causality.missing_stimulus_count ?? 0
+  if (missing > 0) {
+    parts.push(`原文有 ${missing} 处情绪转折没写出诱因，观众会觉得人物反应来得突兀——这是原文层面的问题，可补写原文后重跑本集分镜（具体见对应分镜段的能力降级提示）`)
+  }
+  return parts.join('；')
+}
+
+/** 伏笔/类型信号核验（2026-09-27，P0-C）如实说明，结构与 causalityWarningText
+ *  同构。 */
+export function foreshadowingWarningText(foreshadowing: StoryboardAdaptationForeshadowing | null | undefined): string {
+  if (!foreshadowing) return ''
+  if (foreshadowing.status === 'no_signals_nominated') {
+    return '本集没有识别到任何伏笔/类型信号节拍——如果原文确实有，请人工核查是否被遗漏'
+  }
+  if (foreshadowing.status === 'warning') {
+    return `伏笔核验模型多次调整后仍有 ${foreshadowing.problem_count} 处未通过，请人工核查（具体见对应分镜段的能力降级提示）`
+  }
+  return ''
 }

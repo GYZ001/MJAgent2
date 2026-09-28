@@ -50,9 +50,6 @@ from pydantic import BaseModel, Field
 from app import config, hiagent, spoken_contract
 from app.db import new_id
 from app.harness import model_gateway
-from app.production import storyboard_short_drama
-from app.production import storyboard_short_drama_budget
-from app.production import storyboard_short_drama_hooks
 from app.project_settings import resolve_adaptation_mode, resolve_aspect_ratio
 from app.scene_reverse import segment_views as reverse_segment_views
 from app.production.storyboard_capacity_normalize import normalize_and_assert_capacity
@@ -94,7 +91,7 @@ from app.production.storyboard_dialogue_extract import extract_dialogue_targets
 from app.production.storyboard_dialogue_attribution import (dialogue_speaker_errors, manifest_name_to_identity,
                                                              repair_draft_tail)
 from app.production.storyboard_dialogue_ledger import (
-    DialogueQuote, dialogue_ledger_summary,
+    dialogue_ledger_summary,
     required_dialogue_for_segments,
     required_dialogue_missing_errors,
     required_dialogue_rule,
@@ -105,9 +102,12 @@ from app.production.storyboard_dialogue_repeat_repair import repaired_repeated_d
 from app.production.storyboard_narrative_arc import (
     _segment_continuity_rules,
     _segment_shared_rules,
+    beats_payload_for_segment,
     phase2_segment_rules,
     segment_narrative_arc_payload_fields,
 )
+from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_beats as _action_beats
+from app.visual_styles import current_visual_style_prompt
 from app.production.storyboard_segment_ranges import (
     _PARATEXT_PLACEHOLDER_TEXT,
     segment_source_payload,
@@ -860,6 +860,8 @@ def _segment_content_advisories(
     source_segment_indexes: list[int],
     manifest: dict[str, Any] | None,
     segment_relevant_scene_ids: set[str] = frozenset(),
+    emotional_turns_here: list[Any],
+    foreshadowing_here: list[Any],
 ) -> list[str]:
     """Non-blocking content checks: computed every time, never gate generation.
 
@@ -933,6 +935,9 @@ def _segment_content_advisories(
     advisories.extend(
         continuity_memo_character_advisories(draft.continuity_memo, segment_character_ids)
     )
+    # P0-A/C（2026-09-27）：情绪转折/伏笔"是否真的被写成画面"，同一套 advisory 哲学。
+    advisories.extend(_beat_causality.segment_advisories(list(emotional_turns_here), draft.prompt_text))
+    advisories.extend(_beat_foreshadowing.segment_advisories(list(foreshadowing_here), draft.prompt_text))
     return advisories
 
 
@@ -1028,7 +1033,7 @@ async def _generate_all_segment_prompts(
     profile, target_model_literal, dialect_instructions = _dialect_for_target_video_model(target_video_model)
     beats_by_id = {beat.beat_id: beat for beat in beat_draft.beat_sheet}
     paratext_indexes = _paratext_segment_indexes(payload)
-    visual_style = bible.world.visual_style_canonical if bible is not None and bible.world is not None else ""
+    visual_style = current_visual_style_prompt(bible.world.visual_style_canonical) if bible is not None and bible.world is not None else ""
     shared_rules = [*_segment_shared_rules(), *IDENTITY_GENERATION_RULES]
 
     by_segment_no: dict[int, _AiStoryboardSegmentDraft] = {}
@@ -1037,6 +1042,8 @@ async def _generate_all_segment_prompts(
     # 2.4.0：截至当前段已交付的 (segment_no, speaker_identity_id, line)，用于
     # 跨段台词去重（真实故障见 STORYBOARD_PACK_VERSION 2.4.0 changelog）。
     delivered_lines: list[tuple[int, str, str]] = []
+    # P0-A/C（2026-09-27）：情绪转折/伏笔提名按 beat_id 只认领一次，见 moments_for_segment。
+    covered_turn_ids, covered_signal_ids = set(), set()
     for plan in beat_draft.segments:
         _ensure_segment_prompt_budget()
         relevant_assets = _segment_relevant_assets(payload, plan.source_segment_indexes)
@@ -1046,16 +1053,14 @@ async def _generate_all_segment_prompts(
             by_segment_no[plan.segment_no] = draft
             camera_digest_by_segment_no[plan.segment_no] = draft.camera_digest
             delivered_lines.extend((plan.segment_no, line.speaker_identity_id, line.line) for line in draft.dialogue)
+            _beat_causality.moments_for_segment(plan.beat_ids, beat_draft.emotional_turns, covered_turn_ids)
+            _beat_foreshadowing.moments_for_segment(plan.beat_ids, beat_draft.foreshadowing_beats, covered_signal_ids)
             continue
         previous_draft = by_segment_no.get(plan.segment_no - 1)
         previous_segment_no = plan.segment_no - 1 if previous_draft is not None else None
         previous_memo = previous_draft.continuity_memo if previous_draft is not None else None
-        camera_history = _camera_digest_window_payload(
-            camera_digest_by_segment_no, segment_no=plan.segment_no, window=CAMERA_DIGEST_WINDOW,
-        )
-        continuity_rules = _segment_continuity_rules(
-            previous_segment_no=previous_segment_no, camera_history=camera_history,
-        )
+        camera_history = _camera_digest_window_payload(camera_digest_by_segment_no, segment_no=plan.segment_no, window=CAMERA_DIGEST_WINDOW)
+        continuity_rules = _segment_continuity_rules(previous_segment_no=previous_segment_no, camera_history=camera_history)
         staging_chain = chain_prompt_texts(beat_draft.segments, by_segment_no, plan.segment_no)
         staging_gate = StagingSoftGate(hard_attempts=2, segment_no=plan.segment_no)  # 与下方 semantic_retry_limit 同值：两次带指引的重试后降级为告警
         # 2.4.0：source_text_by_segment 只喂本段 source_unit_ranges 范围内的
@@ -1066,6 +1071,8 @@ async def _generate_all_segment_prompts(
         required_dialogue = required_dialogue_by_segment_no.get(plan.segment_no, [])
         palette_previous = beat_draft.segments[plan.segment_no - 2].palette if plan.segment_no > 1 else ""
         structure = segment_structure(joined_source_text(segments, beat_draft.segments[plan.segment_no - 2].source_segment_indexes) if plan.segment_no > 1 else "", joined_source_text(segments, plan.source_segment_indexes))  # 换场/转场/必拍镜头（screenplay_markers）
+        turns_here = _beat_causality.moments_for_segment(plan.beat_ids, beat_draft.emotional_turns, covered_turn_ids)
+        signals_here = _beat_foreshadowing.moments_for_segment(plan.beat_ids, beat_draft.foreshadowing_beats, covered_signal_ids)
         task_payload: dict[str, Any] = {
             "task": (
                 "为下面这一段原文和节拍写一整段可直接投喂视频生成模型的提示词（prompt_text）。"
@@ -1083,6 +1090,8 @@ async def _generate_all_segment_prompts(
                     previous_memo=previous_memo, staging_rule=staging_continuation_rule(staging_chain[-1][1] if staging_chain else "", previous_segment_no=plan.segment_no - 1, synopsis=plan.synopsis), structure=structure,
                 ),
                 already_delivered_dialogue_rule(delivered_lines, reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no)),
+                *_beat_causality.segment_rule_text(turns_here, plan.beat_ids),
+                *_beat_foreshadowing.segment_rule_text(signals_here, plan.beat_ids),
             ],
             **segment_narrative_arc_payload_fields(
                 segment_no=plan.segment_no,
@@ -1091,11 +1100,9 @@ async def _generate_all_segment_prompts(
                 palette_previous=palette_previous,
             ),
             "segment_no": plan.segment_no, "synopsis": plan.synopsis, **structure,
-            "beats": [
-                {"beat_id": beat_id, "summary": beats_by_id[beat_id].summary}
-                for beat_id in plan.beat_ids
-                if beat_id in beats_by_id
-            ],
+            "beats": beats_payload_for_segment(plan.beat_ids, beats_by_id),
+            "emotional_turns": [t.model_dump(mode="json") for t in turns_here],
+            "foreshadowing_beats": [s.model_dump(mode="json") for s in signals_here],
             "duration_s": SEGMENT_DURATION_S, "shot_count_range": [MIN_SHOTS_PER_SEGMENT, MAX_SHOTS_PER_SEGMENT],
             "source_segment_indexes": plan.source_segment_indexes,
             **source_payload,
@@ -1109,7 +1116,7 @@ async def _generate_all_segment_prompts(
             "recent_camera_language": camera_history,
             "visual_style": visual_style, "aspect_ratio": aspect_ratio,
             "target_video_model": target_model_literal,
-            "dialect_instructions": dialect_instructions,
+            "dialect_instructions": f"{dialect_instructions}\n{_action_beats.decisive_action_dialect_rule(profile.render_format)}",
             # app.video_prompt_profiles 的 SEEDANCE_2_PROFILE/MINIMAX_H3_PROFILE 是
             # 既有的正确接缝（docs/STORYBOARD_PROMPT_IR_DESIGN.md「与既有代码的衔接」），
             # 职责收窄为"交给模型的方言约束"；dialect_instructions 是本模块新写的
@@ -1167,27 +1174,28 @@ async def _generate_all_segment_prompts(
         draft.camera_digest.transition_from_previous = structure["transition_from_previous"]  # 转场以原文标记/段头为准，不用模型自报
         camera_digest_by_segment_no[plan.segment_no] = draft.camera_digest
         by_segment_no[plan.segment_no] = draft
-        delivered_lines.extend(
-            (plan.segment_no, line.speaker_identity_id, line.line) for line in draft.dialogue
-        )
+        delivered_lines.extend((plan.segment_no, line.speaker_identity_id, line.line) for line in draft.dialogue)
 
     # 延迟导入：app.multiview<->app.validators 互相依赖，模块级导入会触发循环导入。
     from app.multiview import _storyboard_pack_asset_dependencies
 
     result: dict[int, _AiStoryboardSegmentDraft] = {}
+    # P0-A/C：阶段二覆盖 advisory 独立重算一遍"谁先认领"，不复用循环 1 的累加器
+    # （循环 1 结束时已"全部认领完毕"）。
+    covered_turn_ids2, covered_signal_ids2 = set(), set()
     for plan in beat_draft.segments:
         draft = by_segment_no[plan.segment_no]
-        relevant_scene_ids = {
-            str(s.get("scene_id") or "")
-            for s in relevant_assets_by_segment_no[plan.segment_no]["scenes"]
-        }
+        relevant_scene_ids = {str(s.get("scene_id") or "") for s in relevant_assets_by_segment_no[plan.segment_no]["scenes"]}
         manifest = _storyboard_pack_asset_dependencies(
             project_id=project_id, episode_no=episode_no, shot_id=f"draft:{plan.segment_no}",
             segment={"resources": draft.resources.model_dump(mode="json")}, conn=conn, bible=bible,
         ) if conn is not None and bible is not None else None
+        turns_here2 = _beat_causality.moments_for_segment(plan.beat_ids, beat_draft.emotional_turns, covered_turn_ids2)
+        signals_here2 = _beat_foreshadowing.moments_for_segment(plan.beat_ids, beat_draft.foreshadowing_beats, covered_signal_ids2)
         advisories = _segment_content_advisories(
             draft, source_segment_indexes=plan.source_segment_indexes,
             segment_relevant_scene_ids=relevant_scene_ids, manifest=manifest,
+            emotional_turns_here=turns_here2, foreshadowing_here=signals_here2,
         )
         if advisories:
             draft.degraded_capabilities = [*draft.degraded_capabilities, *advisories]
@@ -1436,16 +1444,8 @@ async def generate_storyboard_pack(
     )
 
 
-def _assemble_adaptation_summary(
-    *, adaptation_mode: str, planned_segment_count: int, beat_draft: Any, dialogue_quotes: list[DialogueQuote],
-    projected_segment_count: int | None, drop_review: Any, segments: list[SourceSegment],
-) -> dict[str, Any]:
-    """adaptation 留档字典组装，从 generate_storyboard_pack 抽出腾 function_lines（已顶 baseline 153）；hooks 见 storyboard_short_drama_hooks.hook_summary（按最终 beat_draft 事后重算，忠实档恒 None）。"""
-    return {**storyboard_short_drama.adaptation_summary(
-        adaptation_mode=adaptation_mode, planned_segment_count=planned_segment_count, segment_count=len(beat_draft.segments),
-        dropped_spans=getattr(beat_draft, "dropped_source_spans", None) or [], dropped_quote_ids=storyboard_short_drama.dropped_line_quote_ids(beat_draft),
-        kept_dialogue_chars=storyboard_short_drama_budget.kept_dialogue_chars(beat_draft.kept_lines, dialogue_quotes), projected_segment_count=projected_segment_count,
-    ), "drop_review": drop_review, "hooks": storyboard_short_drama_hooks.hook_summary(beat_draft, segments, adaptation_mode=adaptation_mode)}
+#: 2026-09-27：函数体搬到 storyboard_beat_causality.assemble_adaptation_summary（该函数 docstring 有完整理由），`as` 自别名保持调用点零改动。
+from app.production.storyboard_beat_causality import assemble_adaptation_summary as _assemble_adaptation_summary
 
 
 def _resource_identity_display_names(payload: dict[str, Any], identity_ids: list[str]) -> list[str]:

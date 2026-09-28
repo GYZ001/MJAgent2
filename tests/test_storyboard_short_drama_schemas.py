@@ -32,7 +32,13 @@ from app.production.storyboard_short_drama_schemas import (
 from app.source_excerpt import SourceSegment
 
 # 见模块 docstring：改代码前用隔离命名空间跑旧代码得到的参考值，改完后断言不变。
-_EXPECTED_FAITHFUL_FINGERPRINT = "996ff5821340998719d0e080"
+# 2026-09-27（P0-A/C 情绪因果核验/伏笔类型信号保全）实测更新：忠实档新增两条
+# 阶段一 rules（causality_beat_sheet_rules/foreshadowing_beat_sheet_rules）+
+# _AiBeatSheetDraft 基类新增 emotional_turns/foreshadowing_beats 两个字段，
+# task_payload（含 output_schema）逐字节改变是预期之内的——这条正是覆盖忠实档
+# 的落点，不是意外漂移。新值用本文件同一份夹具+同一个 _generate_beat_sheet
+# 实测得到，不是手算。
+_EXPECTED_FAITHFUL_FINGERPRINT = "5adbdf9452c5c2435b11a273"
 
 
 def _fixture_segments() -> list[SourceSegment]:
@@ -107,7 +113,9 @@ def test_faithful_schema_has_no_short_drama_fields():
     schema_text = json.dumps(_AiBeatSheetDraft.model_json_schema(), ensure_ascii=False)
     assert "importance" not in schema_text
     assert "dropped_source_spans" not in schema_text
-    assert set(_AiBeatSheetDraft.model_fields.keys()) == {"beat_sheet", "segments", "kept_lines", "dropped_lines"}
+    assert set(_AiBeatSheetDraft.model_fields.keys()) == {
+        "beat_sheet", "segments", "kept_lines", "dropped_lines", "emotional_turns", "foreshadowing_beats",
+    }
     assert set(_AiBeat.model_fields.keys()) == {"beat_id", "summary", "segment_indexes"}
     # 2026-09-24：dropped_lines 的项类型仍是基类 _AiDroppedLine，没有 beat_id 字段
     # （_AiBeat 本身自带的 beat_id 字段不算——这里直接比对项类型，不做子串匹配）。
@@ -234,6 +242,8 @@ def test_faithful_rules_are_historically_unchanged():
     比对（CLAUDE.md「手写一份修复前的函数体副本」），而不是只信任新函数自己
     的输出。"""
     from app.production.storyboard_beat_sheet import _beat_sheet_rules
+    from app.production.storyboard_beat_causality import causality_beat_sheet_rules
+    from app.production.storyboard_beat_foreshadowing import foreshadowing_beat_sheet_rules
     from app.production.storyboard_dialogue_ledger import beat_sheet_dialogue_ledger_rules
     from app.production.storyboard_narrative_arc import beat_sheet_narrative_arc_rules
 
@@ -264,5 +274,8 @@ def test_faithful_rules_are_historically_unchanged():
         "不能因为「无法视觉化」直接丢弃——保留进节拍，下一步会把它改写成一句简短的"
         "角色画外音说出来（这属于内容改编，不算 dialogue_targets 里的引号台词）",
     ]
-    expected = [*historical_head, *beat_sheet_dialogue_ledger_rules(), *beat_sheet_narrative_arc_rules()]
+    expected = [
+        *historical_head, *beat_sheet_dialogue_ledger_rules(), *beat_sheet_narrative_arc_rules(),
+        *causality_beat_sheet_rules(), *foreshadowing_beat_sheet_rules(),
+    ]
     assert _beat_sheet_rules(set(), adaptation_mode="faithful") == expected

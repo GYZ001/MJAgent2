@@ -55,7 +55,7 @@ from typing import Any
 
 from app import textmatch
 from app.production import storyboard_short_drama as _short_drama
-from app.production.storyboard_segment_ranges import split_source_units
+from app.production.storyboard_segment_ranges import evidence_quote_unit_keys as _quote_unit_keys
 
 #: 留档展示用的截断长度，与 storyboard_short_drama_review._EXCERPT_MAX_CHARS
 #: 同一个值（不能直接 import 那个模块的常量——review 模块要 import 本模块
@@ -84,27 +84,6 @@ def short_drama_hook_rules() -> list[str]:
         "声明的 dropped_source_spans 删减区间里——钩子是本集必须完整呈现的"
         "内容，不能一边提名为钩子一边把它划进删减范围。",
     ]
-
-
-def _quote_unit_keys(quote: str, segment_indexes: list[int], source_segments: list[Any]) -> set[tuple[int, int]]:
-    """``evidence_quote`` 落在 beat 覆盖的原文段里的哪些 ``(source_segment_
-    index, unit_no)`` 句单元——双向 ``condense`` 子串包含判定单元覆盖（quote
-    落在一个单元内，或恰好覆盖若干个整单元），容忍标点/空白差异。没有任何
-    命中时返回空集，调用方据此跳过删减单元核验，不构成误报（quote 可能横跨
-    单元边界、condense 后恰好没有完整包含任一单元，宁可漏检也不误报）。"""
-    condensed_quote = textmatch.condense(quote)
-    if not condensed_quote:
-        return set()
-    hits: set[tuple[int, int]] = set()
-    for index in segment_indexes:
-        if not (1 <= index <= len(source_segments)):
-            continue
-        text = source_segments[index - 1].text
-        for unit_no, (start, end) in enumerate(split_source_units(text), start=1):
-            condensed_unit = textmatch.condense(text[start:end])
-            if condensed_unit and (condensed_unit in condensed_quote or condensed_quote in condensed_unit):
-                hits.add((index, unit_no))
-    return hits
 
 
 def _hook_problems(

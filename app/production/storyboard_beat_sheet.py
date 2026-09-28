@@ -81,6 +81,7 @@ from app.production.storyboard_short_drama_schemas import (
 from app.production import storyboard_short_drama as _short_drama
 from app.production import storyboard_short_drama_budget as _short_drama_budget
 from app.production import storyboard_short_drama_hooks as _short_drama_hooks
+from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing
 from app.production.storyboard_short_drama_beat_guard import restore_dropped_lines_with_invalid_beat
 
 
@@ -267,6 +268,8 @@ def _beat_sheet_rules(
         "角色画外音说出来（这属于内容改编，不算 dialogue_targets 里的引号台词）",
         *beat_sheet_dialogue_ledger_rules(),
         *beat_sheet_narrative_arc_rules(),
+        *_beat_causality.causality_beat_sheet_rules(),
+        *_beat_foreshadowing.foreshadowing_beat_sheet_rules(),
     ]
     extra = (_paratext_exclusion_rule(paratext_indexes), context_segment_rule(set(context_indexes)))
     rules.extend(rule for rule in extra if rule is not None)
@@ -304,6 +307,21 @@ _BEAT_SHEET_SEMANTIC_RETRY_LIMIT = 2
 def _beat_sheet_draft_cls(adaptation_mode: str) -> type[_AiBeatSheetDraft]:
     """model_type/output_schema 两处都要用同一个类，避免各写一次判断分叉。"""
     return _AiShortDramaBeatSheetDraft if adaptation_mode == "short_drama" else _AiBeatSheetDraft
+
+
+def _beat_sheet_soft_checks(
+    *, adaptation_mode: str, retry_limit: int, dialogue_quotes: list[DialogueQuote], segments: list[SourceSegment],
+):
+    """打包全部 5 个 SoftCheck 对象，为 ``_generate_beat_sheet``（已在
+    function_lines 棘轮基线上零余量）腾函数行数。P0-A/C 两个新检查不接收
+    ``adaptation_mode``——判据本身两档都跑，见各自模块 docstring。"""
+    return (
+        _short_drama.SegmentCountSoftCap(adaptation_mode=adaptation_mode, retry_limit=retry_limit, quotes=dialogue_quotes, source_segments=segments),
+        _short_drama_budget.DialogueBudgetSoftCap(adaptation_mode=adaptation_mode, retry_limit=retry_limit, quotes=dialogue_quotes),
+        _short_drama_hooks.HookBeatSoftCheck(adaptation_mode=adaptation_mode, retry_limit=retry_limit, source_segments=segments),
+        _beat_causality.EmotionalTurnSoftCheck(retry_limit=retry_limit, source_segments=segments),
+        _beat_foreshadowing.ForeshadowingSoftCheck(retry_limit=retry_limit, source_segments=segments),
+    )
 
 
 def _beat_sheet_task_payload(
@@ -381,14 +399,10 @@ async def _generate_beat_sheet(
     fingerprint = hashlib.sha256(
         json.dumps(task_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()[:24]
-    soft_cap = _short_drama.SegmentCountSoftCap(
+    soft_cap, budget_cap, hook_check, causality_check, foreshadow_check = _beat_sheet_soft_checks(
         adaptation_mode=adaptation_mode, retry_limit=_BEAT_SHEET_SEMANTIC_RETRY_LIMIT,
-        quotes=dialogue_quotes, source_segments=segments,
+        dialogue_quotes=dialogue_quotes, segments=segments,
     )
-    budget_cap = _short_drama_budget.DialogueBudgetSoftCap(
-        adaptation_mode=adaptation_mode, retry_limit=_BEAT_SHEET_SEMANTIC_RETRY_LIMIT, quotes=dialogue_quotes,
-    )
-    hook_check = _short_drama_hooks.HookBeatSoftCheck(adaptation_mode=adaptation_mode, retry_limit=_BEAT_SHEET_SEMANTIC_RETRY_LIMIT, source_segments=segments)
     return await model_gateway.chat_structured(
         [
             {"role": "system", "content": "你是短剧分镜师。只输出符合 Schema 的一个 JSON 对象，不输出 Markdown或解释。"},
@@ -403,6 +417,8 @@ async def _generate_beat_sheet(
             *soft_cap.errors(value),
             *budget_cap.errors(value),
             *hook_check.errors(value),
+            *causality_check.errors(value),
+            *foreshadow_check.errors(value),
         ],
         normalize_payload=_normalize_beat_sheet_payload,
         operation_id=f"storyboard_pack_beat_sheet_{episode_id}_{fingerprint}",

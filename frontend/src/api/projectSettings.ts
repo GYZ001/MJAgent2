@@ -108,6 +108,26 @@ export interface StoryboardAdaptationHooks {
   ending: StoryboardAdaptationHookNomination;
 }
 
+/** 情绪因果核验（2026-09-27，P0-A）：见 app/production/storyboard_beat_
+ *  causality.py 的 causality_summary 契约。忠实档/短剧档一视同仁地计算
+ *  （不像 hooks 那样忠实档恒 null）。no_turns_nominated 表示模型没有提名
+ *  任何情绪转折/决定性动作节拍——可能是原文确实没有，也可能是模型漏标，
+ *  两者代码都区分不了，需要人工核查。 */
+export interface StoryboardAdaptationCausality {
+  status: "ok" | "warning" | "no_turns_nominated";
+  problem_count: number;
+  /** 原文没写诱因的情绪转折数（剧本层问题；2026-09-27 前的留档没有此字段）。 */
+  missing_stimulus_count?: number;
+}
+
+/** 伏笔/类型信号核验（2026-09-27，P0-C）：见 app/production/storyboard_
+ *  beat_foreshadowing.py 的 foreshadowing_summary 契约，结构与 causality
+ *  同构。 */
+export interface StoryboardAdaptationForeshadowing {
+  status: "ok" | "warning" | "no_signals_nominated";
+  problem_count: number;
+}
+
 export interface StoryboardAdaptationSummary {
   recorded: boolean;
   adaptation_mode: string;
@@ -129,6 +149,10 @@ export interface StoryboardAdaptationSummary {
   // 2026-09-27 开篇/结尾钩子：老留档没有这个字段，降级为 undefined/null，
   // 前端据此不渲染钩子相关文案（同 drop_review 既有模式）。
   hooks?: StoryboardAdaptationHooks | null;
+  // 2026-09-27 情绪因果/伏笔（P0-A/C）：两者对忠实档/短剧档一视同仁地计算，
+  // 老留档没有这两个字段时降级为 undefined/null，同 drop_review 既有模式。
+  causality?: StoryboardAdaptationCausality | null;
+  foreshadowing?: StoryboardAdaptationForeshadowing | null;
 }
 
 /** 分镜台「本集删减」面板的只读数据源：GET /episodes/{id}/storyboard-adaptation。

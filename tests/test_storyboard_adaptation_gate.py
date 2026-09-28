@@ -328,6 +328,43 @@ def test_summary_hooks_degrades_to_none_when_old_record_lacks_it() -> None:
     assert summary["hooks"] is None
 
 
+def test_summary_carries_causality_and_foreshadowing_fields_through_unchanged() -> None:
+    """2026-09-27 新增字段：只读透出留档里的 causality/foreshadowing，不重新
+    计算——同 hooks 一样，本模块只读不产出（见模块 docstring）。"""
+    conn = _conn("甲" * 300)
+    content = _adaptation_content(spans=[_span(start=100, end=300, chars=200)])
+    content["causality"] = {"status": "warning", "problem_count": 2}
+    content["foreshadowing"] = {"status": "no_signals_nominated", "problem_count": 0}
+    _write_adaptation(conn, content=content)
+    summary = storyboard_adaptation_summary(conn, "e")
+    assert summary["causality"] == content["causality"]
+    assert summary["foreshadowing"] == content["foreshadowing"]
+
+
+def test_summary_causality_and_foreshadowing_degrade_to_none_when_old_record_lacks_them() -> None:
+    conn = _conn("甲" * 300)
+    _write_adaptation(conn, content=_adaptation_content(spans=[_span(start=100, end=300, chars=200)]))
+    summary = storyboard_adaptation_summary(conn, "e")
+    assert summary["causality"] is None
+    assert summary["foreshadowing"] is None
+
+
+def test_summary_carries_causality_and_foreshadowing_for_faithful_projects_too() -> None:
+    """忠实档项目也要拿到 causality/foreshadowing 留档与面板——不像 hooks
+    那样忠实档恒 None（见 storyboard_beat_causality.assemble_adaptation_
+    summary docstring：两个新 summary 对忠实档/短剧档一视同仁地计算）。"""
+    conn = _conn("甲" * 300)
+    content = _adaptation_content(mode="faithful", spans=[])
+    content["causality"] = {"status": "ok", "problem_count": 0}
+    content["foreshadowing"] = {"status": "warning", "problem_count": 1}
+    _write_adaptation(conn, content=content)
+    summary = storyboard_adaptation_summary(conn, "e")
+    assert summary["recorded"] is True
+    assert summary["adaptation_mode"] == "faithful"
+    assert summary["causality"] == {"status": "ok", "problem_count": 0}
+    assert summary["foreshadowing"] == {"status": "warning", "problem_count": 1}
+
+
 def test_summary_without_adaptation_still_returns_ledger_drops() -> None:
     """没有改编留档的老分集：recorded=false、mode=faithful、删减为空；台账若
     有仍照常返回弃置台词（把只写不读的台账接活）。"""

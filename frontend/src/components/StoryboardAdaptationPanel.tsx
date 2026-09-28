@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { api, type StoryboardAdaptationSummary } from '../api'
 import {
-  adaptationModeLabel, adaptationPanelTitle, dropReviewText, durationComparisonText, hooksWarningText, overTargetText,
+  adaptationAttentionCount, adaptationModeLabel, adaptationPanelTitle, causalityWarningText, dropReviewText,
+  durationComparisonText, foreshadowingWarningText, hooksWarningText, overTargetText,
 } from '../lib/storyboardAdaptation'
 
 /**
@@ -35,16 +36,21 @@ export default function StoryboardAdaptationPanel({ episodeId }: { episodeId: st
   const hasDrops = spanCount > 0 || lineCount > 0
   const reviewText = dropReviewText(summary.drop_review)
   const hooksText = hooksWarningText(summary.hooks)
+  const causalityText = causalityWarningText(summary.causality)
+  const foreshadowingText = foreshadowingWarningText(summary.foreshadowing)
+  const attentionCount = adaptationAttentionCount(summary.causality, summary.foreshadowing)
 
   return (
     <details className="storyboard-adaptation-toggle">
-      <summary>{adaptationPanelTitle(spanCount, lineCount)}</summary>
+      <summary>{adaptationPanelTitle(spanCount, lineCount, attentionCount)}</summary>
       <div className="storyboard-adaptation-body">
         <p>档位：{adaptationModeLabel(summary)}</p>
         {durationText && <p>{durationText}</p>}
         {summary.over_target && <p role="status">{overTargetText(summary)}</p>}
         {reviewText && <p role="status">{reviewText}</p>}
         {hooksText && <p role="status">{hooksText}</p>}
+        {causalityText && <p role="status">{causalityText}</p>}
+        {foreshadowingText && <p role="status">{foreshadowingText}</p>}
         {!hasDrops && <p>本集没有删减内容</p>}
         {spanCount > 0 && (
           <div>

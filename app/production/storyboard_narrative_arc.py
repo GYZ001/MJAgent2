@@ -152,6 +152,18 @@ def segment_narrative_arc_payload_fields(
     }
 
 
+def beats_payload_for_segment(beat_ids: list[str], beats_by_id: dict[str, Any]) -> list[dict[str, str]]:
+    """阶段二 ``task_payload["beats"]``：本段引用的节拍摘要（``beat_id`` 不在
+    ``beats_by_id`` 里时跳过）。2026-09-27 从 ``_generate_all_segment_prompts``
+    （已在 function_lines 棘轮基线上零余量）抽出腾行数，与本模块其余纯载荷
+    函数同一个抽出理由（见模块 docstring）。"""
+    return [
+        {"beat_id": beat_id, "summary": beats_by_id[beat_id].summary}
+        for beat_id in beat_ids
+        if beat_id in beats_by_id
+    ]
+
+
 def segment_narrative_arc_rules(*, palette_current: str, palette_previous: str, scene_change: bool = False) -> list[str]:
     """阶段二 rules[] 新增的正面陈述：首尾段含义（恒定出现）、色温渐变
     （只在本段色温与上一段不同时出现）、色温延续时禁止假渐变（只在本段

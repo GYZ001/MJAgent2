@@ -128,6 +128,13 @@ def storyboard_adaptation_summary(conn, episode_id: str) -> dict:
         # short_drama_hooks.hook_summary 契约）。老留档没有这个字段，.get()
         # 降级为 None，前端同 drop_review 一样按缺字段不渲染处理。
         "hooks": adaptation.get("hooks"),
+        # 2026-09-27 新增（P0-A/C）：情绪因果/伏笔留档，见 app.production.
+        # storyboard_beat_causality.causality_summary/storyboard_beat_
+        # foreshadowing.foreshadowing_summary 契约。两者对忠实档/短剧档
+        # 一视同仁地计算（不像 hooks 那样忠实档恒 None），老留档没有这两个
+        # 字段时 .get() 降级为 None，前端同样按缺字段不渲染处理。
+        "causality": adaptation.get("causality"),
+        "foreshadowing": adaptation.get("foreshadowing"),
     }
 
 

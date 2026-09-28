@@ -19,6 +19,7 @@ from app import config, db
 from app.continuity import dialogue_framing_errors
 from app.domain.video_ops import _storyboard_structural_errors
 from app.production.screenplay_authority import project_prep_pack_to_screenplay
+from app.production.storyboard_beat_sheet_schemas import _AiEmotionalTurn
 from app.production.storyboard_dialogue_ledger import (
     DialogueQuote,
     _AiDroppedLine,
@@ -1026,6 +1027,7 @@ def test_segment_content_advisories_empty_for_well_formed_draft():
         )),
         source_segment_indexes=[1, 2], segment_relevant_scene_ids={"scene_a"},
         manifest=_manifest(characters=[_manifest_character("id_a")], scene=_manifest_scene("scene_a")),
+        emotional_turns_here=(), foreshadowing_here=(),
     )
     assert advisories == []
 
@@ -1052,7 +1054,10 @@ def test_segment_content_advisories_flags_dialogue_that_cannot_fit_in_fifteen_se
             source_segment_index=1,
         ),
     ])
-    advisories = _segment_content_advisories(over, source_segment_indexes=[1, 2], manifest=None)
+    advisories = _segment_content_advisories(
+        over, source_segment_indexes=[1, 2], manifest=None,
+        emotional_turns_here=(), foreshadowing_here=(),
+    )
     flagged = [a for a in advisories if "STORYBOARD_PACK_DIALOGUE_OVER_CAPACITY" in a]
     assert len(flagged) == 1, "超容量必须留下且只留下一条信号"
     assert "[未拦截]" in flagged[0], "用户拍板第一版分镜提示词不设门禁，这条只能是信息"
@@ -1067,7 +1072,10 @@ def test_segment_content_advisories_silent_when_dialogue_fits_the_shot():
             speaker_identity_id="id_a", line="这……这里是什么地方？", source_segment_index=1,
         ),
     ])
-    advisories = _segment_content_advisories(fits, source_segment_indexes=[1, 2], manifest=None)
+    advisories = _segment_content_advisories(
+        fits, source_segment_indexes=[1, 2], manifest=None,
+        emotional_turns_here=(), foreshadowing_here=(),
+    )
     assert not any("OVER_CAPACITY" in a for a in advisories)
 
 
@@ -1187,6 +1195,7 @@ def test_unknown_character_advisory_says_what_actually_happened() -> None:
     advisories = _segment_content_advisories(
         draft, source_segment_indexes=[1],
         manifest=_manifest(characters=[_manifest_character("马子才")]),
+        emotional_turns_here=(), foreshadowing_here=(),
     )
     unknown = [a for a in advisories if "RESOURCE_CHARACTER_UNKNOWN" in a]
     assert unknown, "未知身份必须报出来"
@@ -1203,6 +1212,7 @@ def test_segment_content_advisories_flags_misattributed_speaker_but_does_not_rai
     advisories = _segment_content_advisories(
         draft, source_segment_indexes=[1, 2],
         manifest=_manifest(characters=[_manifest_character("id_a")]),
+        emotional_turns_here=(), foreshadowing_here=(),
     )
     assert any("不在本段 resources.characters 内" in a for a in advisories)
 
@@ -1220,6 +1230,7 @@ def test_segment_content_advisories_offscreen_voice_uses_different_wording():
     advisories = _segment_content_advisories(
         draft, source_segment_indexes=[1, 2],
         manifest=_manifest(characters=[_manifest_character("id_a")]),
+        emotional_turns_here=(), foreshadowing_here=(),
     )
     flagged = [a for a in advisories if "SPEAKER_ABSENT" in a]
     assert flagged
@@ -1230,7 +1241,10 @@ def test_segment_content_advisories_offscreen_voice_uses_different_wording():
 
 def test_segment_content_advisories_flags_untraceable_dialogue_source():
     draft = _draft(dialogue=[_AiDialogueLine(speaker_identity_id="id_a", line="走吧", source_segment_index=9)])
-    advisories = _segment_content_advisories(draft, source_segment_indexes=[1, 2], manifest=None)
+    advisories = _segment_content_advisories(
+        draft, source_segment_indexes=[1, 2], manifest=None,
+        emotional_turns_here=(), foreshadowing_here=(),
+    )
     assert any("不在本段引用的原文段号" in a for a in advisories)
 
 
@@ -1244,6 +1258,7 @@ def test_segment_content_advisories_flags_unknown_character_and_scene_resource()
     advisories = _segment_content_advisories(
         draft, source_segment_indexes=[1, 2],
         manifest=_manifest(characters=[_manifest_character("id_a")], scene=_manifest_scene("scene_1")),
+        emotional_turns_here=(), foreshadowing_here=(),
     )
     assert any("STORYBOARD_PACK_RESOURCE_CHARACTER_UNKNOWN" in a for a in advisories)
     assert any("STORYBOARD_PACK_RESOURCE_SCENE_UNKNOWN" in a for a in advisories)
@@ -1267,6 +1282,7 @@ def test_segment_content_advisories_flags_invented_identity_id_even_when_manifes
     )
     advisories = _segment_content_advisories(
         draft, source_segment_indexes=[1, 2], manifest=_manifest(),
+        emotional_turns_here=(), foreshadowing_here=(),
     )
     unknown_character_advisories = [a for a in advisories if "STORYBOARD_PACK_RESOURCE_CHARACTER_UNKNOWN" in a]
     unknown_scene_advisories = [a for a in advisories if "STORYBOARD_PACK_RESOURCE_SCENE_UNKNOWN" in a]
@@ -1284,6 +1300,7 @@ def test_segment_content_advisories_flags_manifest_gap_when_no_relevant_scenes_e
     ))
     advisories = _segment_content_advisories(
         draft, source_segment_indexes=[24, 25], segment_relevant_scene_ids=set(), manifest=_manifest(),
+        emotional_turns_here=(), foreshadowing_here=(),
     )
     assert any("STORYBOARD_PACK_RESOURCE_SCENE_MANIFEST_GAP" in a for a in advisories)
     assert not any("STORYBOARD_PACK_RESOURCE_SCENE_MISSING" in a for a in advisories)
@@ -1299,6 +1316,7 @@ def test_segment_content_advisories_flags_missing_when_relevant_scenes_available
     advisories = _segment_content_advisories(
         draft, source_segment_indexes=[1, 2], segment_relevant_scene_ids={"scene_a"},
         manifest=_manifest(characters=[_manifest_character("id_a")]),
+        emotional_turns_here=(), foreshadowing_here=(),
     )
     assert any("STORYBOARD_PACK_RESOURCE_SCENE_MISSING" in a for a in advisories)
     assert not any("STORYBOARD_PACK_RESOURCE_SCENE_MANIFEST_GAP" in a for a in advisories)
@@ -1313,6 +1331,7 @@ def test_segment_content_advisories_no_scene_advisory_when_scenes_declared():
     advisories = _segment_content_advisories(
         draft, source_segment_indexes=[1, 2], segment_relevant_scene_ids={"scene_a", "scene_b"},
         manifest=_manifest(characters=[_manifest_character("id_a")], scene=_manifest_scene("scene_a")),
+        emotional_turns_here=(), foreshadowing_here=(),
     )
     assert not any("STORYBOARD_PACK_RESOURCE_SCENE_MISSING" in a for a in advisories)
     assert not any("STORYBOARD_PACK_RESOURCE_SCENE_MANIFEST_GAP" in a for a in advisories)
@@ -2981,6 +3000,60 @@ async def test_generate_raises_before_any_call_when_budget_cannot_fit_first_segm
         )
 
     assert called is False, "预算不够就不该真的发出请求"
+
+
+@pytest.mark.asyncio
+async def test_generate_reuse_branch_claims_turn_so_later_segment_does_not_reclaim_it(monkeypatch):
+    """P0-A：复用段（``reuse_segments``）跳过真正调用，但它的 ``plan.beat_ids``
+    仍要计入 ``covered_turn_ids``——否则容量拆分让续段完整继承 ``beat_ids``
+    时，被复用段本该认领的情绪转折会被后面新发起调用的段重复认领，同一处
+    决定性动作在成片里被拍两次。段1 复用、段2 正常调用，两段 beat_ids 都是
+    ["B1"]（模拟续段继承）：段2 发给模型的 payload 里 emotional_turns 必须
+    是空——不修复时段1 被跳过导致 B1 从未标记为已认领，段2 会把它当成自己
+    第一次看到而重新领走。"""
+    import app.production.storyboard_pack as storyboard_pack_module
+
+    calls: list[dict] = []
+
+    async def fake_chat_structured(messages, **kwargs):
+        payload = json.loads(messages[1]["content"])
+        calls.append(payload)
+        return _segment_draft(f"提示词-段{payload['segment_no']}")
+
+    monkeypatch.setattr(storyboard_pack_module.model_gateway, "chat_structured", fake_chat_structured)
+    monkeypatch.setattr(storyboard_pack_module, "_ensure_segment_prompt_budget", lambda: None)
+
+    turn = _AiEmotionalTurn(
+        beat_id="B1", turn_kind="decisive_action", turn_evidence_quote="他扔掉了行李箱",
+        stimulus_beat_id="B1", stimulus_evidence_quote="他扔掉了行李箱", stimulus_missing_reason="",
+    )
+    beat_draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="他扔掉了理想", segment_indexes=[1, 2])],
+        segments=[
+            _AiSegmentPlan(segment_no=1, synopsis="a", source_segment_indexes=[1], beat_ids=["B1"]),
+            _AiSegmentPlan(segment_no=2, synopsis="b", source_segment_indexes=[1], beat_ids=["B1"]),
+        ],
+        emotional_turns=[turn],
+    )
+    source = [SourceSegment(segment_id="s1", text="他扔掉了行李箱。", start_offset=0, end_offset=8)]
+    reused = _segment_draft("已定稿的段1提示词")
+
+    result = await _generate_all_segment_prompts(
+        episode_id="ep-reuse-claim",
+        episode_no=1,
+        beat_draft=beat_draft,
+        segments=source,
+        payload={},
+        target_video_model="hiagent",
+        bible=None, conn=None, project_id="", aspect_ratio="9:16",
+        required_dialogue_by_segment_no={},
+        reuse_segments={1: reused},
+    )
+
+    assert len(calls) == 1, "段1被复用不应发起真正调用"
+    assert calls[0]["segment_no"] == 2
+    assert calls[0]["emotional_turns"] == [], "B1 已被复用的段1认领，段2 不能再次领走同一处情绪转折"
+    assert result[1] is reused
 
 
 def test_validate_segment_draft_rejects_identity_prefixed_at_mentions():
