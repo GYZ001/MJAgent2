@@ -364,3 +364,25 @@ def test_advisory_empty_when_evidence_is_shown_in_prompt():
     prompt = "镜头1：他握紧行李箱拉杆。镜头2：慢慢点了点头。"
     advisories = segment_advisories([_good_turn()], prompt_text=prompt)
     assert advisories == []
+
+
+def test_advisory_moments_skips_stimulus_check_when_stimulus_is_in_an_earlier_segment():
+    """刺激在更早段落时，本段告警只核对转折本身，不拿本段镜头稿核对刺激原句（曾误报）。"""
+    from app.production.storyboard_beat_causality import advisory_moments
+
+    turn = _good_turn(beat_id="B2", stimulus_beat_id="B1")
+    claimed = advisory_moments(["B2"], [turn], set())
+    assert [t.beat_id for t in claimed] == ["B2"]
+    assert claimed[0].stimulus_evidence_quote == ""
+    assert turn.stimulus_evidence_quote == "他握紧行李箱拉杆"  # 原提名不被改动
+    prompt = "镜头2：特写 她慢慢点了点头。"
+    assert segment_advisories(claimed, prompt) == []
+    assert any("他握紧行李箱拉杆" in a for a in segment_advisories([turn], prompt))
+
+
+def test_advisory_moments_keeps_stimulus_check_when_stimulus_is_in_this_segment():
+    from app.production.storyboard_beat_causality import advisory_moments
+
+    turn = _good_turn(beat_id="B2", stimulus_beat_id="B1")
+    claimed = advisory_moments(["B1", "B2"], [turn], set())
+    assert claimed[0].stimulus_evidence_quote == "他握紧行李箱拉杆"

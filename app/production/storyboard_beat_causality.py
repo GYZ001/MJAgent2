@@ -241,6 +241,18 @@ def moments_for_segment(segment_beat_ids: list[str], turns: list[Any], covered: 
     return claimed
 
 
+def advisory_moments(segment_beat_ids: list[str], turns: list[Any], covered: set[str]) -> list[Any]:
+    """阶段二告警用的认领：与 ``moments_for_segment`` 同一条认领规则；刺激节拍不在
+    本段 ``beat_ids`` 里时（刺激在更早的段落交代过），刺激原句不该拿本段镜头稿去
+    核对——返回的副本清空 ``stimulus_evidence_quote``，只核对转折本身。
+    2026-09-28《顾念长安》第二版第 1 集第 16 段实测：刺激在第 9 段，却因为拿第
+    16 段镜头稿核对刺激原句而报「没有被写成画面」。"""
+    return [
+        turn if turn.stimulus_beat_id in segment_beat_ids else turn.model_copy(update={"stimulus_evidence_quote": ""})
+        for turn in moments_for_segment(segment_beat_ids, turns, covered)
+    ]
+
+
 def segment_rule_text(turns_here: list[Any], segment_beat_ids: list[str]) -> list[str]:
     """阶段二 per-segment 正面陈述，三分支，每条都引用
     ``turn_evidence_quote``/``stimulus_evidence_quote`` 原文，不写泛泛的话。"""

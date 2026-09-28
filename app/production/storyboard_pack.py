@@ -1190,7 +1190,7 @@ async def _generate_all_segment_prompts(
             project_id=project_id, episode_no=episode_no, shot_id=f"draft:{plan.segment_no}",
             segment={"resources": draft.resources.model_dump(mode="json")}, conn=conn, bible=bible,
         ) if conn is not None and bible is not None else None
-        turns_here2 = _beat_causality.moments_for_segment(plan.beat_ids, beat_draft.emotional_turns, covered_turn_ids2)
+        turns_here2 = _beat_causality.advisory_moments(plan.beat_ids, beat_draft.emotional_turns, covered_turn_ids2)
         signals_here2 = _beat_foreshadowing.moments_for_segment(plan.beat_ids, beat_draft.foreshadowing_beats, covered_signal_ids2)
         advisories = _segment_content_advisories(
             draft, source_segment_indexes=plan.source_segment_indexes,
