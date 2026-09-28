@@ -187,8 +187,11 @@ def test_generate_py_still_contains_the_exact_completed_ids_query() -> None:
 def _seed_shot_with_version(shot_id: str, *, adopted: bool, succeeded_video_path: str | None) -> None:
     conn = _conn()
     conn.execute(
-        "INSERT INTO shots(id, episode_id, shot_no, duration_s) VALUES(?,?,?,15)",
-        (shot_id, EPISODE_ID, hash(shot_id) % 10_000),
+        # 镜号取本集已有镜头数 +1：曾用 hash(shot_id) % 10_000，而 str 的 hash 随进程
+        # 随机化，四个镜头偶发撞号触发 UNIQUE(episode_id, shot_no)，测试间歇性失败。
+        "INSERT INTO shots(id, episode_id, shot_no, duration_s) "
+        "VALUES(?,?,(SELECT COUNT(*) + 1 FROM shots WHERE episode_id=?),15)",
+        (shot_id, EPISODE_ID, EPISODE_ID),
     )
     version_id = f"{shot_id}_v1"
     status = "succeeded" if succeeded_video_path is not None else "queued"
