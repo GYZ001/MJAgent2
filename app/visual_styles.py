@@ -133,6 +133,22 @@ def _project_bible_or_placeholder(project_row) -> Bible:
     return _placeholder_bible()
 
 
+def current_visual_style_prompt(text: str) -> str:
+    """把落库的旧画风文案映射成当前文案：``text`` 逐字等于某预设
+    ``legacy_prompts`` 之一时返回该预设**当前** ``prompt``，否则原样返回
+    ``text``（自由文本、非本仓预设、或已经是当前文案，都原样透传）。
+
+    只给读取点在"消费画风文案生成新内容"时调用（例如分镜台每次生成新的
+    分镜提示词都应该用上最新文案），不改变落库的 ``Bible.world.
+    visual_style_canonical`` 本身——那个字段仍然存旧串，定妆照/场景图的
+    读取点因此不受影响（它们的指纹含风格文案，改了会让全部存量图判过期，
+    见 ``VisualStylePreset.legacy_prompts`` 字段注释）。"""
+    for preset in VISUAL_STYLE_PRESETS:
+        if text in preset.legacy_prompts:
+            return preset.prompt
+    return text
+
+
 def is_photographic_style_prompt(prompt: str | None) -> bool:
     """该已解析画风串是否对应照片级真人摄影预设（按 prompt 逐字匹配，非按名称）。
 

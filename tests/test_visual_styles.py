@@ -1,5 +1,6 @@
 from app.visual_styles import (
     VISUAL_STYLE_PRESETS,
+    current_visual_style_prompt,
     is_photographic_style_prompt,
     visual_style_options,
     visual_style_prompt,
@@ -97,6 +98,21 @@ def test_is_photographic_style_prompt_matches_by_resolved_prompt_text() -> None:
     assert is_photographic_style_prompt("超写实风") is False
     assert is_photographic_style_prompt("") is False
     assert is_photographic_style_prompt(None) is False
+
+
+def test_current_visual_style_prompt_maps_legacy_text_to_current_prompt() -> None:
+    """存量真人风项目落库的旧文案，逐字匹配 legacy_prompts 时要换成当前 prompt。"""
+    for preset in VISUAL_STYLE_PRESETS:
+        for legacy in preset.legacy_prompts:
+            assert current_visual_style_prompt(legacy) == preset.prompt
+
+
+def test_current_visual_style_prompt_passthrough_for_current_and_unknown_text() -> None:
+    """已经是当前文案、自由文本、空串都原样透传，不做任何改写。"""
+    for preset in VISUAL_STYLE_PRESETS:
+        assert current_visual_style_prompt(preset.prompt) == preset.prompt
+    assert current_visual_style_prompt("完全不认识的自由文本画风") == "完全不认识的自由文本画风"
+    assert current_visual_style_prompt("") == ""
 
 
 def test_visual_style_options_carry_photographic_flag_from_presets() -> None:
