@@ -60,7 +60,7 @@ def test_photographic_presets_prompt_has_no_self_contradiction() -> None:
             continue
         assert "非真人" not in preset.prompt
         assert "数字角色" not in preset.prompt
-        assert "不对应任何真实存在的人" in preset.prompt
+        assert "原创虚构人物" in preset.prompt
         assert "卡通" in preset.prompt
         assert "动画" in preset.prompt
         assert "CG" in preset.prompt
@@ -123,3 +123,12 @@ def test_visual_style_options_carry_photographic_flag_from_presets() -> None:
     assert set(options) == {p.name for p in VISUAL_STYLE_PRESETS}
     for preset in VISUAL_STYLE_PRESETS:
         assert options[preset.name]["photographic"] is preset.photographic
+
+
+def test_every_preset_prompt_passes_bible_style_length_gate() -> None:
+    """预设 prompt 落库后会被 validate_bible 校验长度；超长会让该项目任何人物卡编辑都
+    422（2026-09-27 真人风新文案 75 字上线约一小时即踩中）。"""
+    from app.validators.bible_validate import VISUAL_STYLE_MAX_CHARS, VISUAL_STYLE_MIN_CHARS
+
+    for preset in VISUAL_STYLE_PRESETS:
+        assert VISUAL_STYLE_MIN_CHARS <= len(preset.prompt) <= VISUAL_STYLE_MAX_CHARS, preset.name

@@ -6,6 +6,12 @@ import re
 
 from app.schemas import Bible
 
+#: 画风文案长度闸；app.visual_styles 的预设 prompt 必须落在这个区间内（落库即被
+#: 本函数校验，超长会让该项目任何人物卡编辑都 422——2026-09-27 实测踩中）。
+VISUAL_STYLE_MIN_CHARS = 15
+VISUAL_STYLE_MAX_CHARS = 60
+
+
 def validate_bible(bible: Bible) -> list[str]:
     from app.refs import (
         PRODUCTION_APPEARANCE_MAX_CHARS,
@@ -67,8 +73,11 @@ def validate_bible(bible: Bible) -> list[str]:
         for r in c.relationships:
             if r.to not in names:
                 errors.append(f"characters[{i}]({c.name}).relationships 指向「{r.to}」不在角色列表中")
-    if not 15 <= len(bible.world.visual_style_canonical) <= 60:
-        errors.append(f"world.visual_style_canonical 长度 {len(bible.world.visual_style_canonical)} 字，要求 15~60 字")
+    if not VISUAL_STYLE_MIN_CHARS <= len(bible.world.visual_style_canonical) <= VISUAL_STYLE_MAX_CHARS:
+        errors.append(
+            f"world.visual_style_canonical 长度 {len(bible.world.visual_style_canonical)} 字，"
+            f"要求 {VISUAL_STYLE_MIN_CHARS}~{VISUAL_STYLE_MAX_CHARS} 字"
+        )
     return errors
 
 
