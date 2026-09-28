@@ -31,22 +31,36 @@ class VisualStylePreset:
     prompt: str
     photographic: bool = False
     sample_image: str = ""
+    #: 该预设历史上落库过的旧 prompt 原文（逐字），非当前 ``prompt``。
+    #: ``Bible.world.visual_style_canonical`` 落库后只存 prompt 串本身，一旦
+    #: 这里改了文案，存量项目里躺着的旧串就会与新 ``prompt`` 逐字不等——
+    #: ``is_photographic_style_prompt`` 等按 prompt 反查预设的地方必须把旧串
+    #: 也认成同一个预设，否则真人摄影风存量项目会被判成非摄影风，下游随即
+    #: 拼上「必须是 CG/动画渲染」的锁定句，灾难性回退（2026-09-27）。
+    legacy_prompts: tuple[str, ...] = ()
 
 
 VISUAL_STYLE_PRESETS: tuple[VisualStylePreset, ...] = (
     VisualStylePreset(
         "真人摄影风",
         "照片级真人摄影质感，全部风格中最贴近实拍效果，追求极致真实感。",
-        "照片级人像摄影质感，虚构数字角色、非真人照片，自然光影，肌理清晰，电影质感。",
+        "真人实拍电影质感，照片级写实人像，原创虚构人物、不对应任何真实存在的人，"
+        "自然光影，皮肤肌理清晰，全片保持实拍写实渲染，不出现卡通、动画或CG渲染质感。",
         photographic=True,
         sample_image="/visual-styles/real-photo.jpg",
+        # 2026-09-27 前的旧文案：「虚构数字角色、非真人照片」与「照片级」自相
+        # 矛盾，疑似把视频模型往 CG/动画方向推（《顾念长安》第1集134秒女主变
+        # 卡通脸时当段缺女主参考图，只剩这句风格描述起作用）；改文案但仍须识别旧串。
+        legacy_prompts=("照片级人像摄影质感，虚构数字角色、非真人照片，自然光影，肌理清晰，电影质感。",),
     ),
     VisualStylePreset(
         "精修真人风",
         "真人摄影基础上做轻度精修美化，真人相似度约八成，介于真人摄影风与CG动画风格之间。",
-        "写实人像摄影质感，虚构数字角色、非真人照片，自然光影，肤质轻度精修，电影质感。",
+        "写实人像摄影质感，肤质轻度精修，原创虚构人物、不对应任何真实存在的人，"
+        "自然光影，电影质感，全片保持写实摄影渲染，不出现卡通、动画或CG渲染质感。",
         photographic=True,
         sample_image="/visual-styles/retouched-real.jpg",
+        legacy_prompts=("写实人像摄影质感，虚构数字角色、非真人照片，自然光影，肤质轻度精修，电影质感。",),
     ),
     VisualStylePreset(
         "国漫电影风",
@@ -124,13 +138,16 @@ def is_photographic_style_prompt(prompt: str | None) -> bool:
 
     ``Bible.world.visual_style_canonical`` 落库后只保留 prompt 串本身、不保留预设名，
     所以下游（``app.refs``/``app.stages``）只能拿到这串文本；只要它逐字等于某个
-    ``photographic=True`` 预设的 prompt，就判定为照片级摄影风。未命中（自由文本、
-    历史遗留画风或已下线预设的旧值）一律按非摄影处理，与改动前的保守默认一致。
+    ``photographic=True`` 预设的当前 prompt 或该预设的 ``legacy_prompts`` 之一，
+    就判定为照片级摄影风——后半句是兼容口径：预设文案改过之后，存量项目落库
+    的仍是旧串，必须继续认得出来，否则会被判成非摄影风、下游拼错锁定句
+    （见 legacy_prompts 字段注释）。未命中（自由文本、历史遗留画风或已下线
+    预设的旧值）一律按非摄影处理，与改动前的保守默认一致。
     """
     text = (prompt or "").strip()
     if not text:
         return False
     for preset in VISUAL_STYLE_PRESETS:
-        if preset.prompt == text:
+        if preset.prompt == text or text in preset.legacy_prompts:
             return preset.photographic
     return False

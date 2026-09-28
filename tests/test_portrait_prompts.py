@@ -49,7 +49,7 @@ def test_portrait_prompt_does_not_fight_photographic_style_preset() -> None:
     real_photo_style = visual_style_prompt("真人摄影风")
     prompt = portrait_prompt(real_photo_style, "十五六岁少年，黑发束成马尾")
 
-    assert "照片级人像摄影质感" in prompt
+    assert real_photo_style in prompt, "预设自身的画风文案必须原样嵌入合成提示词"
     assert "摄影级写实质感和自然人体比例" in prompt
     assert "非照片级卡通" not in prompt
     assert "动画化比例" not in prompt

@@ -86,7 +86,12 @@ def _confirm_required_quote(monkeypatch, conn, body: dict) -> dict:
 
 
 def test_set_bible_style_no_change_short_circuits_without_quote(monkeypatch) -> None:
-    prompt = "写实人像摄影质感，虚构数字角色、非真人照片，自然光影，肤质轻度精修，电影质感。"
+    # 必须是"精修真人风"当前落库文案（而非 2026-09-27 前的旧文案）：本测试验证
+    # 的是"重复确认同一风格、且已经就是当前文案"时的幂等短路，不是风格迁移场景
+    # ——旧文案与新文案本就不相等，那种情形理应判定为 changed=True（见
+    # is_photographic_style_prompt 的 legacy_prompts 兼容口径与其专项测试）。
+    from app.visual_styles import visual_style_prompt
+    prompt = visual_style_prompt("精修真人风")
     conn = _make_conn(_bible_json(prompt), bible_version=1, bible_style_name="精修真人风")
     _patch_project(monkeypatch, conn)
     calls = _patch_spawns(monkeypatch)
