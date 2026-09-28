@@ -53,7 +53,10 @@ def reverse_check_passed(view: Mapping[str, Any]) -> bool:
 
 def reverse_view_draft(view: Mapping[str, Any]) -> str:
     """生成反打图时视觉模型起草的「转过身看到的另一侧」描述（qa_json.draft）；没有则空串。"""
-    return str(_qa_dict(view).get("draft") or "").strip()
+    draft = _qa_dict(view).get("draft")
+    if isinstance(draft, dict):  # 2026-09-27 起起草为五项结构化字典，取完整画面描述
+        return str(draft.get("reverse_view") or draft.get("back_wall_content") or "").strip()
+    return str(draft or "").strip()
 
 
 def reverse_mention(scene_name: str) -> str:

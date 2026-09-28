@@ -1517,7 +1517,7 @@ async def ensure_scene_multiview_pack(
         elif not _ready_view_matches_fingerprint(rev, rev_fp):
             # 策略见 app.scene_reverse.produce；fp 仍按不含起草文本的 rev_prompt 算。
             produced = await produce_reverse_angle_view(
-                scene_canonical=scene_canonical, visual_style=visual_style, base_prompt=rev_prompt, op_identity=rev_fp,
+                scene_canonical=scene_canonical, visual_style=visual_style, base_prompt=rev_prompt, op_identity=rev_fp, aspect_ratio=ar,
                 establishing_image_path=est.get("image_path") or "", scene_reference_id=scene_reference_id, scene_name=scene_name, size=sz,
                 make_path=lambda: _view_path(project_id, "scene", scene_name, "reverse_angle", ep_start),
                 generate_image=_generate_image, save_image_item=_save_image_item, discard_path=_discard_rejected_candidate,
@@ -2135,7 +2135,7 @@ async def regenerate_scene_view(
         if view_role == "reverse_angle":
             # 策略见 app.scene_reverse.produce；fp 仍按 base_prompt（不含起草文本）算。
             produced = await produce_reverse_angle_view(
-                scene_canonical=canonical, visual_style=style, base_prompt=base_prompt, op_identity=fp,
+                scene_canonical=canonical, visual_style=style, base_prompt=base_prompt, op_identity=fp, aspect_ratio=resolve_aspect_ratio(conn, project_id),
                 establishing_image_path=est.get("image_path") or "", scene_reference_id=scene_reference_id, scene_name=row["scene_name"], size=sz,
                 make_path=lambda: _view_path(project_id, "scene", row["scene_name"], "reverse_angle", row["ep_start"]),
                 generate_image=_generate_image, save_image_item=_save_image_item, discard_path=_discard_rejected_candidate,

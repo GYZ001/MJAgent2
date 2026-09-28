@@ -47,3 +47,11 @@ def test_switch_defaults_on_and_can_be_turned_off(monkeypatch):
     assert ev.reverse_angle_reference_enabled()
     monkeypatch.setattr(ev, "get_setting", lambda key: "false")
     assert not ev.reverse_angle_reference_enabled()
+
+
+def test_reverse_view_draft_reads_structured_and_legacy_drafts():
+    structured = {"reverse_check": {"checked": True, "passed": True}, "draft": {"reverse_view": "从门口朝里看：挂钟墙"}}
+    legacy = {"reverse_check": {"checked": True, "passed": True}, "draft": "背后是砖墙"}
+    assert ev.reverse_view_draft(_view(structured)) == "从门口朝里看：挂钟墙"
+    assert ev.reverse_view_draft(_view(legacy)) == "背后是砖墙"
+    assert ev.reverse_view_draft(_view(None)) == ""

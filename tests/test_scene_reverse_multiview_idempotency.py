@@ -78,7 +78,7 @@ def test_reverse_angle_regeneration_is_idempotent_when_inputs_unchanged(asset_db
 
     def fake_draft(**_kwargs):
         draft_calls.append(1)
-        return asyncio.sleep(0, result="机位背后是斑驳的砖墙与半开的木门")
+        return asyncio.sleep(0, result={"reverse_view": "机位背后是斑驳的砖墙与半开的木门"})
 
     def fake_judge(**_kwargs):
         judge_calls.append(1)

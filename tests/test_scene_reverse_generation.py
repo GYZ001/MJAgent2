@@ -11,8 +11,18 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import json
+
 from app import hiagent
 from app.scene_reverse import draft, judge, produce
+
+_FULL_DRAFT = {
+    "left_becomes_right": "左侧的旧木钟柜与台灯",
+    "invisible_elements": "画面深处的临街木门与窗外街景",
+    "back_wall_content": "原机位背后是挂满钟表的木墙与一张旧藤椅",
+    "furniture_facing": "工作台露出背面的抽屉",
+    "reverse_view": "从门口朝店里看：正对挂满钟表的木墙，左侧是玻璃柜台，右侧是旧木钟柜，暖黄台灯从右侧照来",
+}
 
 
 def _write_image(tmp_path: Path, name: str) -> str:
@@ -29,7 +39,7 @@ def test_draft_returns_note_from_structured_json(tmp_path, monkeypatch) -> None:
     async def fake_chat(_messages, **kwargs):
         assert kwargs["provider"] == "vlm-provider"
         assert kwargs["response_format"] == {"type": "json_object"}
-        return '{"note": "机位背后是斑驳的砖墙与半开的木门"}'
+        return json.dumps(_FULL_DRAFT, ensure_ascii=False)
 
     monkeypatch.setattr(hiagent, "chat", fake_chat)
     monkeypatch.setattr(hiagent, "active_provider", lambda kind: "vlm-provider")
@@ -39,7 +49,7 @@ def test_draft_returns_note_from_structured_json(tmp_path, monkeypatch) -> None:
         establishing_image_path=_write_image(tmp_path, "est.jpg"), scene_reference_id="scene_1",
     ))
 
-    assert note == "机位背后是斑驳的砖墙与半开的木门"
+    assert note == _FULL_DRAFT
 
 
 def test_draft_returns_empty_string_on_provider_error(tmp_path, monkeypatch) -> None:
@@ -54,7 +64,7 @@ def test_draft_returns_empty_string_on_provider_error(tmp_path, monkeypatch) -> 
         establishing_image_path=_write_image(tmp_path, "est.jpg"), scene_reference_id="scene_1",
     ))
 
-    assert note == ""
+    assert note == {}
 
 
 def test_draft_returns_empty_string_on_unparseable_json(tmp_path, monkeypatch) -> None:
@@ -69,7 +79,7 @@ def test_draft_returns_empty_string_on_unparseable_json(tmp_path, monkeypatch) -
         establishing_image_path=_write_image(tmp_path, "est.jpg"), scene_reference_id="scene_1",
     ))
 
-    assert note == ""
+    assert note == {}
 
 
 # ---------------------------------------------------------------------------
@@ -178,10 +188,10 @@ def test_produce_uses_seeded_generation_and_stops_when_judge_passes(tmp_path) ->
         return {"checked": True, "passed": True, "reason": "确实相反", "error": None}
 
     async def draft_fn(**_kwargs):
-        return "背后是砖墙"
+        return _FULL_DRAFT
 
     result = asyncio.run(produce.produce_reverse_angle_view(
-        scene_canonical="老旧修表铺", visual_style="国漫电影风", base_prompt="BASE_PROMPT。", op_identity="fp_1",
+        scene_canonical="老旧修表铺", visual_style="国漫电影风", base_prompt="BASE_PROMPT。", aspect_ratio="9:16", op_identity="fp_1",
         establishing_image_path=_write_image(tmp_path, "est.jpg"),
         scene_reference_id="scene_1", scene_name="修表铺", size="1024x1820",
         make_path=_make_path_factory(tmp_path), generate_image=generate_image, save_image_item=_noop_save,
@@ -192,8 +202,11 @@ def test_produce_uses_seeded_generation_and_stops_when_judge_passes(tmp_path) ->
     assert calls["generate"][0][1] is not None  # 第一次带种子
     assert len(calls["judge"]) == 1
     assert calls["discard"] == []
-    assert result["prompt"] == "BASE_PROMPT。原机位背后一侧的真实内容：背后是砖墙。"
-    assert result["qa"]["draft"] == "背后是砖墙"
+    assert "机位镜像编辑任务" in result["prompt"] and "左右对调清单" in result["prompt"]
+    assert _FULL_DRAFT["invisible_elements"] in result["prompt"] and _FULL_DRAFT["left_becomes_right"] in result["prompt"]
+    assert "BASE_PROMPT" not in result["prompt"]  # 主视角构图描述不再进第一次生成
+    assert "9:16 竖屏" in result["prompt"]
+    assert result["qa"]["draft"] == _FULL_DRAFT
     assert result["qa"]["reverse_check"]["passed"] is True
     assert result["qa"]["attempts"] == [{"seeded": True, "passed": True, "reason": "确实相反"}]
 
@@ -214,10 +227,10 @@ def test_produce_retries_unseeded_when_first_judge_fails(tmp_path) -> None:
         return verdicts[len(calls["judge"]) - 1]
 
     async def draft_fn(**_kwargs):
-        return ""
+        return {}
 
     result = asyncio.run(produce.produce_reverse_angle_view(
-        scene_canonical="老旧修表铺", visual_style="国漫电影风", base_prompt="BASE_PROMPT。", op_identity="fp_1",
+        scene_canonical="老旧修表铺", visual_style="国漫电影风", base_prompt="BASE_PROMPT。", aspect_ratio="9:16", op_identity="fp_1",
         establishing_image_path=_write_image(tmp_path, "est.jpg"),
         scene_reference_id="scene_1", scene_name="修表铺", size="1024x1820",
         make_path=_make_path_factory(tmp_path), generate_image=generate_image, save_image_item=_noop_save,
@@ -245,13 +258,13 @@ def test_produce_does_not_retry_when_judge_call_itself_fails(tmp_path) -> None:
         return {"checked": False, "passed": None, "reason": "", "error": "TimeoutError"}
 
     async def draft_fn(**_kwargs):
-        return ""
+        return {}
 
     def _must_not_discard(_path: str) -> None:
         raise AssertionError("判定失败不该丢弃候选")
 
     result = asyncio.run(produce.produce_reverse_angle_view(
-        scene_canonical="老旧修表铺", visual_style="国漫电影风", base_prompt="BASE_PROMPT。", op_identity="fp_1",
+        scene_canonical="老旧修表铺", visual_style="国漫电影风", base_prompt="BASE_PROMPT。", aspect_ratio="9:16", op_identity="fp_1",
         establishing_image_path=_write_image(tmp_path, "est.jpg"),
         scene_reference_id="scene_1", scene_name="修表铺", size="1024x1820",
         make_path=_make_path_factory(tmp_path), generate_image=generate_image, save_image_item=_noop_save,
@@ -277,14 +290,14 @@ def test_produce_operation_id_stable_across_different_draft_text(tmp_path) -> No
     async def judge_fn(**_kwargs):
         return {"checked": True, "passed": True, "reason": "确实相反", "error": None}
 
-    drafts = iter(["背后是斑驳砖墙", "背后是半开木门与窗台"])
+    drafts = iter([_FULL_DRAFT, {**_FULL_DRAFT, "back_wall_content": "背后是半开木门与窗台"}])
 
     async def draft_fn(**_kwargs):
         return next(drafts)
 
     for _ in range(2):
         asyncio.run(produce.produce_reverse_angle_view(
-            scene_canonical="老旧修表铺", visual_style="国漫电影风", base_prompt="BASE_PROMPT。", op_identity="fp_1",
+            scene_canonical="老旧修表铺", visual_style="国漫电影风", base_prompt="BASE_PROMPT。", aspect_ratio="9:16", op_identity="fp_1",
             establishing_image_path=_write_image(tmp_path, "est.jpg"),
             scene_reference_id="scene_1", scene_name="修表铺", size="1024x1820",
             make_path=_make_path_factory(tmp_path), generate_image=generate_image, save_image_item=_noop_save,
@@ -308,11 +321,11 @@ def test_produce_operation_id_changes_with_op_identity(tmp_path) -> None:
         return {"checked": True, "passed": True, "reason": "确实相反", "error": None}
 
     async def draft_fn(**_kwargs):
-        return "背后是斑驳砖墙"
+        return _FULL_DRAFT
 
     for identity in ("fp_old_establishing", "fp_new_establishing"):
         asyncio.run(produce.produce_reverse_angle_view(
-            scene_canonical="老旧修表铺", visual_style="国漫电影风", base_prompt="BASE_PROMPT。", op_identity=identity,
+            scene_canonical="老旧修表铺", visual_style="国漫电影风", base_prompt="BASE_PROMPT。", aspect_ratio="9:16", op_identity=identity,
             establishing_image_path=_write_image(tmp_path, "est.jpg"),
             scene_reference_id="scene_1", scene_name="修表铺", size="1024x1820",
             make_path=_make_path_factory(tmp_path), generate_image=generate_image, save_image_item=_noop_save,
@@ -327,3 +340,36 @@ def test_judge_prompt_rejects_mirror_and_other_space_explicitly() -> None:
     """标定口径：左右镜像曾被初版判定当成反打（吕家宅院），现版必须写明镜像与另一个空间都判否。"""
     assert "左右镜像" in judge._PROMPT and "另一个空间" in judge._PROMPT
     assert "椅背" in judge._PROMPT and "椅面" in judge._PROMPT
+
+
+
+def test_produce_unseeded_retry_uses_full_view_description_without_reference_wording(tmp_path) -> None:
+    """判否后的纯文生图重试只用起草的完整画面描述，不带「参考图」这类没有图时自相矛盾的措辞。"""
+    prompts: list[tuple[str, object]] = []
+    verdicts = iter([
+        {"checked": True, "passed": False, "reason": "只是平移", "error": None},
+        {"checked": True, "passed": True, "reason": "朝向相反", "error": None},
+    ])
+
+    async def generate_image(prompt, **kwargs):
+        prompts.append((prompt, kwargs.get("seed_inputs")))
+        return {"b64_json": "x"}
+
+    async def judge_fn(**_kwargs):
+        return next(verdicts)
+
+    async def draft_fn(**_kwargs):
+        return _FULL_DRAFT
+
+    result = asyncio.run(produce.produce_reverse_angle_view(
+        scene_canonical="老旧修表铺", visual_style="国漫电影风", base_prompt="BASE_PROMPT。", aspect_ratio="16:9",
+        op_identity="fp_1", establishing_image_path=_write_image(tmp_path, "est.jpg"),
+        scene_reference_id="scene_1", scene_name="修表铺", size="2560x1440",
+        make_path=_make_path_factory(tmp_path), generate_image=generate_image, save_image_item=_noop_save,
+        discard_path=lambda _p: None, draft_fn=draft_fn, judge_fn=judge_fn,
+    ))
+
+    (_first, first_seed), (second, second_seed) = prompts
+    assert first_seed is not None and second_seed is None
+    assert _FULL_DRAFT["reverse_view"] in second and "参考图" not in second and "16:9 横屏" in second
+    assert result["prompt"] == second

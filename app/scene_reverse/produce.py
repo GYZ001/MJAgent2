@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from app import hiagent
+from app.project_settings import canvas_phrase
+from app.refs import scene_visual_style_lock
 
 GenerateImage = Callable[..., Awaitable[dict[str, Any]]]
 SaveImageItem = Callable[[dict[str, Any], str], Awaitable[None]]
@@ -58,11 +60,46 @@ async def _attempt(
     return path, verdict
 
 
+def compose_seeded_prompt(*, visual_style: str, scene_name: str, aspect_ratio: str, draft: dict[str, str]) -> str:
+    """带主视角图作种子的第一次生成：「编辑指令 + 左右对调清单」（B 沙箱 2026-09-27 实测最优）。
+
+    不放主视角的场景描述——那段文字描述的是主视角构图，会把模型拉回原方向（实测
+    带它的写法 0/4）。起草缺关键项时返回空串，调用方退回基础提示词。
+    """
+    required = ("invisible_elements", "back_wall_content", "left_becomes_right")
+    if not all(draft.get(key) for key in required):
+        return ""
+    facing = draft.get("furniture_facing", "")
+    facing_clause = f"画面里有明确朝向的家具需展示与参考图相反的那一面：{facing}。" if facing and facing != "无" else ""
+    return (
+        f"{scene_visual_style_lock(visual_style)}。这是一次基于参考图的机位镜像编辑任务，不是重新构图。"
+        f"参考图是「{scene_name}」这个空间的建立镜头（主视角）。请把摄像机搬到参考图画面最深处一侧"
+        "（例如画面里最远处的那扇门、那面墙或那个角落跟前），原地转身 180°，面朝参考图里原摄像机所在的方向"
+        "拍摄同一个空间。新画面中，参考图里位于画面深处、正对原摄像机的以下内容必须完全从画面中消失，"
+        f"因为它们现在在镜头身后：{draft['invisible_elements']}。新画面的背景应是参考图摄像机原本站立"
+        f"那一侧的真实内容：{draft['back_wall_content']}。{facing_clause}"
+        f"左右对调清单（必须遵守）：参考图画面左侧的这些内容——{draft['left_becomes_right']}——在新画面里"
+        "应出现在画面右侧；参考图画面右侧的内容对应出现在新画面左侧；不得整张图直接左右镜像（背景元素仍须"
+        f"移到镜头身后消失，不是简单翻转）。不出现人物，不出现文字、字幕、水印、logo。{canvas_phrase(aspect_ratio)}。"
+    )
+
+
+def compose_unseeded_prompt(*, visual_style: str, scene_name: str, aspect_ratio: str, draft: dict[str, str]) -> str:
+    """判否后不带种子的第二次生成：只用起草的完整画面描述，不写「参考图」这类没有图时自相矛盾的措辞。"""
+    view = draft.get("reverse_view", "")
+    if not view:
+        return ""
+    return (
+        f"{scene_visual_style_lock(visual_style)}。场景多视角定场图（反打）：「{scene_name}」这个空间从另一侧"
+        f"看到的画面：{view}。画面中不出现任何人物，禁止文字、字幕、水印、logo。{canvas_phrase(aspect_ratio)}。"
+    )
+
+
 async def produce_reverse_angle_view(
-    *, scene_canonical: str, visual_style: str, base_prompt: str, op_identity: str, establishing_image_path: str,
+    *, scene_canonical: str, visual_style: str, base_prompt: str, op_identity: str, establishing_image_path: str, aspect_ratio: str,
     scene_reference_id: str, scene_name: str, size: str, make_path: Callable[[], str],
     generate_image: GenerateImage, save_image_item: SaveImageItem, discard_path: Callable[[str], None],
-    draft_fn: Callable[..., Awaitable[str]], judge_fn: JudgeFn,
+    draft_fn: Callable[..., Awaitable[dict[str, str]]], judge_fn: JudgeFn,
 ) -> dict[str, Any]:
     """返回 ``{"image_path", "prompt", "qa": {"reverse_check", "attempts", "draft"}}``。
 
@@ -75,16 +112,18 @@ async def produce_reverse_angle_view(
         scene_canonical=scene_canonical, visual_style=visual_style,
         establishing_image_path=establishing_image_path, scene_reference_id=scene_reference_id,
     )
-    prompt = f"{base_prompt}原机位背后一侧的真实内容：{draft}。" if draft else base_prompt
+    shape = dict(visual_style=visual_style, scene_name=scene_name, aspect_ratio=aspect_ratio, draft=draft or {})
+    prompt = compose_seeded_prompt(**shape) or base_prompt
     common = dict(
-        prompt=prompt, op_identity=op_identity, establishing_path=establishing_image_path,
+        op_identity=op_identity, establishing_path=establishing_image_path,
         scene_reference_id=scene_reference_id, scene_name=scene_name, size=size, make_path=make_path,
         generate_image=generate_image, save_image_item=save_image_item, judge_fn=judge_fn,
     )
-    path, verdict = await _attempt(seeded=True, **common)
+    path, verdict = await _attempt(seeded=True, prompt=prompt, **common)
     attempts = [{"seeded": True, "passed": verdict.get("passed"), "reason": verdict.get("reason", "")}]
     if verdict.get("checked") is True and verdict.get("passed") is False:
         discard_path(path)
-        path, verdict = await _attempt(seeded=False, **common)
+        prompt = compose_unseeded_prompt(**shape) or base_prompt
+        path, verdict = await _attempt(seeded=False, prompt=prompt, **common)
         attempts.append({"seeded": False, "passed": verdict.get("passed"), "reason": verdict.get("reason", "")})
     return {"image_path": path, "prompt": prompt, "qa": {"reverse_check": verdict, "attempts": attempts, "draft": draft}}
