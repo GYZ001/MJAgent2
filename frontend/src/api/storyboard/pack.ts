@@ -76,10 +76,21 @@ export interface StoryboardPackResourceProp {
   current_prop_image_url?: string | null;
 }
 
+/**
+ * 闪回/回忆画面里以明显不同年龄或形态出现的人物（2026-09-29）：没有参考图，只
+ * 靠 label（称呼）+ description（可视觉验证特征）钉住长相，不进 characters、
+ * 不绑定 @ 引用——旧段落没有这个字段。
+ */
+export interface StoryboardPackResourceFlashbackFigure {
+  label: string;
+  description?: string;
+}
+
 export interface StoryboardPackResources {
   characters: StoryboardPackResourceCharacter[];
   scenes: StoryboardPackResourceScene[];
   props: StoryboardPackResourceProp[];
+  flashback_figures?: StoryboardPackResourceFlashbackFigure[];
 }
 
 export interface StoryboardPackSegment {

@@ -4,7 +4,7 @@ import re
 from pydantic import ValidationError
 
 from app import config, textmatch
-from app.schemas.segment_identity import SegmentCharacter, SegmentDialogue
+from app.schemas.segment_identity import FlashbackFigure, SegmentCharacter, SegmentDialogue
 
 
 def identity_schema_errors(segment: dict) -> list[str]:
@@ -12,6 +12,8 @@ def identity_schema_errors(segment: dict) -> list[str]:
     try:
         for character in (segment.get("resources") or {}).get("characters") or []:
             SegmentCharacter.model_validate(character)
+        for figure in (segment.get("resources") or {}).get("flashback_figures") or []:
+            FlashbackFigure.model_validate(figure)
         for line in segment.get("dialogue") or []:
             SegmentDialogue.model_validate(line)
     except (ValidationError, TypeError, AttributeError) as exc:

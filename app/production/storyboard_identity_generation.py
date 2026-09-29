@@ -20,6 +20,7 @@ IDENTITY_GENERATION_RULES = [
     "必保台词清单的原话必须逐字保留；speaker_identity_id、excluded_speaker_identity_ids、delivery_kind、quote_id 和来源偏移是原文证据：明确归属须保持，听者不能充当发声者。没有明确归属时使用有证据的无名人物，并填写 attribution_evidence；旁白只用于原文叙述者发声。source_quote_id 引用对应 quote_id。",
     "resources.characters[].display_name 使用输入角色正名或群演 label；有图的可见角色用 @完整名字 后接空格或标点，群演用独立描述。仅有声音的角色使用 speech 占位符发声，无需 @人物图片。",
     "叙述者的 speaker_identity_id 固定填写旁白，delivery_kind=narration，delivery=offscreen_voice，resources.characters 只列人物。source_segment_index 沿用原文 [段N] 编号，与视频 segment_no 分开；必保台词包括原文拼音、异体字、错别字均照录，source_quote_id 逐字取自对应 quote_id。",
+    "闪回/回忆画面里出现的人物，若外观明显不是这个角色当前的年龄或形态（童年、少年、年迈等），写进 resources.flashback_figures（label 用称呼如「六岁的顾屿」，description 写清年龄区间、脸型、发型、服装颜色材质等至少三项可视觉验证特征），不要列入 resources.characters、也不要用 @人名指他——@ 的意思是「这一镜用这个角色当前的定妆照」，闪回人物没有这张图可用，镜头正文直接用这个称呼和 description 里的特征描述这个人。闪回画面里如果人物就是角色卡当前的年龄和形态，仍按普通角色处理，正常列入 resources.characters、可以用 @。",
 ]
 
 

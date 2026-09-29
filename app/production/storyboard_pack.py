@@ -62,9 +62,7 @@ from app.production.storyboard_segment_output import segment_output_contract
 from app.production.storyboard_identity_generation import (
     IDENTITY_GENERATION_RULES, generated_identity_errors, finalize_generated_identity,
 )
-from app.schemas.segment_identity import (
-    SegmentDialogue as _AiDialogueLine, SegmentCharacter as _AiResourceCharacter,
-)
+from app.schemas.segment_identity import SegmentDialogue as _AiDialogueLine
 from app.production.storyboard_pack_montage import fill_montage_beat_time_anchors
 from app.production.storyboard_scene_binding import _enrich_asset_manifest_canonical_visuals
 from app.production.storyboard_staging_repeat import StagingSoftGate, canonical_phrases, chain_prompt_texts, repeated_staging_errors, staging_continuation_rule
@@ -615,21 +613,14 @@ def _strip_paratext_from_beat_draft(
 # 阶段二：逐段提示词
 # ---------------------------------------------------------------------------
 
-class _AiResourceScene(BaseModel):
-    scene_id: str
-    scene_reference_id: str | None = None
-    description: str = ""
-
-
-class _AiResourceProp(BaseModel):
-    label: str
-    description: str = ""
-
-
-class _AiSegmentResources(BaseModel):
-    characters: list[_AiResourceCharacter] = Field(default_factory=list)
-    scenes: list[_AiResourceScene] = Field(default_factory=list)
-    props: list[_AiResourceProp] = Field(default_factory=list)
+#: 2026-09-29：真源搬到 storyboard_segment_resources（叶子）——闪回人物字段
+#: （resources.flashback_figures）要给 _AiSegmentResources 添字段，本文件
+#: line_count 棘轮零余量，三个类整体搬出腾行数，`as` 自别名保持这里的既有用法
+#: 与测试 import 路径不变。
+from app.production.storyboard_segment_resources import (
+    _AiResourceScene as _AiResourceScene, _AiResourceProp as _AiResourceProp, _AiSegmentResources as _AiSegmentResources,
+    FlashbackFigure as FlashbackFigure,
+)
 
 
 class _AiCameraDigest(BaseModel):
@@ -861,6 +852,9 @@ def _segment_content_advisories(
     )
     # P0-A/C（2026-09-27）：情绪转折/伏笔"是否真的被写成画面"，同一套 advisory 哲学。
     advisories.extend([*_beat_causality.segment_advisories(list(emotional_turns_here), draft.prompt_text), *_beat_foreshadowing.segment_advisories(list(foreshadowing_here), draft.prompt_text), *_prop_entrance.segment_advisories(list(prop_entrances_here), draft.prompt_text)])
+    # 2026-09-29：可见角色正文里除人数锁定句外再无 @ 点名——参考图仍会照发，
+    # 常见成因是闪回/回忆换了年龄却仍绑着当前定妆照（真实回归见 storyboard_cast_lock 模块）。
+    advisories.extend(_cast_lock.unmentioned_visible_character_advisories(draft))
     return advisories
 
 

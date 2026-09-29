@@ -27,3 +27,21 @@ class SegmentCharacter(BaseModel):
     display_name: str = ""
     visibility: Literal["visible", "voice_only", "unknown"] = "unknown"
     subject_kind: Literal["character", "extra", "crowd", "unknown"] = "unknown"
+
+
+class FlashbackFigure(BaseModel):
+    """闪回/回忆画面里以明显不同年龄或形态出现的人物（2026-09-29，真实回归
+    proj_ca86b15ab7d7 EP1 段16：模型把闪回中六岁的顾屿登记进 resources.characters
+    并绑定成年顾屿的定妆照，画面参考图与文字描述的年龄互相矛盾）。
+
+    与 ``SegmentCharacter`` 分属两个不同的列表（``resources.characters`` /
+    ``resources.flashback_figures``），不是同一模型的两种状态：
+    ``SegmentCharacter`` 的 ``portrait_id``/``visibility`` 语义是"这一段用哪张
+    角色当前定妆照出镜"，闪回人物在这一刻没有任何可用的当前定妆照（角色卡上的
+    定妆照是他/她当前年龄的样子，与闪回年龄不符）——结构上不给这个模型
+    identity_id/portrait_id 字段，模型就没有字段可以把闪回人物错误绑定到当前
+    定妆照上。
+    """
+
+    label: str = Field(description="这个闪回人物的称呼，例如「六岁的顾屿」；镜头正文用这个称呼指代他，不加 @")
+    description: str = Field(default="", description="至少三项可视觉验证特征：年龄区间、脸型、发型、服装颜色材质等")
