@@ -412,7 +412,8 @@
   background: #fbf1e3;
 }
 :where(:root[data-theme="dark"]) .cinema-subtitle-alert {
-  border-color: #8a5a24;
+  border: 1px solid #8a5a24;
+  border-left: 4px solid #c97a2b;
   background: #2a2115;
 }
 .cinema-subtitle-table td,
