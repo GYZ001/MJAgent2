@@ -289,6 +289,70 @@ def test_voice_row_with_missing_clip_file_is_skipped_not_sent() -> None:
     assert skips == [{"character_name": "甲", "reason": "声音文件缺失，请在人物谱重新生成"}]
 
 
+def _dialogue_with_narration(*speakers: str) -> list[dict]:
+    return _dialogue(*speakers, "旁白")
+
+
+def test_narrator_voice_character_empty_leaves_behavior_unchanged() -> None:
+    """默认参数（未传 narrator_voice_character）与显式传空串逐字同效——设置为空时
+    行为不变的回归。"""
+    _adopt_voice("温念")
+    segment = _segment(_dialogue_with_narration("bible:温念"))
+    refs_default, skips_default = _resolve(segment)
+    refs_explicit_empty, skips_explicit_empty = _resolve(segment, narrator_voice_character="")
+    assert refs_default == refs_explicit_empty
+    assert skips_default == skips_explicit_empty
+    assert [r["character_name"] for r in refs_default] == ["温念"]  # 旁白本身不占位
+
+
+def test_narrator_with_no_narration_line_is_not_injected() -> None:
+    """项目设置了旁白固定音色角色，但本段根本没有旁白台词：不追加占位。"""
+    _adopt_voice("温念")
+    segment = _segment(_dialogue("bible:温念"))
+    refs, _skips = _resolve(segment, narrator_voice_character="温念")
+    assert [r["character_name"] for r in refs] == ["温念"]
+
+
+def test_narrator_not_already_a_speaker_is_appended_after_real_speakers() -> None:
+    """本段真实说话人优先：旁白固定音色角色追加在真实说话人之后，role 标为 narrator。"""
+    _adopt_voice("顾屿")
+    _adopt_voice("温念")
+    segment = _segment(_dialogue_with_narration("bible:顾屿"))
+    refs, skips = _resolve(segment, narrator_voice_character="温念", max_speakers=3)
+    assert skips == []
+    assert [r["character_name"] for r in refs] == ["顾屿", "温念"]
+    assert [r["role"] for r in refs] == ["speaker", "narrator"]
+
+
+def test_narrator_already_a_real_speaker_is_not_duplicated() -> None:
+    """旁白固定音色角色本来就是本段真实说话人：不重复占位，role 仍是 speaker
+    （它的声音参考已经覆盖旁白台词，见 rendered_utterance 的标签共用同一短语）。"""
+    _adopt_voice("温念")
+    segment = _segment(_dialogue_with_narration("bible:温念"))
+    refs, skips = _resolve(segment, narrator_voice_character="温念")
+    assert skips == []
+    assert [r["character_name"] for r in refs] == ["温念"]
+    assert refs[0]["role"] == "speaker"
+
+
+def test_narrator_without_voice_is_skipped_with_reason() -> None:
+    """本段只有旁白台词、没有任何真实说话人：旁白固定音色角色未配声音时按已有理由跳过。"""
+    segment = _segment(_dialogue("旁白"))
+    refs, skips = _resolve(segment, narrator_voice_character="温念")
+    assert refs == []
+    assert skips == [{"character_name": "温念", "reason": "未配置声音"}]
+
+
+def test_narrator_counts_toward_max_speakers_cap() -> None:
+    """旁白固定音色角色计入现有说话人上限：上限打满时旁白被挤出并给出理由。"""
+    for name in ("甲", "乙", "温念"):
+        _adopt_voice(name)
+    segment = _segment(_dialogue_with_narration("bible:甲", "bible:乙"))
+    refs, skips = _resolve(segment, narrator_voice_character="温念", max_speakers=2)
+    assert [r["character_name"] for r in refs] == ["甲", "乙"]
+    assert {"character_name": "温念", "reason": "超出每段 2 个上限"} in skips
+
+
 def test_speakers_without_voice_do_not_consume_the_cap() -> None:
     """名额只算真正传入的声音：排第一的没配声音，不该把后面配了声音的角色挤成「超出上限」。"""
     for name in ("乙", "丙"):

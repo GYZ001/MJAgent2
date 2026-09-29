@@ -50,7 +50,7 @@ from pydantic import BaseModel, Field
 from app import config, hiagent, spoken_contract
 from app.db import new_id
 from app.harness import model_gateway
-from app.project_settings import enhance_music_bed_enabled, resolve_adaptation_mode, resolve_aspect_ratio
+from app.project_settings import enhance_music_bed_enabled, resolve_adaptation_mode, resolve_aspect_ratio, resolve_narrator_voice_character
 from app.scene_reverse import segment_views as reverse_segment_views
 from app.production.storyboard_capacity_normalize import normalize_and_assert_capacity
 from app.production.storyboard_identity_contract import canonical_segment_identities, visible_character_ids
@@ -732,6 +732,7 @@ class _AiStoryboardSegmentDraft(BaseModel):
     identity_contract_fingerprint: str = ""
     speech_template: str = ""
     speech_dialect: str = ""
+    narrator_voice_character: str = ""  #: 生成时用的旁白固定音色角色正名，随段落持久化，与 speech_dialect 同一先例——见 render_segment_speech 文档
     prompt_text: str = Field(min_length=1)
     shot_count: int = Field(ge=MIN_SHOTS_PER_SEGMENT, le=MAX_SHOTS_PER_SEGMENT)
     dialogue: list[_AiDialogueLine] = Field(default_factory=list)
@@ -1008,8 +1009,7 @@ async def _generate_all_segment_prompts(
     target_video_model: str,
     bible: Bible | None,
     required_dialogue_by_segment_no: dict[int, list[dict[str, Any]]],
-    conn: Any,
-    project_id: str, aspect_ratio: str, enhance_music_bed: bool,
+    conn: Any, project_id: str, aspect_ratio: str, enhance_music_bed: bool, narrator_voice_character: str = "",
     reuse_segments: dict[int, _AiStoryboardSegmentDraft] | None = None,
 ) -> dict[int, _AiStoryboardSegmentDraft]:
     """逐段独立调用产出全部段落的 prompt_text（2.0.8 起，替代整集批量调用）。
@@ -1149,7 +1149,7 @@ async def _generate_all_segment_prompts(
             _no=plan.segment_no, _n2i=manifest_name_to_identity(payload, plan.source_segment_indexes), _sx=plan.source_segment_indexes, _ch=staging_chain, _syn=plan.synopsis, _dp=canonical_phrases(payload), _sg=staging_gate, _rs=relevant_assets["scenes"]: [*ensure_travel_direction_in_prompt(value), *ensure_wardrobe_continuity_in_prompt(value, prop_factory=_AiResourceProp), *_cast_lock.ensure_cast_lock_in_prompt(value), *strip_extra_reference_markers(value, payload), *overlay_text_errors(value), *required_beats_errors(value, _struct["required_beats"]), *_validate_segment_draft(
                 value, dialect_render_format=profile.render_format, required_dialogue=_req, name_to_identity=_n2i,
                 previous_memo=_pm, segment_source_text=_st, delivered_lines=_dl, reserved_lines=_rv, current_segment_no=_no, relevant_scenes=_rs,
-            ), *generated_identity_errors(value, payload=payload, source_indexes=_sx, required_dialogue=_req, dialect=profile.render_format),
+            ), *generated_identity_errors(value, payload=payload, source_indexes=_sx, required_dialogue=_req, dialect=profile.render_format, narrator_voice_character=narrator_voice_character),
             *_sg.filter(repeated_staging_errors(_ch, value.prompt_text, current_segment_no=_no, synopsis=_syn, drop_phrases=_dp)), *_music_bed.ensure_no_music_bed_in_prompt(value, render_format=profile.render_format, enabled=enhance_music_bed)],
             operation_id=f"storyboard_pack_segment_{episode_id}_{plan.segment_no}_{fingerprint}",
             max_tokens=SEGMENT_PROMPT_ANSWER_TOKENS,
@@ -1170,7 +1170,7 @@ async def _generate_all_segment_prompts(
             format_repair_context=storyboard_repair_context(task_payload),
         )
         draft = finalize_generated_identity(draft, payload=payload, source_indexes=plan.source_segment_indexes,
-                                            required_dialogue=required_dialogue, dialect=profile.render_format)
+                                            required_dialogue=required_dialogue, dialect=profile.render_format, narrator_voice_character=narrator_voice_character)
         draft.camera_digest.transition_from_previous = transition_with_resource_bypass(structure["transition_from_previous"], {s.scene_id for s in previous_draft.resources.scenes} if previous_draft is not None else set(), {s.scene_id for s in draft.resources.scenes})  # 转场以原文标记/段头为准；段头判不出时用相邻两段 resources.scenes 的 scene_id 差异兜底（小说体没有段头标记）
         camera_digest_by_segment_no[plan.segment_no] = draft.camera_digest
         by_segment_no[plan.segment_no] = draft
@@ -1388,7 +1388,7 @@ async def generate_storyboard_pack(
         target_video_model=target_video_model,
         bible=bible,
         required_dialogue_by_segment_no=required_dialogue_by_segment_no,
-        conn=conn, project_id=ep["project_id"], aspect_ratio=resolve_aspect_ratio(conn, ep["project_id"]), enhance_music_bed=enhance_music_bed_enabled(conn, ep["project_id"]),
+        conn=conn, project_id=ep["project_id"], aspect_ratio=resolve_aspect_ratio(conn, ep["project_id"]), enhance_music_bed=enhance_music_bed_enabled(conn, ep["project_id"]), narrator_voice_character=resolve_narrator_voice_character(conn, ep["project_id"]),
     )
     pack_segments = [
         StoryboardPackSegment(

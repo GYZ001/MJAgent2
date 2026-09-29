@@ -251,8 +251,8 @@ export interface Project {
   /** 画幅："9:16"（默认）/ "16:9"。只影响之后生成的视频与场景图；人物定妆照、
    *  道具图不随画幅变。改后端更新走 PUT /projects/{id}/settings。 */
   aspect_ratio?: string;
-  /** AI 生成标识 / 统一配乐 / 片头预告（预留）/ 主角内心独白（预留）开关（2026-09-28 加后三项）；后端给原始 0/1，前端一律 !! 转布尔，同 harness_engine_enabled。 */
-  ai_label_enabled?: number | boolean; enhance_music_bed?: number | boolean; enhance_teaser?: number | boolean; enhance_monologue?: number | boolean;
+  /** AI 生成标识 / 统一配乐 / 片头预告（预留）/ 主角内心独白（预留）开关（2026-09-28 加后三项）；后端给原始 0/1，前端一律 !! 转布尔，同 harness_engine_enabled。旁白固定音色角色（narrator_voice_character）空串＝未设置，非空须是本项目人物谱已有正名；改后端走 PUT /projects/{id}/settings。 */
+  ai_label_enabled?: number | boolean; enhance_music_bed?: number | boolean; enhance_teaser?: number | boolean; enhance_monologue?: number | boolean; narrator_voice_character?: string;
   /** 以下仅在 ?view=picker&episode_limit>0 的窗口模式下返回。
    *  整份分集在千集项目里未压缩 250KB，而切换器最多只展示 60 条，
    *  故服务端只回一个窗口，另外把窗口外仍需要的信息单独带上。 */

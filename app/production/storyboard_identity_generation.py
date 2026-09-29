@@ -23,7 +23,10 @@ IDENTITY_GENERATION_RULES = [
 ]
 
 
-def generated_identity_errors(draft, *, payload: dict, source_indexes: list[int], required_dialogue: list[dict], dialect: str = "") -> list[str]:
+def generated_identity_errors(
+    draft, *, payload: dict, source_indexes: list[int], required_dialogue: list[dict],
+    dialect: str = "", narrator_voice_character: str = "",
+) -> list[str]:
     segment = draft.model_dump(mode="json")
     segment.update(source_segment_indexes=source_indexes, required_dialogue=required_dialogue)
     normalized = canonical_segment_identities(segment, payload)
@@ -42,20 +45,32 @@ def generated_identity_errors(draft, *, payload: dict, source_indexes: list[int]
               *registered_subject_errors(normalized, payload),
               *speech_template_errors(normalized, require_tokens=True), *quote_provenance_errors(normalized)]
     if not errors:
-        render_segment_speech(normalized, dialect=dialect)
+        render_segment_speech(normalized, dialect=dialect, narrator_voice_character=narrator_voice_character)
         errors.extend(final_identity_prompt_errors(normalized))
     return list(dict.fromkeys(errors))
 
 
-def finalize_generated_identity(draft, *, payload: dict, source_indexes: list[int], required_dialogue: list[dict], dialect: str):
-    """完整候选先验证后展开；不存在只改台词数据、不改提示词的半次修补。"""
-    errors = generated_identity_errors(draft, payload=payload, source_indexes=source_indexes, required_dialogue=required_dialogue, dialect=dialect)
+def finalize_generated_identity(
+    draft, *, payload: dict, source_indexes: list[int], required_dialogue: list[dict],
+    dialect: str, narrator_voice_character: str = "",
+):
+    """完整候选先验证后展开；不存在只改台词数据、不改提示词的半次修补。
+
+    ``narrator_voice_character``：项目设置的旁白固定音色角色正名，见
+    ``app.production.storyboard_speech_render.rendered_utterance`` 文档；空串
+    （默认）＝改动前行为逐字不变，供尚未接入该设置的调用方（对话修订、身份
+    工作台等编辑路径）继续用旧行为。
+    """
+    errors = generated_identity_errors(
+        draft, payload=payload, source_indexes=source_indexes, required_dialogue=required_dialogue,
+        dialect=dialect, narrator_voice_character=narrator_voice_character,
+    )
     if errors:
         raise ValueError("；".join(errors))
     segment = draft.model_dump(mode="json")
     segment.update(source_segment_indexes=source_indexes, required_dialogue=required_dialogue)
     normalized = canonical_segment_identities(segment, payload)
     attach_quote_provenance(normalized)
-    render_segment_speech(normalized, dialect=dialect)
+    render_segment_speech(normalized, dialect=dialect, narrator_voice_character=narrator_voice_character)
     stamp_identity_contract(normalized)
     return type(draft).model_validate(normalized)

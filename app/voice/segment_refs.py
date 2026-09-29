@@ -34,6 +34,10 @@ SETTING_KEY_ENABLED = "video_reference_audio_enabled"
 SETTING_KEY_MAX_SPEAKERS = "video_reference_audio_max_speakers"
 DEFAULT_MAX_SPEAKERS = 3
 _BIBLE_PREFIX = "bible:"
+#: 叙述者固定字面量，与 app.production.storyboard_dialogue_attribution.NARRATOR
+#: 同值；本模块不 import app.production（同层 app.voice=4/app.production=4，
+#: 避免为一个字面量常量新增跨包耦合，两边各自内联同一个值）。
+_NARRATOR_IDENTITY = "旁白"
 
 
 def reference_audio_enabled() -> bool:
@@ -81,6 +85,38 @@ def _bible_speaker_ranking(segment: dict[str, Any]) -> list[tuple[str, str]]:
     return [(identity_id, _character_name(identity_id)) for identity_id in ordered]
 
 
+def _with_narrator_entry(
+    ranked: list[tuple[str, str]], segment: dict[str, Any], narrator_voice_character: str,
+) -> tuple[list[tuple[str, str]], str]:
+    """本段有旁白台词、且项目设置了旁白固定音色角色时，把该角色追加到排序表末尾；
+    返回 ``(排序表, 应标记为 narrator 角色的 identity_id 或空串)``——只有真正被
+    本函数合成追加的那一条才标记，该角色本来就是本段真实说话人时标记为空串（它的
+    role 仍是 speaker，见下方「不重复占位」）。
+
+    排序理由（本段真实说话人优先于旁白）：真实在场的说话人在画面里要对口型，参考
+    音频对他们的作用是「声音要配得上画面里正在动的嘴」，这是视频模型最容易出破绽
+    的地方；旁白是纯画外声音，没有对口型这层画面约束，参考音频对它的作用只是保持
+    音色跨段一致，重要但不如对口型紧迫。追加到末尾只影响供应商按顺序分配 @音频N
+    编号时旁白拿到较大的号码，不影响是否传够声音、也不影响真实说话人的名额。
+
+    该角色如果本来就是本段真实说话人（``ranked`` 已包含它），说明它的声音参考已经
+    覆盖到位（且这种情况下 ``rendered_utterance`` 会把旁白台词标成「旁白（该角色的
+    声音）」，与它自己的真实台词共用同一份参考音频说明），不重复占位。
+    """
+    if not narrator_voice_character:
+        return ranked, ""
+    has_narration = any(
+        isinstance(line, dict) and str(line.get("speaker_identity_id") or "") == _NARRATOR_IDENTITY
+        for line in segment.get("dialogue") or []
+    )
+    if not has_narration:
+        return ranked, ""
+    narrator_identity = f"{_BIBLE_PREFIX}{narrator_voice_character}"
+    if any(identity_id == narrator_identity for identity_id, _name in ranked):
+        return ranked, ""
+    return [*ranked, (narrator_identity, narrator_voice_character)], narrator_identity
+
+
 def _portrait_id_for_identity(segment: dict[str, Any], identity_id: str) -> str | None:
     for entry in (segment.get("resources") or {}).get("characters") or []:
         if isinstance(entry, dict) and str(entry.get("identity_id") or "") == identity_id:
@@ -116,15 +152,22 @@ def resolve_segment_reference_audios(
     supports_reference_audio: bool,
     max_reference_audios: int,
     max_reference_audio_total_s: float,
+    narrator_voice_character: str = "",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """本段说话角色 -> 参考音频清单（refs）与未传原因（skips，中文）。
 
     refs 每项 ``{"index","character_name","anchor_key","voice_id","clip_path",
-    "clip_sha256","clip_duration_s"}``；skips 每项 ``{"character_name","reason"}``。
-    两个返回值任何情况下都是列表（不返回 None），调用方可直接原样冻结或计入
-    指纹。规则见模块文档引用的方案 §5.3 与 U3 派单第 2 条。
+    "clip_sha256","clip_duration_s","role"}``（``role`` 恒为 ``"speaker"`` 或
+    ``"narrator"``，供 ``app.video_modes.seedance_reference_notes`` 分辨声音说明
+    该怎么措辞）；skips 每项 ``{"character_name","reason"}``。两个返回值任何情况
+    下都是列表（不返回 None），调用方可直接原样冻结或计入指纹。规则见模块文档
+    引用的方案 §5.3 与 U3 派单第 2 条。
+
+    ``narrator_voice_character``：项目设置的旁白固定音色角色正名，空串（默认，
+    未设置或调用方尚未接入该设置）时行为与改动前逐字相同——见 ``_with_narrator_
+    entry`` 的排序与去重规则。
     """
-    ranked = _bible_speaker_ranking(segment)
+    ranked, narrator_identity = _with_narrator_entry(_bible_speaker_ranking(segment), segment, narrator_voice_character)
     if not ranked:
         return [], []
     if not supports_reference_audio:
@@ -162,6 +205,7 @@ def resolve_segment_reference_audios(
             "voice_id": str(voice["id"]), "clip_path": str(voice["clip_path"] or ""),
             "clip_sha256": str(voice["clip_sha256"] or ""),
             "clip_duration_s": voice["clip_duration_s"],
+            "role": "narrator" if identity_id == narrator_identity else "speaker",
         })
     total = 0.0
     cutoff = len(accepted)
@@ -180,12 +224,18 @@ def resolve_segment_reference_audios(
 def fingerprint_reference_audios(refs: list[dict[str, Any]]) -> str:
     """稳定指纹：只取影响供应商请求字节的字段，按 ``refs`` 已排定的顺序直接
     拼接（不排序——顺序本身决定 ``@音频N`` 的编号，也是请求内容的一部分）。
+
+    ``role`` 计入指纹：同一角色声音在「本段真实说话人」与「旁白固定音色」两种
+    身份下，``app.video_modes.seedance_reference_notes`` 生成的说明文案不同，
+    是请求字节的一部分（不计入会让旁白设置的开关/改绑在同一份候选声音上漏掉
+    一次应有的重新入队）。旧数据没有这个键，``.get`` 缺省成 ``"speaker"``，
+    与改动前的指纹逐字相同。
     """
     if not refs:
         return ""
     material = "|".join(
         f"{item.get('character_name')}:{item.get('anchor_key')}:"
-        f"{item.get('voice_id')}:{item.get('clip_sha256')}"
+        f"{item.get('voice_id')}:{item.get('clip_sha256')}:{item.get('role') or 'speaker'}"
         for item in refs
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()

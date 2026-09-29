@@ -174,7 +174,7 @@ def test_fresh_freeze_writes_meta_appends_note_and_persists(monkeypatch) -> None
     assert meta["reference_audios"] == [{
         "index": 1, "character_name": "张三", "anchor_key": "", "voice_id": meta["reference_audios"][0]["voice_id"],
         "clip_path": _real_clip(f"{meta['reference_audios'][0]['voice_id']}_clip.wav"), "clip_sha256": "sha-1",
-        "clip_duration_s": 4.0,
+        "clip_duration_s": 4.0, "role": "speaker",
     }]
     assert meta["reference_audio_skips"] == []
     assert "声音参考：" in result

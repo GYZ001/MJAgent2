@@ -37,7 +37,10 @@ def revise_segment_dialogue(segment: dict, revisions: dict[str, str], *, reason:
         line["line"] = text
         line[REVISION_REASON] = str(reason or "").strip() or "人工修订"
     if result.get("speech_template"):
-        render_segment_speech(result, dialect=str(result.get("speech_dialect") or ""))
+        render_segment_speech(
+            result, dialect=str(result.get("speech_dialect") or ""),
+            narrator_voice_character=str(result.get("narrator_voice_character") or ""),
+        )
     return result
 
 
@@ -48,7 +51,10 @@ def source_faithful_copy(segment: dict) -> dict:
         if str(line.get(REVISED_FROM) or ""):
             line["line"] = line[REVISED_FROM]
     if result.get("speech_template"):
-        render_segment_speech(result, dialect=str(result.get("speech_dialect") or ""))
+        render_segment_speech(
+            result, dialect=str(result.get("speech_dialect") or ""),
+            narrator_voice_character=str(result.get("narrator_voice_character") or ""),
+        )
     return result
 
 
@@ -58,7 +64,10 @@ def revision_errors(segment: dict) -> list[str]:
         return []
     if not segment.get("speech_template"):
         return ["本段没有台词模板（旧产物），不支持台词修订，请重新生成本段分镜"]
-    expected = render_segment_speech(deepcopy(segment), dialect=str(segment.get("speech_dialect") or ""))
+    expected = render_segment_speech(
+        deepcopy(segment), dialect=str(segment.get("speech_dialect") or ""),
+        narrator_voice_character=str(segment.get("narrator_voice_character") or ""),
+    )
     if str(expected.get("prompt_text") or "") != str(segment.get("prompt_text") or ""):
         return ["修订后的提示词不是模板按修订句的展开结果，请只改台词、不要手改提示词正文"]
     return []

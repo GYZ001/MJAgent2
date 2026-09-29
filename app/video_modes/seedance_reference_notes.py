@@ -218,12 +218,20 @@ def build_seedance_reference_prompt_notes(
 AUDIO_REFERENCE_NOTE_MARKER = "声音参考："
 
 
+def _audio_note_part(item: dict[str, Any]) -> str:
+    """单条参考音频的说明句；``role="narrator"`` 时措辞对应
+    ``app.production.storyboard_speech_render.rendered_utterance`` 给旁白声道
+    标签写的「旁白（{name}的声音）」——两处文案共用同一个「{name}的声音」短语，
+    模型才能把这条参考音频与提示词正文里的旁白台词对上。
+    """
+    name, idx = item.get("character_name"), item.get("index")
+    if item.get("role") == "narrator":
+        return f"@音频{idx} 是{name}的声音，本段标注为「旁白（{name}的声音）」的台词都用 @音频{idx} 的音色和说话方式说出"
+    return f"@音频{idx} 是{name}的声音，{name}的每一句台词都用 @音频{idx} 的音色和说话方式说出"
+
+
 def _compose_audio_note(reference_audios: list[dict[str, Any]]) -> str:
-    parts = [
-        f"@音频{item.get('index')} 是{item.get('character_name')}的声音，"
-        f"{item.get('character_name')}的每一句台词都用 @音频{item.get('index')} 的音色和说话方式说出"
-        for item in reference_audios
-    ]
+    parts = [_audio_note_part(item) for item in reference_audios]
     return AUDIO_REFERENCE_NOTE_MARKER + "；".join(parts) + "。参考音频只提供音色，台词内容以本段剧本为准。"
 
 

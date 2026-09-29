@@ -27,6 +27,10 @@ export interface ProjectSettingsUpdate {
   enhance_teaser?: boolean;
   /** 主角内心独白（2026-09-28 起预留，暂无消费方）。 */
   enhance_monologue?: boolean;
+  /** 旁白固定音色角色（2026-09-28）：值必须是本项目人物谱已有的角色正名，传空串
+   *  清空（旁白不挂固定参考音频，保持现状）。只影响设置后新生成的分镜/视频，需要
+   *  重新生成分镜才对已有分集生效。 */
+  narrator_voice_character?: string;
 }
 
 export interface ProjectSettingsResponse {
@@ -37,6 +41,7 @@ export interface ProjectSettingsResponse {
   enhance_music_bed: boolean;
   enhance_teaser: boolean;
   enhance_monologue: boolean;
+  narrator_voice_character: string;
 }
 
 /** PUT /projects/{id}/settings：Body 为三字段任意子集；非法值后端返回 409 中文

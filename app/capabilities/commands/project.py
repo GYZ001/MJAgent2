@@ -102,7 +102,7 @@ _COMMAND_SPECS: tuple[CommandSpec, ...] = (
         # 开关，影响此后新生成内容」），不是删除资源，NEVER 确认。
         "project.update_settings",
         title="更新项目设置",
-        description="更新改编强度档位/画幅/AI 标识/统一配乐/片头预告/主角内心独白——项目级设置，只影响此后新生成的分镜/成片，不改写已有产出",
+        description="更新改编强度档位/画幅/AI 标识/统一配乐/片头预告/主角内心独白/旁白固定音色角色——项目级设置，只影响此后新生成的分镜/成片，不改写已有产出",
         input_model=I.ProjectUpdateSettingsInput,
         risk=RiskLevel.R2_MATERIAL,
         confirmation=ConfirmationPolicy.NEVER,

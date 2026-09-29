@@ -47,6 +47,20 @@ from pydantic import BaseModel, Field
 
 log = logging.getLogger(__name__)
 
+#: wardrobe 字段的正面陈述规则（2026-09-28 真实回归：模型把「外观锚点未写服装（二十
+#: 余岁青年男性，身形高挑，留乌黑短发）」这类内部说明文字原样写进 wardrobe，被回填进
+#: 提示词发给了视频模型）——规定只写什么、遇到锚点没服装信息时给出「留空」的出路，
+#: 不靠关键词黑名单去猜模型写的文字是不是服装。
+_WARDROBE_FIELD_RULE = (
+    "wardrobe 字段只写本段画面里实际能看到的具体服装/配饰（款式、颜色、材质、佩戴方式，"
+    "例如「米白色针织开衫，内搭浅蓝色碎花长裙」「颈间绕着深灰色围巾」）；relevant_assets 的"
+    "外观锚点（appearance）如果已经写明服装，本集第一次出场时沿用锚点原文里的服装描述，"
+    "之后各段沿用 continuity_memo 里的记录。外观锚点没有写服装信息、且本段画面也没有交代"
+    "任何服装细节时，wardrobe 留空——不要转述外观锚点里的体貌特征（年龄、身高、发型这类"
+    "不是服装的信息），也不要写「外观锚点未写服装」这类说明性文字，空着才是诚实的：这个"
+    "字段目前确实没有可见服装信息。"
+)
+
 
 class _AiCharacterState(BaseModel):
     identity_id: str
@@ -113,10 +127,10 @@ def _continuity_memo_rules_with_previous(previous_memo: _AiContinuityMemo) -> li
         ),
         (
             "continuity_memo.characters 覆盖本段结束时所有在场人物，identity_id 与本段 "
-            "resources.characters 保持一致；每个人物的 location/wardrobe/emotion 以上一段"
+            "resources.characters 保持一致；每个人物的 location/emotion 以上一段"
             "（continuity_memo）里同一人物的记录为起点，只有本段原文写到的具体动作或事件"
-            "才能改变它们——没有原文依据就照抄上一段的值，不要凭空推进人物状态；wardrobe "
-            "与 relevant_assets 的外观锚点不一致时，以外观锚点为准。"
+            "才能改变它们——没有原文依据就照抄上一段的值，不要凭空推进人物状态。"
+            + _WARDROBE_FIELD_RULE
         ),
         (
             "continuity_memo.props 覆盖本段结束时每件关键道具的外观（form，例如网状/透明、"
@@ -167,9 +181,9 @@ def _continuity_memo_rules_first_segment() -> list[str]:
             "time_of_day_basis 填 inferred，并在后续段落里保持这个判断，不要中途无端改变。"
         ),
         (
-            "continuity_memo.characters 记录本段结束时所有在场人物的 location/wardrobe/"
-            "emotion，identity_id 与本段 resources.characters 保持一致；wardrobe 与 "
-            "relevant_assets 的外观锚点不一致时，以外观锚点为准。"
+            "continuity_memo.characters 记录本段结束时所有在场人物的 location/emotion，"
+            "identity_id 与本段 resources.characters 保持一致。"
+            + _WARDROBE_FIELD_RULE
         ),
         (
             "本段是本集第一段，同样没有上一段 props/layout 可以沿用：continuity_memo.props 由"
@@ -201,7 +215,8 @@ def continuity_memo_output_contract_text() -> str:
         "inherited=逐字沿用上一段、inferred=没有上一段或原文都没交代时自行判断；"
         "time_of_day_basis=source_text 时 time_of_day_source_quote 必须是本段原文里写明时间"
         "的那句原话；characters[] 是本段结束时在场人物各自的 location/wardrobe/emotion，"
-        "identity_id 必须来自本段 resources.characters；props[] 是本段结束时每件关键道具的"
+        "identity_id 必须来自本段 resources.characters；wardrobe 只写画面里实际可见的具体"
+        "服装/配饰，没有可见服装信息时留空，不写体貌特征或说明性文字；props[] 是本段结束时每件关键道具的"
         "外观（form，例如网状/透明、颜色材质）、位置（location，谁手里/哪把椅子上/桌面哪一"
         "侧）与状态（state，拉链开合、里面有没有猫）；layout 是本段结束时人物之间以及人物与"
         "家具的相对位置，一两句话；layout 与上一段不同时，layout_change_source_quote 必须是"
@@ -408,19 +423,45 @@ def ensure_travel_direction_in_prompt(draft: Any) -> list[str]:
     return []
 
 
+def _wardrobe_line_pattern(name: str) -> re.Pattern[str]:
+    """某角色「续接服装：@名字 ……。」整行；幂等判断按角色识别既有写法，不按逐字字符串。
+
+    量词用非贪婪 ``[^\\n]*?``（同 ``storyboard_cast_lock._CAST_LOCK_SENTENCE_PATTERN``
+    的写法）只吃到第一个句号为止：真实回归里「续接服装：……。」经常与同一物理行里
+    其它句子挤在一起，贪婪量词会一路吃到该行最后一个句号，把后面无关内容一并
+    静默删掉。
+    """
+    return re.compile(rf"\n?续接服装：@{re.escape(name)} [^\n]*?。")
+
+
+def _character_appearance_anchor(prompt: str, name: str) -> str:
+    """从 ``prompt_text`` 里模型自己写的「@{name} 的外观：……。」提取外观锚点原文；
+    提取不到（没写，或本段不是这个角色的出场镜）返回空串。数据来自提示词自身，
+    供 ``_wardrobe_not_clothing_advisory`` 判断 wardrobe 是不是在转述体貌特征。"""
+    match = re.search(rf"@{re.escape(name)}\s*的外观：([^。]+)。", prompt)
+    return match.group(1).strip() if match else ""
+
+
+def _wardrobe_not_clothing_advisory(name: str, wardrobe: str, anchor: str) -> None:
+    """软检查（不阻断、不静默吞、不兜底改写）：wardrobe 与外观锚点高度重合时多半是
+    在复述体貌特征或写说明性文字，记一条告警供人工核查——判据是与本段自己已有
+    数据的重合度，不是关键词猜测。"""
+    if anchor and (anchor in wardrobe or wardrobe in anchor):
+        log.warning(
+            "[STORYBOARD_WARDROBE_NOT_CLOTHING][未拦截] continuity_memo.characters「%s」的 "
+            "wardrobe「%s」与其外观锚点「%s」高度重合，像是在复述体貌特征或写说明性文字，"
+            "不是具体服装描述，请人工核对分镜提示词", name, wardrobe[:60], anchor[:60],
+        )
+
+
 def ensure_wardrobe_continuity_in_prompt(draft: Any, *, prop_factory: Any) -> list[str]:
-    """服装延续的确定性回填，与 ``ensure_travel_direction_in_prompt`` 同一形状：
-    ``continuity_memo.characters[].wardrobe``（沿用规则见 ``_continuity_memo_rules_with_previous``
-    的「没有原文依据就照抄上一段」）若没出现在 ``prompt_text`` 里，按 ``resources.characters``
-    登记的正名把这句话追加进提示词；并把它登记进 ``resources.props``（不存在同名条目时新增），
-    不再让 wardrobe 只落库、只在 log 级别提示。
+    """服装延续的确定性回填：``continuity_memo.characters[].wardrobe``（规则见
+    ``_WARDROBE_FIELD_RULE``）写进提示词末尾，按正名一句一行；并登记进
+    ``resources.props``。``prop_factory`` 由调用方传入其构造器，避免循环导入。
 
-    ``prop_factory`` 由调用方（``storyboard_pack.py``）传入其 ``_AiResourceProp`` 构造器——本
-    模块不持有那个类，避免与 ``storyboard_pack.py`` 循环导入。
-
-    2026-09-28 真实回归（《顾念长安》第 1 集）：围巾第 14 段由顾屿给温念围上，第 16、18 段整段
-    消失；开衫扣子第 11 段扣好、第 12 段敞开——wardrobe 字段此前从不回填进提示词，视频模型看
-    不到，``resources.props`` 也不从上一段继承，服装类道具因此没有任何跨段锚点。
+    幂等判断按角色识别既有写法，不按逐字字符串（2026-09-28 改版，真实回归同一角色
+    的服装描述被写了两次、只差几个字）：先剥掉该角色此前写入的整行，若剩下的正文
+    本身已经提到这件服装就不再补一行，否则写回最新一行——见 ``_wardrobe_line_pattern``。
     """
     memo = getattr(draft, "continuity_memo", None)
     characters = getattr(memo, "characters", None) or []
@@ -433,18 +474,27 @@ def ensure_wardrobe_continuity_in_prompt(draft: Any, *, prop_factory: Any) -> li
         if getattr(c, "visibility", "") == "visible" and str(getattr(c, "display_name", "") or "").strip()
     }
     appended: list[str] = []
+    changed = False
     for character in characters:
         name = name_by_id.get(character.identity_id)
         wardrobe = character.wardrobe.strip()
         if not name or not wardrobe:
             continue
-        if wardrobe not in prompt:
-            prompt = prompt.rstrip() + f"\n续接服装：@{name} {wardrobe}。"
+        _wardrobe_not_clothing_advisory(name, wardrobe, _character_appearance_anchor(prompt, name))
+        # 先剥掉这个角色此前写入的整行（不论文字是否与本次相同），再判断剩下的正文本身
+        # 是否已经用别的方式提到这件服装——两者都成立时优先信正文，不重复追加一行。
+        deduped = _wardrobe_line_pattern(name).sub("", prompt).rstrip()
+        normalized = deduped if wardrobe in deduped else deduped + f"\n续接服装：@{name} {wardrobe}。"
+        if normalized != deduped:
             appended.append(name)
+        if normalized != prompt:
+            prompt = normalized
+            changed = True
         if not any(wardrobe in (str(getattr(p, "description", "") or "")) for p in draft.resources.props):
             draft.resources.props.append(prop_factory(label=f"{name}的服装", description=wardrobe))
-    if appended:
+    if changed:
         draft.prompt_text = prompt
+    if appended:
         log.info("[STORYBOARD_WARDROBE_APPENDED] 提示词缺服装延续，已按备忘追加：%s", "、".join(appended))
     return []
 

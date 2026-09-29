@@ -105,6 +105,49 @@ describe('ProjectSettingsPanel：默认值与提交字段', () => {
     expect(onSaved).toHaveBeenCalledOnce()
     view.unmount()
   })
+
+  it('旁白音色角色按 project.narrator_voice_character 渲染，留空时占位提示不设置', async () => {
+    const { view } = await mount({ ...BASE_PROJECT, narrator_voice_character: '温念' })
+    const input = view.root.findAllByType('input').find(n => n.props.type === 'text')
+    expect(input!.props.value).toBe('温念')
+    const { view: view2 } = await mount(BASE_PROJECT)
+    const input2 = view2.root.findAllByType('input').find(n => n.props.type === 'text')
+    expect(input2!.props.value).toBe('')
+    view.unmount()
+    view2.unmount()
+  })
+
+  it('失焦且草稿与已保存值不同才提交旁白音色角色', async () => {
+    vi.mocked(api.updateProjectSettings).mockResolvedValue({
+      project_id: 'proj-1', adaptation_mode: 'short_drama', aspect_ratio: '9:16', ai_label_enabled: false,
+      enhance_music_bed: false, enhance_teaser: false, enhance_monologue: false, narrator_voice_character: '温念',
+    })
+    const { view, onSaved } = await mount()
+    const input = view.root.findAllByType('input').find(n => n.props.type === 'text')!
+    await act(async () => { input.props.onChange({ target: { value: '温念' } }) })
+    await act(async () => { input.props.onBlur(); await Promise.resolve() })
+    expect(api.updateProjectSettings).toHaveBeenCalledWith('proj-1', { narrator_voice_character: '温念' })
+    expect(onSaved).toHaveBeenCalledOnce()
+    view.unmount()
+  })
+
+  it('失焦但草稿未变（等于已保存值）时不重复提交', async () => {
+    const { view } = await mount({ ...BASE_PROJECT, narrator_voice_character: '温念' })
+    const input = view.root.findAllByType('input').find(n => n.props.type === 'text')!
+    await act(async () => { input.props.onBlur(); await Promise.resolve() })
+    expect(api.updateProjectSettings).not.toHaveBeenCalled()
+    view.unmount()
+  })
+
+  it('旁白音色角色保存失败时展示后端中文错误', async () => {
+    vi.mocked(api.updateProjectSettings).mockRejectedValue(new Error('角色「张三」不在本项目人物谱中，无法设为旁白音色角色'))
+    const { view, toast } = await mount()
+    const input = view.root.findAllByType('input').find(n => n.props.type === 'text')!
+    await act(async () => { input.props.onChange({ target: { value: '张三' } }) })
+    await act(async () => { input.props.onBlur(); await Promise.resolve() })
+    expect(toast).toHaveBeenCalledWith('角色「张三」不在本项目人物谱中，无法设为旁白音色角色', true)
+    view.unmount()
+  })
 })
 
 describe('ProjectSettingsPanel：保存失败展示后端 detail', () => {

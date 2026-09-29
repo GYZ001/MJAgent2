@@ -7,11 +7,13 @@
 """
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 
 from app.production.storyboard_continuity_memo import (
     _AiCharacterState,
     _AiContinuityMemo,
+    _wardrobe_line_pattern,
     ensure_wardrobe_continuity_in_prompt,
 )
 
@@ -97,6 +99,95 @@ def test_empty_wardrobe_or_no_display_name_is_skipped():
     ensure_wardrobe_continuity_in_prompt(draft, prop_factory=_FakeProp)
     assert draft.prompt_text == before
     assert draft.resources.props == []
+
+
+def test_replaces_stale_line_instead_of_duplicating_when_wardrobe_text_drifts():
+    """2026-09-28 真实回归（《顾念长安》第 1 集第 13 段）：同一角色的服装描述在多次
+    调用间轻微改写（「扣子已扣好，领口被她拢紧」→「扣子已被顾屿扣好」），旧版
+    ``wardrobe not in prompt`` 逐字比对对第二次改写视而不见，两条「续接服装：@温念」
+    整行都留在了提示词里。红：手写旧逻辑复现两行同存；绿：新函数收敛成一行。"""
+    stale_prompt = (
+        "镜头1：温念低头看信。\n续接服装：@温念 米白色开衫（扣子已扣好，领口被她拢紧）。"
+    )
+    draft = _draft(
+        stale_prompt,
+        characters=[_AiCharacterState(identity_id="bible:温念", wardrobe="米白色开衫（扣子已被顾屿扣好）")],
+        resource_characters=[_visible("bible:温念", "温念")],
+    )
+    assert ensure_wardrobe_continuity_in_prompt(draft, prop_factory=_FakeProp) == []
+    assert draft.prompt_text.count("续接服装：@温念") == 1
+    assert draft.prompt_text.endswith("续接服装：@温念 米白色开衫（扣子已被顾屿扣好）。")
+
+    def _old_substring_check_append(_draft, wardrobe: str) -> None:
+        """修复前的旧行为：只按 wardrobe 原文是否已是 prompt 子串判断，改写后的新
+        文本不是旧行的子串，直接在旧行之后再追加一行。"""
+        prompt = _draft.prompt_text
+        if wardrobe not in prompt:
+            _draft.prompt_text = prompt.rstrip() + f"\n续接服装：@温念 {wardrobe}。"
+
+    red_draft = _draft(
+        stale_prompt,
+        characters=[_AiCharacterState(identity_id="bible:温念", wardrobe="米白色开衫（扣子已被顾屿扣好）")],
+        resource_characters=[_visible("bible:温念", "温念")],
+    )
+    _old_substring_check_append(red_draft, "米白色开衫（扣子已被顾屿扣好）")
+    assert red_draft.prompt_text.count("续接服装：@温念") == 2, "旧逐字比对确实会重复追加——红态验证成立"
+
+
+def test_replacing_stale_line_does_not_swallow_trailing_sentence_on_same_physical_line():
+    """评审复现（2026-09-28）：模型有时把「续接服装：……。」与别的句子挤在同一物理行；
+    ``_wardrobe_line_pattern`` 的量词必须非贪婪，只吃到第一个句号，不能一路吃到该行
+    最后一个句号把无关后续句子一并删掉。红：手写贪婪版本证明会吞掉「这句话很重要。」；
+    绿：当前实现（含整段 ``ensure_wardrobe_continuity_in_prompt`` 端到端）都不吞。"""
+    stale_prompt = (
+        "镜头1：温念低头看信。\n续接服装：@温念 米白色开衫（扣子已扣好）。这句话很重要。"
+    )
+    draft = _draft(
+        stale_prompt,
+        characters=[_AiCharacterState(identity_id="bible:温念", wardrobe="米白色开衫（扣子已被顾屿扣好）")],
+        resource_characters=[_visible("bible:温念", "温念")],
+    )
+    assert ensure_wardrobe_continuity_in_prompt(draft, prop_factory=_FakeProp) == []
+    assert "这句话很重要。" in draft.prompt_text
+    assert draft.prompt_text.count("续接服装：@温念") == 1
+
+    def _old_greedy_pattern(name: str) -> re.Pattern[str]:
+        return re.compile(rf"\n?续接服装：@{re.escape(name)} [^\n]*。")
+
+    red_result = _old_greedy_pattern("温念").sub("", stale_prompt)
+    assert "这句话很重要。" not in red_result, "旧贪婪正则确实会把同一行后续句子一并吞掉——红态验证成立"
+
+    assert _wardrobe_line_pattern("温念").search(stale_prompt).group(0) == (
+        "\n续接服装：@温念 米白色开衫（扣子已扣好）。"
+    )
+
+
+def test_wardrobe_overlapping_appearance_anchor_logs_advisory_not_blank(caplog):
+    """模型仍把体貌特征/说明性文字写进 wardrobe（真实样本「外观锚点未写服装（二十
+    余岁青年男性，身形高挑，留乌黑短发）」）：不静默吞、不兜底改写，只记一条可搜索
+    的告警；wardrobe 依然按原样回填（诚实呈现问题，不擅自替模型编造/清空）。"""
+    anchor = "二十余岁青年男性，身形高挑，留乌黑短发"
+    draft = _draft(
+        f"镜头1：@顾屿 的外观：{anchor}。他站在窗边。",
+        characters=[_AiCharacterState(identity_id="bible:顾屿", wardrobe=f"外观锚点未写服装（{anchor}）")],
+        resource_characters=[_visible("bible:顾屿", "顾屿")],
+    )
+    with caplog.at_level("WARNING"):
+        ensure_wardrobe_continuity_in_prompt(draft, prop_factory=_FakeProp)
+    assert "[STORYBOARD_WARDROBE_NOT_CLOTHING][未拦截]" in caplog.text
+    assert "续接服装：@顾屿" in draft.prompt_text  # 不静默吞，也不兜底清空
+
+
+def test_wardrobe_unrelated_to_anchor_does_not_log_advisory(caplog):
+    """真实服装描述与外观锚点没有重合：不误报。"""
+    draft = _draft(
+        "镜头1：@温念 的外观：二十四岁的年轻女性，身形纤细。她走进屋。",
+        characters=[_AiCharacterState(identity_id="bible:温念", wardrobe="米白色针织开衫，内搭浅蓝色碎花长裙")],
+        resource_characters=[_visible("bible:温念", "温念")],
+    )
+    with caplog.at_level("WARNING"):
+        ensure_wardrobe_continuity_in_prompt(draft, prop_factory=_FakeProp)
+    assert "STORYBOARD_WARDROBE_NOT_CLOTHING" not in caplog.text
 
 
 def test_empty_prompt_or_no_characters_is_left_untouched():

@@ -142,7 +142,8 @@ async def set_project_settings(project_id: str, body: dict = Body(...)):
     """项目设置部分更新：改编强度档位（faithful/short_drama）/ 画幅（9:16/16:9）/
     AI 标识开关 / 统一配乐（enhance_music_bed，2026-09-28 起由分镜台消费）/ 片头
     预告（enhance_teaser）/ 主角内心独白（enhance_monologue，后两项暂无消费方，
-    为后续任务预留）；body 只需带想改的字段。REST 路由与 ``project.update_settings``
+    为后续任务预留）/ 旁白固定音色角色（narrator_voice_character，空串=保持现状，
+    非空须是本项目人物谱已有正名）；body 只需带想改的字段。REST 路由与 ``project.update_settings``
     Command Handler 共用（``ui_route`` 短路复用，见 ``app.orchestration.api.
     set_project_engine`` 同款写法：Handler 执行期经 ``in_handler()`` 短路回本函数
     直接跑领域逻辑，不二次进入 Command Bus）。
@@ -163,6 +164,7 @@ async def set_project_settings(project_id: str, body: dict = Body(...)):
             "enhance_music_bed": body.get("enhance_music_bed"),
             "enhance_teaser": body.get("enhance_teaser"),
             "enhance_monologue": body.get("enhance_monologue"),
+            "narrator_voice_character": body.get("narrator_voice_character"),
         },
     )
     if routed is not None:
@@ -178,6 +180,7 @@ async def set_project_settings(project_id: str, body: dict = Body(...)):
             enhance_music_bed=body.get("enhance_music_bed"),
             enhance_teaser=body.get("enhance_teaser"),
             enhance_monologue=body.get("enhance_monologue"),
+            narrator_voice_character=body.get("narrator_voice_character"),
         )
     except LookupError as exc:
         # 回滚必须是异常处理器的第一条语句（CLAUDE.md）：update_project_settings

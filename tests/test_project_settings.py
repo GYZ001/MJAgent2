@@ -26,6 +26,7 @@ from app.project_settings import (
     enhance_teaser_enabled,
     resolve_adaptation_mode,
     resolve_aspect_ratio,
+    resolve_narrator_voice_character,
     update_project_settings,
 )
 from tests.conftest import SessionTestClient
@@ -60,6 +61,7 @@ def test_legacy_project_defaults_to_faithful_9x16_off():
     assert enhance_music_bed_enabled(conn, "proj_legacy_settings") is False
     assert enhance_teaser_enabled(conn, "proj_legacy_settings") is False
     assert enhance_monologue_enabled(conn, "proj_legacy_settings") is False
+    assert resolve_narrator_voice_character(conn, "proj_legacy_settings") == ""
 
 
 def test_new_project_defaults_to_short_drama_9x16_off():
@@ -169,6 +171,7 @@ def test_resolve_corrupted_value_raises_runtime_error_not_value_error():
 
 _NO_BOOL_CHANGES = {
     "ai_label_enabled": None, "enhance_music_bed": None, "enhance_teaser": None, "enhance_monologue": None,
+    "narrator_voice_character": None,
 }
 
 
@@ -183,6 +186,7 @@ def test_update_project_settings_partial_update_only_touches_given_fields():
     assert result == {
         "adaptation_mode": "short_drama", "aspect_ratio": "9:16", "ai_label_enabled": False,
         "enhance_music_bed": False, "enhance_teaser": False, "enhance_monologue": False,
+        "narrator_voice_character": "",
     }
     assert resolve_aspect_ratio(conn, "proj_update_settings") == "9:16"
 
@@ -197,11 +201,13 @@ def test_update_project_settings_only_enhance_music_bed_field_does_not_touch_oth
         conn, "proj_update_music_bed_only",
         adaptation_mode=None, aspect_ratio=None, ai_label_enabled=None,
         enhance_music_bed=True, enhance_teaser=None, enhance_monologue=None,
+        narrator_voice_character=None,
     )
     conn.commit()
     assert result == {
         "adaptation_mode": "faithful", "aspect_ratio": "9:16", "ai_label_enabled": False,
         "enhance_music_bed": True, "enhance_teaser": False, "enhance_monologue": False,
+        "narrator_voice_character": "",
     }
     assert enhance_teaser_enabled(conn, "proj_update_music_bed_only") is False
     assert enhance_monologue_enabled(conn, "proj_update_music_bed_only") is False
@@ -223,6 +229,129 @@ def test_update_project_settings_missing_project_raises_lookup_error():
             conn, "proj_does_not_exist_2",
             adaptation_mode="short_drama", aspect_ratio=None, **_NO_BOOL_CHANGES,
         )
+
+
+# ---------------------------------------------------------------------------
+# narrator_voice_character（2026-09-28，旁白固定音色角色）
+# ---------------------------------------------------------------------------
+
+
+def _seed_project_with_bible(conn, project_id: str, character_names: list[str]) -> None:
+    """最小人物谱：只写 ``narrator_voice_character`` 校验读的 ``characters[].name``，
+    不经 ``app.schemas.Bible``（校验函数本身也不经它，见 app.project_settings.store
+    的「零 app.* 依赖」约束）。"""
+    import json
+
+    conn.execute(
+        "INSERT INTO projects(id, name, created_at, bible_json, bible_version) VALUES(?,?,?,?,?)",
+        (project_id, "带人物谱的项目", now(), json.dumps({
+            "characters": [{"name": name} for name in character_names],
+        }, ensure_ascii=False), 1),
+    )
+    conn.commit()
+
+
+def test_update_project_settings_accepts_narrator_in_bible_roster():
+    conn = get_conn()
+    _seed_project_with_bible(conn, "proj_narrator_ok", ["温念", "顾屿"])
+    result = update_project_settings(
+        conn, "proj_narrator_ok",
+        adaptation_mode=None, aspect_ratio=None, ai_label_enabled=None,
+        enhance_music_bed=None, enhance_teaser=None, enhance_monologue=None,
+        narrator_voice_character="温念",
+    )
+    conn.commit()
+    assert result["narrator_voice_character"] == "温念"
+    assert resolve_narrator_voice_character(conn, "proj_narrator_ok") == "温念"
+
+
+def test_update_project_settings_rejects_narrator_not_in_bible_roster():
+    """人物谱里没有这个名字：拒绝写入，中文错误信息（判据从数据推导，不是白名单）。"""
+    conn = get_conn()
+    _seed_project_with_bible(conn, "proj_narrator_bad", ["温念", "顾屿"])
+    with pytest.raises(ValueError, match="不在本项目人物谱中"):
+        update_project_settings(
+            conn, "proj_narrator_bad",
+            adaptation_mode=None, aspect_ratio=None, ai_label_enabled=None,
+            enhance_music_bed=None, enhance_teaser=None, enhance_monologue=None,
+            narrator_voice_character="张三",
+        )
+    assert resolve_narrator_voice_character(conn, "proj_narrator_bad") == ""
+
+
+def test_update_project_settings_rejects_narrator_when_no_bible_yet():
+    """人物谱还没生成（``bible_json`` 为空）：任何名字都不合法，诚实拒绝，不是校验被绕过。"""
+    conn = get_conn()
+    _minimal_project(conn, "proj_narrator_no_bible")
+    with pytest.raises(ValueError, match="不在本项目人物谱中"):
+        update_project_settings(
+            conn, "proj_narrator_no_bible",
+            adaptation_mode=None, aspect_ratio=None, ai_label_enabled=None,
+            enhance_music_bed=None, enhance_teaser=None, enhance_monologue=None,
+            narrator_voice_character="温念",
+        )
+
+
+def test_update_project_settings_narrator_empty_string_clears_it():
+    """空串＝显式清空，恢复「保持现状」（旁白不挂固定参考音频）。"""
+    conn = get_conn()
+    _seed_project_with_bible(conn, "proj_narrator_clear", ["温念"])
+    update_project_settings(
+        conn, "proj_narrator_clear",
+        adaptation_mode=None, aspect_ratio=None, ai_label_enabled=None,
+        enhance_music_bed=None, enhance_teaser=None, enhance_monologue=None,
+        narrator_voice_character="温念",
+    )
+    conn.commit()
+    assert resolve_narrator_voice_character(conn, "proj_narrator_clear") == "温念"
+    update_project_settings(
+        conn, "proj_narrator_clear",
+        adaptation_mode=None, aspect_ratio=None, ai_label_enabled=None,
+        enhance_music_bed=None, enhance_teaser=None, enhance_monologue=None,
+        narrator_voice_character="",
+    )
+    conn.commit()
+    assert resolve_narrator_voice_character(conn, "proj_narrator_clear") == ""
+
+
+def test_update_project_settings_narrator_not_passed_leaves_it_untouched():
+    """``narrator_voice_character=None``（未传）时逐字不变——不是「传了空串」。"""
+    conn = get_conn()
+    _seed_project_with_bible(conn, "proj_narrator_untouched", ["温念"])
+    update_project_settings(
+        conn, "proj_narrator_untouched",
+        adaptation_mode=None, aspect_ratio=None, ai_label_enabled=None,
+        enhance_music_bed=None, enhance_teaser=None, enhance_monologue=None,
+        narrator_voice_character="温念",
+    )
+    conn.commit()
+    update_project_settings(
+        conn, "proj_narrator_untouched",
+        adaptation_mode="faithful", aspect_ratio=None, ai_label_enabled=None,
+        enhance_music_bed=None, enhance_teaser=None, enhance_monologue=None,
+        narrator_voice_character=None,
+    )
+    conn.commit()
+    assert resolve_narrator_voice_character(conn, "proj_narrator_untouched") == "温念"
+
+
+def test_put_settings_narrator_voice_character_via_http():
+    conn = get_conn()
+    _seed_project_with_bible(conn, "proj_http_narrator", ["温念"])
+    client = _admin_client()
+    resp = client.put("/api/projects/proj_http_narrator/settings", json={"narrator_voice_character": "温念"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["narrator_voice_character"] == "温念"
+    assert resolve_narrator_voice_character(conn, "proj_http_narrator") == "温念"
+
+
+def test_put_settings_narrator_voice_character_rejects_unknown_name_with_409():
+    conn = get_conn()
+    _seed_project_with_bible(conn, "proj_http_narrator_bad", ["温念"])
+    client = _admin_client()
+    resp = client.put("/api/projects/proj_http_narrator_bad/settings", json={"narrator_voice_character": "张三"})
+    assert resp.status_code == 409, resp.text
+    assert "不在本项目人物谱中" in resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +419,7 @@ def test_project_detail_exposes_settings_fields_for_frontend_panel():
         conn, "proj_detail_settings",
         adaptation_mode="short_drama", aspect_ratio="16:9", ai_label_enabled=True,
         enhance_music_bed=True, enhance_teaser=None, enhance_monologue=None,
+        narrator_voice_character=None,
     )
     conn.commit()
     client = _admin_client()
@@ -299,6 +429,7 @@ def test_project_detail_exposes_settings_fields_for_frontend_panel():
     assert body["adaptation_mode"] == "short_drama"
     assert body["aspect_ratio"] == "16:9"
     assert body["ai_label_enabled"] == 1
+    assert body["narrator_voice_character"] == ""
     assert body["enhance_music_bed"] == 1
     assert body["enhance_teaser"] == 0
     assert body["enhance_monologue"] == 0

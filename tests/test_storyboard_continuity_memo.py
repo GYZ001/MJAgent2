@@ -255,6 +255,34 @@ def test_output_contract_text_mentions_props_and_layout_fields():
     assert "layout_change_source_quote" in text
 
 
+def test_rules_with_previous_wardrobe_is_positive_statement_not_anchor_fallback():
+    """2026-09-28 真实回归：wardrobe 规则此前只说「与外观锚点不一致时以外观锚点为准」，
+    没有交代锚点没写服装时该怎么办，模型于是把「外观锚点未写服装（……）」这类说明性
+    文字写进了 wardrobe。新规则必须正面交代取值来源（只写可见服装/配饰）与边界情形
+    （锚点没写服装且本段没交代时留空）。"""
+    rules = continuity_memo_rules(_memo())
+    assert any(
+        "wardrobe 字段只写本段画面里实际能看到的具体服装/配饰" in r
+        and "wardrobe 留空" in r
+        and "外观锚点未写服装" in r
+        for r in rules
+    )
+
+
+def test_rules_without_previous_wardrobe_is_positive_statement_not_anchor_fallback():
+    rules = continuity_memo_rules(None)
+    assert any(
+        "wardrobe 字段只写本段画面里实际能看到的具体服装/配饰" in r and "wardrobe 留空" in r
+        for r in rules
+    )
+
+
+def test_output_contract_text_wardrobe_clarifies_visible_clothing_only():
+    text = continuity_memo_output_contract_text()
+    assert "wardrobe 只写画面里实际可见的具体" in text
+    assert "没有可见服装信息时留空" in text
+
+
 # ---------------------------------------------------------------------------
 # continuity_memo_character_advisories：只做 advisory，不阻断
 # ---------------------------------------------------------------------------

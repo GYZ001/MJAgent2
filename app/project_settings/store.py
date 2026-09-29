@@ -1,5 +1,5 @@
-"""项目级设置（改编强度档位 / 画幅 / AI 标识 / 统一配乐及预留开关）的读写实现——
-只读写 ``projects`` 表。
+"""项目级设置（改编强度档位 / 画幅 / AI 标识 / 统一配乐及预留开关 / 旁白固定音色）
+的读写实现——只读写 ``projects`` 表。
 
 ``conn`` 一律由调用方传入、无默认值（CLAUDE.md「所有权必须显式」：可选参数是缺陷的
 温床）；写函数不 ``commit``，事务边界归调用方。这里只负责存取契约本身，「改编强度
@@ -9,9 +9,17 @@
 ``app.production.storyboard_music_bed``）、``enhance_teaser``（片头预告）、
 ``enhance_monologue``（主角内心独白）——后两项本次只加开关本身，暂无消费方，为
 下一个任务预留同一处存取契约，避免它再动这段代码；三项都默认关闭。
+
+2026-09-28 再新增 ``narrator_voice_character``（旁白固定音色角色，真实回归
+《顾念长安》第 1 集驱动：旁白每段随机配声音，前后不一致）：值必须是本项目人物谱
+（``projects.bible_json`` 的 ``characters[].name``）里实际存在的正名，空串＝保持
+现状（旁白不挂固定参考音频，行为逐字不变）。合法值校验直接解析 ``bible_json`` 原始
+JSON（不经 ``app.schemas.Bible``），保持本模块「零 app.* 依赖」的既有约束——见
+``app.LAYERS.toml`` 对 ``app.project_settings`` 的层号注释。
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 #: 改编强度档位：faithful=忠实原文（存量项目默认，行为零变化）；
@@ -118,6 +126,35 @@ def enhance_monologue_enabled(conn: Any, project_id: str) -> bool:
     return bool(row["enhance_monologue"])
 
 
+def resolve_narrator_voice_character(conn: Any, project_id: str) -> str:
+    """读出项目的旁白固定音色角色正名；空串表示未设置（保持现状）。项目不存在 ->
+    ``LookupError``，语义同 ``ai_label_enabled``。"""
+    row = conn.execute(
+        "SELECT narrator_voice_character FROM projects WHERE id=?", (project_id,),
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"项目不存在：{project_id}")
+    return str(row["narrator_voice_character"] or "")
+
+
+def _bible_character_names(conn: Any, project_id: str) -> list[str]:
+    """本项目人物谱里的正名列表；``bible_json`` 缺失/未生成/解析失败都返回空列表
+    （诚实——人物谱还不存在时任何名字都不合法，不是校验被绕过）。只解析裸 JSON，
+    不经 ``app.schemas.Bible``（本模块零 app.* 依赖）。"""
+    row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+    if row is None or not row["bible_json"]:
+        return []
+    try:
+        data = json.loads(row["bible_json"])
+    except (TypeError, ValueError):
+        return []
+    return [
+        str(c.get("name") or "").strip()
+        for c in (data.get("characters") or [])
+        if isinstance(c, dict) and str(c.get("name") or "").strip()
+    ]
+
+
 def update_project_settings(
     conn: Any,
     project_id: str,
@@ -128,16 +165,22 @@ def update_project_settings(
     enhance_music_bed: bool | None,
     enhance_teaser: bool | None,
     enhance_monologue: bool | None,
+    narrator_voice_character: str | None,
 ) -> dict:
     """按传入字段部分更新项目设置，只更新非 ``None`` 的字段。
 
     非法值 -> ``ValueError``（中文 message）；项目不存在 -> ``LookupError``；调用方
     负责 ``commit``，本函数不提交（CLAUDE.md「不得在调用方的连接上隐式提交」）。
+    ``narrator_voice_character`` 传空串表示显式清空（恢复「保持现状」）；传非空值
+    时必须命中本项目人物谱的正名，否则拒绝写入。
     """
     if adaptation_mode is not None and adaptation_mode not in ADAPTATION_MODES:
         raise ValueError(f"不支持的改编强度档位：{adaptation_mode!r}")
     if aspect_ratio is not None and aspect_ratio not in ASPECT_RATIOS:
         raise ValueError(f"不支持的画幅：{aspect_ratio!r}")
+    narrator_name = narrator_voice_character.strip() if narrator_voice_character is not None else None
+    if narrator_name and narrator_name not in _bible_character_names(conn, project_id):
+        raise ValueError(f"角色「{narrator_name}」不在本项目人物谱中，无法设为旁白音色角色")
     fields: list[str] = []
     params: list[Any] = []
     if adaptation_mode is not None:
@@ -158,12 +201,15 @@ def update_project_settings(
     if enhance_monologue is not None:
         fields.append("enhance_monologue=?")
         params.append(int(enhance_monologue))
+    if narrator_name is not None:
+        fields.append("narrator_voice_character=?")
+        params.append(narrator_name)
     if fields:
         params.append(project_id)
         conn.execute(f"UPDATE projects SET {', '.join(fields)} WHERE id=?", params)
     row = conn.execute(
         "SELECT adaptation_mode, aspect_ratio, ai_label_enabled, enhance_music_bed, "
-        "enhance_teaser, enhance_monologue FROM projects WHERE id=?",
+        "enhance_teaser, enhance_monologue, narrator_voice_character FROM projects WHERE id=?",
         (project_id,),
     ).fetchone()
     if row is None:
@@ -174,5 +220,6 @@ def update_project_settings(
         "ai_label_enabled": bool(row["ai_label_enabled"]),
         "enhance_music_bed": bool(row["enhance_music_bed"]),
         "enhance_teaser": bool(row["enhance_teaser"]),
+        "narrator_voice_character": str(row["narrator_voice_character"] or ""),
         "enhance_monologue": bool(row["enhance_monologue"]),
     }

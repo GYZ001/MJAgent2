@@ -76,7 +76,10 @@ def prepare_identity_candidate(conn, *, shot_id: str, candidate: dict) -> dict:
     if errors:
         raise ValueError("；".join(errors))
     attach_quote_provenance(result)
-    render_segment_speech(result, dialect=str(result.get("speech_dialect") or ""))
+    render_segment_speech(
+        result, dialect=str(result.get("speech_dialect") or ""),
+        narrator_voice_character=str(result.get("narrator_voice_character") or ""),
+    )
     stamp_identity_contract(result)
     errors = segment_submission_errors(result, source_text=row["source_excerpt"] or "")
     if errors:

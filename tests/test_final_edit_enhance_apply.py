@@ -157,6 +157,7 @@ def test_full_pipeline_with_all_three_switches_on(episode, tmp_path, monkeypatch
     update_project_settings(
         conn, "p", adaptation_mode=None, aspect_ratio=None, ai_label_enabled=None,
         enhance_music_bed=True, enhance_teaser=True, enhance_monologue=True,
+        narrator_voice_character=None,
     )
     conn.commit()
 
@@ -227,6 +228,7 @@ def test_monologue_failure_is_visible_and_does_not_block_music_bed(episode, tmp_
     update_project_settings(
         conn, "p", adaptation_mode=None, aspect_ratio=None, ai_label_enabled=None,
         enhance_music_bed=True, enhance_teaser=False, enhance_monologue=True,
+        narrator_voice_character=None,
     )
     conn.commit()
 
@@ -294,6 +296,7 @@ def test_dropped_plan_items_are_surfaced_as_rejected_in_report(episode, tmp_path
     update_project_settings(
         conn, "p", adaptation_mode=None, aspect_ratio=None, ai_label_enabled=None,
         enhance_music_bed=True, enhance_teaser=False, enhance_monologue=False,
+        narrator_voice_character=None,
     )
     conn.commit()
     set_setting("music_library_dir", str(_seed_music_library(tmp_path)))
@@ -336,6 +339,7 @@ def test_music_bed_only_does_not_duck_arbitrary_silence_windows(episode, tmp_pat
     update_project_settings(
         conn, "p", adaptation_mode=None, aspect_ratio=None, ai_label_enabled=None,
         enhance_music_bed=True, enhance_teaser=False, enhance_monologue=False,
+        narrator_voice_character=None,
     )
     conn.commit()
     set_setting("music_library_dir", str(_seed_music_library(tmp_path)))

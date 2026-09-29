@@ -32,6 +32,7 @@ def segment_identity_fingerprint(shot) -> str:
 
 def storyboard_pack_prompt_text(
     shot, critique: list[str] | None = None, *, override: str | None = None,
+    narrator_voice_character: str = "",
 ) -> str:
     """分镜台 2.0.0 段：原样复用模型已产出的 prompt_text，不重新编译。
 
@@ -49,6 +50,12 @@ def storyboard_pack_prompt_text(
     形态：与分镜段 ``speech_template`` 同形——带 @角色 标签，台词处写 ``{{speech:Uxx}}``
     占位符而不是原话；这里按段自己的 ``speech_dialect`` 展开成 prompt_text，展开结果与
     模板一致才能过 ``explicit_prompt_speaker_errors``。段没有模板（旧产物）时原样使用。
+
+    ``narrator_voice_character``：覆盖分支重新展开台词时使用的旁白固定音色角色，由
+    调用方按项目**当前**设置现查传入（不是段落生成时刻的旧值）——这条路径正是
+    「编辑本镜提示词后重抽」，理应按最新设置重来，且与同一次请求里
+    ``reference_audio_idem_fingerprint`` 挂参考音频时读的是同一个当前值，两处不会
+    对不上。不传（默认空串）时逐字不变；段本身没有 speech_template 的旧产物不受影响。
     """
     # shot_contract_json 才是权威来源，这里直接读 shot 模型上已解析好的
     # storyboard_pack_segment；不再插入占位「已采纳」版本，也不再依赖
@@ -58,7 +65,10 @@ def storyboard_pack_prompt_text(
     if (override or "").strip():
         if segment.get("speech_template"):
             segment["speech_template"] = str(override).strip()
-            render_segment_speech(segment, dialect=str(segment.get("speech_dialect") or ""))
+            render_segment_speech(
+                segment, dialect=str(segment.get("speech_dialect") or ""),
+                narrator_voice_character=narrator_voice_character,
+            )
         else:
             segment["prompt_text"] = str(override).strip()
         prompt_text = str(segment.get("prompt_text") or "")
@@ -309,6 +319,7 @@ def reference_audio_idem_fingerprint(
     )
     if not reference_audio_enabled():
         return ""
+    from app.project_settings import resolve_narrator_voice_character  # 只在开关打开时才需要
     from app.video_plan.capability_snapshot import current_capability_snapshot  # 只在开关打开时才需要
 
     capability = current_capability_snapshot(
@@ -327,6 +338,7 @@ def reference_audio_idem_fingerprint(
         supports_reference_audio=capability.supports_reference_audio,
         max_reference_audios=capability.max_reference_audios,
         max_reference_audio_total_s=capability.max_reference_audio_total_s,
+        narrator_voice_character=resolve_narrator_voice_character(conn, project_id),
     )
     return fingerprint_reference_audios(refs)
 

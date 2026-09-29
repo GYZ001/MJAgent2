@@ -48,12 +48,37 @@ def test_appends_lock_sentence_with_actual_names_and_count():
 
 def test_does_not_duplicate_when_already_present():
     draft = _draft(
-        "镜头1：@温念 坐在桌边。画面中只有@温念共1人，不出现其他人物或路人。",
+        "镜头1：@温念 坐在桌边。\n画面中只有@温念共1人，不出现其他人物或路人。",
         [_character("bible:温念", "温念")],
     )
     before = draft.prompt_text
     assert ensure_cast_lock_in_prompt(draft) == []
     assert draft.prompt_text == before
+
+
+def test_dedupes_repeated_lock_sentence_from_earlier_call_or_model_mimicry():
+    """2026-09-28 真实回归：《顾念长安》第 1 集 29 段里 24 段这句话逐字重复了两次
+    （模型自己按方言规则也写了一遍同形状的话，与本函数追加的那句格式上恰好一样），
+    另一段两处写法不同（其一缺 @、多一个空格）。旧版 ``lock_sentence in prompt`` 逐字
+    包含检查在写法不同这个案例里失效才重复追加；新判据按结构标记整体剥离再统一写回
+    唯一一句，两种情况都收敛成一句。"""
+    exact_dup = _draft(
+        "镜头1：@温念 坐在桌边。\n画面中只有@温念、@顾屿共2人，不出现其他人物或路人。"
+        "\n续接服装：@顾屿 蓝色外套。\n画面中只有@温念、@顾屿共2人，不出现其他人物或路人。",
+        [_character("bible:温念", "温念"), _character("bible:顾屿", "顾屿")],
+    )
+    assert ensure_cast_lock_in_prompt(exact_dup) == []
+    assert exact_dup.prompt_text.count("画面中只有") == 1
+    assert exact_dup.prompt_text.endswith("画面中只有@温念、@顾屿共2人，不出现其他人物或路人。")
+
+    mismatched_format = _draft(
+        "镜头1：@温念 坐在桌边。\n画面中只有@温念、顾屿 共2人，不出现其他人物或路人。"
+        "\n续接服装：@顾屿 蓝色外套。",
+        [_character("bible:温念", "温念"), _character("bible:顾屿", "顾屿")],
+    )
+    assert ensure_cast_lock_in_prompt(mismatched_format) == []
+    assert mismatched_format.prompt_text.count("画面中只有") == 1
+    assert mismatched_format.prompt_text.endswith("画面中只有@温念、@顾屿共2人，不出现其他人物或路人。")
 
 
 def test_segment_without_visible_characters_is_left_untouched():

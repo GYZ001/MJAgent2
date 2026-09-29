@@ -5,7 +5,7 @@ from app import textmatch
 from app.production.storyboard_dialogue_extract import extract_dialogue_targets
 from app.production.storyboard_identity_scope import bind_quote_identities
 from app.production.storyboard_dialogue_ledger import _AiKeptLine, required_dialogue_for_segments
-from app.project_settings import enhance_music_bed_enabled, resolve_aspect_ratio
+from app.project_settings import enhance_music_bed_enabled, resolve_aspect_ratio, resolve_narrator_voice_character
 from app.production.storyboard_pack import (
     _AiBeatSheetDraft, _AiStoryboardSegmentDraft, _generate_all_segment_prompts,
     _load_indexed_source_segments, _manifest_speaker_names, _paratext_segment_indexes,
@@ -58,7 +58,8 @@ async def regenerate_identity_candidate(conn, *, episode: dict, shot_id: str, pa
         episode_id=episode["id"], episode_no=episode["episode_no"], beat_draft=_existing_plan(stored),
         segments=source, payload=payload, target_video_model=episode.get("target_video_model") or "hiagent",
         bible=bible, required_dialogue_by_segment_no=required, conn=conn, project_id=episode["project_id"], aspect_ratio=resolve_aspect_ratio(conn, episode["project_id"]),
-        enhance_music_bed=enhance_music_bed_enabled(conn, episode["project_id"]), reuse_segments=reuse,
+        enhance_music_bed=enhance_music_bed_enabled(conn, episode["project_id"]),
+        narrator_voice_character=resolve_narrator_voice_character(conn, episode["project_id"]), reuse_segments=reuse,
     )
     result = dict(target, **drafts[target["segment_no"]].model_dump(mode="json"))
     result["beats"] = target.get("beats") or []

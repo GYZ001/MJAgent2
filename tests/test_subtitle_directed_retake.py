@@ -139,7 +139,7 @@ def test_pack_prompt_override_is_rendered_through_the_speech_template(monkeypatc
     """段带 speech_template 时，override 是模板形态：按段方言展开后才是发给供应商的正文。"""
     monkeypatch.setattr(enqueue_prompt, "assert_segment_submission", lambda segment, *, source_text: None)
 
-    def fake_render(segment, *, dialect):
+    def fake_render(segment, *, dialect, narrator_voice_character=""):
         segment["prompt_text"] = segment["speech_template"].replace("{{speech:U01}}", f"画内对白（孟浩）：“圣贤说过”[{dialect}]")
         return segment
 
@@ -154,4 +154,32 @@ def test_pack_prompt_override_is_rendered_through_the_speech_template(monkeypatc
     out = enqueue_prompt.storyboard_pack_prompt_text(shot, override="新正文 {{speech:U01}} 收尾")
     assert out == "新正文 画内对白（孟浩）：“圣贤说过”[d] 收尾"
     assert shot.storyboard_pack_segment["speech_template"] == "旧正文 {{speech:U01}}"  # 不回写分镜段
+
+
+def test_pack_prompt_override_threads_narrator_voice_character_into_rerender(monkeypatch) -> None:
+    """评审复现（2026-09-28，major）：覆盖分支重新展开台词时以前从不传
+    narrator_voice_character，本段带 narration 台词、项目设置了旁白固定音色角色时，
+    覆盖后的正文仍是字面量「旁白」，与同一次请求里挂参考音频时按当前设置生成的
+    「旁白（{角色}的声音）」说明句对不上。这里断言 narrator_voice_character 会被
+    原样透传给 render_segment_speech。"""
+    monkeypatch.setattr(enqueue_prompt, "assert_segment_submission", lambda segment, *, source_text: None)
+    seen: dict = {}
+
+    def fake_render(segment, *, dialect, narrator_voice_character=""):
+        seen["narrator_voice_character"] = narrator_voice_character
+        segment["prompt_text"] = segment["speech_template"].replace("{{speech:U01}}", "旁白（占位）：“换水管”")
+        return segment
+
+    monkeypatch.setattr(enqueue_prompt, "render_segment_speech", fake_render)
+    shot = SimpleNamespace(
+        storyboard_pack_segment={
+            "prompt_text": "旧正文", "speech_template": "旧正文 {{speech:U01}}",
+            "speech_dialect": "d", "dialogue": [{"utterance_id": "U01", "line": "换水管"}],
+        },
+        source_excerpt="原文",
+    )
+    enqueue_prompt.storyboard_pack_prompt_text(
+        shot, override="新正文 {{speech:U01}}", narrator_voice_character="温念",
+    )
+    assert seen["narrator_voice_character"] == "温念"
 

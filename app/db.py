@@ -1841,7 +1841,7 @@ MIGRATIONS = (
        )""",
     "ALTER TABLE projects ADD COLUMN adaptation_mode TEXT NOT NULL DEFAULT 'faithful'",  # 改编强度档位：faithful=忠实（存量默认，行为不变）/short_drama=短剧节奏（新建项目默认，2026-09-23 用户拍板）
     "ALTER TABLE projects ADD COLUMN aspect_ratio TEXT NOT NULL DEFAULT '9:16'",  # 画幅：9:16/16:9，存量与新建都默认 9:16
-    "ALTER TABLE projects ADD COLUMN ai_label_enabled INTEGER NOT NULL DEFAULT 0", "ALTER TABLE projects ADD COLUMN enhance_music_bed INTEGER NOT NULL DEFAULT 0", "ALTER TABLE projects ADD COLUMN enhance_teaser INTEGER NOT NULL DEFAULT 0", "ALTER TABLE projects ADD COLUMN enhance_monologue INTEGER NOT NULL DEFAULT 0",  # AI 生成内容标识 / 统一配乐 / 片头预告 / 主角内心独白，四项都默认关闭；后两项本次只加开关未接消费方（2026-09-28）
+    "ALTER TABLE projects ADD COLUMN ai_label_enabled INTEGER NOT NULL DEFAULT 0", "ALTER TABLE projects ADD COLUMN enhance_music_bed INTEGER NOT NULL DEFAULT 0", "ALTER TABLE projects ADD COLUMN enhance_teaser INTEGER NOT NULL DEFAULT 0", "ALTER TABLE projects ADD COLUMN enhance_monologue INTEGER NOT NULL DEFAULT 0", "ALTER TABLE projects ADD COLUMN narrator_voice_character TEXT NOT NULL DEFAULT ''",  # AI 生成内容标识 / 统一配乐 / 片头预告 / 主角内心独白 / 旁白固定音色角色（空串=保持现状，非空须是本项目人物谱正名，写入校验见 app.project_settings.store），六项都默认关闭/空；后两个 enhance_* 与 narrator_voice_character 本次只加存取契约（2026-09-28）
 )
 
 

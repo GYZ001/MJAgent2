@@ -20,6 +20,7 @@ import json
 from typing import Any
 
 from app import hiagent
+from app.project_settings import resolve_narrator_voice_character
 from app.video_modes.seedance_reference_notes import append_audio_reference_note
 from app.video_plan.capability_snapshot import current_capability_snapshot
 from app.voice.segment_refs import (
@@ -66,6 +67,7 @@ def freeze_segment_reference_audios(
         supports_reference_audio=capability.supports_reference_audio,
         max_reference_audios=capability.max_reference_audios,
         max_reference_audio_total_s=capability.max_reference_audio_total_s,
+        narrator_voice_character=resolve_narrator_voice_character(conn, job["project_id"]),
     )
     meta["reference_audios"] = refs
     meta["reference_audio_skips"] = skips

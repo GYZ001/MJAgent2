@@ -7,7 +7,7 @@ from typing import Any
 
 from app import config, errors, quota, video_modes
 from app.db import get_conn, new_id, now
-from app.project_settings import resolve_aspect_ratio
+from app.project_settings import resolve_aspect_ratio, resolve_narrator_voice_character
 from app.orchestration import media_scheduler
 from app.orchestration.media_runs import mark_media_job_state
 
@@ -1464,7 +1464,9 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     )
 
     if is_storyboard_pack_shot:
-        prompt_text = enqueue_prompt.storyboard_pack_prompt_text(shot, critique=critique, override=prompt_override)
+        narrator_voice_character = resolve_narrator_voice_character(conn, project["id"]) if (prompt_override or "").strip() else ""
+        prompt_text = enqueue_prompt.storyboard_pack_prompt_text(
+            shot, critique=critique, override=prompt_override, narrator_voice_character=narrator_voice_character)
     else:
         prompt_text, preflight_repair = enqueue_prompt.compile_legacy_prompt(
             shot, prev_shot, screenplay, bible, extra_negative, critique, preflight_repair,

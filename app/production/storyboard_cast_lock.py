@@ -12,17 +12,37 @@
 形状：不发明内容，只是把模型自己已经给出的结构化事实，确定性地转成视频模型真正会读的自由
 文本。没有任何可见角色的段（纯画外音/旁白段）不写这句话——“无可见角色”本身就是诚实的事实，
 不是需要补一句空话的缺口。
+2026-09-28 幂等判断改版（《顾念长安》第 1 集真实回归发现的重复追加）：真实数据里
+29 段中 24 段这句话逐字重复了两次，另有一段两次写法不同（其一缺 @、多一个空格）。
+根因是 ``storyboard_dialects`` 教模型自己在正文里也写一句同形状的话（模块 docstring
+第一段那条规则），模型时常照做——原判据按 ``lock_sentence in prompt`` 做逐字包含
+检查，只要模型自己写的那句与本函数即将生成的 canonical 文本有一丝格式差异（缺
+``@``、多一个空格、名字顺序不同……），包含检查就会失败而重复追加，即使两句表达的
+是完全相同的「这段只有这几个人」这件事。改法：幂等判断不再比较逐字字符串，而是
+用这句话固定的首尾结构标记（``画面中只有`` … ``不出现其他人物或路人。``——这是
+本函数自己定义的模板边界，不是对模型自由文本的关键词猜测）识别出所有既有的同形状
+写法（不论是模型自己写的、还是本函数上一次写的），先整体剥离，再统一写回唯一一句
+canonical 文本，天然收敛到「同一段落只有一句」，不必判断两句在语义上是否说的是
+同一件事——反正最终都要重写成同一句话。
 """
 from __future__ import annotations
 
+import re
 from typing import Any
+
+#: 本函数自己固定生成的句式的首尾结构标记；``[^\n]*?`` 非贪婪，逐句独立匹配，
+#: 不会跨行把无关内容也吃进去。只匹配这个精确的收尾短语，不影响「人数锁定（画面
+#: 中只有……不出现其他客人或店员）」这类嵌在别处、收尾用词不同的正常文本。
+_CAST_LOCK_SENTENCE_PATTERN = re.compile(r"\n?画面中只有[^\n]*?不出现其他人物或路人。")
 
 
 def ensure_cast_lock_in_prompt(draft: Any) -> list[str]:
     """本段 ``resources.characters`` 里可见角色的实际数量与正名，写成「画面中只有
-    @A、@B 共 2 人，不出现其他人物或路人」追加进 ``prompt_text``；句子已存在（例如模型自己
-    按方言规则写过一遍）则不重复追加。返回值恒为空列表——这是确定性回填，不是校验，
-    不参与语义重试/失败判定，与 ``ensure_travel_direction_in_prompt`` 同一先例。
+    @A、@B 共 2 人，不出现其他人物或路人」写进 ``prompt_text`` 末尾；幂等判断按
+    ``_CAST_LOCK_SENTENCE_PATTERN`` 这个结构标记识别既有写法（不论格式是否与本次
+    生成的逐字相同）先整体剥离再统一写回唯一一句——见模块 docstring 2026-09-28
+    幂等判断改版。返回值恒为空列表——这是确定性回填，不是校验，不参与语义重试/
+    失败判定，与 ``ensure_travel_direction_in_prompt`` 同一先例。
     """
     names = _visible_character_names(draft)
     if not names:
@@ -31,9 +51,11 @@ def ensure_cast_lock_in_prompt(draft: Any) -> list[str]:
     if not prompt.strip():
         return []
     lock_sentence = _cast_lock_sentence(names)
-    if lock_sentence in prompt:
+    deduped = _CAST_LOCK_SENTENCE_PATTERN.sub("", prompt).rstrip()
+    normalized = (deduped + "\n" if deduped else "") + lock_sentence
+    if normalized == prompt:
         return []
-    draft.prompt_text = prompt.rstrip() + "\n" + lock_sentence
+    draft.prompt_text = normalized
     return []
 
 

@@ -35,9 +35,23 @@ def speaker_names(segment: dict) -> dict[str, str]:
     return names
 
 
-def rendered_utterance(line: dict, names: dict[str, str], *, dialect: str) -> str:
+def rendered_utterance(
+    line: dict, names: dict[str, str], *, dialect: str, narrator_voice_character: str = "",
+) -> str:
+    """``narrator_voice_character`` 非空且本句是旁白（``narration``）时，声道标签
+    括号里写成「{角色}的声音」而不是字面量「旁白」（例如「旁白（温念的声音）」）——
+    项目设置了旁白固定音色角色时，让分镜提示词与视频请求里挂的参考音频对得上（见
+    app.voice.segment_refs._with_narrator_entry 与
+    app.video_modes.seedance_reference_notes._audio_note_part，三处共用同一个
+    「{name}的声音」短语）。空串（默认，未设置）时逐字不变。这个覆盖只影响本函数
+    渲染出的自由文本，不改变 ``names``/``speaker_names()`` 本身的身份映射——
+    字幕（app.subtitles.episode）与发声者校验都直接读 ``speaker_names()``，不受
+    影响。
+    """
     speaker = names.get(str(line.get("speaker_identity_id") or ""), str(line.get("speaker_identity_id") or ""))
     kind = effective_delivery_kind(line)
+    if kind == "narration" and narrator_voice_character:
+        speaker = f"{narrator_voice_character}的声音"
     label = {"spoken_dialogue": "画内对白", "offscreen_dialogue": "人物画外对白", "inner_monologue": "内心独白", "narration": "旁白"}[kind]
     if dialect == "minimax_h3_native_fields":
         return _h3_utterance(line, names, speaker=speaker, kind=kind)
@@ -73,15 +87,25 @@ def speech_template_errors(segment: dict, *, require_tokens: bool) -> list[str]:
     return errors
 
 
-def render_segment_speech(segment: dict, *, dialect: str) -> dict:
-    """占位符按合同一次性展开，并保留模板供以后修订与审计。"""
+def render_segment_speech(segment: dict, *, dialect: str, narrator_voice_character: str = "") -> dict:
+    """占位符按合同一次性展开，并保留模板供以后修订与审计。``narrator_voice_character``
+    见 ``rendered_utterance`` 文档；默认空串＝改动前行为逐字不变。展开时把它与
+    ``speech_dialect`` 一起写回 ``segment``（``_AiStoryboardSegmentDraft.
+    narrator_voice_character`` 字段），这样任何只拿到 ``segment`` 本身、没有 conn/
+    project_id 的重渲染再比对（``explicit_prompt_speaker_errors``、台词人工修订）
+    都能复现当次生成实际用的旁白音色，不必外部传参、也不会读到项目设置之后被
+    改动的新值。"""
     template = str(segment.get("speech_template") or segment.get("prompt_text") or "")
     if not SPEECH_TOKEN.search(template):
         return segment
     names = speaker_names(segment)
-    by_id = {line["utterance_id"]: rendered_utterance(line, names, dialect=dialect) for line in segment.get("dialogue") or []}
+    by_id = {
+        line["utterance_id"]: rendered_utterance(line, names, dialect=dialect, narrator_voice_character=narrator_voice_character)
+        for line in segment.get("dialogue") or []
+    }
     segment["speech_template"] = template
     segment["speech_dialect"] = dialect
+    segment["narrator_voice_character"] = narrator_voice_character
     segment["prompt_text"] = SPEECH_TOKEN.sub(lambda m: by_id[m.group(1)], template)
     return segment
 
@@ -140,7 +164,10 @@ def explicit_prompt_speaker_errors(segment: dict) -> list[str]:
         if template_errors:
             return template_errors
         candidate: dict[str, Any] = dict(segment)
-        render_segment_speech(candidate, dialect=str(segment.get("speech_dialect") or ""))
+        render_segment_speech(
+            candidate, dialect=str(segment.get("speech_dialect") or ""),
+            narrator_voice_character=str(segment.get("narrator_voice_character") or ""),
+        )
         if candidate["prompt_text"] != prompt:
             return ["提示词与已保存的发声模板/台词合同不同，请重新生成该片段的提示词"]
         return []

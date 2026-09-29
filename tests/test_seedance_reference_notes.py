@@ -228,6 +228,23 @@ def test_append_audio_reference_note_is_idempotent():
     assert twice.count(AUDIO_REFERENCE_NOTE_MARKER) == 1
 
 
+def test_append_audio_reference_note_narrator_role_uses_narration_label_phrasing():
+    """2026-09-28 旁白固定音色角色：``role="narrator"`` 的说明句引用「旁白（{name}
+    的声音）」这个短语，与 app.production.storyboard_speech_render.rendered_utterance
+    给旁白声道标签写的措辞完全一致，模型才能把参考音频与提示词正文里的旁白台词对上；
+    ``role="speaker"``（默认，未传视为 speaker，向后兼容旧数据）仍是原来的措辞。"""
+    prompt = "镜头1：@图片1 顾屿 说话。旁白（温念的声音）：“……”。 --ratio 9:16 --dur 15"
+    refs = [
+        {"index": 1, "character_name": "顾屿", "role": "speaker"},
+        {"index": 2, "character_name": "温念", "role": "narrator"},
+    ]
+
+    result = append_audio_reference_note(prompt, refs, aspect_ratio="9:16")
+
+    assert "@音频1 是顾屿的声音，顾屿的每一句台词都用 @音频1 的音色和说话方式说出" in result
+    assert "@音频2 是温念的声音，本段标注为「旁白（温念的声音）」的台词都用 @音频2 的音色和说话方式说出" in result
+
+
 def test_append_audio_reference_note_preserves_existing_image_note_and_duration():
     """先加图片说明，再加声音说明；两段说明都在，尾部 --dur 沿用已内嵌的值
     （不因为这次调用没传 duration_s 就被重置成默认 5 秒）。"""
