@@ -768,25 +768,21 @@ def _begin_video_preflight_job(
                 or float(existing["lease_expires_at"]) <= stamp
             )
             if existing["version_id"] is None and lease_inactive:
+                # 认领复用行必须一并清掉取消标记，否则带着旧的
+                # cancellation_requested=1 一路进 queued 后会被 dispatch 永久
+                # 过滤掉，卡死且不报错（2026-09-29 生产事故复盘）。
                 claimed = conn.execute(
                     """UPDATE jobs
                           SET status='waiting_retry',error=NULL,next_retry_at=?,
                               owner_run_id=COALESCE(?,owner_run_id),
-                              lease_owner=?,lease_expires_at=?,updated_at=?
+                              lease_owner=?,lease_expires_at=?,updated_at=?,
+                              cancellation_requested=0,abandoned=0,reason_code=NULL,reason_text=NULL
                         WHERE id=? AND video_slot_active=1 AND version_id IS NULL
                           AND (
                               lease_owner IS NULL OR lease_expires_at IS NULL
                               OR lease_expires_at<=?
                           )""",
-                    (
-                        retry_at,
-                        supervisor_run_id,
-                        claim_owner,
-                        retry_at,
-                        stamp,
-                        job_id,
-                        stamp,
-                    ),
+                    (retry_at, supervisor_run_id, claim_owner, retry_at, stamp, job_id, stamp),
                 )
                 acquired = claimed.rowcount == 1
         else:

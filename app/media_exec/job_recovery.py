@@ -324,12 +324,19 @@ def _reconcile_stalled_video_jobs(conn, limit: int) -> dict[str, int]:
         "redundant_preflight_closed", "legacy_jobless_recovered",
         "legacy_preflight_reactivated", "preflight_retried",
         "continuity_degraded", "dependency_repair_required",
-        "quarantine_released", "episodes_reconciled",
+        "quarantine_released", "episodes_reconciled", "stuck_cancellation_converged",
     ), 0)
 
+    # video_slot_active=0 必须和取消一起写：这一行本来就没有 version_id
+    # （从未提交供应商），继续占着 uq_jobs_active_video_shot 这个每镜唯一
+    # 的活动槽只会挡住这个镜头之后的正常重试——挡不住的重试最终会通过
+    # enqueue._begin_video_preflight_job 的"复用"分支把这行认领回来，
+    # 若认领分支漏清 cancellation_requested，任务会带着这个标记一路进
+    # queued 但被 dispatch 查询永久过滤掉（2026-09-29 生产事故：
+    # job_92f3cd206935 卡在 queued+cancellation_requested=1 20 分钟无人处理）。
     redundant = conn.execute(
         """UPDATE jobs
-           SET status='cancelled', cancellation_requested=1,
+           SET status='cancelled', cancellation_requested=1, video_slot_active=0,
                reason_code='SUPERSEDED_PREFLIGHT',
                reason_text='已有成功采用版，关闭并发产生的冗余校验任务',
                error='已有成功采用版，关闭并发产生的冗余校验任务',
@@ -350,6 +357,8 @@ def _reconcile_stalled_video_jobs(conn, limit: int) -> dict[str, int]:
     conn.commit()
     if redundant:
         report["redundant_preflight_closed"] = int(redundant)
+
+    report["stuck_cancellation_converged"] = media_scheduler.converge_stuck_cancelled_queued_jobs(conn, limit)
 
     # 兼容修复上线前的历史事故：当时 preflight 发生在 jobs INSERT 之前，
     # 因而只留下 issue artifact。仅恢复 24 小时内、整集仍处于 generating、

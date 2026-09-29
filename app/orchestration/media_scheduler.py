@@ -374,6 +374,40 @@ def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") 
     }
 
 
+def converge_stuck_cancelled_queued_jobs(conn, limit: int) -> int:
+    """把带着取消标记却仍卡在 ``queued`` 的视频任务收敛成终态。
+
+    不管 ``cancellation_requested=1`` 是怎么打上去的（取消接口本身、
+    ``app.media_exec.job_recovery`` 里的冗余预检收口、还是以后新增的任何一
+    条路径），只要一个视频任务还带着这个标记却仍是 ``queued``，就必须被判
+    定为终态——``app/media_exec/dispatch.py`` 的两条派发查询（legacy 与
+    stage_aware 两版）都无条件排除 ``cancellation_requested=1``，这类行不会
+    再被任何 worker 捡起，只能靠周期对账主动收口（2026-09-29 生产事故：
+    job_92f3cd206935 卡在 queued+cancellation_requested=1 20 分钟无人处理）。
+    复用本模块的 ``request_cancel`` 而不是手写 UPDATE：它已经正确处理了供
+    应商已接单/未接单、预算、版本投影这几件必须一起做对的事。
+    """
+    rows = conn.execute(
+        """SELECT id FROM jobs
+           WHERE kind='video' AND status='queued' AND cancellation_requested=1
+           ORDER BY updated_at LIMIT ?""",
+        (max(1, int(limit)),),
+    ).fetchall()
+    converged = 0
+    for row in rows:
+        try:
+            outcome = request_cancel(row["id"])
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            continue
+        if outcome.get("cancelled") or outcome.get("status") != "queued":
+            converged += 1
+    return converged
+
+
 def recoverable_jobs() -> list[tuple[str, float]]:
     """Return every recoverable job and its remaining delay.
 
