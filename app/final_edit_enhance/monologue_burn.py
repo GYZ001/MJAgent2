@@ -3,7 +3,8 @@
 不重复烧对白）。走现有 ``app.subtitles.ass`` 渲染管线，标注为"内心独白"复用
 ``Cue.speaker`` 字段（``show_speaker`` 关闭时该字段不显示，仍能通过
 ``app.final_edit_enhance.report`` 里的原句/出处让用户核对，满足"样式区分
-可选"）。
+可选"）。cue 切分统一走 ``app.final_edit_enhance.monologue_cues``（与
+``subtitle_shift`` 共用同一份实现，避免超长独白整行跑出画面）。
 """
 from __future__ import annotations
 
@@ -12,11 +13,9 @@ from pathlib import Path
 from app.final_edit import _font_path
 from app.final_edit_enhance.ffutil import run_ffmpeg
 from app.final_edit_enhance.monologue_audio import MonologueAudioItem
+from app.final_edit_enhance.monologue_cues import monologue_cues
 from app.media_pipeline.delivery_encode import DELIVERY_VIDEO_ARGS, encode_timeout_s
 from app.subtitles.ass import SubtitleStyle, ffmpeg_ass_filter, font_family_from_file, render_ass
-from app.subtitles.cues import Cue
-
-_MONOLOGUE_SPEAKER_TAG = "内心独白"
 
 
 def default_style() -> SubtitleStyle:
@@ -26,24 +25,15 @@ def default_style() -> SubtitleStyle:
     return SubtitleStyle(font_family=font_family_from_file(_font_path()))
 
 
-def _monologue_cues(items: list[MonologueAudioItem]) -> tuple[Cue, ...]:
-    return tuple(
-        Cue(
-            shot_no=-1, utterance_id=f"MONO{i:02d}", text=item.text,
-            start_s=item.start_s, end_s=item.start_s + item.duration_s,
-            speaker=_MONOLOGUE_SPEAKER_TAG,
-        )
-        for i, item in enumerate(items)
-    )
-
-
 def burn_monologue_captions(
     video_path: Path, items: list[MonologueAudioItem], style: SubtitleStyle,
     play_res: tuple[int, int], work_dir: Path, total_duration_s: float,
 ) -> Path:
     if not items:
         return video_path
-    cues = _monologue_cues(items)
+    # 烧录走的是未经片头预告偏移的本地时间轴，offset_s 固定为 0——片头预告
+    # 后移只发生在 subtitle_shift 那条“下载字幕轨”路径上。
+    cues = monologue_cues(items, offset_s=0.0, max_chars_per_line=style.max_chars_per_line)
     # 独白样式固定显示 speaker 前缀（不受项目字幕总开关的 show_speaker 设置
     # 影响）——这是独白与普通对白唯一的可见区分手段，关掉就退化成看不出来
     # 这句是心理描写还是说出口的话。

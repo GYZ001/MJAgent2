@@ -5,7 +5,10 @@
    后移预告时长——只改 ``cues_timeline``（sidecar/连播台章节偏移唯一消费的
    字段）与随之重算的 srt/ass，不改 ``lines``/``missing``/``extra_speech``
    （这些是按镜号呈现的诊断信息，语义上不随"整片在最终产物里挪到第几秒"变化）。
-2. 主角内心独白的文本与时间追加进同一条 cue 时间轴，一并出字幕/出 srt。
+2. 主角内心独白的文本与时间追加进同一条 cue 时间轴，一并出字幕/出 srt——超过
+   样式 ``max_chars_per_line`` 的独白句按 ``app.final_edit_enhance.
+   monologue_cues`` 切成多条 cue（与烧录路径共用同一份切分实现，见该模块
+   文档）。
 
 AI 标识的独立 ``Dialogue`` 行（``extra_events``）不在本函数重建范围内——它由
 ``app.subtitles.ass.ai_label_event`` 生成的是原始字符串而不是结构化 ``Cue``，
@@ -20,6 +23,7 @@ import hashlib
 from typing import Any
 
 from app.final_edit_enhance.monologue_audio import MonologueAudioItem
+from app.final_edit_enhance.monologue_cues import monologue_cues
 from app.subtitles.ass import SubtitleStyle, render_ass, render_srt
 from app.subtitles.cues import Cue
 
@@ -29,17 +33,6 @@ def _cue_from_entry(entry: dict[str, Any], offset_s: float) -> Cue:
         shot_no=int(entry["shot_no"]), utterance_id=str(entry["utterance_id"]), text=str(entry["text"]),
         start_s=float(entry["start_s"]) + offset_s, end_s=float(entry["end_s"]) + offset_s,
         estimated=bool(entry.get("estimated", False)),
-    )
-
-
-def _monologue_cues(items: list[MonologueAudioItem], offset_s: float) -> tuple[Cue, ...]:
-    return tuple(
-        Cue(
-            shot_no=-1, utterance_id=f"MONO{i:02d}", text=item.text,
-            start_s=item.start_s + offset_s, end_s=item.start_s + item.duration_s + offset_s,
-            speaker="内心独白",
-        )
-        for i, item in enumerate(items)
     )
 
 
@@ -55,7 +48,8 @@ def shift_and_augment_subtitles(
         # 这里原样返回，不伪造一份"启用"的字幕报告。
         return subtitles
     dialogue_cues = tuple(_cue_from_entry(e, offset_s) for e in subtitles.get("cues_timeline") or [])
-    all_cues = tuple(sorted((*dialogue_cues, *_monologue_cues(monologue_items, offset_s)), key=lambda c: c.start_s))
+    mono_cues = monologue_cues(monologue_items, offset_s=offset_s, max_chars_per_line=style.max_chars_per_line)
+    all_cues = tuple(sorted((*dialogue_cues, *mono_cues), key=lambda c: c.start_s))
     ass_text = render_ass(all_cues, style, play_res)
     srt_text = render_srt(all_cues)
     updated = dict(subtitles)

@@ -260,6 +260,43 @@ def _resolve_overlaps(cues: list[Cue], effective_duration_s: float) -> list[Cue]
     return [c for c in ordered if c.end_s > c.start_s]
 
 
+def split_display_pieces(
+    text: str, start_s: float, end_s: float, max_chars_per_line: int
+) -> list[tuple[str, float, float]]:
+    """把没有逐字时间戳的整句文本（如独白 TTS 合成结果，只知道整句的
+    ``start_s``/``end_s``）按对白字幕同一套规则切成多条 <= ``max_chars_per_line``
+    的显示片段：复用 ``_split_clauses``/``_merge_spans``/``_split_by_gap``——
+    唯一的差别是喂给它们的不是真实逐字 ASR 时间戳，而是假设匀速念白、按字符
+    位置线性插值出的合成时间戳。匀速假设下相邻字符间隔处处相等，
+    ``_pick_split_point``「按最大停顿选拆点」会落进它自带的等隔兜底分支（取
+    候选区间中点）——没有真实停顿信号时这正是诚实的近似，不是意外副作用。
+
+    最终每片的起止时间不取合成时间戳本身（那只是字符「起点」，会让每片都提前
+    一个字符的时长结束），而是按字符位置占比重新在 ``[start_s, end_s]`` 上
+    插值：片 ``[s, e)`` 的时间是 ``start_s + s/n*duration`` 到
+    ``start_s + e/n*duration``（``n`` 为全文字符数），这样相邻片首尾无缝衔接、
+    整句时长严格按字符数比例分配到各片——对匀速合成语音而言这是唯一诚实的
+    估算（没有逐字对齐结果可用）。
+    """
+    n = len(text)
+    if n == 0:
+        return []
+    if end_s <= start_s:
+        return [(text, start_s, end_s)]
+    max_chars_per_line = max(1, max_chars_per_line)
+    duration = end_s - start_s
+    timeline = [(ch, start_s + i * duration / n) for i, ch in enumerate(text)]
+    spans = _split_clauses(timeline)
+    if not spans:
+        return [(text, start_s, end_s)]
+    merged = _merge_spans(timeline, spans, max_chars_per_line)
+    pieces: list[tuple[str, float, float]] = []
+    for span_start, span_end in merged:
+        for s, e in _split_by_gap(timeline, span_start, span_end, max_chars_per_line):
+            pieces.append((text[s:e], start_s + s * duration / n, start_s + e * duration / n))
+    return pieces
+
+
 def build_cues(
     shot_no: int, alignment: ShotAlignment, *, rate: float, effective_duration_s: float, max_chars_per_line: int
 ) -> list[Cue]:

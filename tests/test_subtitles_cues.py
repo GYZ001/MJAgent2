@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from app.subtitles.align import AsrToken, LineSpec, align_shot
-from app.subtitles.cues import GAP_S, MIN_CUE_S, build_cues
+from app.subtitles.cues import GAP_S, MIN_CUE_S, build_cues, split_display_pieces
 
 
 def _toks(pairs: list[tuple[str, float]]) -> list[AsrToken]:
@@ -278,3 +278,49 @@ def test_cue_beyond_effective_duration_is_dropped():
     assert len(cues) == 1
     assert cues[0].text == "甲乙，"
     assert cues[0].end_s <= 5.0
+
+
+# ---------------------------------------------------------------------------
+# split_display_pieces：没有逐字时间戳的整句文本（独白 TTS）按匀速假设切分
+# （2026-09-29 修复：独白句超过 max_chars 时整行烧进画面会跑出右边缘）
+# ---------------------------------------------------------------------------
+
+_MONOLOGUE_TEXT = "他只当是从前磕碰留下的旧疤，没有多想，只是把她的手又拢进了被子里，掌心一直没有松开。"
+
+
+def test_monologue_line_splits_within_max_chars_and_preserves_order():
+    pieces = split_display_pieces(_MONOLOGUE_TEXT, start_s=3.0, end_s=11.4, max_chars_per_line=14)
+    assert len(pieces) > 1
+    for text, _start, _end in pieces:
+        assert len(text) <= 14
+    # 文本按顺序拼回去必须是原句的一个前缀子序列（末尾成串标点按既有约定整体
+    # 剔除，见 test_trailing_punctuation_run_fully_stripped），不丢字、不重复。
+    joined = "".join(text for text, _s, _e in pieces)
+    assert _MONOLOGUE_TEXT.startswith(joined)
+    assert len(_MONOLOGUE_TEXT) - len(joined) <= 1  # 至多丢末尾一串标点
+
+
+def test_monologue_line_pieces_are_contiguous_within_span():
+    pieces = split_display_pieces(_MONOLOGUE_TEXT, start_s=3.0, end_s=11.4, max_chars_per_line=14)
+    assert pieces[0][1] == pytest.approx(3.0, abs=1e-9)
+    for (_t1, _s1, e1), (_t2, s2, _e2) in zip(pieces, pieces[1:]):
+        assert s2 == pytest.approx(e1, abs=1e-9)
+    assert pieces[-1][2] <= 11.4 + 1e-9
+
+
+def test_monologue_line_short_text_stays_single_piece():
+    pieces = split_display_pieces("我不会认输", start_s=5.0, end_s=7.0, max_chars_per_line=14)
+    assert pieces == [("我不会认输", 5.0, 7.0)]
+
+
+def test_monologue_line_duration_split_proportional_to_char_count():
+    """匀速假设：每片时长应正比于该片字符数（含被并入片内的标点）。"""
+    pieces = split_display_pieces("甲乙丙丁戊己庚辛壬癸", start_s=0.0, end_s=10.0, max_chars_per_line=5)
+    assert len(pieces) == 2
+    for text, start, end in pieces:
+        expected = len(text) / 10 * 10.0  # 10 字符总时长 10s，每字符 1s
+        assert (end - start) == pytest.approx(expected, abs=1e-9)
+
+
+def test_split_display_pieces_empty_text_returns_no_pieces():
+    assert split_display_pieces("", start_s=0.0, end_s=5.0, max_chars_per_line=14) == []
