@@ -139,6 +139,52 @@ def test_paid_boundary_rechecks_identity_but_allows_existing_task_poll(fixture):
     assert_identity_revision(conn,shot_id="s1",meta=meta,write_point="provider_poll")
 
 
+def test_apply_persists_narrator_voice_character_missing_on_legacy_row(fixture):
+    """真实回归（proj_ca86b15ab7d7 EP1 段 9）：旧行落库时没有 narrator_voice_character
+    字段（``StoryboardPackSegment`` 曾经没有这个字段，见 app.production.storyboard_pack）。
+    身份工作台 preview（``prepare_identity_candidate``）现查项目设置把字段补上了，
+    但此前 ``save_identity_candidate`` 的「未变化」判据（``identity_contract_
+    fingerprint``）不读这个字段，两次指纹算出来相同，被误判 unchanged 直接
+    rollback——存量缺字段的行因此永远无法通过身份工作台这个入口修复。指纹现在
+    把它计入比较：同一份合同首次原样重提必须落盘补齐字段；随后再原样重提一次
+    （baseline 换成刚落盘的新指纹）才是真正的「没有变化」。"""
+    conn, segment, _, _ = fixture
+    # 先在旁白音色尚未设置时跑一次 preview，把 required_dialogue（按原文重新计算）、
+    # speech_dialect（按 target_model 归一）先稳定下来——这两项与 narrator_voice_
+    # character 无关但同样会被 prepare_identity_candidate 每次重算，不先固定它们，
+    # 后面的比较会把它们的正常重算也算成「变化」，混淆了这次单独要验证的字段。
+    stable = workspace.prepare_identity_candidate(conn, shot_id="s1", candidate=deepcopy(segment))
+    legacy = dict(stable)
+    del legacy["narrator_voice_character"]  # 模拟修复前落库的旧行：字段整个不存在
+    conn.execute(
+        "UPDATE shots SET shot_contract_json=? WHERE id='s1'",
+        (json.dumps({"storyboard_pack_segment": legacy}),),
+    )
+    conn.execute("UPDATE projects SET narrator_voice_character='温念' WHERE id='p'")
+    conn.commit()
+
+    baseline = identity_contract_fingerprint(legacy)
+    preview = workspace.prepare_identity_candidate(conn, shot_id="s1", candidate=deepcopy(legacy))
+    assert preview["narrator_voice_character"] == "温念"
+    # preview 的其余字段与 legacy 逐一相同——这次「变化」只应该来自 narrator_voice_
+    # character，不是 required_dialogue/speech_dialect 等其它字段的正常重算波动。
+    for key in ("resources", "dialogue", "required_dialogue", "prompt_text", "speech_dialect", "identity_contract_version"):
+        assert preview[key] == legacy[key], f"字段 {key} 不应在这次无编辑的重提中变化"
+
+    result = workspace.save_identity_candidate(conn, shot_id="s1", baseline=baseline, candidate=deepcopy(legacy))
+    assert result.get("unchanged") is not True, "旧行缺字段时，补齐后的候选必须判定为有变化并落盘，不能被 unchanged 挡住"
+    stored = json.loads(
+        conn.execute("SELECT shot_contract_json FROM shots WHERE id='s1'").fetchone()["shot_contract_json"]
+    )["storyboard_pack_segment"]
+    assert stored["narrator_voice_character"] == "温念"
+
+    # 原样再提交一次（baseline/candidate 都是刚落盘、已经带字段的合同）：这次必须
+    # 判定未变化，不产生冗余修订、不多占一个 shot_versions 版本号。
+    baseline2 = identity_contract_fingerprint(stored)
+    result2 = workspace.save_identity_candidate(conn, shot_id="s1", baseline=baseline2, candidate=deepcopy(stored))
+    assert result2 == {"unchanged": True}
+
+
 def test_http_preview_errors_and_observations_are_scoped(fixture):
     _,segment,_,_ = fixture
     client = SessionTestClient(TestClient(app))

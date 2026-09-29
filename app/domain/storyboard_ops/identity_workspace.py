@@ -153,7 +153,10 @@ def save_identity_candidate(conn, *, shot_id: str, baseline: str, candidate: dic
     try:
         row, episode, original = _assert_idle_current(conn, shot_id, baseline)
         prepared = prepare_identity_candidate(conn, shot_id=shot_id, candidate=candidate)
-        if identity_contract_fingerprint(prepared) == identity_contract_fingerprint(original):
+        # 旁白音色/方言不进身份指纹（那是生成复用键的输入），但它们落库、并决定提交前的重渲染比对：
+        # 存量行缺旁白音色时原样重存要能补上（真实回归 proj_ca86b15ab7d7 EP1 段 9）。
+        if identity_contract_fingerprint(prepared) == identity_contract_fingerprint(original) and all(
+                prepared.get(k) == original.get(k) for k in ("narrator_voice_character", "speech_dialect")):
             conn.rollback()
             return {"unchanged":True}
         artifact_id = _record_identity_revision(conn, row, prepared)

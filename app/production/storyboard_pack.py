@@ -603,10 +603,8 @@ def _strip_paratext_from_beat_draft(
     return notes
 
 
-# 世界书标准外观/场景锚点接入 + 场景当前生效行重绑定（问题一修复，真实 EP1/
-# proj_ca86b15ab7d7 两次回归）：见 app.production.storyboard_scene_binding
-# 模块 docstring（本文件 line_count 基线零余量，新逻辑拆到那边，这里只保留
-# 调用点 ``_enrich_asset_manifest_canonical_visuals``，随 import 一并可用）。
+# 世界书标准外观/场景锚点接入 + 场景当前生效行重绑定（问题一修复，真实 EP1/proj_ca86b15ab7d7 两次回归）：见 app.production.storyboard_scene_binding
+# 模块 docstring（本文件 line_count 基线零余量，新逻辑拆到那边，这里只保留调用点 ``_enrich_asset_manifest_canonical_visuals``，随 import 一并可用）。
 
 
 # ---------------------------------------------------------------------------
@@ -1154,6 +1152,7 @@ class StoryboardPackSegment(BaseModel):
     identity_contract_fingerprint: str = ""
     speech_template: str = ""
     speech_dialect: str = ""
+    narrator_voice_character: str = ""  #: 生成时用的旁白固定音色角色正名，随段落持久化；默认空串兼容旧行——见 render_segment_speech 文档
     prompt_text: str
     shot_count: int
     dialogue: list[dict[str, Any]]
@@ -1319,6 +1318,7 @@ async def generate_storyboard_pack(
             identity_contract_fingerprint=segment_drafts[plan.segment_no].identity_contract_fingerprint,
             speech_template=segment_drafts[plan.segment_no].speech_template,
             speech_dialect=segment_drafts[plan.segment_no].speech_dialect,
+            narrator_voice_character=segment_drafts[plan.segment_no].narrator_voice_character,
             dialogue=[line.model_dump(mode="json") for line in segment_drafts[plan.segment_no].dialogue],
             transition=segment_drafts[plan.segment_no].camera_digest.transition_from_previous or "硬切",
             resources=segment_drafts[plan.segment_no].resources.model_dump(mode="json"),

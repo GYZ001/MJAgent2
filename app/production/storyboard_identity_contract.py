@@ -144,7 +144,13 @@ def effective_delivery_kind(line: dict) -> str:
 
 
 def identity_contract_fingerprint(segment: dict) -> str:
-    """最小片段范围指纹：身份/声道/来源变化使旧视频幂等复用失效。"""
+    """最小片段范围指纹：身份/声道/来源变化使旧视频幂等复用失效。
+
+    字段集合是生成复用键（``app.media_exec.enqueue_prompt.segment_identity_fingerprint``
+    进 idem key）与付费提交防串（``app.media_exec.identity_fence``）的共同输入，改动它
+    会让全部存量视频对不上复用键、被当成新任务重拍——所以旁白音色/方言这类字段不在这里加，
+    身份工作台「未变化」判据另行比较（见 ``identity_workspace.save_identity_candidate``）。
+    """
     data = {k: segment.get(k) for k in ("resources", "dialogue", "required_dialogue", "prompt_text", "identity_contract_version")}
     return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 

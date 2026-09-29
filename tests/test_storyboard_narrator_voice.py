@@ -202,3 +202,46 @@ def test_dialogue_revision_helpers_preserve_narrator_voice_character():
     restored = source_faithful_copy(revised)
     assert "温念的声音" in restored["prompt_text"]
     assert restored["dialogue"][0]["line"] == "小区物业正给那栋楼换水管"
+
+
+# ---------------------------------------------------------------------------
+# 持久化回归（2026-09-29，proj_ca86b15ab7d7 EP1 段 9）：narrator_voice_character
+# 生成期渲染进了 prompt_text（「旁白（温念的声音）」），但落库用的
+# StoryboardPackSegment 没有这个字段，model_dump() 丢掉它；提交视频时
+# explicit_prompt_speaker_errors 重渲染拿到空串，与已保存正文逐字不同，
+# 误判为身份合同不一致（[STORYBOARD_IDENTITY_REPAIR_REQUIRED]），每一段
+# 带旁白的新分镜都会被拒收。见 app.production.storyboard_pack.
+# StoryboardPackSegment 与 generate_storyboard_pack 的构造点。
+# ---------------------------------------------------------------------------
+
+
+def test_storyboard_pack_segment_persists_narrator_voice_character():
+    from app.production.storyboard_identity_contract import stamp_identity_contract
+    from app.production.storyboard_identity_submission import segment_submission_errors
+    from app.production.storyboard_pack import StoryboardPackSegment
+    from app.production.storyboard_speech_render import explicit_prompt_speaker_errors
+
+    draft = {
+        "speech_template": "镜头1：小区外景。{{speech:U01}}",
+        "dialogue": [dict(_narration_line("小区物业正给那栋楼换水管"), source_segment_index=1)],
+        "resources": {"characters": [], "scenes": [], "props": []},
+        "degraded_capabilities": [],
+    }
+    render_segment_speech(draft, dialect="seedance_compact_director_brief", narrator_voice_character="温念")
+    stamp_identity_contract(draft)
+    assert "温念的声音" in draft["prompt_text"]
+
+    pack_segment = StoryboardPackSegment(
+        segment_no=1, synopsis="测试段", source_segment_indexes=[1],
+        prompt_text=draft["prompt_text"], shot_count=2,
+        identity_contract_version=draft["identity_contract_version"],
+        identity_contract_fingerprint=draft["identity_contract_fingerprint"],
+        speech_template=draft["speech_template"], speech_dialect=draft["speech_dialect"],
+        narrator_voice_character=draft["narrator_voice_character"],
+        dialogue=draft["dialogue"], resources=draft["resources"],
+        degraded_capabilities=draft["degraded_capabilities"],
+    )
+    persisted = pack_segment.model_dump(mode="json")
+    assert persisted["narrator_voice_character"] == "温念", "持久化的段落丢了生成期用的旁白音色角色"
+    assert explicit_prompt_speaker_errors(persisted) == []
+    assert segment_submission_errors(persisted, source_text="") == []
