@@ -634,7 +634,7 @@ def validate_storyboard(
 
 def storyboard_pack_dialogue_errors(shot: Shot) -> list[str]:
     """分镜台段行的台词闸门：说话人在场 + 台词可溯源；delivery 感知（2.1.0
-    受控画外音，旧行无此键按 spoken_dialogue 处理）；旧架构行返回空列表。"""
+    受控画外音）；delivery_kind=narration（旁白）不是场景人物，豁免在场检查；旧架构行返回空列表。"""
     segment = shot.storyboard_pack_segment
     if segment is None:
         return []
@@ -648,7 +648,7 @@ def storyboard_pack_dialogue_errors(shot: Shot) -> list[str]:
         speaker_id = str(line.get("speaker_identity_id") or "")
         source_index = line.get("source_segment_index")
         delivery = str(line.get("delivery") or "spoken_dialogue")
-        if not speaker_id or speaker_id not in known_character_ids:
+        if (not speaker_id or speaker_id not in known_character_ids) and line.get("delivery_kind") != "narration":
             tail = (
                 f"是画外音，说话人「{speaker_id}」未列入本段 resources.characters（画外发声也需要注明归属角色）"
                 if delivery == "offscreen_voice" else

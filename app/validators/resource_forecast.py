@@ -172,7 +172,19 @@ def resource_advisories_for_segment(
     manifest = manifest if isinstance(manifest, dict) else {}
     advisories: list[str] = []
     for entry in resources.get("characters") or []:
-        name = _display_name(str(entry.get("identity_id") or ""))
+        # voice_only 主体从不出镜，天生不需要参考图；app.multiview.
+        # _storyboard_pack_asset_dependencies 建 manifest 时本就把这类主体整条
+        # 排除（同一份 visibility 字段判据），这里的 manifest 里永远查不到它，
+        # 不跳过就会把"这里没有它"误判成"缺参考图"，对一个从不需要参考图的
+        # 主体报出虚假的"按纯文本出片"后果。
+        if entry.get("visibility") == "voice_only":
+            continue
+        identity_id = str(entry.get("identity_id") or "")
+        # 展示名优先取 display_name（人话，如「房东」），不是内部 identity_id
+        # 这种哈希/编号——同一套优先级见 app.multiview._storyboard_pack_
+        # asset_dependencies 的 name 取法，两处必须一致，否则告警文案里的名字
+        # 会跟 manifest 里真正用来匹配资产的名字对不上。
+        name = str(entry.get("display_name") or "").strip() or _display_name(identity_id)
         if _manifest_character_has_asset(manifest, name):
             continue
         advisories.append(_advisory_line(
