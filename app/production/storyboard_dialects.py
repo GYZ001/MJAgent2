@@ -188,14 +188,14 @@ JSON 字段或分点罗列）。
   汉字与字母数字，不数标点和说话人名）。这是 15 秒能说完的物理容量
   （约 {config.SPOKEN_CHARS_PER_5_SECONDS / 5:.1f} 字/秒），不是风格偏好：
   超出的部分模型只能抢读、糊读或整句吞掉，而它吞哪一句你无法预测。
-- 台词只以声音呈现：画面上不叠加字幕、台词文本、说话人名条或标题条，观众靠
-  声音听台词，字幕由后期功能另行添加。画面本身需要的文字（牌匾、书信、招牌、
-  符箓、碑刻）由视频模型直接生成：在该镜头的画面描述里写清载体与逐字内容
-  （如「门楣牌匾上『云杰县』三字，楷书」），字数越少越稳；不留白、不写「无字」、
-  不交后期——文字长在画面里，透视、光照、遮挡才能与镜头运动一致。原文里的
-  「【后期字幕】」「【字幕】」标注是后期指令，不写进画面；不得写「画面某角浮现文字/
-  字样/文字标识」「标题条」「名条」这类叠加式呈现，画面文字只能长在手机屏幕、横幅、
-  牌匾、书信等场景物体上。
+- 台词只以声音呈现：画面上不叠加字幕、台词文本、说话人名条或标题条，观众靠声音听台词，字幕由后期功能另行添加。
+  画面里不出现需要观众看清、读出内容的文字（手机/电脑屏幕、通话或结束界面、招牌、黑板、书信这类）：带屏幕的
+  物体一律从背面、侧面或半虚焦角度拍摄，不给屏幕正面清晰入镜；招牌、黑板、书信这类背景物体只写材质与外形
+  （例如「木质招牌，边角磨损」），不写它上面的具体字样，原文没有写到的招牌/告示不要自行添加；文字本该承载的
+  信息（地名、通话内容、金额）改由这一镜的台词或画外音说出来，不能只让画面替观众读——2026-09-28 用户拍板改写：
+  旧规则要求画面文字由视频模型直接生成，但该模型中文字形极不稳定，《顾念长安》第 1 集生产实测手机界面、招牌与
+  黑板字全部是乱码，招牌还是模型在原文未提及时自行加的。原文里的「【后期字幕】」「【字幕】」标注是后期指令，
+  不写进画面；不得写「画面某角浮现文字/字样/文字标识」「标题条」「名条」这类叠加式呈现。
 - 若本段原文本身是叙述者对多年经历的总结、回忆列举，或跨越多个时间点的排比
   （例如「我八岁的时候被诊断出长不高……我十三岁离开家……我三十五岁，把它抱
   在怀里」），这一段的镜头就应该按它列举的时间点分拍，每个时间点各给一个
@@ -336,9 +336,14 @@ Rules:
 - non_diegetic_music: instrument / tempo / rhythm / dynamics language, not
   abstract mood words ("sad music" is invalid; "a slow solo piano note with
   a swelling low string" is valid). No music -> write "N/A".
-- On-screen text (signs, letters, titles) is H3's strong suit: quote it
-  verbatim in double quotes inside integrated_multimodal_description, e.g.
-  reading "靠山宗". Do not translate it.
+- Do not put text the audience needs to read on screen (a phone/computer screen, a call or end-call UI, a
+  signboard, a blackboard, a letter). Frame any screened device from behind, from the side, or slightly out of
+  focus -- never a clear frontal shot of its screen; a signboard/blackboard/letter keeps only its material and
+  shape in the description (e.g. "a weathered wooden signboard"), spells out no characters, and is never added
+  unless the source text mentions it; put the information such text would carry (a place name, a call's content,
+  an amount) into that Shot's dialogue or voiceover instead. (2026-09-28: replaces the previous rule that had the
+  model render exact on-screen text directly -- this model's Chinese glyphs are unstable, and real renders showed
+  a phone call screen, an end-call screen, a cafe signboard, and a blackboard all come out as garbled characters.)
 - A cut must carry new information (subject/space/state/viewpoint/time).
   Reframing alone is a camera move, not a cut.
 - Reference character/scene images are attached separately by the platform,

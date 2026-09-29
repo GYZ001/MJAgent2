@@ -407,3 +407,44 @@ def ensure_travel_direction_in_prompt(draft: Any) -> list[str]:
     log.info("[STORYBOARD_TRAVEL_DIRECTION_APPENDED] 提示词缺走向词，已按备忘追加：%s", direction[:40])
     return []
 
+
+def ensure_wardrobe_continuity_in_prompt(draft: Any, *, prop_factory: Any) -> list[str]:
+    """服装延续的确定性回填，与 ``ensure_travel_direction_in_prompt`` 同一形状：
+    ``continuity_memo.characters[].wardrobe``（沿用规则见 ``_continuity_memo_rules_with_previous``
+    的「没有原文依据就照抄上一段」）若没出现在 ``prompt_text`` 里，按 ``resources.characters``
+    登记的正名把这句话追加进提示词；并把它登记进 ``resources.props``（不存在同名条目时新增），
+    不再让 wardrobe 只落库、只在 log 级别提示。
+
+    ``prop_factory`` 由调用方（``storyboard_pack.py``）传入其 ``_AiResourceProp`` 构造器——本
+    模块不持有那个类，避免与 ``storyboard_pack.py`` 循环导入。
+
+    2026-09-28 真实回归（《顾念长安》第 1 集）：围巾第 14 段由顾屿给温念围上，第 16、18 段整段
+    消失；开衫扣子第 11 段扣好、第 12 段敞开——wardrobe 字段此前从不回填进提示词，视频模型看
+    不到，``resources.props`` 也不从上一段继承，服装类道具因此没有任何跨段锚点。
+    """
+    memo = getattr(draft, "continuity_memo", None)
+    characters = getattr(memo, "characters", None) or []
+    prompt = str(getattr(draft, "prompt_text", "") or "")
+    if not characters or not prompt.strip():
+        return []
+    name_by_id = {
+        c.identity_id: c.display_name
+        for c in getattr(draft.resources, "characters", None) or []
+        if getattr(c, "visibility", "") == "visible" and str(getattr(c, "display_name", "") or "").strip()
+    }
+    appended: list[str] = []
+    for character in characters:
+        name = name_by_id.get(character.identity_id)
+        wardrobe = character.wardrobe.strip()
+        if not name or not wardrobe:
+            continue
+        if wardrobe not in prompt:
+            prompt = prompt.rstrip() + f"\n续接服装：@{name} {wardrobe}。"
+            appended.append(name)
+        if not any(wardrobe in (str(getattr(p, "description", "") or "")) for p in draft.resources.props):
+            draft.resources.props.append(prop_factory(label=f"{name}的服装", description=wardrobe))
+    if appended:
+        draft.prompt_text = prompt
+        log.info("[STORYBOARD_WARDROBE_APPENDED] 提示词缺服装延续，已按备忘追加：%s", "、".join(appended))
+    return []
+

@@ -81,7 +81,7 @@ from app.production.storyboard_beat_sheet import (
 )
 from app.production.storyboard_short_drama_review import generate_beat_sheet_with_drop_review
 from app.production.storyboard_continuity_memo import (
-    _AiContinuityMemo, ensure_travel_direction_in_prompt,
+    _AiContinuityMemo, ensure_travel_direction_in_prompt, ensure_wardrobe_continuity_in_prompt,
     continuity_memo_character_advisories, continuity_memo_errors, continuity_memo_payload,
 )
 from app.production.screenplay_markers import joined_source_text, parse_scene_header, required_beats_errors, segment_structure, transition_with_resource_bypass
@@ -106,7 +106,7 @@ from app.production.storyboard_narrative_arc import (
     phase2_segment_rules,
     segment_narrative_arc_payload_fields,
 )
-from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_beats as _action_beats
+from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_beats as _action_beats, storyboard_cast_lock as _cast_lock, storyboard_shot_mandates as _shot_mandates
 from app.visual_styles import current_visual_style_prompt
 from app.production.storyboard_segment_ranges import (
     _PARATEXT_PLACEHOLDER_TEXT,
@@ -1116,7 +1116,7 @@ async def _generate_all_segment_prompts(
             "recent_camera_language": camera_history,
             "visual_style": visual_style, "aspect_ratio": aspect_ratio,
             "target_video_model": target_model_literal,
-            "dialect_instructions": f"{dialect_instructions}\n{_action_beats.decisive_action_dialect_rule(profile.render_format)}",
+            "dialect_instructions": f"{dialect_instructions}\n{_action_beats.decisive_action_dialect_rule(profile.render_format)}\n{_shot_mandates.shot_mandates_dialect_rule(profile.render_format)}",
             # app.video_prompt_profiles 的 SEEDANCE_2_PROFILE/MINIMAX_H3_PROFILE 是
             # 既有的正确接缝（docs/STORYBOARD_PROMPT_IR_DESIGN.md「与既有代码的衔接」），
             # 职责收窄为"交给模型的方言约束"；dialect_instructions 是本模块新写的
@@ -1146,7 +1146,7 @@ async def _generate_all_segment_prompts(
             model_type=_AiStoryboardSegmentDraft,
             validate=lambda value, _req=required_dialogue, _pm=previous_memo, _struct=structure,
             _st=source_payload["source_text_by_segment"], _dl=list(delivered_lines), _rv=reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no),
-            _no=plan.segment_no, _n2i=manifest_name_to_identity(payload, plan.source_segment_indexes), _sx=plan.source_segment_indexes, _ch=staging_chain, _syn=plan.synopsis, _dp=canonical_phrases(payload), _sg=staging_gate, _rs=relevant_assets["scenes"]: [*ensure_travel_direction_in_prompt(value), *strip_extra_reference_markers(value, payload), *overlay_text_errors(value), *required_beats_errors(value, _struct["required_beats"]), *_validate_segment_draft(
+            _no=plan.segment_no, _n2i=manifest_name_to_identity(payload, plan.source_segment_indexes), _sx=plan.source_segment_indexes, _ch=staging_chain, _syn=plan.synopsis, _dp=canonical_phrases(payload), _sg=staging_gate, _rs=relevant_assets["scenes"]: [*ensure_travel_direction_in_prompt(value), *ensure_wardrobe_continuity_in_prompt(value, prop_factory=_AiResourceProp), *_cast_lock.ensure_cast_lock_in_prompt(value), *strip_extra_reference_markers(value, payload), *overlay_text_errors(value), *required_beats_errors(value, _struct["required_beats"]), *_validate_segment_draft(
                 value, dialect_render_format=profile.render_format, required_dialogue=_req, name_to_identity=_n2i,
                 previous_memo=_pm, segment_source_text=_st, delivered_lines=_dl, reserved_lines=_rv, current_segment_no=_no, relevant_scenes=_rs,
             ), *generated_identity_errors(value, payload=payload, source_indexes=_sx, required_dialogue=_req, dialect=profile.render_format),

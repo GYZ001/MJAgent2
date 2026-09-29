@@ -404,3 +404,42 @@ def test_aspect_ratio_composition_rule_present_symmetrically_in_both_dialects():
     assert "9:16竖屏时沿用本方言其余规则" in SEEDANCE_FLAT.replace(" ", "")
     assert "Frame every shot for the task aspect_ratio" in H3_FLAT
     assert "when it is 9:16 portrait the rest of this dialect applies unchanged" in H3_FLAT
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-28：画面无可读文字（推翻 2026-09-13/14 的「画面文字由模型直接生成」旧规则）
+# ---------------------------------------------------------------------------
+
+def test_seedance_no_longer_tells_the_model_to_render_on_screen_text():
+    """红态验证：修复前的旧文案（本次替换掉的那句正面指令，区别于新文案里回顾旧规则
+    的说明句）会指示模型直接生成画面文字并给出示例「门楣牌匾上『云杰县』三字」——这两个
+    标志短语只属于被替换掉的那句正面指令，只要还在就说明只是并存，没有真的替换。"""
+    assert "门楣牌匾上" not in SEEDANCE_FLAT
+    assert "不留白、不写「无字」" not in SEEDANCE_FLAT
+
+
+def test_seedance_new_policy_avoids_readable_on_screen_text():
+    assert "不出现需要观众看清、读出内容的文字" in SEEDANCE_FLAT
+    assert "从背面、侧面或半虚焦角度拍摄" in SEEDANCE_FLAT
+    assert "原文没有写到的招牌/告示不要自行添加" in SEEDANCE_FLAT
+    assert "改由这一镜的台词或画外音说出来" in SEEDANCE_FLAT
+    # 旧规则允许的例外（叠加式字幕仍然禁止）保持不变，不因本次改写而松动。
+    assert "字幕由后期功能另行添加" in SEEDANCE_FLAT
+
+
+def test_h3_no_longer_calls_on_screen_text_h3s_strong_suit():
+    assert "strong suit" not in H3_FLAT
+    assert 'reading "靠山宗"' not in H3_FLAT
+
+
+def test_h3_new_policy_avoids_readable_on_screen_text():
+    assert "Do not put text the audience needs to read on screen" in H3_FLAT
+    assert "never a clear frontal shot of its screen" in H3_FLAT
+    assert "unless the source text mentions it" in H3_FLAT
+    assert "into that Shot's dialogue or voiceover instead" in H3_FLAT
+
+
+def test_on_screen_text_policy_change_is_symmetric_across_both_dialects():
+    """两块必须同步落地，不许只改一边——docstring 里写的对称纪律，这里用可执行断言守住。"""
+    assert "从背面、侧面或半虚焦角度拍摄" in SEEDANCE_FLAT
+    assert "Frame any screened device from behind, from the side, or slightly out of focus" in H3_FLAT

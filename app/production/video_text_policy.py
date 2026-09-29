@@ -1,11 +1,16 @@
 """视频提示词里的「画面文字」规则：正文一句 + 负面清单一条。
 
 2026-09-14 用户裁定：视频生成只负责画面与声音，台词字幕由后续功能另做；牌匾、书信这类
-画面本身需要的文字由视频模型直接生成，不再「留白交后期」。生产 210 镜里 0 镜带
-``required_text``，所以 ``_TEXT_POLICY_NONE`` 就是线上每一个视频提示词的文字规则——它曾写成
-「画面中不出现任何文字」，与分镜方言「牌匾由模型直接生成」自相矛盾。
+画面本身需要的文字由视频模型直接生成，不再「留白交后期」。这条 2026-09-14 的默认策略
+已于 2026-09-28 被推翻——``_TEXT_POLICY_NONE`` 只服务本模块调用方（``app.compiler``，旧
+架构逐镜编译路径；分镜台 2.x 走 ``app.production.storyboard_dialects`` 的方言散文，见其
+模块 docstring 的同日改动）：《顾念长安》第 1 集生产实测手机通话界面、结束界面、咖啡馆
+招牌与黑板文字全部乱码，视频模型中文字形不稳定，招牌还是模型在 prompt 未提及时自行加的。
+新默认改为「画面不出现需要阅读的文字」：带屏幕的物体从背面/侧面/虚焦拍摄，背景物体只写
+材质与外形，文字信息改由台词或画外音说出。
 
-策略（``RequiredOnScreenText.strategy``，默认 ``embedded_prop``）：
+策略（``RequiredOnScreenText.strategy``，默认 ``embedded_prop``）——这四种策略是上游对
+「这一镜确实需要一段指定文字」的显式选择，不受上面默认策略改写影响：
 - ``embedded_prop``：指定文字由本镜直接生成（默认）；
 - ``deterministic_insert``：原始视频无字，终剪确定性插字（显式选用）；
 - ``audio_only``：只靠声音交付信息；
@@ -17,7 +22,7 @@ from app.continuity import required_text_strategy
 from app.schemas import Shot
 
 # 措辞受提示词预算约束（必填段落总长上限见 compiler），改动前先跑 test_compiler_prompt_budget。
-_TEXT_POLICY_NONE = "台词只出声不出字幕；画面文字（牌匾、书信）按画面描述直接生成，逐字一致。"
+_TEXT_POLICY_NONE = "台词只出声不出字幕；画面不出现需要读出的文字，带屏幕物体背面/侧面/虚焦拍摄，文字信息改由台词说出。"
 
 
 def compile_text_policy(shot: Shot) -> str:
