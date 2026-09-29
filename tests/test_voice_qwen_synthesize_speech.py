@@ -46,9 +46,26 @@ async def test_synthesize_speech_request_shape_and_base64_response() -> None:
     assert result.request_id == "req-mono-1"
 
 
-async def test_synthesize_speech_url_shape_raises_not_implemented() -> None:
-    def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"output": {"audio": {"url": "https://example.com/a.wav"}}})
+async def test_synthesize_speech_downloads_audio_from_url_shape() -> None:
+    """2026-09-29 真实调用实测形态：data 为空串，音频在 OSS 预签名 url。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            assert "authorization" not in {k.lower() for k in request.headers}
+            return httpx.Response(200, content=b"RIFFwav-bytes", headers={"content-type": "audio/x-wav"})
+        return httpx.Response(200, json={"output": {"audio": {"data": "", "url": "https://oss.example.com/a.wav"}},
+                                         "request_id": "req-url-1"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await qwen.synthesize_speech(_conn(), "text", "voice-abc", client=client)
+    assert result.audio == b"RIFFwav-bytes"
+    assert result.request_id == "req-url-1"
+
+
+async def test_synthesize_speech_url_download_failure_is_explicit() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(403, content=b"")
+        return httpx.Response(200, json={"output": {"audio": {"data": "", "url": "https://oss.example.com/a.wav"}}})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(VoiceProviderError) as exc:

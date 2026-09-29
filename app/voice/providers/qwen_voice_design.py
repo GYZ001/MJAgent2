@@ -191,10 +191,9 @@ def _synthesis_endpoint(base_url: str) -> str:
 
 
 def _parse_synthesis_response(response: httpx.Response, latency_ms: int) -> SpeechSynthesisResult:
-    """响应形态未经真实调用核实（WebFetch 摘要可能编造，见调用方文档）——
-    兼容 ``output.audio.data``（base64）与 ``output.audio.url``（下载链接）
-    两种 DashScope 多模态生成接口常见形态，两者都取不到就明确报错，不猜测
-    第三种形态、不拼一个假音频。"""
+    """内联 ``output.audio.data``（base64）形态；下载链接形态（09-29 真实调用
+    实测的形态）由 ``_synthesis_audio_url`` 先行分流。两者都取不到就明确报错，
+    不猜测第三种形态、不拼一个假音频。"""
     try:
         data = response.json()
     except ValueError as exc:
@@ -215,13 +214,6 @@ def _parse_synthesis_response(response: httpx.Response, latency_ms: int) -> Spee
         return SpeechSynthesisResult(
             audio=audio_bytes, audio_format="wav", sample_rate=24000,
             request_id=str(data.get("request_id") or ""), latency_ms=latency_ms,
-        )
-    audio_url = str((audio or {}).get("url") or "") if isinstance(audio, dict) else ""
-    if audio_url:
-        raise VoiceProviderError(
-            "千问语音合成返回了下载链接而非内联音频，本适配器暂未实现下载分支"
-            "（需要先用一次真实调用确认响应形态再补，见模块文档）",
-            failure_kind="malformed_response", http_status=response.status_code,
         )
     raise VoiceProviderError(
         "千问语音合成返回缺少音频（未知响应形态，需要真实调用核实后再适配）",
@@ -264,7 +256,46 @@ async def synthesize_speech(
         ) from exc
     latency_ms = int((time.perf_counter() - started) * 1000)
     _raise_for_status(response)
+    audio_url = _synthesis_audio_url(response)
+    if audio_url:
+        return await _download_synthesis_audio(audio_url, response, latency_ms, client)
     return _parse_synthesis_response(response, latency_ms)
+
+
+def _synthesis_audio_url(response: httpx.Response) -> str:
+    """2026-09-29 真实调用核实：``output.audio.data`` 为空串、音频放在
+    ``output.audio.url``（阿里云 OSS 预签名 wav 链接，24kHz 单声道，带 expires_at）。
+    只有内联音频为空时才走下载；JSON 不合法交给 ``_parse_synthesis_response`` 报错。"""
+    try:
+        data = response.json()
+    except ValueError:
+        return ""
+    audio = ((data.get("output") or {}) if isinstance(data, dict) else {}).get("audio")
+    if not isinstance(audio, dict) or audio.get("data"):
+        return ""
+    return str(audio.get("url") or "")
+
+
+async def _download_synthesis_audio(
+    url: str, response: httpx.Response, latency_ms: int, client: httpx.AsyncClient | None,
+) -> SpeechSynthesisResult:
+    """预签名链接无需鉴权头；下载失败明确报错，调用方跳过独白并在报告写明原因。"""
+    try:
+        async with ensure_client(client, timeout_s=60) as active:
+            audio_response = await active.get(url)
+    except httpx.HTTPError as exc:
+        raise VoiceProviderError(
+            f"下载千问语音合成音频失败：{type(exc).__name__}", failure_kind="connection_failed", retryable=True,
+        ) from exc
+    if audio_response.status_code != 200 or not audio_response.content:
+        raise VoiceProviderError(
+            f"下载千问语音合成音频失败（HTTP {audio_response.status_code}）",
+            failure_kind="malformed_response", http_status=audio_response.status_code,
+        )
+    return SpeechSynthesisResult(
+        audio=audio_response.content, audio_format="wav", sample_rate=24000,
+        request_id=str(response.json().get("request_id") or ""), latency_ms=latency_ms,
+    )
 
 
 async def probe(conn: VoiceConnection, *, client: httpx.AsyncClient | None = None) -> dict[str, Any]:
