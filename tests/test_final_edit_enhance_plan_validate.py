@@ -59,6 +59,62 @@ def test_validate_music_cues_drops_duplicate_shot_no(tmp_path) -> None:
     assert len(dropped) == 1
 
 
+# ---------- music sections：换曲点当分段起点核验最短情绪段时长 ----------
+
+def _section_context(n_shots: int = 9) -> EpisodeContext:
+    shots = tuple(
+        ShotContext(shot_no=i, start_s=(i - 1) * 15.0, duration_s=15.0, prompt_text=f"第{i}段")
+        for i in range(1, n_shots + 1)
+    )
+    return EpisodeContext(shots=shots, total_duration_s=n_shots * 15.0, source_text="", character_roster=())
+
+
+def test_validate_music_sections_keeps_cues_spaced_at_least_min_duration_apart() -> None:
+    context = _section_context()
+    cues = [MusicCueDraft(shot_no=1, track_id="t1"), MusicCueDraft(shot_no=4, track_id="t2")]  # 45s 间隔，刚好达标
+    kept, dropped, first_gap = plan_validate.validate_music_sections(cues, context=context)
+    assert [c.shot_no for c in kept] == [1, 4]
+    assert dropped == []
+    assert first_gap is None
+
+
+def test_validate_music_sections_drops_cue_too_close_to_previous() -> None:
+    context = _section_context()
+    cues = [MusicCueDraft(shot_no=1, track_id="t1"), MusicCueDraft(shot_no=2, track_id="t2")]  # 只隔 15s
+    kept, dropped, _first_gap = plan_validate.validate_music_sections(cues, context=context)
+    assert [c.shot_no for c in kept] == [1]
+    assert len(dropped) == 1
+    assert "不足最短情绪段时长" in dropped[0]["reason"]
+
+
+def test_validate_music_sections_does_not_require_min_length_for_trailing_section() -> None:
+    """最后一个换曲点到全集结束这一段允许比最短时长短——收尾段可能就是全集
+    本身较短，不因此被判定为「换太快」。"""
+    context = _section_context(n_shots=2)  # 全集只有 30s，远小于 45s
+    cues = [MusicCueDraft(shot_no=1, track_id="t1")]
+    kept, dropped, _first_gap = plan_validate.validate_music_sections(cues, context=context)
+    assert [c.shot_no for c in kept] == [1]
+    assert dropped == []
+
+
+def test_validate_music_sections_flags_first_cue_not_at_episode_start() -> None:
+    context = _section_context()
+    cues = [MusicCueDraft(shot_no=3, track_id="t1")]
+    kept, dropped, first_gap = plan_validate.validate_music_sections(cues, context=context)
+    assert [c.shot_no for c in kept] == [3]  # 不丢弃这条 cue 本身，只是提示片头有缺口
+    assert dropped == []
+    assert first_gap is not None
+    assert "片头" in first_gap
+
+
+def test_validate_music_sections_sorts_out_of_order_input_by_shot_no() -> None:
+    context = _section_context()
+    cues = [MusicCueDraft(shot_no=4, track_id="t2"), MusicCueDraft(shot_no=1, track_id="t1")]
+    kept, dropped, _first_gap = plan_validate.validate_music_sections(cues, context=context)
+    assert [c.shot_no for c in kept] == [1, 4]
+    assert dropped == []
+
+
 # ---------- teaser clips ----------
 
 def test_validate_teaser_clips_accepts_in_range_clip() -> None:

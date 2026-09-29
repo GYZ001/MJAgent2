@@ -22,7 +22,7 @@ from app.final_edit_enhance import context as context_mod
 from app.final_edit_enhance import music_mix, monologue_audio, monologue_burn, plan_generate, plan_store, silence, teaser
 from app.final_edit_enhance.ffutil import probe_duration_s
 from app.final_edit_enhance.music_library import MusicLibrary, load_music_library, resolve_library_dir
-from app.final_edit_enhance.music_runs import MusicRun, build_music_runs
+from app.final_edit_enhance.music_runs import MusicRun, build_music_runs, expand_sparse_cues
 from app.final_edit_enhance.subtitle_shift import shift_and_augment_subtitles
 from app.db import get_setting
 from app.project_settings import enhance_monologue_enabled, enhance_music_bed_enabled, enhance_teaser_enabled
@@ -79,8 +79,15 @@ def _music_bed_stage(
     if library is None:
         return None, _disabled_fragment("曲库缺失：目录下没有可用的 manifest.json 或音频文件")
     if not plan.music_cues:
-        return None, _disabled_fragment("编排计划未给出任何可用的配乐提名")
-    cue_by_shot = {c.shot_no: c.track_id for c in plan.music_cues}
+        return None, _disabled_fragment("编排计划已重试一次，模型仍未给出任何可用的配乐提名")
+    # plan.music_cues 是稀疏的「换曲点」（见 plan_schema.MusicCueDraft），不是
+    # 逐段配乐表：先按参与合成的段号顺序展开成稠密映射（换曲点之间的段落沿用
+    # 同一首），build_music_runs 才能把它们正确折叠成连续播放的时间轴——否则
+    # 换曲点之间没有显式条目的段落会被当成静音（2026-09-29 生产实测：7 条换曲
+    # 点只覆盖前 7 段，后 16 段全部静音）。
+    cue_by_shot_sparse = {c.shot_no: c.track_id for c in plan.music_cues}
+    shot_order = [s.shot_no for s in context.shots]
+    cue_by_shot = expand_sparse_cues(cue_by_shot_sparse, shot_order)
     timeline = [(s.shot_no, s.start_s, s.duration_s) for s in context.shots]
     runs: list[MusicRun] = build_music_runs(cue_by_shot, timeline)
     try:
@@ -102,7 +109,7 @@ async def _monologue_stage(
     if not monologue_on:
         return [], _disabled_fragment("项目未开启主角内心独白")
     if not plan.monologue_lines:
-        return [], _disabled_fragment("编排计划未给出任何可用的独白台词")
+        return [], _disabled_fragment("编排计划已重试一次，模型仍未给出任何可用的独白台词")
     applied, skipped = await monologue_audio.synthesize_monologue_lines(conn, project_id, plan.monologue_lines, work_dir)
     if not applied:
         reason = "；".join(s["reason"] for s in skipped) or "没有独白台词成功合成"
@@ -122,7 +129,7 @@ def _teaser_stage(
     if not teaser_on:
         return main_video_path, 0.0, _disabled_fragment("项目未开启片头预告")
     if not plan.teaser_clips:
-        return main_video_path, 0.0, _disabled_fragment("编排计划未给出任何可用的预告片段")
+        return main_video_path, 0.0, _disabled_fragment("编排计划已重试一次，模型仍未给出任何可用的预告片段")
     try:
         teaser_path = teaser.build_teaser(plan.teaser_clips, piece_specs, play_res, work_dir)
         merged_path = teaser.prepend_teaser(teaser_path, main_video_path, play_res, work_dir)
@@ -167,6 +174,7 @@ async def _run(
     if plan is None:
         plan = await plan_generate.generate_plan(
             context=context, library=library, windows=windows, episode_id=episode_id, fingerprint=fingerprint,
+            switches=(music_on, teaser_on, monologue_on),
         )
         plan_store.save_plan(cache, fingerprint, plan)
 

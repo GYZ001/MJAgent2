@@ -1,9 +1,15 @@
-"""配乐时间轴的纯计算：把逐段（``shot_no``）曲目提名折叠成连续播放的"run"，
-再判定哪些相邻 run 之间要做交叉淡化。纯函数，不碰 ffmpeg/IO，方便独立测试。
+"""配乐时间轴的纯计算：把编排计划给出的「换曲点」稀疏映射
+（``expand_sparse_cues``）展开成逐段稠密映射，再把逐段（``shot_no``）曲目
+提名折叠成连续播放的"run"（``build_music_runs``），最后判定哪些相邻 run
+之间要做交叉淡化。纯函数，不碰 ffmpeg/IO，方便独立测试。
 
-折叠：相邻段若提名同一首（或都未提名，落空 = 静默），合并成一个连续 run——
-同一首歌不会被反复从头播放，这是"相邻情绪相近的段复用同一首减少切歌"在
-时间轴层面的落点（模型只需要按段提名，不需要管"从第几秒继续播"）。
+展开：模型只在真正换曲的 shot_no 给一条 cue（见
+``app.final_edit_enhance.plan_schema.MusicCueDraft``），``expand_sparse_cues``
+把它按 shot_no 顺序延伸到下一个换曲点为止；换曲点之前的段落保持缺席（诚实的
+静音，不是要延续的音乐）。
+
+折叠：展开后相邻段若是同一首（或都未提名，落空 = 静默），合并成一个连续
+run——同一首歌不会被反复从头播放。
 
 交叉淡化只发生在两个都不是静默、且提名了不同曲目的相邻 run 之间；run 与静默
 相邻时用淡入淡出而不是交叉淡化（另一侧没有内容可混）。
@@ -18,6 +24,27 @@ class MusicRun:
     start_s: float
     duration_s: float
     track_id: str | None  # None = 静默（这一段没有配乐提名）
+
+
+def expand_sparse_cues(cues: dict[int, str], shot_order: list[int]) -> dict[int, str]:
+    """把「换曲点」稀疏映射（只在真正换曲的 shot_no 有条目）按 ``shot_order``
+    （本集参与合成的段号，按时间轴顺序排列）展开成逐段稠密映射：从某个换曲点
+    开始，同一首曲子沿用到下一个换曲点为止，交给 ``build_music_runs`` 折叠。
+
+    换曲点之前的段（本集片头还没轮到第一条换曲点）保持缺席——``build_music_runs``
+    把缺席的段落当静音处理，这是诚实的空白，不是要延续的音乐（见
+    ``app.final_edit_enhance.plan_validate.validate_music_sections`` 对
+    「首条换曲点不在片头」的处理说明；那里只把这种情况当语义错误触发重试，
+    不强行编造一条覆盖片头的换曲点）。
+    """
+    dense: dict[int, str] = {}
+    current: str | None = None
+    for shot_no in shot_order:
+        if shot_no in cues:
+            current = cues[shot_no]
+        if current is not None:
+            dense[shot_no] = current
+    return dense
 
 
 def build_music_runs(cue_by_shot: dict[int, str], shot_timeline: list[tuple[int, float, float]]) -> list[MusicRun]:

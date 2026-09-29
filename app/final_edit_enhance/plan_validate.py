@@ -26,6 +26,10 @@ MONOLOGUE_LINE_COUNT_MIN = 3
 MONOLOGUE_LINE_COUNT_MAX = 8
 MONOLOGUE_SPEECH_RATE_CHARS_PER_S = 4.5
 MONOLOGUE_WINDOW_MARGIN_S = 1.0  # 首尾各留 1 秒余量，不把独白贴着台词边界播
+# 三个 15 秒叙事段的量级：短于此仍是「几秒一换」的翻版——本模块要修的失败模式
+# 本身（见 app.final_edit_enhance.plan_generate 系统提示词）。最后一段允许更短
+# （全集本身可能就没剩多少），只对非末尾段落强制。
+MUSIC_SECTION_MIN_DURATION_S = 45.0
 
 
 def _shots_by_no(context: EpisodeContext) -> dict[int, Any]:
@@ -53,6 +57,48 @@ def validate_music_cues(
         seen_shot_nos.add(cue.shot_no)
         valid.append(cue)
     return valid, dropped
+
+
+def validate_music_sections(
+    cues: list[MusicCueDraft], *, context: EpisodeContext,
+) -> tuple[list[MusicCueDraft], list[dict[str, Any]], str | None]:
+    """把已经通过 ``validate_music_cues`` 的换曲点当「分段起点」核验，按
+    ``shot_no`` 排序后逐个检查：与上一个存活换曲点相距不足
+    ``MUSIC_SECTION_MIN_DURATION_S`` 就丢弃——前一个换曲点的曲子据此继续
+    播放（展开逻辑见 ``app.final_edit_enhance.music_runs.expand_sparse_cues``），
+    与本模块「丢弃条目、不整体失败」的既有策略一致。最后一个存活换曲点到
+    全集结束这一段不做最短时长校验——收尾段允许因为全集本身较短而不足。
+
+    返回 ``(kept, dropped, first_gap_reason)``：``first_gap_reason`` 不是
+    丢弃项，是"首条换曲点没有落在本集第一个参与合成的段"这一提示——片头到
+    首条换曲点之间没有配乐是诚实的静音，不强行编造一条覆盖片头的 cue（不
+    兜底填充），只在生成阶段作为语义错误要求模型重答一次。
+    """
+    shots = _shots_by_no(context)
+    ordered = sorted((c for c in cues if c.shot_no in shots), key=lambda c: c.shot_no)
+    kept: list[MusicCueDraft] = []
+    dropped: list[dict[str, Any]] = []
+    anchor_start_s: float | None = None
+    for cue in ordered:
+        start_s = shots[cue.shot_no].start_s
+        if anchor_start_s is not None and start_s - anchor_start_s < MUSIC_SECTION_MIN_DURATION_S - 1e-6:
+            dropped.append({
+                "item": cue.model_dump(),
+                "reason": (
+                    f"段 {cue.shot_no} 距上一次换曲仅 {start_s - anchor_start_s:.1f}s，"
+                    f"不足最短情绪段时长 {MUSIC_SECTION_MIN_DURATION_S:.0f}s，沿用上一首曲子"
+                ),
+            })
+            continue
+        kept.append(cue)
+        anchor_start_s = start_s
+    first_gap_reason = None
+    if kept and context.shots and kept[0].shot_no != context.shots[0].shot_no:
+        first_gap_reason = (
+            f"首条配乐换曲点在段 {kept[0].shot_no}，未覆盖片头段 "
+            f"{context.shots[0].shot_no}，片头到首条换曲点之间不会有配乐"
+        )
+    return kept, dropped, first_gap_reason
 
 
 def _teaser_item_errors(clip: TeaserClipDraft, shots: dict[int, Any]) -> str | None:

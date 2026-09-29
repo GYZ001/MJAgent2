@@ -23,6 +23,28 @@ from app.harness import model_gateway
 
 _SEMANTIC_RETRY_LIMIT = 1
 
+# 规则文案（系统提示词/Schema 字段描述）或核验逻辑有实质变化时必须递增：
+# 指纹（``plan_fingerprint``）把它编码进输入，旧规则生成并缓存的计划会因指纹
+# 变化而失效，不会被新规则部署后继续复用（2026-09-29：修配乐"换曲点"语义 +
+# 三项开关开启却空输出必须重试两项改动，从 1 bump 到 2）。
+_PLAN_RULES_VERSION = 2
+
+_SYSTEM_PROMPT = (
+    "你是短剧成片后期剪辑师。只输出符合 Schema 的一个 JSON 对象，不输出 Markdown 或解释。"
+    "配乐 music_cues 是「换曲点」列表，不是逐段配乐表：把全集按情绪走向切成 2-5 个大段"
+    "（例如「艰难铺垫→重逢→甜蜜/悬念收尾」），每段从给定曲库里选一首与该段情绪最匹配的"
+    "曲目（参考 mood_tags）；每条 cue 表示「从这个 shot_no 起改播这首曲子，一直连续播放到"
+    "下一条 cue 的 shot_no 为止（没有下一条就播到全集结束）」——不要给每个 shot_no 都各提"
+    "一条，只在真正换曲的 shot_no 处给一条；第一条 cue 必须落在本集参与合成的第一个"
+    "shot_no；除最后一段允许因全集本身较短而不足外，每一段都要覆盖足够时长（把该段起点到"
+    "下一条 cue 之间的段落时长加起来，至少约 45 秒），不要几秒钟就换一首曲子——那正是要"
+    "避免的「观众跟不上音乐」的问题；track_id 必须逐字取自给定曲库清单。"
+    "预告片段给出 3-5 个（shot_no/start_s/end_s 必须落在给定段落时长内，单段 1.5-4 秒，"
+    "总长 8-12 秒）；独白给出 3-8 句，正文必须逐字取自给定原文，character_name 必须是"
+    "给定人物谱中的真实角色，window_index 必须是给定候选静默窗口的下标（不要自己编造"
+    "秒数）。"
+)
+
 
 @dataclass(frozen=True)
 class ResolvedMusicCue:
@@ -70,6 +92,7 @@ def plan_fingerprint(
     payload = {
         "manifest_hash": manifest_hash, "shots": shots_signature,
         "library": library_signature, "switches": switches,
+        "rules_version": _PLAN_RULES_VERSION,
     }
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, default=list).encode("utf-8"),
@@ -120,24 +143,50 @@ def _amnesty_validate(validate_fn):
     return _validate
 
 
-def _semantic_errors(draft: EnhancementPlanDraft, *, context: EpisodeContext, library: MusicLibrary | None, windows: list[Interval]) -> list[str]:
-    errors: list[str] = []
-    if library is not None:
-        _valid, dropped = plan_validate.validate_music_cues(draft.music_cues, context=context, library=library)
-        errors.extend(f"配乐：{d['reason']}" for d in dropped)
+def _music_semantic_errors(
+    draft: EnhancementPlanDraft, *, context: EpisodeContext, library: MusicLibrary | None, music_on: bool,
+) -> list[str]:
+    if library is None:
+        return []
+    item_valid, item_dropped = plan_validate.validate_music_cues(draft.music_cues, context=context, library=library)
+    errors = [f"配乐：{d['reason']}" for d in item_dropped]
+    section_valid, section_dropped, first_gap = plan_validate.validate_music_sections(item_valid, context=context)
+    errors.extend(f"配乐：{d['reason']}" for d in section_dropped)
+    if first_gap:
+        errors.append(f"配乐：{first_gap}")
+    if music_on and not section_valid:
+        errors.append("配乐：开关已开启且曲库可用，请至少给出一条可用的配乐换曲点（track_id 需逐字取自曲库清单）")
+    return errors
+
+
+def _teaser_semantic_errors(draft: EnhancementPlanDraft, *, context: EpisodeContext, teaser_on: bool) -> list[str]:
     valid_clips, dropped_clips = plan_validate.validate_teaser_clips(draft.teaser_clips, context=context)
-    errors.extend(f"预告：{d['reason']}" for d in dropped_clips)
+    errors = [f"预告：{d['reason']}" for d in dropped_clips]
+    if not valid_clips:
+        if teaser_on:
+            errors.append("预告：开关已开启，请至少给出 3-5 段可用的预告片段")
+        return errors
     total = plan_validate.teaser_total_duration_s(valid_clips)
-    if valid_clips and not (plan_validate.TEASER_TOTAL_MIN_S <= total <= plan_validate.TEASER_TOTAL_MAX_S):
+    if not (plan_validate.TEASER_TOTAL_MIN_S <= total <= plan_validate.TEASER_TOTAL_MAX_S):
         errors.append(f"预告：{len(valid_clips)} 段总长 {total:.1f}s，目标区间 8-12s")
-    if valid_clips and not (plan_validate.TEASER_CLIP_COUNT_MIN <= len(valid_clips) <= plan_validate.TEASER_CLIP_COUNT_MAX):
+    if not (plan_validate.TEASER_CLIP_COUNT_MIN <= len(valid_clips) <= plan_validate.TEASER_CLIP_COUNT_MAX):
         errors.append(
             f"预告：{len(valid_clips)} 段，目标区间 "
             f"{plan_validate.TEASER_CLIP_COUNT_MIN}-{plan_validate.TEASER_CLIP_COUNT_MAX} 段",
         )
+    return errors
+
+
+def _monologue_semantic_errors(
+    draft: EnhancementPlanDraft, *, context: EpisodeContext, windows: list[Interval], monologue_on: bool,
+) -> list[str]:
     valid_lines, dropped_lines = plan_validate.validate_monologue_lines(draft.monologue_lines, context=context, windows=windows)
-    errors.extend(f"独白：{d['reason']}" for d in dropped_lines)
-    if valid_lines and not (plan_validate.MONOLOGUE_LINE_COUNT_MIN <= len(valid_lines) <= plan_validate.MONOLOGUE_LINE_COUNT_MAX):
+    errors = [f"独白：{d['reason']}" for d in dropped_lines]
+    if not valid_lines:
+        if monologue_on:
+            errors.append("独白：开关已开启，请至少给出 3-8 句可用的独白台词")
+        return errors
+    if not (plan_validate.MONOLOGUE_LINE_COUNT_MIN <= len(valid_lines) <= plan_validate.MONOLOGUE_LINE_COUNT_MAX):
         errors.append(
             f"独白：{len(valid_lines)} 句，目标区间 "
             f"{plan_validate.MONOLOGUE_LINE_COUNT_MIN}-{plan_validate.MONOLOGUE_LINE_COUNT_MAX} 句",
@@ -145,26 +194,31 @@ def _semantic_errors(draft: EnhancementPlanDraft, *, context: EpisodeContext, li
     return errors
 
 
+def _semantic_errors(
+    draft: EnhancementPlanDraft, *, context: EpisodeContext, library: MusicLibrary | None,
+    windows: list[Interval], switches: tuple[bool, bool, bool],
+) -> list[str]:
+    """三项开关开启却给出零个可用条目也算语义错误（触发重试）——「空集合不等于
+    无需检查」，不能因为模型什么都没给就跳过范围/覆盖率校验（见各 ``_*_semantic_
+    errors`` 里 ``if $x_on and not valid`` 分支）。开关关闭时不强求该项非空。"""
+    music_on, teaser_on, monologue_on = switches
+    errors = _music_semantic_errors(draft, context=context, library=library, music_on=music_on)
+    errors += _teaser_semantic_errors(draft, context=context, teaser_on=teaser_on)
+    errors += _monologue_semantic_errors(draft, context=context, windows=windows, monologue_on=monologue_on)
+    return errors
+
+
 async def _call_model(
     context: EpisodeContext, library: MusicLibrary | None, windows: list[Interval], episode_id: str, fingerprint: str,
+    switches: tuple[bool, bool, bool],
 ) -> EnhancementPlanDraft:
     payload = _task_payload(context, library, windows)
     validate = _amnesty_validate(
-        lambda draft: _semantic_errors(draft, context=context, library=library, windows=windows),
+        lambda draft: _semantic_errors(draft, context=context, library=library, windows=windows, switches=switches),
     )
     return await model_gateway.chat_structured(
         [
-            {
-                "role": "system",
-                "content": (
-                    "你是短剧成片后期剪辑师。只输出符合 Schema 的一个 JSON 对象，不输出 "
-                    "Markdown 或解释。配乐 track_id 必须逐字取自给定曲库清单；预告片段给出 "
-                    "3-5 个（shot_no/start_s/end_s 必须落在给定段落时长内，单段 1.5-4 秒，"
-                    "总长 8-12 秒）；独白给出 3-8 句，正文必须逐字取自给定原文，"
-                    "character_name 必须是给定人物谱中的真实角色，window_index 必须是给定"
-                    "候选静默窗口的下标（不要自己编造秒数）。"
-                ),
-            },
+            {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ],
         model_type=EnhancementPlanDraft,
@@ -218,16 +272,30 @@ def _resolve_monologue(
     return resolved, dropped
 
 
+def _resolve_music(
+    draft: EnhancementPlanDraft, *, context: EpisodeContext, library: MusicLibrary | None,
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    """先按单条判据核验（段号存在、曲目存在于曲库、无重复段号），再把存活的
+    换曲点当分段起点核验最短情绪段时长——两层核验的丢弃原因都要进 ``dropped``，
+    与 ``_semantic_errors`` 触发重试用的是同一份 ``plan_validate`` 判据函数。
+    第二层丢弃某个换曲点后，前一个存活换曲点的曲子据此在最终时间轴上延续
+    播放到下一个存活换曲点（展开逻辑见 ``app.final_edit_enhance.apply``/
+    ``music_runs.expand_sparse_cues``），不需要在这里另外处理。"""
+    if library is None:
+        return [], []
+    item_valid, item_dropped = plan_validate.validate_music_cues(draft.music_cues, context=context, library=library)
+    section_valid, section_dropped, _first_gap = plan_validate.validate_music_sections(item_valid, context=context)
+    dropped = [{"feature": "music_bed", **d} for d in item_dropped]
+    dropped += [{"feature": "music_bed", **d} for d in section_dropped]
+    return section_valid, dropped
+
+
 def _resolve(draft: EnhancementPlanDraft, *, context: EpisodeContext, library: MusicLibrary | None, windows: list[Interval]) -> EnhancementPlan:
-    dropped: list[dict[str, Any]] = []
-    music_valid: list[Any] = []
-    if library is not None:
-        music_valid, music_dropped = plan_validate.validate_music_cues(draft.music_cues, context=context, library=library)
-        dropped.extend({"feature": "music_bed", **d} for d in music_dropped)
+    music_valid, dropped = _resolve_music(draft, context=context, library=library)
     teaser_valid, teaser_total, teaser_dropped = _resolve_teaser(draft, context=context)
-    dropped.extend(teaser_dropped)
+    dropped = dropped + teaser_dropped
     monologue_lines, monologue_dropped = _resolve_monologue(draft, context=context, windows=windows)
-    dropped.extend(monologue_dropped)
+    dropped = dropped + monologue_dropped
     return EnhancementPlan(
         music_cues=tuple(ResolvedMusicCue(c.shot_no, c.track_id) for c in music_valid),
         teaser_clips=tuple(ResolvedTeaserClip(c.shot_no, c.start_s, c.end_s, c.reason) for c in teaser_valid),
@@ -239,6 +307,7 @@ def _resolve(draft: EnhancementPlanDraft, *, context: EpisodeContext, library: M
 
 async def generate_plan(
     *, context: EpisodeContext, library: MusicLibrary | None, windows: list[Interval], episode_id: str, fingerprint: str,
+    switches: tuple[bool, bool, bool],
 ) -> EnhancementPlan:
-    draft = await _call_model(context, library, windows, episode_id, fingerprint)
+    draft = await _call_model(context, library, windows, episode_id, fingerprint, switches)
     return _resolve(draft, context=context, library=library, windows=windows)

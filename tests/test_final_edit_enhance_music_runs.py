@@ -5,7 +5,39 @@
 """
 from __future__ import annotations
 
-from app.final_edit_enhance.music_runs import MusicRun, build_music_runs, edge_fades, is_crossfade_boundary, tail_extend_s
+from app.final_edit_enhance.music_runs import (
+    MusicRun, build_music_runs, edge_fades, expand_sparse_cues, is_crossfade_boundary, tail_extend_s,
+)
+
+
+# ---------- expand_sparse_cues：换曲点稀疏映射 -> 逐段稠密映射 ----------
+
+def test_expand_sparse_cues_continues_until_next_cue() -> None:
+    """只在 shot 1 与 shot 4 给换曲点时，shot 2/3 应沿用 shot 1 的曲子，
+    shot 4 起换成第二首——这是生产实测缺失的"换曲点持续播放到下一条"语义。"""
+    dense = expand_sparse_cues({1: "a", 4: "b"}, [1, 2, 3, 4, 5])
+    assert dense == {1: "a", 2: "a", 3: "a", 4: "b", 5: "b"}
+
+
+def test_expand_sparse_cues_leaves_shots_before_first_cue_absent() -> None:
+    """首条换曲点不在片头时，片头到首条换曲点之间的段不应该被编出一首曲子——
+    保持缺席，交给 build_music_runs 当静音处理（诚实的空白，不兜底编造）。"""
+    dense = expand_sparse_cues({3: "a"}, [1, 2, 3, 4])
+    assert 1 not in dense and 2 not in dense
+    assert dense == {3: "a", 4: "a"}
+
+
+def test_expand_sparse_cues_empty_cues_yields_empty_dense_map() -> None:
+    assert expand_sparse_cues({}, [1, 2, 3]) == {}
+
+
+def test_expand_sparse_cues_output_feeds_build_music_runs_as_one_continuous_run() -> None:
+    """展开 + 折叠合起来验证端到端效果：稀疏换曲点应该产出一个连续 run，而不是
+    只覆盖有显式条目的段、其余静音（2026-09-29 生产实测的失败模式）。"""
+    timeline = [(i, (i - 1) * 15.0, 15.0) for i in range(1, 8)]
+    dense = expand_sparse_cues({1: "a"}, [t[0] for t in timeline])
+    runs = build_music_runs(dense, timeline)
+    assert runs == [MusicRun(0.0, 105.0, "a")]
 
 
 def test_build_music_runs_merges_consecutive_same_track() -> None:
