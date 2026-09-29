@@ -50,7 +50,7 @@ from pydantic import BaseModel, Field
 from app import config, hiagent, spoken_contract
 from app.db import new_id
 from app.harness import model_gateway
-from app.project_settings import resolve_adaptation_mode, resolve_aspect_ratio
+from app.project_settings import enhance_music_bed_enabled, resolve_adaptation_mode, resolve_aspect_ratio
 from app.scene_reverse import segment_views as reverse_segment_views
 from app.production.storyboard_capacity_normalize import normalize_and_assert_capacity
 from app.production.storyboard_identity_contract import canonical_segment_identities, visible_character_ids
@@ -106,7 +106,7 @@ from app.production.storyboard_narrative_arc import (
     phase2_segment_rules,
     segment_narrative_arc_payload_fields,
 )
-from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_beats as _action_beats, storyboard_cast_lock as _cast_lock, storyboard_shot_mandates as _shot_mandates
+from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_beats as _action_beats, storyboard_cast_lock as _cast_lock, storyboard_shot_mandates as _shot_mandates, storyboard_music_bed as _music_bed
 from app.visual_styles import current_visual_style_prompt
 from app.production.storyboard_segment_ranges import (
     _PARATEXT_PLACEHOLDER_TEXT,
@@ -1009,7 +1009,7 @@ async def _generate_all_segment_prompts(
     bible: Bible | None,
     required_dialogue_by_segment_no: dict[int, list[dict[str, Any]]],
     conn: Any,
-    project_id: str, aspect_ratio: str,
+    project_id: str, aspect_ratio: str, enhance_music_bed: bool,
     reuse_segments: dict[int, _AiStoryboardSegmentDraft] | None = None,
 ) -> dict[int, _AiStoryboardSegmentDraft]:
     """逐段独立调用产出全部段落的 prompt_text（2.0.8 起，替代整集批量调用）。
@@ -1116,7 +1116,7 @@ async def _generate_all_segment_prompts(
             "recent_camera_language": camera_history,
             "visual_style": visual_style, "aspect_ratio": aspect_ratio,
             "target_video_model": target_model_literal,
-            "dialect_instructions": f"{dialect_instructions}\n{_action_beats.decisive_action_dialect_rule(profile.render_format)}\n{_shot_mandates.shot_mandates_dialect_rule(profile.render_format)}",
+            "dialect_instructions": f"{dialect_instructions}\n{_action_beats.decisive_action_dialect_rule(profile.render_format)}\n{_shot_mandates.shot_mandates_dialect_rule(profile.render_format)}{_music_bed.music_bed_dialect_addendum(profile.render_format, enabled=enhance_music_bed)}",
             # app.video_prompt_profiles 的 SEEDANCE_2_PROFILE/MINIMAX_H3_PROFILE 是
             # 既有的正确接缝（docs/STORYBOARD_PROMPT_IR_DESIGN.md「与既有代码的衔接」），
             # 职责收窄为"交给模型的方言约束"；dialect_instructions 是本模块新写的
@@ -1150,7 +1150,7 @@ async def _generate_all_segment_prompts(
                 value, dialect_render_format=profile.render_format, required_dialogue=_req, name_to_identity=_n2i,
                 previous_memo=_pm, segment_source_text=_st, delivered_lines=_dl, reserved_lines=_rv, current_segment_no=_no, relevant_scenes=_rs,
             ), *generated_identity_errors(value, payload=payload, source_indexes=_sx, required_dialogue=_req, dialect=profile.render_format),
-            *_sg.filter(repeated_staging_errors(_ch, value.prompt_text, current_segment_no=_no, synopsis=_syn, drop_phrases=_dp))],
+            *_sg.filter(repeated_staging_errors(_ch, value.prompt_text, current_segment_no=_no, synopsis=_syn, drop_phrases=_dp)), *_music_bed.ensure_no_music_bed_in_prompt(value, render_format=profile.render_format, enabled=enhance_music_bed)],
             operation_id=f"storyboard_pack_segment_{episode_id}_{plan.segment_no}_{fingerprint}",
             max_tokens=SEGMENT_PROMPT_ANSWER_TOKENS,
             format_retry_limit=1,
@@ -1388,7 +1388,7 @@ async def generate_storyboard_pack(
         target_video_model=target_video_model,
         bible=bible,
         required_dialogue_by_segment_no=required_dialogue_by_segment_no,
-        conn=conn, project_id=ep["project_id"], aspect_ratio=resolve_aspect_ratio(conn, ep["project_id"]),
+        conn=conn, project_id=ep["project_id"], aspect_ratio=resolve_aspect_ratio(conn, ep["project_id"]), enhance_music_bed=enhance_music_bed_enabled(conn, ep["project_id"]),
     )
     pack_segments = [
         StoryboardPackSegment(

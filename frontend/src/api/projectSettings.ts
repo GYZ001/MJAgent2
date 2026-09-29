@@ -20,6 +20,13 @@ export interface ProjectSettingsUpdate {
   adaptation_mode?: string;
   aspect_ratio?: string;
   ai_label_enabled?: boolean;
+  /** 统一配乐（2026-09-28）：开启后分镜台每段视频不再各自带配乐，改写声音描述
+   *  为「无配乐，只有对白与环境音」，为成片合成阶段统一铺配乐让路。 */
+  enhance_music_bed?: boolean;
+  /** 片头预告（2026-09-28 起预留，暂无消费方）。 */
+  enhance_teaser?: boolean;
+  /** 主角内心独白（2026-09-28 起预留，暂无消费方）。 */
+  enhance_monologue?: boolean;
 }
 
 export interface ProjectSettingsResponse {
@@ -27,6 +34,9 @@ export interface ProjectSettingsResponse {
   adaptation_mode: string;
   aspect_ratio: string;
   ai_label_enabled: boolean;
+  enhance_music_bed: boolean;
+  enhance_teaser: boolean;
+  enhance_monologue: boolean;
 }
 
 /** PUT /projects/{id}/settings：Body 为三字段任意子集；非法值后端返回 409 中文

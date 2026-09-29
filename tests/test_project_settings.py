@@ -1,4 +1,6 @@
-"""项目级设置（改编强度档位/画幅/AI 标识）存取与 PUT 接口回归（2026-09-23 新增）。
+"""项目级设置（改编强度档位/画幅/AI 标识/统一配乐/片头预告/主角内心独白）存取与
+PUT 接口回归（2026-09-23 新增，2026-09-28 加三个布尔开关：enhance_music_bed 本次
+由分镜台消费，enhance_teaser/enhance_monologue 只加开关暂无消费方）。
 
 覆盖：迁移后存量项目的默认值、创建入口写入（含非法画幅拒绝）、``app.project_settings``
 纯函数契约（``resolve_*``/``canvas_size``/``update_project_settings``）、PUT
@@ -19,6 +21,9 @@ from app.main import app
 from app.project_settings import (
     ai_label_enabled,
     canvas_size,
+    enhance_monologue_enabled,
+    enhance_music_bed_enabled,
+    enhance_teaser_enabled,
     resolve_adaptation_mode,
     resolve_aspect_ratio,
     update_project_settings,
@@ -51,6 +56,10 @@ def test_legacy_project_defaults_to_faithful_9x16_off():
     assert resolve_adaptation_mode(conn, "proj_legacy_settings") == "faithful"
     assert resolve_aspect_ratio(conn, "proj_legacy_settings") == "9:16"
     assert ai_label_enabled(conn, "proj_legacy_settings") is False
+    # 2026-09-28 新增三个布尔开关：存量项目（从未显式设置过）迁移列默认值同样是关闭。
+    assert enhance_music_bed_enabled(conn, "proj_legacy_settings") is False
+    assert enhance_teaser_enabled(conn, "proj_legacy_settings") is False
+    assert enhance_monologue_enabled(conn, "proj_legacy_settings") is False
 
 
 def test_new_project_defaults_to_short_drama_9x16_off():
@@ -139,6 +148,12 @@ def test_resolve_missing_project_raises_lookup_error():
         resolve_aspect_ratio(conn, "proj_does_not_exist")
     with pytest.raises(LookupError):
         ai_label_enabled(conn, "proj_does_not_exist")
+    with pytest.raises(LookupError):
+        enhance_music_bed_enabled(conn, "proj_does_not_exist")
+    with pytest.raises(LookupError):
+        enhance_teaser_enabled(conn, "proj_does_not_exist")
+    with pytest.raises(LookupError):
+        enhance_monologue_enabled(conn, "proj_does_not_exist")
 
 
 def test_resolve_corrupted_value_raises_runtime_error_not_value_error():
@@ -152,16 +167,44 @@ def test_resolve_corrupted_value_raises_runtime_error_not_value_error():
         resolve_adaptation_mode(conn, "proj_corrupt_settings")
 
 
+_NO_BOOL_CHANGES = {
+    "ai_label_enabled": None, "enhance_music_bed": None, "enhance_teaser": None, "enhance_monologue": None,
+}
+
+
 def test_update_project_settings_partial_update_only_touches_given_fields():
     conn = get_conn()
     _minimal_project(conn, "proj_update_settings")
     result = update_project_settings(
         conn, "proj_update_settings",
-        adaptation_mode="short_drama", aspect_ratio=None, ai_label_enabled=None,
+        adaptation_mode="short_drama", aspect_ratio=None, **_NO_BOOL_CHANGES,
     )
     conn.commit()
-    assert result == {"adaptation_mode": "short_drama", "aspect_ratio": "9:16", "ai_label_enabled": False}
+    assert result == {
+        "adaptation_mode": "short_drama", "aspect_ratio": "9:16", "ai_label_enabled": False,
+        "enhance_music_bed": False, "enhance_teaser": False, "enhance_monologue": False,
+    }
     assert resolve_aspect_ratio(conn, "proj_update_settings") == "9:16"
+
+
+def test_update_project_settings_only_enhance_music_bed_field_does_not_touch_others():
+    """本任务新增字段的部分更新回归：只传 enhance_music_bed，其余五个字段（含另两个
+    预留开关）保持迁移默认值不变——覆盖 CLAUDE.md「只更新非 None 的字段」这条既有
+    契约在新字段上依然成立。"""
+    conn = get_conn()
+    _minimal_project(conn, "proj_update_music_bed_only")
+    result = update_project_settings(
+        conn, "proj_update_music_bed_only",
+        adaptation_mode=None, aspect_ratio=None, ai_label_enabled=None,
+        enhance_music_bed=True, enhance_teaser=None, enhance_monologue=None,
+    )
+    conn.commit()
+    assert result == {
+        "adaptation_mode": "faithful", "aspect_ratio": "9:16", "ai_label_enabled": False,
+        "enhance_music_bed": True, "enhance_teaser": False, "enhance_monologue": False,
+    }
+    assert enhance_teaser_enabled(conn, "proj_update_music_bed_only") is False
+    assert enhance_monologue_enabled(conn, "proj_update_music_bed_only") is False
 
 
 def test_update_project_settings_invalid_value_raises_value_error_chinese_message():
@@ -169,7 +212,7 @@ def test_update_project_settings_invalid_value_raises_value_error_chinese_messag
     _minimal_project(conn, "proj_update_bad")
     with pytest.raises(ValueError, match="不支持的画幅"):
         update_project_settings(
-            conn, "proj_update_bad", adaptation_mode=None, aspect_ratio="4:3", ai_label_enabled=None,
+            conn, "proj_update_bad", adaptation_mode=None, aspect_ratio="4:3", **_NO_BOOL_CHANGES,
         )
 
 
@@ -178,7 +221,7 @@ def test_update_project_settings_missing_project_raises_lookup_error():
     with pytest.raises(LookupError):
         update_project_settings(
             conn, "proj_does_not_exist_2",
-            adaptation_mode="short_drama", aspect_ratio=None, ai_label_enabled=None,
+            adaptation_mode="short_drama", aspect_ratio=None, **_NO_BOOL_CHANGES,
         )
 
 
@@ -197,6 +240,28 @@ def test_put_settings_partial_update_via_http():
     assert body["ai_label_enabled"] is True
     assert body["adaptation_mode"] == "faithful"  # 未传，保持迁移默认值
     assert body["aspect_ratio"] == "9:16"
+    assert body["enhance_music_bed"] is False
+    assert body["enhance_teaser"] is False
+    assert body["enhance_monologue"] is False
+
+
+def test_put_settings_enhance_music_bed_via_http():
+    """PUT 单独开启统一配乐，三个布尔字段互不影响；覆盖命令总线路径
+    （``project.update_settings`` handler 经 ``ui_route`` 短路回 REST 路由函数）。"""
+    conn = get_conn()
+    _minimal_project(conn, "proj_http_music_bed")
+    client = _admin_client()
+    resp = client.put(
+        "/api/projects/proj_http_music_bed/settings",
+        json={"enhance_music_bed": True},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["enhance_music_bed"] is True
+    assert body["enhance_teaser"] is False
+    assert body["enhance_monologue"] is False
+    assert body["ai_label_enabled"] is False
+    assert enhance_music_bed_enabled(conn, "proj_http_music_bed") is True
 
 
 def test_put_settings_invalid_value_is_409_with_chinese_message():
@@ -224,6 +289,7 @@ def test_project_detail_exposes_settings_fields_for_frontend_panel():
     update_project_settings(
         conn, "proj_detail_settings",
         adaptation_mode="short_drama", aspect_ratio="16:9", ai_label_enabled=True,
+        enhance_music_bed=True, enhance_teaser=None, enhance_monologue=None,
     )
     conn.commit()
     client = _admin_client()
@@ -233,3 +299,6 @@ def test_project_detail_exposes_settings_fields_for_frontend_panel():
     assert body["adaptation_mode"] == "short_drama"
     assert body["aspect_ratio"] == "16:9"
     assert body["ai_label_enabled"] == 1
+    assert body["enhance_music_bed"] == 1
+    assert body["enhance_teaser"] == 0
+    assert body["enhance_monologue"] == 0

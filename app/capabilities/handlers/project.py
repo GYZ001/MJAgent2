@@ -181,8 +181,9 @@ async def purge_all_deleted_projects(args: I.ProjectPurgeAllInput) -> CommandRes
 
 
 async def update_settings(args: I.ProjectUpdateSettingsInput) -> CommandResult:
-    """更新项目设置（改编强度档位/画幅/AI 标识）；同 ``series.*`` handler 写法：
-    直接调用同名 REST 路由函数，``ui_route`` 在 Handler 执行期短路返回 None。"""
+    """更新项目设置（改编强度档位/画幅/AI 标识/统一配乐/片头预告/主角内心独白）；
+    同 ``series.*`` handler 写法：直接调用同名 REST 路由函数，``ui_route`` 在
+    Handler 执行期短路返回 None。"""
     # 延迟导入：app.domain.* 与本文件其余 handler 一律 `from app import api` 延迟
     # 导入同一顾虑——app.domain 包 __init__ 是大再导出门面，模块级导入会与
     # app.capabilities.handlers 成环。
@@ -195,6 +196,9 @@ async def update_settings(args: I.ProjectUpdateSettingsInput) -> CommandResult:
             "adaptation_mode": args.adaptation_mode,
             "aspect_ratio": args.aspect_ratio,
             "ai_label_enabled": args.ai_label_enabled,
+            "enhance_music_bed": args.enhance_music_bed,
+            "enhance_teaser": args.enhance_teaser,
+            "enhance_monologue": args.enhance_monologue,
         },
     )
     if isinstance(outcome, CommandResult):

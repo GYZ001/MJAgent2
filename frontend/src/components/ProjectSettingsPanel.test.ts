@@ -75,11 +75,33 @@ describe('ProjectSettingsPanel：默认值与提交字段', () => {
   })
 
   it('开启 AI 标识直接提交 PUT', async () => {
-    vi.mocked(api.updateProjectSettings).mockResolvedValue({ project_id: 'proj-1', adaptation_mode: 'short_drama', aspect_ratio: '9:16', ai_label_enabled: true })
+    vi.mocked(api.updateProjectSettings).mockResolvedValue({ project_id: 'proj-1', adaptation_mode: 'short_drama', aspect_ratio: '9:16', ai_label_enabled: true, enhance_music_bed: false, enhance_teaser: false, enhance_monologue: false })
     const { view, onSaved } = await mount()
     const checkbox = view.root.findAllByType('input').find(n => n.props.type === 'checkbox')
     await act(async () => { checkbox!.props.onChange({ target: { checked: true } }); await Promise.resolve() })
     expect(api.updateProjectSettings).toHaveBeenCalledWith('proj-1', { ai_label_enabled: true })
+    expect(onSaved).toHaveBeenCalledOnce()
+    view.unmount()
+  })
+
+  it('统一配乐/片头预告/主角内心独白三个开关默认渲染为关闭，各自带中文说明', async () => {
+    const { view } = await mount()
+    const checkboxes = view.root.findAllByType('input').filter(n => n.props.type === 'checkbox')
+    expect(checkboxes).toHaveLength(4)
+    expect(checkboxes.slice(1).every(n => n.props.checked === false)).toBe(true)
+    const text = textOf(view.root)
+    expect(text).toContain('统一配乐')
+    expect(text).toContain('片头预告')
+    expect(text).toContain('主角内心独白')
+    view.unmount()
+  })
+
+  it('开启统一配乐直接提交 PUT，不影响另两个预留开关', async () => {
+    vi.mocked(api.updateProjectSettings).mockResolvedValue({ project_id: 'proj-1', adaptation_mode: 'short_drama', aspect_ratio: '9:16', ai_label_enabled: false, enhance_music_bed: true, enhance_teaser: false, enhance_monologue: false })
+    const { view, onSaved } = await mount()
+    const checkboxes = view.root.findAllByType('input').filter(n => n.props.type === 'checkbox')
+    await act(async () => { checkboxes[1].props.onChange({ target: { checked: true } }); await Promise.resolve() })
+    expect(api.updateProjectSettings).toHaveBeenCalledWith('proj-1', { enhance_music_bed: true })
     expect(onSaved).toHaveBeenCalledOnce()
     view.unmount()
   })

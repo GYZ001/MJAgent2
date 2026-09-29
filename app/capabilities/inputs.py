@@ -42,14 +42,16 @@ class ProjectPurgeAllInput(StandardCommandInput):
 
 
 class ProjectUpdateSettingsInput(StandardCommandInput):
-    """项目设置部分更新（2026-09-23 新增）：改编强度档位/画幅/AI 标识，三字段皆可选，
-    只更新传了的字段。合法值集合见 app.project_settings（ADAPTATION_MODES/ASPECT_RATIOS）。
+    """项目设置部分更新：改编强度档位/画幅/AI 标识/统一配乐/片头预告/主角内心独白，
+    字段皆可选，只更新传了的字段；合法值见 app.project_settings（ADAPTATION_MODES/
+    ASPECT_RATIOS），enhance_teaser/enhance_monologue 本次只加开关暂无消费方。
     """
 
     project_id: str
     adaptation_mode: str | None = None
     aspect_ratio: str | None = None
     ai_label_enabled: bool | None = None
+    enhance_music_bed: bool | None = None; enhance_teaser: bool | None = None; enhance_monologue: bool | None = None
 
 
 class AccountSelfDeleteInput(StandardCommandInput):

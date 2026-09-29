@@ -1,8 +1,14 @@
-"""项目级设置（改编强度档位 / 画幅 / AI 标识）的读写实现——只读写 ``projects`` 表。
+"""项目级设置（改编强度档位 / 画幅 / AI 标识 / 统一配乐及预留开关）的读写实现——
+只读写 ``projects`` 表。
 
 ``conn`` 一律由调用方传入、无默认值（CLAUDE.md「所有权必须显式」：可选参数是缺陷的
 温床）；写函数不 ``commit``，事务边界归调用方。这里只负责存取契约本身，「改编强度
 具体怎么影响生成」是后续单元的事，不在本模块范围内。
+
+2026-09-28 新增三个布尔开关：``enhance_music_bed``（统一配乐，本次由分镜台消费，见
+``app.production.storyboard_music_bed``）、``enhance_teaser``（片头预告）、
+``enhance_monologue``（主角内心独白）——后两项本次只加开关本身，暂无消费方，为
+下一个任务预留同一处存取契约，避免它再动这段代码；三项都默认关闭。
 """
 from __future__ import annotations
 
@@ -82,6 +88,36 @@ def ai_label_enabled(conn: Any, project_id: str) -> bool:
     return bool(row["ai_label_enabled"])
 
 
+def enhance_music_bed_enabled(conn: Any, project_id: str) -> bool:
+    """读出项目的统一配乐开关；项目不存在 -> ``LookupError``。语义同 ``ai_label_enabled``。"""
+    row = conn.execute(
+        "SELECT enhance_music_bed FROM projects WHERE id=?", (project_id,),
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"项目不存在：{project_id}")
+    return bool(row["enhance_music_bed"])
+
+
+def enhance_teaser_enabled(conn: Any, project_id: str) -> bool:
+    """读出项目的片头预告开关（本次只加开关，暂无消费方）；项目不存在 -> ``LookupError``。"""
+    row = conn.execute(
+        "SELECT enhance_teaser FROM projects WHERE id=?", (project_id,),
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"项目不存在：{project_id}")
+    return bool(row["enhance_teaser"])
+
+
+def enhance_monologue_enabled(conn: Any, project_id: str) -> bool:
+    """读出项目的主角内心独白开关（本次只加开关，暂无消费方）；项目不存在 -> ``LookupError``。"""
+    row = conn.execute(
+        "SELECT enhance_monologue FROM projects WHERE id=?", (project_id,),
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"项目不存在：{project_id}")
+    return bool(row["enhance_monologue"])
+
+
 def update_project_settings(
     conn: Any,
     project_id: str,
@@ -89,6 +125,9 @@ def update_project_settings(
     adaptation_mode: str | None,
     aspect_ratio: str | None,
     ai_label_enabled: bool | None,
+    enhance_music_bed: bool | None,
+    enhance_teaser: bool | None,
+    enhance_monologue: bool | None,
 ) -> dict:
     """按传入字段部分更新项目设置，只更新非 ``None`` 的字段。
 
@@ -110,11 +149,21 @@ def update_project_settings(
     if ai_label_enabled is not None:
         fields.append("ai_label_enabled=?")
         params.append(int(ai_label_enabled))
+    if enhance_music_bed is not None:
+        fields.append("enhance_music_bed=?")
+        params.append(int(enhance_music_bed))
+    if enhance_teaser is not None:
+        fields.append("enhance_teaser=?")
+        params.append(int(enhance_teaser))
+    if enhance_monologue is not None:
+        fields.append("enhance_monologue=?")
+        params.append(int(enhance_monologue))
     if fields:
         params.append(project_id)
         conn.execute(f"UPDATE projects SET {', '.join(fields)} WHERE id=?", params)
     row = conn.execute(
-        "SELECT adaptation_mode, aspect_ratio, ai_label_enabled FROM projects WHERE id=?",
+        "SELECT adaptation_mode, aspect_ratio, ai_label_enabled, enhance_music_bed, "
+        "enhance_teaser, enhance_monologue FROM projects WHERE id=?",
         (project_id,),
     ).fetchone()
     if row is None:
@@ -123,4 +172,7 @@ def update_project_settings(
         "adaptation_mode": row["adaptation_mode"],
         "aspect_ratio": row["aspect_ratio"],
         "ai_label_enabled": bool(row["ai_label_enabled"]),
+        "enhance_music_bed": bool(row["enhance_music_bed"]),
+        "enhance_teaser": bool(row["enhance_teaser"]),
+        "enhance_monologue": bool(row["enhance_monologue"]),
     }
