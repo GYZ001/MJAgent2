@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 from app.production.screenplay_markers import (
+    SAME_SCENE_TRANSITION,
+    SCENE_CHANGE_TRANSITION,
     explicit_transition_marker,
     map_transition,
     parse_scene_header,
     required_beats,
     scene_changed,
+    scene_changed_by_resource_scenes,
     transition_between,
+    transition_with_resource_bypass,
 )
 
 SEG_05 = "【段 05｜人间·诊室｜夜】\n人物：周晚、龙猫\n龙猫：记住了。\n【转场：爪印光圈】"
@@ -79,6 +83,31 @@ def test_header_wording_variants_and_capacity_splits_are_same_scene() -> None:
     # 同一原文段拆成两段（容量拆分）：段尾的【转场】不在两半之间
     assert transition_between(SEG_05, SEG_05) == "硬切" and scene_changed(SEG_05, SEG_05) is False
     assert transition_between(SEG_05, SEG_06) == "遮挡转场"
+
+
+def test_scene_changed_by_resource_scenes_requires_both_sides_nonempty_and_different() -> None:
+    """小说体原文没有段头，判据只能靠相邻两段各自登记的 resources.scenes；
+    任一侧为空都不下判断（不得拿缺失数据伪造"同场"），两边都非空且不同才算换场。"""
+    assert scene_changed_by_resource_scenes({"scene_a"}, {"scene_b"}) is True
+    assert scene_changed_by_resource_scenes({"scene_a"}, {"scene_a"}) is False
+    assert scene_changed_by_resource_scenes({"scene_a", "scene_b"}, {"scene_b"}) is True  # 部分重叠也算变了
+    assert scene_changed_by_resource_scenes(set(), {"scene_a"}) is False
+    assert scene_changed_by_resource_scenes({"scene_a"}, set()) is False
+    assert scene_changed_by_resource_scenes(set(), set()) is False
+
+
+def test_transition_with_resource_bypass_upgrades_same_scene_only() -> None:
+    """只在文本判据判定为同场时才补台升级；已经是显式/结构化换场转场的不覆盖，
+    这样才是与既有判据取「或」而不是替代它。"""
+    # 文本判据同场 + 资源判据换场 -> 升级为换场默认转场
+    assert transition_with_resource_bypass(SAME_SCENE_TRANSITION, {"a"}, {"b"}) == SCENE_CHANGE_TRANSITION
+    # 文本判据同场 + 资源判据同场 -> 维持同场
+    assert transition_with_resource_bypass(SAME_SCENE_TRANSITION, {"a"}, {"a"}) == SAME_SCENE_TRANSITION
+    # 文本判据同场 + 资源信息缺失（任一侧为空）-> 不升级
+    assert transition_with_resource_bypass(SAME_SCENE_TRANSITION, set(), {"b"}) == SAME_SCENE_TRANSITION
+    # 文本判据已经是显式转场（非同场默认值）-> 原样返回，不被资源判据覆盖
+    assert transition_with_resource_bypass("遮挡转场", {"a"}, {"b"}) == "遮挡转场"
+    assert transition_with_resource_bypass(SCENE_CHANGE_TRANSITION, {"a"}, {"a"}) == SCENE_CHANGE_TRANSITION
 
 
 def test_beat_paraphrased_by_model_counts_as_shot_but_dropped_beat_does_not() -> None:

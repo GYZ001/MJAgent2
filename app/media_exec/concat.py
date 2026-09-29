@@ -1286,7 +1286,7 @@ def concatenate_episode(
 
     subtitle_plan = subtitle_episode.plan_or_none(
         conn, episode_id=episode_id, piece_specs=piece_specs,
-        probe_by_shot=probe_by_shot, manifest_items=video_delivery_manifest["items"])
+        probe_by_shot=probe_by_shot, manifest_items=video_delivery_manifest["items"], play_res=play_res)
     final_path = _final_video_path(ep["project_id"], ep["episode_no"])
     started_at = time.perf_counter()
     common_result = {

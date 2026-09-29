@@ -404,9 +404,29 @@
   display: grid;
   gap: 8px;
 }
+.cinema-subtitle-alert {
+  padding: 10px 12px;
+  border: 1px solid #d9a25c;
+  border-left: 4px solid #c97a2b;
+  border-radius: 4px;
+  background: #fbf1e3;
+}
+:where(:root[data-theme="dark"]) .cinema-subtitle-alert {
+  border-color: #8a5a24;
+  background: #2a2115;
+}
 .cinema-subtitle-table td,
 .cinema-subtitle-table th {
   font-size: 12px;
+}
+.cinema-subtitle-row-missing td {
+  color: #a3401f;
+}
+:where(:root[data-theme="dark"]) .cinema-subtitle-row-missing td {
+  color: #e08a63;
+}
+.cinema-subtitle-row-estimated td {
+  color: var(--ink-soft);
 }
 .cinema-subtitle-extra summary {
   color: var(--ink-faint);

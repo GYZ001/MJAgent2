@@ -40,16 +40,84 @@ def test_real_fixture_produces_non_overlapping_cues_within_bounds():
 
 
 # ---------------------------------------------------------------------------
-# 只对 aligned 出 cue
+# aligned/partial 出真实 cue；完全未命中且缺锚点的仍然不出 cue
 # ---------------------------------------------------------------------------
 
-def test_only_aligned_lines_produce_cues():
+def test_trailing_unmatched_line_without_following_anchor_produces_no_cue():
+    """「silent」是本镜最后一行、后面没有任何已对齐行可以当锚点——不得向后无
+    边界外推，仍然不出 cue（不得兜底填充）。"""
     spoken = LineSpec(utterance_id="U01", text="师父今天要出门")
     silent = LineSpec(utterance_id="U02", text="外面风雨欲来")
     tokens = _toks([(c, i * 0.3) for i, c in enumerate(spoken.text)])
     alignment = align_shot([spoken, silent], tokens)
     cues = build_cues(1, alignment, rate=1.0, effective_duration_s=100.0, max_chars_per_line=14)
     assert {c.utterance_id for c in cues} == {"U01"}
+
+
+def test_aligned_line_is_never_silently_dropped_by_overlap_resolution():
+    """2026-09-28 实测复现的根因：``align._retry_unmatched_lines`` 若共享一份不
+    随认领收窄的残留音轨候选池，同镜头内两条短插话会各自独立匹配到同一段
+    音轨、都拿到相同真实时间戳、都被判成 ``aligned``——其中一条随后在
+    ``_resolve_overlaps`` 里被完全裁到零时长过滤掉，而它的 status 仍是
+    ``aligned``（不进 missing/estimated），字幕消失却没有任何可见信号。修复
+    后候选池按行逐次收窄、互斥分配，不应再出现「status=aligned 但零 cue」。"""
+    landlord = LineSpec(utterance_id="U01", text="甲乙丙丁戊己庚辛")
+    interruption_a = LineSpec(utterance_id="U02", text="那那")
+    interruption_b = LineSpec(utterance_id="U03", text="那那")
+    tokens = _toks([
+        ("甲", 0.0), ("乙", 0.1), ("丙", 0.2),
+        ("那", 0.4), ("那", 0.5),  # 两条插话唯一能用的一段残留音轨
+        ("丁", 0.7), ("戊", 0.8), ("己", 0.9), ("庚", 1.0), ("辛", 1.1),
+    ])
+    alignment = align_shot([landlord, interruption_a, interruption_b], tokens)
+    cues = build_cues(1, alignment, rate=1.0, effective_duration_s=100.0, max_chars_per_line=14)
+
+    produced_ids = {c.utterance_id for c in cues}
+    aligned_or_partial_ids = {la.utterance_id for la in alignment.lines if la.status in ("aligned", "partial")}
+    assert aligned_or_partial_ids <= produced_ids, "aligned/partial 行必须都能在 cues 里找到自己的字幕"
+
+
+def test_missing_line_between_two_aligned_lines_gets_estimated_cue():
+    """完全未命中的台账行，如果同镜头前后都有真实锚点，按台账顺序在两者之间
+    估一个显示区间产出 cue（不丢），并标记 estimated=True——这不是编造内容：
+    台词文本来自台账原文，只是时间是估计的。"""
+    before = LineSpec(utterance_id="U01", text="甲乙丙丁")
+    lost = LineSpec(utterance_id="U02", text="没有被识别到的这句话")
+    after = LineSpec(utterance_id="U03", text="戊己庚辛")
+    tokens = _toks([
+        ("甲", 0.0), ("乙", 0.1), ("丙", 0.2), ("丁", 0.3),
+        ("戊", 10.0), ("己", 10.1), ("庚", 10.2), ("辛", 10.3),
+    ])
+    alignment = align_shot([before, lost, after], tokens)
+    assert alignment.lines[1].status == "missing"  # 前提：确实完全没命中
+
+    cues = build_cues(1, alignment, rate=1.0, effective_duration_s=100.0, max_chars_per_line=14)
+    by_id = {c.utterance_id: c for c in cues}
+    assert set(by_id) == {"U01", "U02", "U03"}
+    estimated = by_id["U02"]
+    assert estimated.estimated is True
+    assert estimated.text == lost.text
+    assert by_id["U01"].estimated is False and by_id["U03"].estimated is False
+    # 估计区间必须落在前后两个真实锚点之间，不越界。
+    assert by_id["U01"].end_s <= estimated.start_s < estimated.end_s <= by_id["U03"].start_s
+
+
+def test_two_consecutive_missing_lines_split_the_gap_by_table_order():
+    """两条连续缺失行共享同一对锚点时，按台账顺序各分到前后半段，互不重叠。"""
+    before = LineSpec(utterance_id="U01", text="甲乙")
+    lost1 = LineSpec(utterance_id="U02", text="第一句丢失的话")
+    lost2 = LineSpec(utterance_id="U03", text="第二句丢失的话")
+    after = LineSpec(utterance_id="U04", text="戊己")
+    tokens = _toks([("甲", 0.0), ("乙", 0.1), ("戊", 10.0), ("己", 10.1)])
+    alignment = align_shot([before, lost1, lost2, after], tokens)
+    assert alignment.lines[1].status == "missing" and alignment.lines[2].status == "missing"
+
+    cues = build_cues(1, alignment, rate=1.0, effective_duration_s=100.0, max_chars_per_line=14)
+    by_id = {c.utterance_id: c for c in cues}
+    assert set(by_id) == {"U01", "U02", "U03", "U04"}
+    assert by_id["U02"].end_s <= by_id["U03"].start_s  # 按台账顺序不重叠
+    assert by_id["U01"].end_s <= by_id["U02"].start_s
+    assert by_id["U03"].end_s <= by_id["U04"].start_s
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ const REASON_LABELS: Record<string, string> = {
   not_found: '音轨里没有找到这句台词',
   no_audio: '该镜视频没有音轨',
   short_line_partial: '短句只念出了一部分',
+  cue_dropped_by_overlap: '与相邻台词的显示时间重叠，字幕被裁剪掉了',
 }
 
 export interface MissingSubtitleRow {
@@ -21,6 +22,10 @@ export interface MissingSubtitleRow {
   line: string
   ratioText: string
   reasonLabel: string
+  /** true：已按同镜头前后台词的时间估出一个显示区间、字幕仍然烧出来了，只是
+   *  时间是估计的；false：真的没有任何字幕（旧报告没有 status 字段时按 false
+   *  处理——那批报告确实还没有估计时间兜底，不是伪造历史）。 */
+  estimated: boolean
 }
 
 export interface ExtraSpeechRow {
@@ -86,15 +91,30 @@ export function subtitleSummaryLine(report: unknown): string | null {
   const linesAligned = asNonNegativeInt(subtitles.lines_aligned)
   if (linesAligned === null) return null
 
-  const linesMissing = asNonNegativeInt(subtitles.lines_missing)
-  if (linesMissing === null) return null
+  // 仅当完整性校验用：字段必须存在才继续渲染（旧报告缺这个字段按「数据不全」
+  // 处理，不渲染半截摘要）。展示用的计数改用下面按行逐条统计的真实值——
+  // lines_missing 是「missing/estimated」两类的合计，直接当「未出声」展示会把
+  // 已经烧出字幕（只是时间是估计的）的行也算成"没有字幕"，误导用户。
+  if (asNonNegativeInt(subtitles.lines_missing) === null) return null
+  const linesPartial = asNonNegativeInt(subtitles.lines_partial) ?? 0
 
+  const rows = missingSubtitleRows(report)
+  const trueMissingCount = rows.filter(row => !row.estimated).length
+  const estimatedCount = rows.length - trueMissingCount
+
+  const partialSuffix = linesPartial > 0 ? `，${linesPartial} 句部分命中` : ''
   const extraSuffix = extraCount > 0 ? `，另检测到 ${extraCount} 处账本外人声` : ''
-  if (linesMissing === 0) return `字幕：${linesAligned}/${linesTotal} 句已对齐${extraSuffix}`
+  if (trueMissingCount === 0 && estimatedCount === 0) {
+    return `字幕：${linesAligned}/${linesTotal} 句已对齐${partialSuffix}${extraSuffix}`
+  }
 
-  const shotNos = Array.from(new Set(missingSubtitleRows(report).map(row => row.shotNo))).sort((a, b) => a - b)
+  const shotNos = Array.from(new Set(rows.map(row => row.shotNo))).sort((a, b) => a - b)
   const shotsText = shotNos.length ? `（第 ${shotNos.join('、')} 镜）` : ''
-  return `字幕：${linesAligned}/${linesTotal} 句已对齐，${linesMissing} 句未出声${shotsText}${extraSuffix}`
+  const gapParts = [
+    trueMissingCount > 0 ? `${trueMissingCount} 句未出声` : '',
+    estimatedCount > 0 ? `${estimatedCount} 句按估计时间显示` : '',
+  ].filter(Boolean)
+  return `字幕：${linesAligned}/${linesTotal} 句已对齐${partialSuffix}，${gapParts.join('，')}${shotsText}${extraSuffix}`
 }
 
 /** 未出声台词列表，按镜号排序；逐项校验，单条畸形数据跳过而不丢弃整份列表。 */
@@ -118,9 +138,23 @@ export function missingSubtitleRows(report: unknown): MissingSubtitleRow[] {
       line: truncateLine(line),
       ratioText: `${Math.round(matchRatio * 100)}%`,
       reasonLabel: reasonLabel(reason),
+      estimated: item.status === 'estimated',
     })
   }
   return rows.sort((a, b) => a.shotNo - b.shotNo)
+}
+
+/** 未出声台词的出路文案：真的缺字幕的句子要去生成台重做；只是时间估计的
+ *  句子已经有字幕了，只建议人工核对时机。两种都有时两句话都给。 */
+export function missingSubtitleActionHint(rows: MissingSubtitleRow[]): string {
+  const parts: string[] = []
+  if (rows.some(row => !row.estimated)) {
+    parts.push('完全没有字幕的句子：去生成台重新生成对应镜头后重新合成即可补上')
+  }
+  if (rows.some(row => row.estimated)) {
+    parts.push('标了「估计时间」的句子已经烧出字幕，只是显示时刻是按同镜头前后台词估算的，建议人工核对画面时机是否准确')
+  }
+  return parts.join('；')
 }
 
 /** 「模型多念的语音」列表，按镜号排序；逐项校验，单条畸形数据跳过。 */

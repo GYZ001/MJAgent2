@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { extraSpeechRows, missingSubtitleRows, subtitleSummaryLine } from './subtitleSummary'
+import { extraSpeechRows, missingSubtitleActionHint, missingSubtitleRows, subtitleSummaryLine } from './subtitleSummary'
 
 describe('subtitleSummaryLine', () => {
   it.each([
@@ -34,6 +34,31 @@ describe('subtitleSummaryLine', () => {
     ['lines_total 类型不对（畸形）', { subtitles: { enabled: true, lines_total: 'many' } }, null],
     ['lines_aligned 缺失（畸形）', { subtitles: { enabled: true, lines_total: 10 } }, null],
     ['lines_missing 缺失（畸形）', { subtitles: { enabled: true, lines_total: 10, lines_aligned: 10 } }, null],
+    [
+      '估计时间的行不算「未出声」：已经烧出字幕了，只是时间是估计的，不应混进真缺失的计数',
+      {
+        subtitles: {
+          enabled: true,
+          lines_total: 31,
+          lines_aligned: 29,
+          lines_missing: 2,
+          missing: [
+            { shot_no: 12, utterance_id: 'U01', line: '守……印……人……', match_ratio: 0.3, reason: 'short_line_partial', status: 'estimated' },
+            { shot_no: 20, utterance_id: 'U02', line: '真的没识别到', match_ratio: 0, reason: 'not_found', status: 'missing' },
+          ],
+        },
+      },
+      '字幕：29/31 句已对齐，1 句未出声，1 句按估计时间显示（第 12、20 镜）',
+    ],
+    [
+      'lines_partial 非零时补一句部分命中计数',
+      {
+        subtitles: {
+          enabled: true, lines_total: 31, lines_aligned: 28, lines_partial: 3, lines_missing: 0,
+        },
+      },
+      '字幕：28/31 句已对齐，3 句部分命中',
+    ],
     [
       '账本为空但检测到账本外人声：不得谎称没有台词',
       {
@@ -151,6 +176,63 @@ describe('missingSubtitleRows', () => {
     expect(missingSubtitleRows(null)).toEqual([])
     expect(missingSubtitleRows({ subtitles: { enabled: true } })).toEqual([])
     expect(missingSubtitleRows({ subtitles: { enabled: false } })).toEqual([])
+  })
+})
+
+describe('missingSubtitleRows：estimated 字段', () => {
+  it('status=estimated 的行标记为 estimated=true，其余（含旧报告没有 status 字段）为 false', () => {
+    const rows = missingSubtitleRows({
+      subtitles: {
+        enabled: true,
+        missing: [
+          { shot_no: 1, utterance_id: 'U01', line: '按估计时间显示的句子', match_ratio: 0, reason: 'not_found', status: 'estimated' },
+          { shot_no: 1, utterance_id: 'U02', line: '真的没有字幕', match_ratio: 0, reason: 'not_found', status: 'missing' },
+          { shot_no: 1, utterance_id: 'U03', line: '旧报告没有 status 字段', match_ratio: 0, reason: 'not_found' },
+        ],
+      },
+    })
+    const byId = Object.fromEntries(rows.map(row => [row.utteranceId, row]))
+    expect(byId.U01.estimated).toBe(true)
+    expect(byId.U02.estimated).toBe(false)
+    expect(byId.U03.estimated).toBe(false)
+  })
+})
+
+describe('missingSubtitleActionHint', () => {
+  it('只有真缺失时只给"去生成台重做"的出路', () => {
+    const rows = missingSubtitleRows({
+      subtitles: { enabled: true, missing: [{ shot_no: 1, utterance_id: 'U01', line: 'x', match_ratio: 0, reason: 'not_found', status: 'missing' }] },
+    })
+    expect(missingSubtitleActionHint(rows)).toBe('完全没有字幕的句子：去生成台重新生成对应镜头后重新合成即可补上')
+  })
+
+  it('只有估计时间时只给"人工核对时机"的提示', () => {
+    const rows = missingSubtitleRows({
+      subtitles: { enabled: true, missing: [{ shot_no: 1, utterance_id: 'U01', line: 'x', match_ratio: 0, reason: 'not_found', status: 'estimated' }] },
+    })
+    expect(missingSubtitleActionHint(rows)).toBe(
+      '标了「估计时间」的句子已经烧出字幕，只是显示时刻是按同镜头前后台词估算的，建议人工核对画面时机是否准确',
+    )
+  })
+
+  it('两种都有时两句话都给，且拦人必须给出路（不能是空字符串）', () => {
+    const rows = missingSubtitleRows({
+      subtitles: {
+        enabled: true,
+        missing: [
+          { shot_no: 1, utterance_id: 'U01', line: 'x', match_ratio: 0, reason: 'not_found', status: 'missing' },
+          { shot_no: 1, utterance_id: 'U02', line: 'y', match_ratio: 0, reason: 'not_found', status: 'estimated' },
+        ],
+      },
+    })
+    const hint = missingSubtitleActionHint(rows)
+    expect(hint).toContain('去生成台重新生成')
+    expect(hint).toContain('人工核对画面时机')
+    expect(hint.length).toBeGreaterThan(0)
+  })
+
+  it('空列表返回空字符串，不假装有内容', () => {
+    expect(missingSubtitleActionHint([])).toBe('')
   })
 })
 

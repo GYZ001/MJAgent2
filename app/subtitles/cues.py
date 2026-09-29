@@ -6,11 +6,15 @@
 按中点折行会把「赵某」「别人的」这类词拆断，观感不可接受，见
 ``_pick_split_point`` 文档）。合并/拆分全部在原始（未按倍速换算的）ASR 时间域
 完成，最后统一除以 ``rate``、加提前量/尾量、裁到有效时长，再解决相邻 cue 的
-重叠与最短时长。只对 ``status == "aligned"`` 的台词出 cue。
+重叠与最短时长。``status`` 是 ``aligned``/``partial`` 的台词按真实（或部分
+真实）时间戳出 cue；``missing``（完全未命中）的台词在同镜头前后都有真实锚点
+时按台账顺序估算一个显示区间（``Cue.estimated=True``，见 ``_estimated_window``
+——2026-09-28 起不再直接丢弃，否则观众连字幕都看不到这句词存在过）。
 """
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 from app.subtitles.align import LineAlignment, ShotAlignment
@@ -32,6 +36,7 @@ class Cue:
     start_s: float
     end_s: float
     speaker: str = ""
+    estimated: bool = False  # True：完全未命中台词按台账顺序估算的显示区间，不是真实语音对齐结果
 
 
 def _char_timeline(line: LineAlignment) -> list[tuple[str, float]]:
@@ -169,27 +174,64 @@ def _line_cue_pieces(line: LineAlignment, max_chars: int) -> list[tuple[str, flo
     return pieces
 
 
+def _anchor(lines: Sequence[LineAlignment], idxs: range, *, pick: str) -> tuple[float, int] | None:
+    """在 ``idxs`` 范围内找第一条有真实（或部分真实）时间戳的行，``pick`` 取
+    ``"start"``/``"end"`` 决定要那一端的时间；连带索引一起返回，供调用方算
+    两个锚点之间一共有几条待估计行。"""
+    for i in idxs:
+        line = lines[i]
+        if line.status in ("aligned", "partial"):
+            return (line.start_s if pick == "start" else line.end_s), i
+    return None
+
+
+def _estimated_window(lines: Sequence[LineAlignment], idx: int) -> tuple[float, float] | None:
+    """完全未命中行（``status == "missing"``）的兜底显示区间：找同镜头前一条/
+    后一条有真实时间戳的行，按台账顺序在它们之间均分间隔；任一侧缺锚点就放
+    弃，不额外向外推断（不伪造没有证据支撑的边界，CLAUDE.md「不得兜底填
+    充」）。多条连续缺失行共享同一对锚点时，按各自的序号分到对应的等分区间。
+    """
+    prev = _anchor(lines, range(idx - 1, -1, -1), pick="end")
+    nxt = _anchor(lines, range(idx + 1, len(lines)), pick="start")
+    if prev is None or nxt is None:
+        return None
+    prev_end, prev_idx = prev
+    next_start, next_idx = nxt
+    if next_start <= prev_end:
+        return None
+    gap_lines = next_idx - prev_idx
+    slot = idx - prev_idx
+    step = (next_start - prev_end) / gap_lines
+    return prev_end + step * (slot - 1), prev_end + step * slot
+
+
 def _collect_raw_cues(
     shot_no: int, alignment: ShotAlignment, max_chars_per_line: int
-) -> list[tuple[int, str, str, str, float, float]]:
-    """(shot_no, utterance_id, speaker, text, 原始首字时间, 原始末字时间+tail)。"""
-    raw: list[tuple[int, str, str, str, float, float]] = []
-    for line in alignment.lines:
-        if line.status != "aligned":
+) -> list[tuple[int, str, str, str, float, float, bool]]:
+    """(shot_no, utterance_id, speaker, text, 原始首字时间, 原始末字时间+tail, estimated)。"""
+    raw: list[tuple[int, str, str, str, float, float, bool]] = []
+    lines = alignment.lines
+    for idx, line in enumerate(lines):
+        if line.status in ("aligned", "partial"):
+            tail_raw = line.end_s - line.char_times[-1].start_s
+            for text, first_t, last_t in _line_cue_pieces(line, max_chars_per_line):
+                raw.append((shot_no, line.utterance_id, line.speaker, text, first_t, last_t + tail_raw, False))
             continue
-        tail_raw = line.end_s - line.char_times[-1].start_s
-        for text, first_t, last_t in _line_cue_pieces(line, max_chars_per_line):
-            raw.append((shot_no, line.utterance_id, line.speaker, text, first_t, last_t + tail_raw))
+        window = _estimated_window(lines, idx)
+        if window is None:
+            continue
+        start_t, end_t = window
+        raw.append((shot_no, line.utterance_id, line.speaker, line.text, start_t, end_t, True))
     return raw
 
 
-def _scale_cue(raw: tuple[int, str, str, str, float, float], rate: float) -> Cue:
-    shot_no, utterance_id, speaker, text, raw_start, raw_end = raw
+def _scale_cue(raw: tuple[int, str, str, str, float, float, bool], rate: float) -> Cue:
+    shot_no, utterance_id, speaker, text, raw_start, raw_end, estimated = raw
     start_s = raw_start / rate - LEAD_S
     end_s = raw_end / rate + TAIL_EXTRA_S
     return Cue(
         shot_no=shot_no, utterance_id=utterance_id, text=text, speaker=speaker,
-        start_s=start_s, end_s=max(start_s, end_s),
+        start_s=start_s, end_s=max(start_s, end_s), estimated=estimated,
     )
 
 

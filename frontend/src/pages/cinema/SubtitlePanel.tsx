@@ -1,4 +1,4 @@
-import { extraSpeechRows, missingSubtitleRows, subtitleSummaryLine } from './subtitleSummary'
+import { extraSpeechRows, missingSubtitleActionHint, missingSubtitleRows, subtitleSummaryLine } from './subtitleSummary'
 
 interface SubtitlePanelProps {
   /** `MixStatus.final_edit_report`；可能为 null，也可能是旧格式（无 subtitles 键）。 */
@@ -24,10 +24,8 @@ export default function SubtitlePanel({ report, srtUrl, episodeNo }: SubtitlePan
     <div className="cinema-subtitle-panel">
       <p className="hint" role="status">{summary}</p>
       {missing.length > 0 && (
-        <div className="cinema-subtitle-missing">
-          <p className="hint">
-            这些句子没有烧进字幕；去生成台重新生成对应镜头后重新合成即可补上
-          </p>
+        <div className="cinema-subtitle-missing cinema-subtitle-alert" role="alert">
+          <p className="hint">{missingSubtitleActionHint(missing)}</p>
           <table className="ledger cinema-subtitle-table">
             <thead>
               <tr>
@@ -36,16 +34,21 @@ export default function SubtitlePanel({ report, srtUrl, episodeNo }: SubtitlePan
                 <th>原话</th>
                 <th>命中率</th>
                 <th>原因</th>
+                <th>状态</th>
               </tr>
             </thead>
             <tbody>
               {missing.map(row => (
-                <tr key={`${row.shotNo}-${row.utteranceId}`}>
+                <tr
+                  key={`${row.shotNo}-${row.utteranceId}`}
+                  className={row.estimated ? 'cinema-subtitle-row-estimated' : 'cinema-subtitle-row-missing'}
+                >
                   <td>第 {row.shotNo} 镜</td>
                   <td>{row.utteranceId}</td>
                   <td>{row.line}</td>
                   <td>{row.ratioText}</td>
                   <td>{row.reasonLabel}</td>
+                  <td>{row.estimated ? '估计时间显示' : '完全没有字幕'}</td>
                 </tr>
               ))}
             </tbody>

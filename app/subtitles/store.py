@@ -45,13 +45,29 @@ _CREATE_STATEMENTS: tuple[str, ...] = (
 _ensured_paths: set[str] = set()
 
 
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, coltype: str) -> None:
+    """``CREATE TABLE IF NOT EXISTS`` 对已经存在的旧表不会补列；同手法见
+    ``app/models_registry/schema.py::_add_column_if_missing``，只吞"列已存在"
+    这一种 ``OperationalError``，其余原样抛出。"""
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
+
+
 def ensure_tables_on_connection(conn: sqlite3.Connection) -> None:
     """轻量、同连接、无副作用的建表兜底——不开新连接、不申请新锁，安全用于
     调用方已持有事务的场景。见模块文档。逐条 ``execute``，绝不能用
     ``executescript``（``tests/test_schema_guard.py`` 有 AST 守卫钉死这一点）。
+
+    ``algo_version`` 是 2026-09-28 补的：对齐算法改了局部窗口重试（插话/短句
+    不再被全局单调匹配挤掉），旧缓存行是按旧算法产出的结果，必须连同模型/
+    文件哈希一起参与缓存键，让旧算法版本的缓存自动失效重算，不会误用旧结果。
     """
     for statement in _CREATE_STATEMENTS:
         conn.execute(statement)
+    _add_column_if_missing(conn, "subtitle_alignments", "algo_version", "TEXT NOT NULL DEFAULT ''")
 
 
 def ensure_schema() -> None:
@@ -87,16 +103,18 @@ def ensure_schema() -> None:
 
 
 def get_alignment(
-    conn: sqlite3.Connection, *, shot_version_id: str, media_sha256: str, model_id: str,
+    conn: sqlite3.Connection, *, shot_version_id: str, media_sha256: str, model_id: str, algo_version: str,
 ) -> dict[str, Any] | None:
-    """只读；``shot_version_id``/``media_sha256``/``model_id`` 三者全等才命中
-    （样式改动只重做 cue/渲染，不重跑 ASR；模型换了/文件变了都必须重算）。
+    """只读；``shot_version_id``/``media_sha256``/``model_id``/``algo_version``
+    四者全等才命中（样式改动只重做 cue/渲染，不重跑 ASR；模型换了/文件变了/
+    对齐算法改了都必须重算——``algo_version`` 不等价于「结果不同」，是「不能
+    信任旧结果没有变化」，宁可多算一次也不能悄悄复用旧算法产出）。
     """
     ensure_schema()
     row = conn.execute(
         "SELECT result_json FROM subtitle_alignments"
-        " WHERE shot_version_id=? AND media_sha256=? AND model_id=?",
-        (shot_version_id, media_sha256, model_id),
+        " WHERE shot_version_id=? AND media_sha256=? AND model_id=? AND algo_version=?",
+        (shot_version_id, media_sha256, model_id, algo_version),
     ).fetchone()
     if row is None:
         return None
@@ -104,17 +122,17 @@ def get_alignment(
 
 
 def put_alignment(
-    *, shot_version_id: str, media_sha256: str, engine_id: str, model_id: str, result: dict[str, Any],
+    *, shot_version_id: str, media_sha256: str, engine_id: str, model_id: str, algo_version: str, result: dict[str, Any],
 ) -> bool:
     ensure_schema()
 
     def operation(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT OR REPLACE INTO subtitle_alignments"
-            "(shot_version_id, media_sha256, engine_id, model_id, result_json, created_at)"
-            " VALUES(?,?,?,?,?,?)",
+            "(shot_version_id, media_sha256, engine_id, model_id, algo_version, result_json, created_at)"
+            " VALUES(?,?,?,?,?,?,?)",
             (
-                shot_version_id, media_sha256, engine_id, model_id,
+                shot_version_id, media_sha256, engine_id, model_id, algo_version,
                 json.dumps(result, ensure_ascii=False), time.time(),
             ),
         )

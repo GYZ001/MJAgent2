@@ -112,6 +112,117 @@ def test_whole_line_not_spoken_is_missing_not_found():
     assert la.match_ratio < 0.3
 
 
+def _global_pass_only(lines, tokens):
+    """修复前逻辑的手写副本（红绿验证用，不回退线上代码）：只做一次全局单调
+    匹配，没有局部窗口重试。逐字展开 + 拼音转换 + SequenceMatcher 一次性匹配，
+    与 ``align.align_shot`` 2026-09-28 之前的实现等价。"""
+    from difflib import SequenceMatcher as _SM
+
+    from app.subtitles import align as _a
+
+    asr_pairs = _a._expand_asr_chars(tokens)
+    known_chars, spans = _a._known_chars_and_spans(lines)
+    known_pinyin = _a._pinyin_units(known_chars)
+    asr_pinyin = _a._pinyin_units([c for c, _t in asr_pairs])
+    blocks = _SM(None, known_pinyin, asr_pinyin, autojunk=False).get_matching_blocks()
+    hit_time, hit_exact, _asr_matched = _a._apply_matching_blocks(blocks, known_chars, asr_pairs)
+    return tuple(_a._build_line_alignment(line, span, hit_time, hit_exact) for line, span in zip(lines, spans))
+
+
+def test_interruption_lost_by_global_pass_recovered_by_local_retry():
+    """插话被挤掉的真实机制复现：台账顺序是 [房东完整句][插话]，但实际语序是
+    [房东前半][插话][房东后半]——已知文字里插话排在房东句子之后（两者互不
+    相交），而插话的真实音轨却夹在房东句子中间；全局单调匹配的递归会把「房东
+    前半」「房东后半」各自匹配掉，插话在已知序列里排在两者之后、可用的 ASR
+    区间却是空的（结构性找不到），即使插话的音轨原样存在于残留字符里。"""
+    landlord = LineSpec(utterance_id="U01", text="甲乙丙丁戊己庚辛")  # 台账记的是完整句
+    interruption = LineSpec(utterance_id="U02", text="壬癸")  # 台账另起一行
+    tokens = _toks([
+        ("甲", 0.0), ("乙", 0.1), ("丙", 0.2), ("丁", 0.3),  # 房东前半（实际先说）
+        ("壬", 0.4), ("癸", 0.5),  # 插话真实音轨（实际中间说）
+        ("戊", 0.6), ("己", 0.7), ("庚", 0.8), ("辛", 0.9),  # 房东后半（实际接着说完）
+    ])
+
+    # 红：手写的修复前逻辑（只有全局单调匹配）——插话 0 命中，真被挤掉。
+    before = _global_pass_only([landlord, interruption], tokens)
+    assert before[0].status == "aligned"
+    assert before[1].status == "missing" and before[1].matched_chars == 0
+
+    # 绿：线上代码（含局部窗口重试）——插话从「没人认领」的残留音轨里找回真实时间戳。
+    result = align_shot([landlord, interruption], tokens)
+    assert result.lines[0].status == "aligned"
+    interjection = result.lines[1]
+    assert interjection.status == "aligned"
+    assert interjection.matched_chars == 2
+    assert interjection.char_times[0].start_s == pytest.approx(0.4)
+    assert interjection.char_times[1].start_s == pytest.approx(0.5)
+    # 插话的字符被局部重试认领后，不应该在 extra_speech 里被重复计一遍。
+    assert result.extra_speech == ()
+
+
+def _retry_shared_pool_before_fix(lines, alignments, asr_pairs, asr_matched):
+    """修复前逻辑的手写副本（红绿验证用，不回退线上代码）：``residual_pairs``/
+    ``residual_indices`` 只在循环外算一次、循环内从不收窄——同一镜头内多条待
+    重试的行共享同一份不变的候选池，可能重复认领同一段残留音轨。与
+    ``align._retry_unmatched_lines`` 2026-09-28 之前的实现等价。"""
+    from app.subtitles import align as _a
+
+    residual_indices = [i for i, matched in enumerate(asr_matched) if not matched]
+    residual_pairs = [asr_pairs[i] for i in residual_indices]
+    result = list(alignments)
+    updated_matched = list(asr_matched)
+    for i, la in enumerate(result):
+        if la.status == "aligned":
+            continue
+        retried = _a._retry_line_in_window(lines[i], residual_pairs, residual_indices)
+        if retried is None:
+            continue
+        candidate, claimed_indices = retried
+        if candidate.matched_chars > la.matched_chars:
+            result[i] = candidate
+            for idx in claimed_indices:
+                updated_matched[idx] = True
+    return tuple(result), updated_matched
+
+
+def test_two_interruptions_do_not_double_claim_same_residual_audio():
+    """一镜内两条短插话若共享一份不收窄的候选池，会各自独立匹配到同一段残留
+    音轨、都拿到相同的真实时间戳、都被判成 aligned——下游 cues.py 的重叠裁剪
+    会让其中一条完全消失，而它的 status 仍是 aligned，没有任何可见信号
+    （2026-09-28 实测复现）。修复后候选池按行逐次收窄，两条插话互斥分配。"""
+    from difflib import SequenceMatcher as _SM
+
+    from app.subtitles import align as _a
+
+    landlord = LineSpec(utterance_id="U01", text="甲乙丙丁戊己庚辛")
+    interruption_a = LineSpec(utterance_id="U02", text="那那")
+    interruption_b = LineSpec(utterance_id="U03", text="那那")
+    lines = [landlord, interruption_a, interruption_b]
+    tokens = _toks([
+        ("甲", 0.0), ("乙", 0.1), ("丙", 0.2),
+        ("那", 0.4), ("那", 0.5),  # 两条插话唯一能用的一段残留音轨
+        ("丁", 0.7), ("戊", 0.8), ("己", 0.9), ("庚", 1.0), ("辛", 1.1),
+    ])
+    asr_pairs = _a._expand_asr_chars(tokens)
+    known_chars, spans = _a._known_chars_and_spans(lines)
+    known_pinyin = _a._pinyin_units(known_chars)
+    asr_pinyin = _a._pinyin_units([c for c, _t in asr_pairs])
+    blocks = _SM(None, known_pinyin, asr_pinyin, autojunk=False).get_matching_blocks()
+    hit_time, hit_exact, asr_matched = _a._apply_matching_blocks(blocks, known_chars, asr_pairs)
+    pre_retry = tuple(_a._build_line_alignment(line, span, hit_time, hit_exact) for line, span in zip(lines, spans))
+
+    # 红：手写的修复前逻辑——两条插话共享同一份不收窄的候选池，都判成 aligned，
+    # 且用的是同一段残留音轨（时间戳完全相同）。
+    before, _ = _retry_shared_pool_before_fix(lines, pre_retry, asr_pairs, asr_matched)
+    assert before[1].status == "aligned" and before[2].status == "aligned"
+    assert before[1].char_times[0].start_s == before[2].char_times[0].start_s
+
+    # 绿：线上代码——候选池逐次收窄，同一段残留音轨只能被一条插话认领。
+    result = align_shot(lines, tokens)
+    claimants = [la for la in result.lines[1:] if la.status in ("aligned", "partial")]
+    assert len(claimants) == 1
+
+
 def test_one_of_two_lines_not_spoken():
     spoken = LineSpec(utterance_id="U01", text="师父今天要出门")
     silent = LineSpec(utterance_id="U02", text="外面风雨欲来")
@@ -136,13 +247,18 @@ def test_short_line_full_match_aligned():
     assert result.lines[0].matched_chars == 2
 
 
-def test_short_line_partial_match_missing():
+def test_short_line_partial_match_keeps_real_hit_timestamp():
+    """2026-09-28：短句未达 aligned 阈值但确有真实命中时不再整行判 missing、
+    丢弃时间戳——「是」这个字的真实命中时间必须保留在 char_times 里，供
+    build_cues 产出 cue（不丢），只是整行判为置信度更低的 partial。"""
     line = LineSpec(utterance_id="U01", text="是啊")
     tokens = _toks([("是", 0.0), ("嗯", 0.2)])
     result = align_shot([line], tokens)
     la = result.lines[0]
-    assert la.status == "missing"
+    assert la.status == "partial"
     assert la.reason == "short_line_partial"
+    assert la.matched_chars == 1
+    assert la.char_times[0].matched is True and la.char_times[0].start_s == pytest.approx(0.0)
 
 
 def test_two_char_line_zero_match_is_missing():
@@ -169,13 +285,14 @@ def test_three_char_line_contiguous_block_aligned():
     assert la.total_chars == 3
 
 
-def test_three_char_line_noncontiguous_hits_are_missing():
-    """首尾字命中但中间字没命中：2 字命中但不连续，不满足短句规则。"""
+def test_three_char_line_noncontiguous_hits_are_partial():
+    """首尾字命中但中间字没命中：2 字命中但不连续，不满足短句 aligned 规则，
+    但仍是 partial（有真实命中，不是 missing）——2026-09-28 改判。"""
     line = LineSpec(utterance_id="U01", text="甲乙丙")
     tokens = _toks([("甲", 0.0), ("戊", 0.2), ("丙", 0.4)])
     result = align_shot([line], tokens)
     la = result.lines[0]
-    assert la.status == "missing"
+    assert la.status == "partial"
     assert la.reason == "short_line_partial"
     assert la.matched_chars == 2
 
@@ -240,7 +357,7 @@ def test_homophone_order_is_monotonic_not_commutative():
     result = align_shot([line], tokens)
     la = result.lines[0]
     assert la.matched_chars == 1
-    assert la.status == "missing"
+    assert la.status == "partial"  # 2026-09-28 改判：短句 1 字真实命中不再判 missing
     assert la.reason == "short_line_partial"
 
 

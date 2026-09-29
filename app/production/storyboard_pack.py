@@ -84,7 +84,7 @@ from app.production.storyboard_continuity_memo import (
     _AiContinuityMemo, ensure_travel_direction_in_prompt,
     continuity_memo_character_advisories, continuity_memo_errors, continuity_memo_payload,
 )
-from app.production.screenplay_markers import joined_source_text, parse_scene_header, required_beats_errors, segment_structure
+from app.production.screenplay_markers import joined_source_text, parse_scene_header, required_beats_errors, segment_structure, transition_with_resource_bypass
 from app.production.storyboard_overlay_text import overlay_text_errors
 from app.production.storyboard_reference_repair import strip_extra_reference_markers
 from app.production.storyboard_dialogue_extract import extract_dialogue_targets
@@ -1171,7 +1171,7 @@ async def _generate_all_segment_prompts(
         )
         draft = finalize_generated_identity(draft, payload=payload, source_indexes=plan.source_segment_indexes,
                                             required_dialogue=required_dialogue, dialect=profile.render_format)
-        draft.camera_digest.transition_from_previous = structure["transition_from_previous"]  # 转场以原文标记/段头为准，不用模型自报
+        draft.camera_digest.transition_from_previous = transition_with_resource_bypass(structure["transition_from_previous"], {s.scene_id for s in previous_draft.resources.scenes} if previous_draft is not None else set(), {s.scene_id for s in draft.resources.scenes})  # 转场以原文标记/段头为准；段头判不出时用相邻两段 resources.scenes 的 scene_id 差异兜底（小说体没有段头标记）
         camera_digest_by_segment_no[plan.segment_no] = draft.camera_digest
         by_segment_no[plan.segment_no] = draft
         delivered_lines.extend((plan.segment_no, line.speaker_identity_id, line.line) for line in draft.dialogue)

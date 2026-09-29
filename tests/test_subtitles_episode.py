@@ -9,11 +9,13 @@ store.py``）：``get_conn()`` 每个测试拿到独立克隆的 SQLite，不需
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 from app.db import get_conn
-from app.subtitles import episode, engine
+from app.subtitles import align, cues, episode, engine
+from app.subtitles.ass import SubtitleStyle
 
 
 def _segment(text: str) -> dict:
@@ -87,6 +89,7 @@ def test_first_call_hits_engine_and_caches_second_call_is_pure_cache(monkeypatch
 
     plan1 = episode.prepare_episode_subtitles(
         conn, episode_id="e", piece_specs=_PIECE_SPECS, probe_by_shot=_PROBE, manifest_items=_MANIFEST,
+        play_res=(1080, 1920),
     )
     assert len(calls) == 1
     assert plan1.asr_shots == 2
@@ -101,6 +104,7 @@ def test_first_call_hits_engine_and_caches_second_call_is_pure_cache(monkeypatch
     )
     plan2 = episode.prepare_episode_subtitles(
         conn, episode_id="e", piece_specs=_PIECE_SPECS, probe_by_shot=_PROBE, manifest_items=_MANIFEST,
+        play_res=(1080, 1920),
     )
     assert plan2.asr_shots == 0
     assert plan2.cache_hits == 2
@@ -120,6 +124,7 @@ def test_no_audio_shot_is_all_missing_with_no_audio_reason(monkeypatch):
 
     plan = episode.prepare_episode_subtitles(
         conn, episode_id="e", piece_specs=_PIECE_SPECS, probe_by_shot=probe, manifest_items=_MANIFEST,
+        play_res=(1080, 1920),
     )
 
     assert len(calls) == 1
@@ -146,6 +151,7 @@ def test_engine_not_ok_raises_before_any_ffmpeg_work(monkeypatch):
     with pytest.raises(engine.AsrEngineError, match="缺模型文件"):
         episode.prepare_episode_subtitles(
             conn, episode_id="e", piece_specs=_PIECE_SPECS, probe_by_shot=_PROBE, manifest_items=_MANIFEST,
+            play_res=(1080, 1920),
         )
 
 
@@ -217,3 +223,38 @@ def test_srt_sidecar_url_none_when_sha_mismatch(tmp_path, monkeypatch):
     assert episode.srt_sidecar_url(final_path, {"subtitles": {"enabled": True, "srt_sha256": "not-the-real-hash"}}) is None
     assert episode.srt_sidecar_url(final_path, {"subtitles": {"enabled": False}}) is None
     assert episode.srt_sidecar_url(final_path, None) is None
+
+
+def _line_alignment(utterance_id: str, *, status: str = "aligned") -> align.LineAlignment:
+    return align.LineAlignment(
+        utterance_id=utterance_id, text="占位台词", status=status, match_ratio=1.0,
+        matched_chars=4, exact_chars=4, total_chars=4, char_times=(),
+        start_s=0.0, end_s=1.0, reason="", speaker="", delivery_kind="spoken_dialogue",
+    )
+
+
+def test_aligned_line_with_zero_produced_cue_is_flagged_in_report():
+    """安全网：对齐算法判定 aligned/partial 的行，如果渲染阶段（比如与相邻台词
+    时间重叠被 ``cues._resolve_overlaps`` 完全裁掉）一条真实 cue 都没落地，报告
+    必须把它标记出来——不能让 status=aligned 掩盖「用户实际看不到这句字幕」的
+    事实。覆盖 align.py 那次 double-claim bug 之外，任何未来仍可能导致 cue 被
+    裁没的路径。"""
+    kept = _line_alignment("U01")
+    dropped = _line_alignment("U02")
+    alignment = align.ShotAlignment(lines=(kept, dropped), extra_speech=(), asr_text="")
+    only_cue = cues.Cue(shot_no=1, utterance_id="U01", text="占位台词", start_s=0.0, end_s=1.0)
+    shot_plan = episode.ShotSubtitlePlan(shot_no=1, version_id="v1", cues=(only_cue,), alignment=alignment, cache_hit=False)
+    plan = episode.EpisodeSubtitlePlan(
+        shots={1: shot_plan}, style=SubtitleStyle(font_family="X"), fonts_dir=Path("/tmp"),
+        engine_id="e", model_id="m", asr_elapsed_s=0.0, asr_shots=0, cache_hits=0,
+    )
+
+    report = episode.report_section(plan, artifacts=None)
+
+    assert report["lines_aligned"] == 2  # 对齐算法本身的判定不受影响
+    dropped_entries = [m for m in report["missing"] if m["utterance_id"] == "U02"]
+    assert len(dropped_entries) == 1
+    assert dropped_entries[0]["reason"] == "cue_dropped_by_overlap"
+    assert dropped_entries[0]["status"] == "missing"
+    # U01 正常出了 cue，不应该被误标。
+    assert all(m["utterance_id"] != "U01" for m in report["missing"])

@@ -2733,6 +2733,53 @@ async def test_generate_calls_model_once_per_segment_strictly_sequential(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_generate_transition_upgrades_to_scene_change_via_resource_scenes(monkeypatch):
+    """2026-09-28：小说体原文没有【段｜地点｜时段】结构标记，段头判据判不出换
+    场（两段原文都是普通句子），但模型各自登记的 resources.scenes 的
+    scene_id 不同——这是相邻两段场景其实变了的真实信号，最终落库的
+    transition_from_previous 必须从默认的「硬切」升级为换场默认值「叠化」
+    （screenplay_markers.transition_with_resource_bypass 与既有文本判据取
+    「或」）。"""
+    import app.production.storyboard_pack as storyboard_pack_module
+    from app.production.screenplay_markers import SAME_SCENE_TRANSITION, SCENE_CHANGE_TRANSITION
+
+    async def fake_chat_structured(messages, **kwargs):
+        payload = json.loads(messages[1]["content"])
+        segment_no = payload["segment_no"]
+        scene_id = "scn_room" if segment_no == 1 else "scn_street"  # 两段场景不同
+        return _segment_draft(
+            f"提示词-段{segment_no}",
+            camera_digest=_AiCameraDigest(),
+        ).model_copy(update={"resources": _AiSegmentResources(scenes=[{"scene_id": scene_id}])})
+
+    monkeypatch.setattr(storyboard_pack_module.model_gateway, "chat_structured", fake_chat_structured)
+    monkeypatch.setattr(storyboard_pack_module, "_ensure_segment_prompt_budget", lambda: None)
+
+    beat_draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="她走出了房间", segment_indexes=[1])],
+        segments=[
+            _AiSegmentPlan(segment_no=index, synopsis=f"段{index}", source_segment_indexes=[1], beat_ids=["B1"])
+            for index in range(1, 3)
+        ],
+    )
+    source = [SourceSegment(segment_id="s1", text="她站在窗边，没有任何结构标记。", start_offset=0, end_offset=14)]
+
+    result = await _generate_all_segment_prompts(
+        episode_id="ep-resource-scene-change",
+        episode_no=1,
+        beat_draft=beat_draft,
+        segments=source,
+        payload={},
+        target_video_model="hiagent",
+        bible=None, conn=None, project_id="", aspect_ratio="9:16",
+        required_dialogue_by_segment_no={},
+    )
+
+    assert result[1].camera_digest.transition_from_previous == SAME_SCENE_TRANSITION  # 第一段没有「上一段」
+    assert result[2].camera_digest.transition_from_previous == SCENE_CHANGE_TRANSITION
+
+
+@pytest.mark.asyncio
 async def test_generate_camera_digest_window_excludes_segments_outside_window(monkeypatch):
     """镜头语言清单只带最近 CAMERA_DIGEST_WINDOW 段，不是全集累积清单。"""
     import app.production.storyboard_pack as storyboard_pack_module

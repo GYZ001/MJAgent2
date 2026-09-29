@@ -109,9 +109,31 @@ def _head(text: str, chars: int = 120) -> str:
     return (text or "")[:chars]
 
 
+def scene_changed_by_resource_scenes(previous_scene_ids: set[str], current_scene_ids: set[str]) -> bool:
+    """相邻两段各自 ``resources.scenes`` 的 ``scene_id`` 集合是否不同——小说体原文没有
+    【段｜地点｜时段】结构标记，``scene_changed`` 的段头判据永远判不出换场，这是它的旁路信号：
+    判据仍然是数据（模型为每段登记的场景引用），不是剧情关键词表。两边都非空且不同才算换场：
+    任一侧为空只代表这段没有可信场景信息，不是「没有变化」，不能拿缺失数据伪造「同场」的结论。
+    """
+    return bool(previous_scene_ids) and bool(current_scene_ids) and previous_scene_ids != current_scene_ids
+
+
+def transition_with_resource_bypass(
+    text_based_transition: str, previous_scene_ids: set[str], current_scene_ids: set[str],
+) -> str:
+    """在 ``transition_between``/``segment_structure`` 的文本结构判据之外再取一次「或」：
+    文本判据判定为同场（``text_based_transition == SAME_SCENE_TRANSITION``）但
+    ``scene_changed_by_resource_scenes`` 认为场景其实变了，就把转场升级成换场默认值；
+    文本判据已经给出显式标记或结构化换场时原样返回，不覆盖——只补台，不替代既有判据。"""
+    if text_based_transition == SAME_SCENE_TRANSITION and scene_changed_by_resource_scenes(previous_scene_ids, current_scene_ids):
+        return SCENE_CHANGE_TRANSITION
+    return text_based_transition
+
+
 __all__ = [
     "SAME_SCENE_TRANSITION", "SCENE_CHANGE_TRANSITION", "explicit_transition_marker", "map_transition",
-    "parse_scene_header", "required_beats", "required_beat_spans", "scene_changed", "transition_between",
+    "parse_scene_header", "required_beats", "required_beat_spans", "scene_changed",
+    "scene_changed_by_resource_scenes", "transition_between", "transition_with_resource_bypass",
 ]
 
 

@@ -188,6 +188,7 @@ def _collect_jobs_and_cache(
         lines = shot_line_specs(row)
         cached_result = store.get_alignment(
             conn, shot_version_id=version_id, media_sha256=media_sha, model_id=model_id,
+            algo_version=align.ALGO_VERSION,
         )
         if cached_result is not None and cached_alignment_matches(cached_result, lines):
             cached[shot_no] = (cached_result, lines, version_id)
@@ -221,7 +222,7 @@ def _build_shot_plans(
             alignment = align.align_shot(lines, tokens, has_audio=has_audio)
             store.put_alignment(
                 shot_version_id=version_id, media_sha256=media_sha, engine_id=status.engine_id,
-                model_id=status.model_id, result=align.alignment_to_dict(alignment),
+                model_id=status.model_id, algo_version=align.ALGO_VERSION, result=align.alignment_to_dict(alignment),
             )
         else:
             continue
@@ -240,15 +241,16 @@ def _build_shot_plans(
 
 def prepare_episode_subtitles(
     conn: Any, *, episode_id: str, piece_specs: list[tuple[int, str, float]],
-    probe_by_shot: dict[int, dict], manifest_items: list[dict],
+    probe_by_shot: dict[int, dict], manifest_items: list[dict], play_res: tuple[int, int],
 ) -> EpisodeSubtitlePlan:
     """引擎不就绪直接抛 ``AsrEngineError``（在任何编码开始之前失败）；否则逐镜
-    走缓存或一次批量 ASR，返回整集字幕方案。"""
+    走缓存或一次批量 ASR，返回整集字幕方案。``play_res`` 必传——字幕底边距按
+    画幅换算（见 ``settings.style_from_settings``），没有默认值可用。"""
     status = engine.engine_status()
     if not status.ok:
         raise engine.AsrEngineError("字幕语音识别引擎不可用：" + "；".join(status.problems))
     font_path = _font_path()
-    style = settings.style_from_settings(font_family=font_family_from_file(font_path))
+    style = settings.style_from_settings(font_family=font_family_from_file(font_path), play_res=play_res)
     manifest_by_shot = {int(item["shot_no"]): item for item in manifest_items}
     shot_rows = _shot_rows_by_no(conn, episode_id)
     jobs, pending, cached = _collect_jobs_and_cache(
@@ -268,7 +270,7 @@ def prepare_episode_subtitles(
 
 def plan_or_none(
     conn: Any, *, episode_id: str, piece_specs: list[tuple[int, str, float]],
-    probe_by_shot: dict[int, dict], manifest_items: list[dict],
+    probe_by_shot: dict[int, dict], manifest_items: list[dict], play_res: tuple[int, int],
 ) -> EpisodeSubtitlePlan | None:
     """concat.py 专用封装：开关关闭返回 None；引擎/对齐失败转成用户可读 ValueError。"""
     if not settings.burn_in_enabled():
@@ -276,7 +278,7 @@ def plan_or_none(
     try:
         return prepare_episode_subtitles(
             conn, episode_id=episode_id, piece_specs=piece_specs,
-            probe_by_shot=probe_by_shot, manifest_items=manifest_items,
+            probe_by_shot=probe_by_shot, manifest_items=manifest_items, play_res=play_res,
         )
     except (engine.AsrEngineError, RuntimeError) as exc:
         raise ValueError(f"字幕嵌入未就绪：{exc}；上一版成片仍保留") from exc
@@ -355,43 +357,70 @@ def compose_artifacts(
 # ---------------------------------------------------------------------------
 
 
-def _line_report_entries(plan: EpisodeSubtitlePlan) -> tuple[list[dict], list[dict], list[dict], int]:
+def _cue_dropped_entry(shot_no: int, line: align.LineAlignment) -> dict:
+    """对齐算法判定 ``aligned``/``partial`` 的行，若渲染阶段一条真实 cue 都没
+    产出（多半是和相邻台词时间重叠，被 ``cues._resolve_overlaps`` 完全裁掉），
+    必须在报告里留痕——不能让「算法判定成功」掩盖「用户实际看不到这句字幕」
+    的事实（CLAUDE.md「挂产物信号，不挂状态字段」「缺失要有可见信号」）。"""
+    return {
+        "shot_no": shot_no, "utterance_id": line.utterance_id, "line": line.text,
+        "match_ratio": round(line.match_ratio, 3), "reason": "cue_dropped_by_overlap", "status": "missing",
+    }
+
+
+def _line_report_entries(plan: EpisodeSubtitlePlan) -> tuple[list[dict], list[dict], list[dict], int, int]:
+    """``missing[]`` 收三类「用户需要关注」的行：真正 0 命中的 ``missing``、
+    ``estimated``（完全未命中但按同镜头前后锚点估出了显示区间，见
+    ``app.subtitles.cues._estimated_window``），以及 ``aligned``/``partial`` 却
+    在渲染阶段被完全裁掉、一条 cue 都没落地的行（见 ``_cue_dropped_entry``）——
+    后者正常情况下不会发生，只是兜底信号，不代表 ``partial`` 本身有问题：
+    ``partial``（有真实命中、只是没达到 aligned 严格阈值）在正常出 cue 时不算
+    "需要用户处理的问题"，只进 ``lines[]`` 供完整审计。"""
     lines: list[dict] = []
     missing: list[dict] = []
     extra_speech: list[dict] = []
-    lines_aligned = 0
+    lines_aligned = lines_partial = 0
     for shot_no in sorted(plan.shots):
         shot = plan.shots[shot_no]
+        estimated_ids = {c.utterance_id for c in shot.cues if c.estimated}
+        produced_ids = {c.utterance_id for c in shot.cues}
         for line in shot.alignment.lines:
             entry = {
                 "shot_no": shot_no, "utterance_id": line.utterance_id, "status": line.status,
                 "match_ratio": round(line.match_ratio, 3), "start_s": line.start_s, "end_s": line.end_s,
             }
-            if line.status == "aligned":
-                lines_aligned += 1
+            if line.status in ("aligned", "partial"):
+                lines_aligned += line.status == "aligned"
+                lines_partial += line.status == "partial"
                 entry.update(
                     exact_chars=line.exact_chars, matched_chars=line.matched_chars, total_chars=line.total_chars,
                 )
+                if line.utterance_id not in produced_ids:
+                    missing.append(_cue_dropped_entry(shot_no, line))
             else:
                 missing.append({
                     "shot_no": shot_no, "utterance_id": line.utterance_id, "line": line.text,
                     "match_ratio": round(line.match_ratio, 3), "reason": line.reason,
+                    "status": "estimated" if line.utterance_id in estimated_ids else "missing",
                 })
             lines.append(entry)
         extra_speech.extend(
             {"shot_no": shot_no, "text": e.text, "start_s": e.start_s, "end_s": e.end_s}
             for e in shot.alignment.extra_speech
         )
-    return lines, missing, extra_speech, lines_aligned
+    return lines, missing, extra_speech, lines_aligned, lines_partial
 
 
 def report_section(plan: EpisodeSubtitlePlan | None, artifacts: EpisodeSubtitleArtifacts | None) -> dict[str, Any]:
     """关闭时只写 ``{"enabled": false}``，见 ``episode.edit-report.json`` 契约。"""
     if plan is None:
         return {"enabled": False}
-    lines, missing, extra_speech, lines_aligned = _line_report_entries(plan)
+    lines, missing, extra_speech, lines_aligned, lines_partial = _line_report_entries(plan)
     cues_timeline = [
-        {"shot_no": c.shot_no, "utterance_id": c.utterance_id, "text": c.text, "start_s": c.start_s, "end_s": c.end_s}
+        {
+            "shot_no": c.shot_no, "utterance_id": c.utterance_id, "text": c.text,
+            "start_s": c.start_s, "end_s": c.end_s, "estimated": c.estimated,
+        }
         for c in (artifacts.cues if artifacts else ())
     ]
     ass_text = artifacts.ass_text if artifacts else ""
@@ -399,7 +428,8 @@ def report_section(plan: EpisodeSubtitlePlan | None, artifacts: EpisodeSubtitleA
     return {
         "enabled": True, "engine_id": plan.engine_id, "model_id": plan.model_id,
         "font_family": plan.style.font_family,
-        "lines_total": len(lines), "lines_aligned": lines_aligned, "lines_missing": len(missing),
+        "lines_total": len(lines), "lines_aligned": lines_aligned, "lines_partial": lines_partial,
+        "lines_missing": len(missing),
         "cues": len(cues_timeline),
         "missing": missing, "extra_speech": extra_speech, "lines": lines, "cues_timeline": cues_timeline,
         "ass_text": ass_text, "ass_sha256": hashlib.sha256(ass_text.encode("utf-8")).hexdigest(),

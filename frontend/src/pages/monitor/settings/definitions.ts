@@ -178,7 +178,7 @@ export const SETTING_FIELD_IMPACTS: Record<string, string> = {
   error_log_retention_days: "错误记录可用于排障的保留天数",
   subtitle_burn_in_enabled: "成片合成时是否把台词按语音对齐结果烧进画面并生成 .srt/.ass",
   subtitle_font_size: "字幕字号（1080 宽竖屏下的像素值）",
-  subtitle_margin_bottom: "字幕距画面底部的像素距离，用于避开短视频平台底部 UI",
+  subtitle_margin_bottom: "字幕距画面底部的像素距离，用于避开短视频平台底部 UI（仅竖屏生效；横屏改按画面高度的 7% 自动换算，不读这个值）",
   subtitle_max_chars_per_line: "字幕每行最多字数，超出按标点折行或按时间拆条",
   subtitle_show_speaker: "字幕前是否加说话人前缀",
   storyboard_workspace_safe_readonly: "紧急情况下把分镜台切换为只读",
