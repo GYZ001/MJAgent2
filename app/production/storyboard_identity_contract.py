@@ -54,12 +54,36 @@ def _backfill_portrait_binding(entry: dict, manifest_entry: dict, result: dict, 
     result["degraded_capabilities"] = existing
 
 
+#: ``_backfill_scene_reference_binding`` 与 ``_backfill_portrait_binding`` 同一防线
+#: 的场景侧版本，但绑定关系本身不同：场景绑定纯是确定性 DB 查找结果，没有
+#: 需要保留的"作者意图"（不像 portrait_id 那样"模型已经填了就不动"），manifest
+#: 这份场景条目在 ``_enrich_asset_manifest_canonical_visuals``（见
+#: app.production.storyboard_scene_binding）里已经按当前集号重新解析到「此刻
+#: 生效」的行，是唯一权威来源，因此这里无条件覆盖，不是只在缺失时才补。
+def _backfill_scene_reference_binding(entry: dict, manifest_entry: dict) -> None:
+    """本段草稿这条场景的 ``scene_reference_id`` 统一改写为 manifest 当前值。
+
+    真实回归（proj_ca86b15ab7d7 EP1）：模型这段看到的 ``relevant_assets.scenes``
+    是按本段 ``source_segment_indexes`` 过滤过的子集（``storyboard_pack.
+    _segment_relevant_assets`` 的 ``_hits``），过滤有缺口时模型看不到这个场景，
+    草稿字段可能留空或带着上一轮生成时的旧值；manifest 是全量、已重新解析过
+    的权威数据，这里把它写回段落持久化。幂等：manifest 值不变时重复调用结果
+    不变。
+    """
+    entry["scene_reference_id"] = manifest_entry.get("scene_reference_id")
+
+
 def canonical_segment_identities(segment: dict, payload: dict) -> dict:
     """只按已确认映射正名；不改写语义，不猜未知人物，不产生事务副作用。"""
     result = deepcopy(segment)
     manifest = payload.get("asset_manifest") or {}
     entries = {str(c["identity_id"]): c for c in manifest.get("characters") or []}
     extras = {str(e["visual_entity_id"]): e for e in manifest.get("functional_extras") or [] if e.get("visual_entity_id")}
+    scenes = {str(s.get("scene_id") or ""): s for s in manifest.get("scenes") or []}
+    for scene_entry in (result.get("resources") or {}).get("scenes") or []:
+        manifest_scene = scenes.get(str(scene_entry.get("scene_id") or ""))
+        if manifest_scene is not None:
+            _backfill_scene_reference_binding(scene_entry, manifest_scene)
     normalized = []
     aliases = {}
     for entry in (result.get("resources") or {}).get("characters") or []:

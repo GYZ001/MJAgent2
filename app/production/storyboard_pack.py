@@ -66,7 +66,7 @@ from app.schemas.segment_identity import (
     SegmentDialogue as _AiDialogueLine, SegmentCharacter as _AiResourceCharacter,
 )
 from app.production.storyboard_pack_montage import fill_montage_beat_time_anchors
-from app.production.storyboard_prop_assets import enrich_prop_manifest_entries
+from app.production.storyboard_scene_binding import _enrich_asset_manifest_canonical_visuals
 from app.production.storyboard_staging_repeat import StagingSoftGate, canonical_phrases, chain_prompt_texts, repeated_staging_errors, staging_continuation_rule
 from app.production.storyboard_dialects import (
     MINIMAX_H3_DIALECT_INSTRUCTIONS,  # noqa: F401 -- 重新导出，测试按旧路径 import
@@ -605,90 +605,10 @@ def _strip_paratext_from_beat_draft(
     return notes
 
 
-# ---------------------------------------------------------------------------
-# 世界书标准外观/场景锚点接入（问题一修复，真实 EP1 回归：孟浩换了三套
-# 衣服——asset_manifest 只写身份字段，模型只能现推外观；世界书的标准外观/
-# 场景锚点一直都在，只是没被送给模型）。
-# ---------------------------------------------------------------------------
-
-_NO_CANONICAL_APPEARANCE_NOTE = (
-    "素材库没有为这个角色建立标准外观定妆照（群演/一次性人物，没有定妆照）："
-    "由你在本集第一次出现这个角色时自行确定其外观特征（年龄体型、发型头饰、"
-    "服装颜色材质、随身物等可视信息），并在本集所有涉及这个角色的段落里原样"
-    "沿用同一套自定特征，不得每段重新编写。"
-)
-
-_NO_CANONICAL_SCENE_NOTE = (
-    "素材库没有为这个场景建立标准场景描述：由你在本集第一次出现这个场景时"
-    "自行确定其可视特征（空间格局、主要陈设、光线氛围等），并在本集所有涉及"
-    "这个场景的段落里原样沿用同一套自定特征，不得每段重新编写。"
-)
-
-
-def _character_canonical_appearance(
-    conn, portrait_id: str | None, *, bible_appearance: str | None = None,
-) -> str | None:
-    """这个已解析 portrait_id 对应的世界书标准外观锚点串；查不到（含出图已
-    解耦到后台、portrait_id 本就为空）时回退 ``bible_appearance``——世界书
-    ``Character.appearance_canonical`` 本来就是外观权威，不是 character_
-    portraits 行的附属产物。
-    """
-    if portrait_id:
-        row = conn.execute(
-            "SELECT appearance FROM character_portraits WHERE id=?", (portrait_id,),
-        ).fetchone()
-        if row is not None:
-            appearance = str(row["appearance"] or "").strip()
-            if appearance:
-                return appearance
-    return bible_appearance
-
-
-def _scene_canonical_description(
-    conn, scene_reference_id: str | None, *, bible_scene_canonical: str | None = None,
-) -> str | None:
-    """场景侧同构（见 ``_character_canonical_appearance``）：查不到时回退
-    ``bible_scene_canonical``（世界书 ``Scene.scene_canonical``）。
-    """
-    if scene_reference_id:
-        row = conn.execute(
-            "SELECT scene_canonical FROM scene_references WHERE id=?", (scene_reference_id,),
-        ).fetchone()
-        if row is not None:
-            canonical = str(row["scene_canonical"] or "").strip()
-            if canonical:
-                return canonical
-    return bible_scene_canonical
-
-
-def _enrich_asset_manifest_canonical_visuals(
-    conn, payload: dict[str, Any], *, bible: Bible | None = None, project_id: str | None = None,
-) -> None:
-    """原地把世界书标准外观/场景锚点补进 ``payload["asset_manifest"]``。
-
-    在 ``_generate_beat_sheet``/``_generate_all_segment_prompts`` 之前调用一次。
-    ``bible`` 非空时兜底取世界书原始锚点——出图已解耦到后台，卡在人物谱/场景库
-    但还没出图的资产查不到 character_portraits/scene_references 行，不该被读成
-    "没有任何外观信息"。``functional_extras``（群演）没有 portrait_id，天生没有
-    标准外观，这里显式写一条说明而不是留空，避免被模型读成"无信息"而各段各编。
-    """
-    bible_appearance = {c.name: c.appearance_canonical for c in (bible.characters if bible else [])}
-    bible_scenes = {s.name: s.scene_canonical for s in (bible.scenes if bible else [])}
-    manifest = payload.get("asset_manifest") or {}
-    for character in manifest.get("characters") or []:
-        character["appearance"] = _character_canonical_appearance(
-            conn, character.get("portrait_id"),
-            bible_appearance=bible_appearance.get(str(character.get("display_name") or "")),
-        ) or _NO_CANONICAL_APPEARANCE_NOTE
-    for extra in manifest.get("functional_extras") or []:
-        extra["appearance"] = _NO_CANONICAL_APPEARANCE_NOTE
-    for scene in manifest.get("scenes") or []:
-        scene["scene_canonical"] = _scene_canonical_description(
-            conn, scene.get("scene_reference_id"),
-            bible_scene_canonical=bible_scenes.get(str(scene.get("display_name") or "")),
-        ) or _NO_CANONICAL_SCENE_NOTE
-        reverse_segment_views.annotate_manifest_scene(conn, scene, project_id=project_id, episode_no=payload.get("episode_no"))
-    enrich_prop_manifest_entries(conn, manifest, bible=bible, project_id=project_id, episode_no=payload.get("episode_no"))
+# 世界书标准外观/场景锚点接入 + 场景当前生效行重绑定（问题一修复，真实 EP1/
+# proj_ca86b15ab7d7 两次回归）：见 app.production.storyboard_scene_binding
+# 模块 docstring（本文件 line_count 基线零余量，新逻辑拆到那边，这里只保留
+# 调用点 ``_enrich_asset_manifest_canonical_visuals``，随 import 一并可用）。
 
 
 # ---------------------------------------------------------------------------
@@ -846,8 +766,11 @@ def _validate_segment_draft(
 def _speaker_absent_advisory(
     index: int, line: _AiDialogueLine, segment_character_ids: set[str],
 ) -> str | None:
-    """delivery 感知的说话人在场提示文案：画外音不要求在场，改说「未列入」。"""
-    if line.speaker_identity_id in segment_character_ids:
+    """delivery 感知的说话人在场提示文案：画外音不要求在场，改说「未列入」；
+    delivery_kind=narration（旁白，见 app.schemas.segment_identity.DeliveryKind）
+    不是场景里的人物，在场检查天生不适用，直接豁免——不按"旁白"这个名字猜。
+    """
+    if line.speaker_identity_id in segment_character_ids or line.delivery_kind == "narration":
         return None
     head = f"[STORYBOARD_PACK_DIALOGUE_SPEAKER_ABSENT][未拦截] dialogue[{index}] "
     if line.delivery == "offscreen_voice":

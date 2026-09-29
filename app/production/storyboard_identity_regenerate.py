@@ -9,8 +9,8 @@ from app.project_settings import enhance_music_bed_enabled, resolve_aspect_ratio
 from app.production.storyboard_pack import (
     _AiBeatSheetDraft, _AiStoryboardSegmentDraft, _generate_all_segment_prompts,
     _load_indexed_source_segments, _manifest_speaker_names, _paratext_segment_indexes,
-    _enrich_asset_manifest_canonical_visuals,
 )
+from app.production.storyboard_scene_binding import _enrich_asset_manifest_canonical_visuals
 
 
 def refreshed_required_dialogue(stored: dict, quotes: list) -> list[dict]:
