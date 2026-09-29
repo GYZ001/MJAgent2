@@ -46,8 +46,10 @@ from typing import Any
 
 from app import textmatch
 from app.production import storyboard_beat_foreshadowing as _beat_foreshadowing
+from app.production import storyboard_prop_entrance as _prop_entrance
 from app.production import storyboard_short_drama as _short_drama
 from app.production import storyboard_short_drama_budget as _short_drama_budget
+from app.production import storyboard_wardrobe_plan as _wardrobe_plan
 from app.production import storyboard_short_drama_hooks as _short_drama_hooks
 from app.production.screenplay_markers import beat_is_shot
 from app.production.storyboard_dialogue_ledger import DialogueQuote
@@ -308,14 +310,17 @@ def segment_advisories(turns_here: list[Any], prompt_text: str) -> list[str]:
 
 def assemble_adaptation_summary(
     *, adaptation_mode: str, planned_segment_count: int, beat_draft: Any, dialogue_quotes: list[DialogueQuote],
-    projected_segment_count: int | None, drop_review: Any, segments: list[SourceSegment],
+    projected_segment_count: int | None, drop_review: Any, segments: list[SourceSegment], payload: dict[str, Any],
 ) -> dict[str, Any]:
     """adaptation 留档字典组装，从 ``storyboard_pack.generate_storyboard_pack``
     抽出腾 function_lines（该函数已顶 baseline 153）；hooks 见 ``storyboard_
     short_drama_hooks.hook_summary``（按最终 beat_draft 事后重算，忠实档恒
     None）。``causality``/``foreshadowing`` 两个新 summary（2026-09-27）对
     忠实档/短剧档一视同仁地计算，不像 ``hooks`` 那样忠实档返回 None——这正是
-    覆盖忠实档的落点。"""
+    覆盖忠实档的落点。``wardrobe_plan``/``prop_entrances``（2026-09-29，P0-D）
+    同一哲学，见 ``storyboard_wardrobe_plan``/``storyboard_prop_entrance``
+    模块 docstring；``payload`` 只为它们核验 identity_id 用，其余 summary
+    不需要。"""
     return {
         **_short_drama.adaptation_summary(
             adaptation_mode=adaptation_mode, planned_segment_count=planned_segment_count, segment_count=len(beat_draft.segments),
@@ -326,4 +331,6 @@ def assemble_adaptation_summary(
         "hooks": _short_drama_hooks.hook_summary(beat_draft, segments, adaptation_mode=adaptation_mode),
         "causality": causality_summary(beat_draft, segments),
         "foreshadowing": _beat_foreshadowing.foreshadowing_summary(beat_draft, segments),
+        "wardrobe_plan": _wardrobe_plan.wardrobe_plan_summary(beat_draft, payload),
+        "prop_entrances": _prop_entrance.prop_entrance_summary(beat_draft),
     }

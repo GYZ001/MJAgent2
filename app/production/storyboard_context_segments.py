@@ -43,7 +43,7 @@ def context_segment_rule(context_indexes: set[int]) -> str | None:
 def manifest_brief_for_prompt(payload: dict[str, Any]) -> dict[str, Any]:
     """Compact asset_manifest summary handed to the model as light context.
 
-    Only names/ids/segment_indexes -- not portrait binaries or provenance --
+    Only names/ids/segment_indexes/appearance -- not portrait binaries or provenance --
     so phase 1 (which only needs to recognize named entities while drafting
     the beat sheet) doesn't pay for the full manifest payload twice. 从
     ``storyboard_beat_sheet.py`` 搬来（2026-09-27，给该文件腾行数余量——它
@@ -57,6 +57,9 @@ def manifest_brief_for_prompt(payload: dict[str, Any]) -> dict[str, Any]:
                 "display_name": c.get("display_name"),
                 "aliases": c.get("aliases") or [],
                 "segment_indexes": c.get("segment_indexes") or [],
+                # 全集服装表（storyboard_wardrobe_plan）的首次着装要沿用外观锚点里的服装，
+                # 锚点由 _enrich_asset_manifest_canonical_visuals 在阶段一之前补进 manifest。
+                "appearance": c.get("appearance") or "",
             }
             for c in (manifest.get("characters") or [])
         ],

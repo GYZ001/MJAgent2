@@ -30,6 +30,13 @@ def refreshed_required_dialogue(stored: dict, quotes: list) -> list[dict]:
 
 
 def _existing_plan(stored: list[dict]) -> _AiBeatSheetDraft:
+    """已知限制（2026-09-29，P0-D）：``wardrobe_plan``/``prop_entrances``
+    （全集服装表/道具入场计划，见 ``app.production.storyboard_wardrobe_plan``/
+    ``storyboard_prop_entrance``）不落库在每段的 ``storyboard_pack_segment``
+    里，这里重建不出来——``_AiBeatSheetDraft`` 的两个字段默认空列表兼容旧存量
+    行，验证仍然通过，只是单段身份重生成这条路径不会带上计划驱动的着装/道具
+    入场规则文本（不影响其余规则）。要接上需要先把整份计划持久化到集级产物，
+    不在本次改动范围内，不在这里发明一种新的存储方式顶替。"""
     beats = {}
     plans = []
     for segment in stored:

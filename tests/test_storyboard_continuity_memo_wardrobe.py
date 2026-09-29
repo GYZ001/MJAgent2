@@ -201,3 +201,19 @@ def test_empty_prompt_or_no_characters_is_left_untouched():
     no_characters = _draft("镜头1：空镜。", characters=[], resource_characters=[])
     ensure_wardrobe_continuity_in_prompt(no_characters, prop_factory=_FakeProp)
     assert no_characters.prompt_text == "镜头1：空镜。"
+
+
+def test_planned_change_at_segment_start_is_not_overwritten_by_previous_look():
+    """P0-D（2026-09-29，app.production.storyboard_wardrobe_plan）：全集服装表
+    在本段开场就安排换装时，模型按注入的规则把 continuity_memo.characters[].
+    wardrobe 写成新造型——本函数不接收 previous_memo，只读本段 continuity_memo
+    自己上报的值，没有任何路径能把它拉回上一段的旧造型（例如上一段还是「米白色
+    针织开衫」，本段计划要求换成围巾）。"""
+    draft = _draft(
+        "镜头1：温念走进屋内，顾屿跟在她身后。",
+        characters=[_AiCharacterState(identity_id="bible:温念", wardrobe="颈间绕着深灰色围巾")],
+        resource_characters=[_visible("bible:温念", "温念")],
+    )
+    assert ensure_wardrobe_continuity_in_prompt(draft, prop_factory=_FakeProp) == []
+    assert draft.prompt_text.endswith("续接服装：@温念 颈间绕着深灰色围巾。")
+    assert "米白色针织开衫" not in draft.prompt_text

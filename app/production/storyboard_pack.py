@@ -106,7 +106,7 @@ from app.production.storyboard_narrative_arc import (
     phase2_segment_rules,
     segment_narrative_arc_payload_fields,
 )
-from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_beats as _action_beats, storyboard_cast_lock as _cast_lock, storyboard_shot_mandates as _shot_mandates, storyboard_music_bed as _music_bed
+from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_beats as _action_beats, storyboard_cast_lock as _cast_lock, storyboard_shot_mandates as _shot_mandates, storyboard_music_bed as _music_bed, storyboard_prop_entrance as _prop_entrance, storyboard_wardrobe_plan as _wardrobe_plan
 from app.visual_styles import current_visual_style_prompt
 from app.production.storyboard_segment_ranges import (
     _PARATEXT_PLACEHOLDER_TEXT,
@@ -785,7 +785,7 @@ def _segment_content_advisories(
     manifest: dict[str, Any] | None,
     segment_relevant_scene_ids: set[str] = frozenset(),
     emotional_turns_here: list[Any],
-    foreshadowing_here: list[Any],
+    foreshadowing_here: list[Any], prop_entrances_here: list[Any],
 ) -> list[str]:
     """Non-blocking content checks: computed every time, never gate generation.
 
@@ -860,8 +860,7 @@ def _segment_content_advisories(
         continuity_memo_character_advisories(draft.continuity_memo, segment_character_ids)
     )
     # P0-A/C（2026-09-27）：情绪转折/伏笔"是否真的被写成画面"，同一套 advisory 哲学。
-    advisories.extend(_beat_causality.segment_advisories(list(emotional_turns_here), draft.prompt_text))
-    advisories.extend(_beat_foreshadowing.segment_advisories(list(foreshadowing_here), draft.prompt_text))
+    advisories.extend([*_beat_causality.segment_advisories(list(emotional_turns_here), draft.prompt_text), *_beat_foreshadowing.segment_advisories(list(foreshadowing_here), draft.prompt_text), *_prop_entrance.segment_advisories(list(prop_entrances_here), draft.prompt_text)])
     return advisories
 
 
@@ -965,8 +964,8 @@ async def _generate_all_segment_prompts(
     # 2.4.0：截至当前段已交付的 (segment_no, speaker_identity_id, line)，用于
     # 跨段台词去重（真实故障见 STORYBOARD_PACK_VERSION 2.4.0 changelog）。
     delivered_lines: list[tuple[int, str, str]] = []
-    # P0-A/C（2026-09-27）：情绪转折/伏笔提名按 beat_id 只认领一次，见 moments_for_segment。
-    covered_turn_ids, covered_signal_ids = set(), set()
+    # P0-A/C（2026-09-27）：情绪转折/伏笔提名按 beat_id 只认领一次，见 moments_for_segment；P0-D（2026-09-29）全集服装表/道具入场同一套机制。
+    covered_turn_ids, covered_signal_ids, covered_prop_ids, wardrobe_state, props_plan = set(), set(), set(), _wardrobe_plan.build_wardrobe_state(beat_draft.wardrobe_plan, payload, set(beats_by_id)), _prop_entrance.valid_prop_entrances(beat_draft.prop_entrances, set(beats_by_id))
     for plan in beat_draft.segments:
         _ensure_segment_prompt_budget()
         relevant_assets = _segment_relevant_assets(payload, plan.source_segment_indexes)
@@ -976,8 +975,7 @@ async def _generate_all_segment_prompts(
             by_segment_no[plan.segment_no] = draft
             camera_digest_by_segment_no[plan.segment_no] = draft.camera_digest
             delivered_lines.extend((plan.segment_no, line.speaker_identity_id, line.line) for line in draft.dialogue)
-            _beat_causality.moments_for_segment(plan.beat_ids, beat_draft.emotional_turns, covered_turn_ids)
-            _beat_foreshadowing.moments_for_segment(plan.beat_ids, beat_draft.foreshadowing_beats, covered_signal_ids)
+            (_beat_causality.moments_for_segment(plan.beat_ids, beat_draft.emotional_turns, covered_turn_ids), _beat_foreshadowing.moments_for_segment(plan.beat_ids, beat_draft.foreshadowing_beats, covered_signal_ids), wardrobe_state.advance(plan.beat_ids), _prop_entrance.moments_for_segment(plan.beat_ids, props_plan, covered_prop_ids))
             continue
         previous_draft = by_segment_no.get(plan.segment_no - 1)
         previous_segment_no = plan.segment_no - 1 if previous_draft is not None else None
@@ -1015,6 +1013,7 @@ async def _generate_all_segment_prompts(
                 already_delivered_dialogue_rule(delivered_lines, reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no)),
                 *_beat_causality.segment_rule_text(turns_here, plan.beat_ids),
                 *_beat_foreshadowing.segment_rule_text(signals_here, plan.beat_ids),
+                *_wardrobe_plan.segment_rule_text(*wardrobe_state.advance(plan.beat_ids), payload, relevant_assets["characters"]), *_prop_entrance.segment_rule_text(_prop_entrance.moments_for_segment(plan.beat_ids, props_plan, covered_prop_ids)),
             ],
             **segment_narrative_arc_payload_fields(
                 segment_no=plan.segment_no,
@@ -1105,7 +1104,7 @@ async def _generate_all_segment_prompts(
     result: dict[int, _AiStoryboardSegmentDraft] = {}
     # P0-A/C：阶段二覆盖 advisory 独立重算一遍"谁先认领"，不复用循环 1 的累加器
     # （循环 1 结束时已"全部认领完毕"）。
-    covered_turn_ids2, covered_signal_ids2 = set(), set()
+    covered_turn_ids2, covered_signal_ids2, covered_prop_ids2 = set(), set(), set()
     for plan in beat_draft.segments:
         draft = by_segment_no[plan.segment_no]
         relevant_scene_ids = {str(s.get("scene_id") or "") for s in relevant_assets_by_segment_no[plan.segment_no]["scenes"]}
@@ -1114,11 +1113,11 @@ async def _generate_all_segment_prompts(
             segment={"resources": draft.resources.model_dump(mode="json")}, conn=conn, bible=bible,
         ) if conn is not None and bible is not None else None
         turns_here2 = _beat_causality.advisory_moments(plan.beat_ids, beat_draft.emotional_turns, covered_turn_ids2)
-        signals_here2 = _beat_foreshadowing.moments_for_segment(plan.beat_ids, beat_draft.foreshadowing_beats, covered_signal_ids2)
+        signals_here2, props_here2 = _beat_foreshadowing.moments_for_segment(plan.beat_ids, beat_draft.foreshadowing_beats, covered_signal_ids2), _prop_entrance.moments_for_segment(plan.beat_ids, props_plan, covered_prop_ids2)
         advisories = _segment_content_advisories(
             draft, source_segment_indexes=plan.source_segment_indexes,
             segment_relevant_scene_ids=relevant_scene_ids, manifest=manifest,
-            emotional_turns_here=turns_here2, foreshadowing_here=signals_here2,
+            emotional_turns_here=turns_here2, foreshadowing_here=signals_here2, prop_entrances_here=props_here2,
         )
         if advisories:
             draft.degraded_capabilities = [*draft.degraded_capabilities, *advisories]
@@ -1362,7 +1361,7 @@ async def generate_storyboard_pack(
         ),
         adaptation=_assemble_adaptation_summary(
             adaptation_mode=adaptation_mode, planned_segment_count=planned_segment_count, beat_draft=beat_draft,
-            dialogue_quotes=dialogue_quotes, projected_segment_count=projected_segment_count, drop_review=drop_review, segments=segments,
+            dialogue_quotes=dialogue_quotes, projected_segment_count=projected_segment_count, drop_review=drop_review, segments=segments, payload=payload,
         ),
     )
 

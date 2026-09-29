@@ -94,6 +94,28 @@ class _AiForeshadowingBeat(BaseModel):
     evidence_quote: str = Field(min_length=1)
 
 
+class _AiWardrobeState(BaseModel):
+    """全集服装表条目提名（P0-D，2026-09-29，真实回归见
+    ``app.production.storyboard_wardrobe_plan`` 模块 docstring）。忠实档/
+    短剧档共用。一个人物在全集里有几次换装就有几条记录，第一条是这个人物
+    第一次出场时的着装。核验/按段拆解见
+    ``app.production.storyboard_wardrobe_plan``。"""
+
+    identity_id: str = Field(min_length=1)
+    beat_id: str = Field(min_length=1)
+    wardrobe: str = Field(min_length=1)
+    change_reason: str = Field(min_length=1)
+
+
+class _AiPropEntrance(BaseModel):
+    """道具入场计划提名（P0-D，2026-09-29）。忠实档/短剧档共用。核验/按段
+    拆解见 ``app.production.storyboard_prop_entrance``。"""
+
+    label: str = Field(min_length=1)
+    beat_id: str = Field(min_length=1)
+    entrance_description: str = Field(min_length=1)
+
+
 class _AiBeatSheetDraft(BaseModel):
     beat_sheet: list[_AiBeat] = Field(min_length=1)
     segments: list[_AiSegmentPlan] = Field(min_length=1)
@@ -105,6 +127,11 @@ class _AiBeatSheetDraft(BaseModel):
     #: 几个，也可能确实一个都没有（见各自模块的三态 summary）。
     emotional_turns: list[_AiEmotionalTurn] = Field(default_factory=list)
     foreshadowing_beats: list[_AiForeshadowingBeat] = Field(default_factory=list)
+    #: 2026-09-29（P0-D）：全集服装表/道具入场计划，默认空列表兼容旧存量
+    #: beat_draft（``storyboard_identity_regenerate._existing_plan`` 重建时
+    #: 不产出这两个字段，见该模块调用点）。
+    wardrobe_plan: list[_AiWardrobeState] = Field(default_factory=list)
+    prop_entrances: list[_AiPropEntrance] = Field(default_factory=list)
 
 
 #: 固定 15 秒/段，不引入分档（用户 09-03 已拍板保留原设计）；短剧档段数目标由

@@ -38,7 +38,12 @@ from app.source_excerpt import SourceSegment
 # task_payload（含 output_schema）逐字节改变是预期之内的——这条正是覆盖忠实档
 # 的落点，不是意外漂移。新值用本文件同一份夹具+同一个 _generate_beat_sheet
 # 实测得到，不是手算。
-_EXPECTED_FAITHFUL_FINGERPRINT = "5adbdf9452c5c2435b11a273"
+# 2026-09-29（P0-D 全集服装表/道具入场计划）再次实测更新：忠实档新增两条阶段一
+# rules（wardrobe_plan_beat_sheet_rules/prop_entrance_beat_sheet_rules）+
+# _AiBeatSheetDraft 基类新增 wardrobe_plan/prop_entrances 两个字段，同一份
+# "覆盖忠实档的落点"逻辑——新值同样用本文件夹具实测得到；随后 known_assets.characters
+# 补进 appearance（服装表首次着装要读外观锚点），指纹再更新一次。
+_EXPECTED_FAITHFUL_FINGERPRINT = "e51cc855a8c167821e50a077"
 
 
 def _fixture_segments() -> list[SourceSegment]:
@@ -115,6 +120,7 @@ def test_faithful_schema_has_no_short_drama_fields():
     assert "dropped_source_spans" not in schema_text
     assert set(_AiBeatSheetDraft.model_fields.keys()) == {
         "beat_sheet", "segments", "kept_lines", "dropped_lines", "emotional_turns", "foreshadowing_beats",
+        "wardrobe_plan", "prop_entrances",
     }
     assert set(_AiBeat.model_fields.keys()) == {"beat_id", "summary", "segment_indexes"}
     # 2026-09-24：dropped_lines 的项类型仍是基类 _AiDroppedLine，没有 beat_id 字段
@@ -246,6 +252,8 @@ def test_faithful_rules_are_historically_unchanged():
     from app.production.storyboard_beat_foreshadowing import foreshadowing_beat_sheet_rules
     from app.production.storyboard_dialogue_ledger import beat_sheet_dialogue_ledger_rules
     from app.production.storyboard_narrative_arc import beat_sheet_narrative_arc_rules
+    from app.production.storyboard_prop_entrance import prop_entrance_beat_sheet_rules
+    from app.production.storyboard_wardrobe_plan import wardrobe_plan_beat_sheet_rules
 
     historical_head = [
         "beat_sheet[].segment_indexes 与 segments[].source_segment_indexes 必须引用"
@@ -277,5 +285,6 @@ def test_faithful_rules_are_historically_unchanged():
     expected = [
         *historical_head, *beat_sheet_dialogue_ledger_rules(), *beat_sheet_narrative_arc_rules(),
         *causality_beat_sheet_rules(), *foreshadowing_beat_sheet_rules(),
+        *wardrobe_plan_beat_sheet_rules(), *prop_entrance_beat_sheet_rules(),
     ]
     assert _beat_sheet_rules(set(), adaptation_mode="faithful") == expected
