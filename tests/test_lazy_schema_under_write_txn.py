@@ -398,7 +398,7 @@ def test_subtitles_store_get_alignment_under_caller_write_txn(fresh_conn):
     """真实业务函数（``get_alignment``）在调用方持有写事务时被调用：不能报
     no such table，也不应该抛任何异常。"""
     result = subtitles_store.get_alignment(
-        fresh_conn, shot_version_id="no-such-version", media_sha256="sha", model_id="model",
+        fresh_conn, shot_version_id="no-such-version", media_sha256="sha", model_id="model", algo_version="v-test",
     )
     assert result is None
     assert fresh_conn.in_transaction

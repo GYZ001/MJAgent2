@@ -399,9 +399,12 @@ def test_legacy_action_detail_does_not_infer_typed_phase_count() -> None:
     assert errors == []
 
 
-def test_required_text_defaults_to_embedded_prop_generated_by_video_model() -> None:
+def test_required_text_default_keeps_frame_free_of_readable_text() -> None:
+    """2026-09-28 用户拍板：画面文字不走后期贴字、视频模型中文字形又不稳定，未声明
+    required_text 的镜头默认让画面不出现需要阅读的文字（旧默认「按画面描述直接生成」
+    已推翻，见 app.production.video_text_policy 模块 docstring）。"""
     no_text = compile_prompt(_shot(required_text=None), _bible(), aspect_ratio="9:16")
-    assert "按画面描述直接生成" in no_text and "不出现任何文字" not in no_text
+    assert "画面不出现需要读出的文字" in no_text and "按画面描述直接生成" not in no_text
     assert "不要生成字幕、名条、标题条、乱码或水印" in no_text and "可读道具字样" not in no_text
 
     with_text_shot = _shot(
