@@ -20,8 +20,16 @@ def has_revisions(segment: dict) -> bool:
     return any(str(line.get(REVISED_FROM) or "") for line in segment.get("dialogue") or [])
 
 
-def revise_segment_dialogue(segment: dict, revisions: dict[str, str], *, reason: str) -> dict:
-    """按 utterance_id 改句，原句（或更早的原句）留在 revised_from；有模板就按段方言重新展开 prompt_text。"""
+def revise_segment_dialogue(segment: dict, revisions: dict[str, str], *, reason: str, narrator_voice_character: str) -> dict:
+    """按 utterance_id 改句，原句（或更早的原句）留在 revised_from；有模板就按段方言重新展开 prompt_text。
+
+    ``narrator_voice_character`` 必传：调用方须现查项目当前设置
+    （``app.project_settings.resolve_narrator_voice_character``），不能读段落里生成
+    时刻留下的旧值——否则项目设置改过之后，编辑这一段会把旁白声道标签悄悄冻结在
+    旧设置上，与「重新生成」这一段会产出的标签不一致。本模块不碰 conn/project_id，
+    解析动作留给调用方（见 app.domain.storyboard_ops.mutation_primitives.
+    apply_segment_dialogue_revision）。
+    """
     result = deepcopy(segment)
     by_id = {str(line.get("utterance_id") or ""): line for line in result.get("dialogue") or []}
     for utterance_id, new_line in revisions.items():
@@ -39,7 +47,7 @@ def revise_segment_dialogue(segment: dict, revisions: dict[str, str], *, reason:
     if result.get("speech_template"):
         render_segment_speech(
             result, dialect=str(result.get("speech_dialect") or ""),
-            narrator_voice_character=str(result.get("narrator_voice_character") or ""),
+            narrator_voice_character=narrator_voice_character,
         )
     return result
 

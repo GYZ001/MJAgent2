@@ -58,8 +58,19 @@ def finalize_generated_identity(
 
     ``narrator_voice_character``：项目设置的旁白固定音色角色正名，见
     ``app.production.storyboard_speech_render.rendered_utterance`` 文档；空串
-    （默认）＝改动前行为逐字不变，供尚未接入该设置的调用方（对话修订、身份
-    工作台等编辑路径）继续用旧行为。
+    （默认）＝改动前行为逐字不变。本函数只有一条生产调用链——``app.production.
+    storyboard_pack._generate_all_segment_prompts``（生成与「仅重新编写本段」
+    重生成共用），调用方永远现查项目设置显式传入，默认值只服务没有项目上下文
+    的直接调用（如测试）。
+
+    2026-09-29 更正：这条 docstring 曾说「对话修订、身份工作台等编辑路径尚未
+    接入该设置、继续用旧行为」——不准确，那两条路径根本不经过本函数，各自
+    直接调 ``render_segment_speech``；它们当时确实也没接入项目设置（读的是段落
+    里生成时刻留下的旧字段，项目设置改过之后编辑会把旁白标签冻结在旧值上，
+    真实回归 proj_ca86b15ab7d7 EP1），但修法在各自模块（``app.domain.
+    storyboard_ops.identity_workspace.prepare_identity_candidate``、
+    ``app.production.storyboard_dialogue_revision.revise_segment_dialogue``），
+    与本函数无关，这里不再重复描述其行为。
     """
     errors = generated_identity_errors(
         draft, payload=payload, source_indexes=source_indexes, required_dialogue=required_dialogue,

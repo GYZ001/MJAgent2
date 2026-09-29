@@ -195,7 +195,7 @@ def test_dialogue_revision_helpers_preserve_narrator_voice_character():
     render_segment_speech(segment, dialect="", narrator_voice_character="温念")
     assert revision_errors(segment) == []  # 没有修订时永远放行，先确认基线本身不报错
 
-    revised = revise_segment_dialogue(segment, {"U01": "水管换完了"}, reason="供应商拒收原句")
+    revised = revise_segment_dialogue(segment, {"U01": "水管换完了"}, reason="供应商拒收原句", narrator_voice_character="温念")
     assert "温念的声音" in revised["prompt_text"]
     assert revision_errors(revised) == []
 

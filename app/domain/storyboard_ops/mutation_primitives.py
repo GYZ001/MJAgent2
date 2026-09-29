@@ -257,9 +257,16 @@ def _board_from_shot_rows(rows, episode_no: int) -> Storyboard:
     return Storyboard(episode_no=episode_no, shots=shots)
 
 
-def apply_segment_dialogue_revision(instance, submitted_changes, *, reason: str | None) -> None:
+def apply_segment_dialogue_revision(
+    instance, submitted_changes, *, reason: str | None, narrator_voice_character: str,
+) -> None:
     """人工改了 2.x 镜头的台词：把改动对回段落合同（视频提示词与字幕都读 storyboard_pack_segment.dialogue[]，
-    只改 shots.dialogues 会静默不生效），原句留档、按模板重新展开提示词。条数/发声者不一致直接 422。"""
+    只改 shots.dialogues 会静默不生效），原句留档、按模板重新展开提示词。条数/发声者不一致直接 422。
+
+    ``narrator_voice_character``：调用方现查的项目当前设置，原样透传给
+    ``revise_segment_dialogue``；本函数不碰 conn/project_id，解析动作留给调用方
+    （见 app.domain.storyboard_ops.edit_shot）。
+    """
     from app.production.storyboard_dialogue_revision import revise_segment_dialogue, revisions_from_dialogues
 
     segment = getattr(instance, "storyboard_pack_segment", None)
@@ -268,6 +275,9 @@ def apply_segment_dialogue_revision(instance, submitted_changes, *, reason: str 
     try:
         revisions = revisions_from_dialogues(segment, [d.model_dump() for d in instance.dialogues])
         if revisions:
-            instance.storyboard_pack_segment = revise_segment_dialogue(segment, revisions, reason=str(reason or "分镜台人工修订"))
+            instance.storyboard_pack_segment = revise_segment_dialogue(
+                segment, revisions, reason=str(reason or "分镜台人工修订"),
+                narrator_voice_character=narrator_voice_character,
+            )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc

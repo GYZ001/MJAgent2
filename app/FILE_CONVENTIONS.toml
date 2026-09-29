@@ -323,7 +323,8 @@ max_lines_tests = 500
 "app/domain/storyboard_ops/character_policy_repair.py" = 90
 "app/domain/storyboard_ops/clear_apply.py" = 253
 "app/domain/storyboard_ops/clear_preview.py" = 55
-"app/domain/storyboard_ops/edit_shot.py" = 395
+"app/domain/storyboard_ops/edit_shot.py" = 394  # 2026-09-29：旁白固定音色现查项目设置改到调用点，
+    # 顺带把 episode_id/ep 的重复查询合并成一次，净减 1 行——棘轮只降不升，收紧后如实记账。
 "app/domain/storyboard_ops/episode_detail.py" = 272
 "app/domain/storyboard_ops/evidence.py" = 186
 "app/domain/storyboard_ops/public_shot_versions.py" = 124

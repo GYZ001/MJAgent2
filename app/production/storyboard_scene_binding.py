@@ -104,6 +104,28 @@ def _rebind_current_scene_reference(
     scene["scene_reference_id"] = scene_reference_id
 
 
+def rebind_manifest_scene_references(
+    conn, payload: dict[str, Any], *, project_id: str, episode_no: int, bible: Bible | None,
+) -> dict[str, Any]:
+    """把 ``payload["asset_manifest"]["scenes"]`` 逐条场景的 ``scene_reference_id``
+    重新解析成「此刻对这一集生效」的行，原地覆盖并返回同一个 ``payload``。
+
+    ``_enrich_asset_manifest_canonical_visuals`` 在生成/重生成阶段已经内联做了这一步
+    （本模块 docstring 的根因）；本函数把同一个 rebind 步骤单独抽出，供只需要场景
+    绑定这一件事、不需要世界书标准外观/场景锚点/反打图整套 enrich 的调用方复用——
+    ``app.domain.storyboard_ops.identity_workspace.load_identity_workspace`` 读的
+    ``episode.screenplay_json`` 是映射时刻的一次性快照，从不随场景整包重生更新；
+    不重新解析就把这份冻结的旧 ``scene_reference_id`` 交给 ``canonical_segment_
+    identities`` 的 ``_backfill_scene_reference_binding``，会把已经作废的历史场景行
+    写回段落持久化（真实回归 proj_ca86b15ab7d7 EP1：场景整包重生后旧行挪进历史槽，
+    身份工作台预览把 ``scene_reference_id`` 又改回了这个已作废的历史行）。
+    """
+    manifest = payload.get("asset_manifest") or {}
+    for scene in manifest.get("scenes") or []:
+        _rebind_current_scene_reference(conn, scene, bible=bible, project_id=project_id, episode_no=episode_no)
+    return payload
+
+
 def _enrich_asset_manifest_canonical_visuals(
     conn, payload: dict[str, Any], *, bible: Bible | None = None, project_id: str | None = None,
 ) -> None:

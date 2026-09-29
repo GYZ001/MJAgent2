@@ -15,12 +15,36 @@ from app.production.storyboard_identity_regenerate import refreshed_required_dia
 from app.production.storyboard_identity_scope import bind_quote_identities
 from app.production.storyboard_identity_submission import segment_submission_errors
 from app.production.storyboard_pack import _load_indexed_source_segments, _manifest_speaker_names, _paratext_segment_indexes
+from app.production.storyboard_scene_binding import rebind_manifest_scene_references
 from app.production.storyboard_speech_render import attach_quote_provenance, render_segment_speech, speech_template_errors
 from app.production.storyboard_identity_validation import identity_schema_errors
+from app.project_settings import resolve_narrator_voice_character
+from app.schemas import Bible
 from .mutation_primitives import _board_from_shot_rows
 
 
+def _project_bible_or_none(project_row) -> Bible | None:
+    """尽力取世界书，供场景重绑定的别名回退解析用。``app.visual_styles.
+    _project_bible_or_placeholder`` 在这里不适用：它对非空但不满足 ``Bible``
+    必填字段的 ``bible_json``（例如占位值 ``"{}"``）直接抛出 ``ValidationError``，
+    会把每一次身份工作台打开都变成 500——本函数只是「查不到就不走别名归一」
+    （``rebind_manifest_scene_references``/``_rebind_current_scene_reference``
+    对 ``bible=None`` 有完整回退，退化为精确匹配，不是「结构上没法查」）。"""
+    raw = (project_row["bible_json"] if project_row else None) or ""
+    if not raw:
+        return None
+    try:
+        return Bible.model_validate_json(raw)
+    except ValueError:
+        return None
+
+
 def load_identity_workspace(conn, shot_id: str) -> tuple[dict, dict, dict, dict]:
+    """``payload``（``episode.screenplay_json``）是映射时刻的一次性快照：场景可能
+    在映射之后整包重生，快照里的 ``scene_reference_id`` 会指向已挪进历史槽的旧行
+    （见 ``rebind_manifest_scene_references`` 文档）。这里读出来就地重新解析成
+    当前生效行，供全部四个入口（review/preview/apply/校验幂等）统一受益，不再各自
+    补一份。"""
     row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
     if row is None:
         raise ValueError("镜头不存在")
@@ -29,6 +53,11 @@ def load_identity_workspace(conn, shot_id: str) -> tuple[dict, dict, dict, dict]
     segment = json.loads(row["shot_contract_json"] or "{}").get("storyboard_pack_segment")
     if not segment or not payload.get("prep_pack_version"):
         raise ValueError("此入口仅适用于映射包生成的分镜片段，叙事权威分镜请走原有受控修订流程")
+    project = conn.execute("SELECT * FROM projects WHERE id=?", (episode["project_id"],)).fetchone()
+    rebind_manifest_scene_references(
+        conn, payload, project_id=episode["project_id"], episode_no=episode["episode_no"],
+        bible=_project_bible_or_none(project),
+    )
     return dict(row), episode, payload, segment
 
 
@@ -76,9 +105,12 @@ def prepare_identity_candidate(conn, *, shot_id: str, candidate: dict) -> dict:
     if errors:
         raise ValueError("；".join(errors))
     attach_quote_provenance(result)
+    # 现查项目当前设置，不读 result 里生成时刻留下的旧值——与生成/重生成
+    # （app.production.storyboard_pack._generate_all_segment_prompts）同一权威
+    # 来源，编辑路径不应该冻结在旧设置上（见 finalize_generated_identity 文档）。
     render_segment_speech(
         result, dialect=str(result.get("speech_dialect") or ""),
-        narrator_voice_character=str(result.get("narrator_voice_character") or ""),
+        narrator_voice_character=resolve_narrator_voice_character(conn, episode["project_id"]),
     )
     stamp_identity_contract(result)
     errors = segment_submission_errors(result, source_text=row["source_excerpt"] or "")

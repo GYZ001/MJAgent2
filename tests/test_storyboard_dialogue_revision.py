@@ -29,14 +29,14 @@ def _rendered(segment):
 
 def test_revision_keeps_original_for_provenance_and_rerenders_prompt() -> None:
     base = _rendered(SEGMENT)
-    revised = revise_segment_dialogue(base, {"U01": "那根线越来越粗了。"}, reason="供应商合规拒收")
+    revised = revise_segment_dialogue(base, {"U01": "那根线越来越粗了。"}, reason="供应商合规拒收", narrator_voice_character="")
     line = revised["dialogue"][0]
     assert line["line"] == "那根线越来越粗了。" and line["revised_from"] == "那根越来越粗了。" and line["revision_reason"] == "供应商合规拒收"
     assert "那根线越来越粗了" in revised["prompt_text"] and "那根越来越粗了" not in revised["prompt_text"]
     assert revised["speech_template"] == base["speech_template"]  # 模板不动
     assert has_revisions(revised) and not has_revisions(base)
     # 再改一次仍指向最初的原句
-    again = revise_segment_dialogue(revised, {"U01": "那根红线越来越粗了。"}, reason="再改")
+    again = revise_segment_dialogue(revised, {"U01": "那根红线越来越粗了。"}, reason="再改", narrator_voice_character="")
     assert again["dialogue"][0]["revised_from"] == "那根越来越粗了。"
     faithful = source_faithful_copy(again)
     assert faithful["dialogue"][0]["line"] == "那根越来越粗了。" and "那根越来越粗了" in faithful["prompt_text"]
@@ -44,7 +44,7 @@ def test_revision_keeps_original_for_provenance_and_rerenders_prompt() -> None:
 
 
 def test_revision_errors_catch_hand_edited_prompt_and_missing_template() -> None:
-    revised = revise_segment_dialogue(_rendered(SEGMENT), {"U01": "那根线越来越粗了。"}, reason="r")
+    revised = revise_segment_dialogue(_rendered(SEGMENT), {"U01": "那根线越来越粗了。"}, reason="r", narrator_voice_character="")
     tampered = dict(revised, prompt_text=revised["prompt_text"] + " 手改")
     assert revision_errors(tampered) and "模板" in revision_errors(tampered)[0]
     legacy = dict(revised, speech_template="")
@@ -54,7 +54,7 @@ def test_revision_errors_catch_hand_edited_prompt_and_missing_template() -> None
 def test_submission_checks_source_against_original_lines_then_revision(monkeypatch) -> None:
     seen = []
     monkeypatch.setattr(submission, "_source_checked_errors", lambda segment, *, source_text: seen.append(segment) or [])
-    revised = revise_segment_dialogue(_rendered(SEGMENT), {"U01": "那根线越来越粗了。"}, reason="r")
+    revised = revise_segment_dialogue(_rendered(SEGMENT), {"U01": "那根线越来越粗了。"}, reason="r", narrator_voice_character="")
     assert submission.segment_submission_errors(revised, source_text="听听：那根越来越粗了。") == []
     assert seen[0]["dialogue"][0]["line"] == "那根越来越粗了。"  # 溯源检查看到的是原句
     tampered = dict(revised, prompt_text="手改正文")
@@ -70,4 +70,4 @@ def test_revisions_from_dialogues_only_allows_line_changes() -> None:
     with pytest.raises(ValueError, match="发声者"):
         revisions_from_dialogues(base, [{"speaker": "龙猫", "line": "x"}, edited[1]])
     with pytest.raises(ValueError, match="utterance_id"):
-        revise_segment_dialogue(base, {"U99": "x"}, reason="r")
+        revise_segment_dialogue(base, {"U99": "x"}, reason="r", narrator_voice_character="")

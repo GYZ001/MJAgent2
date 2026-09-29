@@ -19,6 +19,7 @@ from app.harness.types import (
     Evaluation,
     EvidenceArtifact,
 )
+from app.project_settings import resolve_narrator_voice_character
 from app.schemas import (
     Shot,
     Storyboard,
@@ -146,7 +147,12 @@ async def edit_shot(shot_id: str, body: dict):
     )
     if errors:
         raise HTTPException(422, "；".join(errors))
-    apply_segment_dialogue_revision(instance, submitted_changes, reason=body.get("revision_reason"))  # 2.x 段台词修订
+    episode_id = shot["episode_id"]
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    apply_segment_dialogue_revision(  # 2.x 段台词修订
+        instance, submitted_changes, reason=body.get("revision_reason"),
+        narrator_voice_character=resolve_narrator_voice_character(conn, ep["project_id"]),
+    )
     instance.narration = ""  # 产品禁止旁白：保存时强制清空，并从 timeline 剥离 narration 轨
     if instance.audio_timeline:
         instance.audio_timeline = [item for item in instance.audio_timeline if item.type != "narration"]
@@ -166,8 +172,6 @@ async def edit_shot(shot_id: str, body: dict):
         validate_storyboard_preserves_key_content,
         key_line_delivery_errors,
     )
-    episode_id = shot["episode_id"]
-    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     screenplay_context = _resolve_storyboard_mutation_screenplay(conn, episode_id)
     screenplay = screenplay_context.screenplay
     changed_fields = {key for key in submitted_changes if key != "source_binding"}
