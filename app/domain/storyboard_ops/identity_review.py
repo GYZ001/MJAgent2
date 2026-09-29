@@ -1,4 +1,5 @@
-"""片段发声与群演复核 API：候选生成、人工修订和原子保存。"""
+"""片段修订 API（发声/群演/镜头稿，可带人工修订意见）：候选生成、人工修订和原子保存。
+前端入口是分镜台的「修订本段」（``SegmentIdentityReview.tsx``）。"""
 import json
 
 from fastapi import APIRouter, HTTPException
@@ -21,6 +22,11 @@ router = APIRouter(prefix="/api")
 class IdentityRevisionBody(BaseModel):
     baseline: str = Field(min_length=1)
     candidate: dict = Field(default_factory=dict)
+    #: 只在 regenerate 用——人工复核写下的单段修订意见（例如「同一个杯子既在桌上又在她手里」
+    #: 「这件道具凭空出现，改成她从屋里带出来」），preview/apply 忽略这个字段。1000 字上限
+    #: 是给自由文本的合理上限，不是逐字节精算；超限触发标准请求校验，走全局 422（见
+    #: app.main._on_request_validation，公开文案已经是中文）。
+    revision_notes: str = Field(default="", max_length=1000)
 
 
 @router.get("/shots/{shot_id}/identity-review")
@@ -80,7 +86,10 @@ async def regenerate_identity(shot_id: str, body: IdentityRevisionBody):
         _row, episode, payload, _segment = load_identity_workspace(conn, shot_id)
         project = conn.execute("SELECT * FROM projects WHERE id=?", (episode["project_id"],)).fetchone()
         with stage_text_provider(resolve_stage_text_provider(dict(project).get("board_text_provider"))):
-            candidate = await regenerate_identity_candidate(conn, episode=episode, shot_id=shot_id, payload=payload, bible=_project_bible_or_placeholder(project))
+            candidate = await regenerate_identity_candidate(
+                conn, episode=episode, shot_id=shot_id, payload=payload, bible=_project_bible_or_placeholder(project),
+                revision_notes=body.revision_notes,
+            )
         return {"baseline":body.baseline,"candidate":candidate}
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc

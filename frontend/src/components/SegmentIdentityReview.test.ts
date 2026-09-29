@@ -18,7 +18,7 @@ async function mount() {
   vi.mocked(api.get).mockResolvedValue({ baseline: 'baseline-1', segment, issues: [], versions: [] })
   let view!: TestRenderer.ReactTestRenderer
   await act(async () => { view = TestRenderer.create(React.createElement(SegmentIdentityReview, { shotId: 'shot-1', notify, onSaved: saved })) })
-  await click(view, '复核说话人和群演')
+  await click(view, '修订本段')
   return { view, notify, saved }
 }
 async function click(view: TestRenderer.ReactTestRenderer, label: string) {
@@ -72,11 +72,29 @@ it('旧片段只请求当前片段的候选，不直接保存', async () => {
   vi.mocked(api.get).mockResolvedValue({ baseline: 'old', segment: { ...segment, identity_contract_version: '' }, issues: [], versions: [] })
   let view!: TestRenderer.ReactTestRenderer
   await act(async () => { view = TestRenderer.create(React.createElement(SegmentIdentityReview, { shotId: 'old-shot', notify: vi.fn(), onSaved: vi.fn() })) })
-  await click(view, '复核说话人和群演')
+  await click(view, '修订本段')
   expect(view.root.findAllByType('select')).toHaveLength(0)
   vi.mocked(api.post).mockResolvedValue({ candidate: segment })
   await click(view, '仅重新编写本段（调用文本模型）')
   expect(api.post).toHaveBeenCalledOnce()
-  expect(api.post).toHaveBeenCalledWith('/shots/old-shot/identity-review/regenerate', { baseline: 'old' })
+  expect(api.post).toHaveBeenCalledWith('/shots/old-shot/identity-review/regenerate', { baseline: 'old', revision_notes: '' })
+  view.unmount()
+})
+
+it('填写修改意见后按钮文案与请求体都带上意见；生成成功后意见保留，关闭复核才清空', async () => {
+  const { view } = await mount()
+  const textarea = view.root.findAllByType('textarea').find(t => t.props.placeholder?.includes('同一个杯子'))
+  expect(textarea).toBeDefined()
+  await act(async () => { textarea!.props.onChange({ target: { value: '  同一个杯子既在桌上又在她手里，去掉桌上那只  ' } }) })
+  expect(view.root.findAllByType('button').some(b => b.children.includes('按意见重写本段（调用文本模型）'))).toBe(true)
+  vi.mocked(api.post).mockResolvedValue({ candidate: segment })
+  await click(view, '按意见重写本段（调用文本模型）')
+  expect(api.post).toHaveBeenCalledWith('/shots/shot-1/identity-review/regenerate', { baseline: 'baseline-1', revision_notes: '同一个杯子既在桌上又在她手里，去掉桌上那只' })
+  const textareaAfter = view.root.findAllByType('textarea').find(t => t.props.placeholder?.includes('同一个杯子'))
+  expect(textareaAfter!.props.value).toBe('  同一个杯子既在桌上又在她手里，去掉桌上那只  ')
+  await click(view, '关闭复核')
+  await click(view, '修订本段')
+  const textareaReopened = view.root.findAllByType('textarea').find(t => t.props.placeholder?.includes('同一个杯子'))
+  expect(textareaReopened!.props.value).toBe('')
   view.unmount()
 })

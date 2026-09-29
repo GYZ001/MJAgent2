@@ -12,6 +12,7 @@ export default function SegmentIdentityReview({ shotId, onSaved, notify }: Props
   const [busy, setBusy] = useState(false)
   const [previewed, setPreviewed] = useState(false)
   const [notes, setNotes] = useState('')
+  const [revisionNotes, setRevisionNotes] = useState('')
   const [versionId, setVersionId] = useState('')
   const [extraLabel, setExtraLabel] = useState('')
   const base = `/shots/${shotId}/identity-review`
@@ -22,6 +23,7 @@ export default function SegmentIdentityReview({ shotId, onSaved, notify }: Props
     finally { setBusy(false) }
   }
   function update(next: StoryboardPackSegment) { setCandidate(next); setPreviewed(false) }
+  function close() { setReview(null); setCandidate(null); setRevisionNotes('') }
   async function open() {
     const result = await api.get(base) as Review
     setReview(result); setCandidate(result.segment); setPreviewed(false)
@@ -29,7 +31,7 @@ export default function SegmentIdentityReview({ shotId, onSaved, notify }: Props
   }
   async function generate() {
     if (!review) return
-    const result = await api.post(`${base}/regenerate`, { baseline: review.baseline }) as { candidate: StoryboardPackSegment }
+    const result = await api.post(`${base}/regenerate`, { baseline: review.baseline, revision_notes: revisionNotes.trim() }) as { candidate: StoryboardPackSegment }
     update(result.candidate)
     notify('本段候选已生成，请核对说话人与画面人物，再预览保存')
   }
@@ -47,16 +49,17 @@ export default function SegmentIdentityReview({ shotId, onSaved, notify }: Props
     notify(result.unchanged
       ? '内容未变化，无需保存'
       : '本段修订已保存，旧视频保留为历史版本；可前往生成台生成本段视频')
-    setReview(null); setCandidate(null); onSaved()
+    close(); onSaved()
   }
   const editable = Boolean(candidate?.identity_contract_version)
-  return <section className="segment-identity-review" aria-label="发声与群演复核">
-    <button type="button" disabled={busy} onClick={() => void perform(open)}>复核说话人和群演</button>
+  return <section className="segment-identity-review" aria-label="修订本段">
+    <button type="button" disabled={busy} onClick={() => void perform(open)}>修订本段</button>
     {review && candidate && <div>
-      <p>核对每句由谁发声、哪些人物实际出镜。保存只更新本段，旧视频保留供对比。</p>
+      <p>改说话人、出镜人物、镜头稿，或写下修改意见让文本模型按意见重写本段；保存只更新本段，旧视频保留为历史版本。</p>
       {review.issues.length > 0 && <ul>{review.issues.map((issue, i) => <li key={i}>{issue}</li>)}</ul>}
       {!editable && <p>这是旧版片段。先生成本段修订候选，补齐说话人与出镜人物关系。</p>}
-      <button type="button" disabled={busy} onClick={() => void perform(generate)}>{busy ? '处理中…' : '仅重新编写本段（调用文本模型）'}</button>
+      <label>修改意见（可选）<textarea rows={3} value={revisionNotes} onChange={e => setRevisionNotes(e.target.value)} placeholder="写下要修的问题，例如「同一个杯子既在桌上又在她手里」「这件道具凭空出现，改成她从屋里带出来」" /></label>
+      <button type="button" disabled={busy} onClick={() => void perform(generate)}>{busy ? '处理中…' : revisionNotes.trim() ? '按意见重写本段（调用文本模型）' : '仅重新编写本段（调用文本模型）'}</button>
       {editable && <>
         <fieldset disabled={busy}><legend>每句由谁发声</legend>
           {candidate.dialogue.map((line, i) => <div key={line.utterance_id || i}>
@@ -106,7 +109,7 @@ export default function SegmentIdentityReview({ shotId, onSaved, notify }: Props
           setReview({ ...review, versions: review.versions.map(v => v.id === versionId ? { ...v, observations: [...(v.observations || []), { notes }] } : v) }); setNotes('')
         })}>保存复核记录</button>
       </details>}
-      <button type="button" disabled={busy} onClick={() => { setReview(null); setCandidate(null) }}>关闭复核</button>
+      <button type="button" disabled={busy} onClick={close}>关闭复核</button>
     </div>}
   </section>
 }

@@ -320,7 +320,21 @@ def assemble_adaptation_summary(
     覆盖忠实档的落点。``wardrobe_plan``/``prop_entrances``（2026-09-29，P0-D）
     同一哲学，见 ``storyboard_wardrobe_plan``/``storyboard_prop_entrance``
     模块 docstring；``payload`` 只为它们核验 identity_id 用，其余 summary
-    不需要。"""
+    不需要。
+
+    ``wardrobe_plan_full``/``prop_entrances_full``（2026-09-29，同批）：模型
+    原始提名的完整列表（不是上面两个 key 的三态统计），供
+    ``storyboard_identity_regenerate._existing_plan`` 单段重生成时重建
+    ``_AiBeatSheetDraft.wardrobe_plan``/``prop_entrances`` 用——那条路径只有
+    ``shots.shot_contract_json`` 里落库的逐段结果，没有整集规划阶段的原始
+    提名，此前只能重建出空列表（``storyboard_beat_sheet_schemas`` 字段
+    docstring）。这两个 key 只是「新增字段，未改/未删已有字段名」的又一次
+    additive 扩展（与本函数上面 2026-09-24/09-27 两批扩展同一条纪律，见
+    ``storyboard_pack_evidence`` 模块 docstring「冻结契约」段：门禁只读
+    ``adaptation_mode``/``dropped_source_spans`` 两个字段，新增字段不影响
+    它们，也不占用已有 key 名——``wardrobe_plan``/``prop_entrances`` 两个
+    key 已经被上面的三态统计占用，这里必须用不同名字，不能覆盖）；不新开
+    artifact 类型、不建表，复用同一条 ``storyboard_pack_adaptation`` 产物。"""
     return {
         **_short_drama.adaptation_summary(
             adaptation_mode=adaptation_mode, planned_segment_count=planned_segment_count, segment_count=len(beat_draft.segments),
@@ -333,4 +347,6 @@ def assemble_adaptation_summary(
         "foreshadowing": _beat_foreshadowing.foreshadowing_summary(beat_draft, segments),
         "wardrobe_plan": _wardrobe_plan.wardrobe_plan_summary(beat_draft, payload),
         "prop_entrances": _prop_entrance.prop_entrance_summary(beat_draft),
+        "wardrobe_plan_full": [item.model_dump(mode="json") for item in beat_draft.wardrobe_plan],
+        "prop_entrances_full": [item.model_dump(mode="json") for item in beat_draft.prop_entrances],
     }

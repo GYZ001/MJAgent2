@@ -106,7 +106,7 @@ from app.production.storyboard_narrative_arc import (
     phase2_segment_rules,
     segment_narrative_arc_payload_fields,
 )
-from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_beats as _action_beats, storyboard_cast_lock as _cast_lock, storyboard_shot_mandates as _shot_mandates, storyboard_music_bed as _music_bed, storyboard_prop_entrance as _prop_entrance, storyboard_wardrobe_plan as _wardrobe_plan
+from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_beats as _action_beats, storyboard_cast_lock as _cast_lock, storyboard_shot_mandates as _shot_mandates, storyboard_music_bed as _music_bed, storyboard_prop_entrance as _prop_entrance, storyboard_wardrobe_plan as _wardrobe_plan, storyboard_revision_notes as _revision_notes
 from app.visual_styles import current_visual_style_prompt
 from app.production.storyboard_segment_ranges import (
     _PARATEXT_PLACEHOLDER_TEXT,
@@ -932,7 +932,7 @@ async def _generate_all_segment_prompts(
     bible: Bible | None,
     required_dialogue_by_segment_no: dict[int, list[dict[str, Any]]],
     conn: Any, project_id: str, aspect_ratio: str, enhance_music_bed: bool, narrator_voice_character: str = "",
-    reuse_segments: dict[int, _AiStoryboardSegmentDraft] | None = None,
+    reuse_segments: dict[int, _AiStoryboardSegmentDraft] | None = None, revision_notes: str = "",
 ) -> dict[int, _AiStoryboardSegmentDraft]:
     """逐段独立调用产出全部段落的 prompt_text（2.0.8 起，替代整集批量调用）。
 
@@ -1013,7 +1013,7 @@ async def _generate_all_segment_prompts(
                 already_delivered_dialogue_rule(delivered_lines, reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no)),
                 *_beat_causality.segment_rule_text(turns_here, plan.beat_ids),
                 *_beat_foreshadowing.segment_rule_text(signals_here, plan.beat_ids),
-                *_wardrobe_plan.segment_rule_text(*wardrobe_state.advance(plan.beat_ids), payload, relevant_assets["characters"]), *_prop_entrance.segment_rule_text(_prop_entrance.moments_for_segment(plan.beat_ids, props_plan, covered_prop_ids)),
+                *_wardrobe_plan.segment_rule_text(*wardrobe_state.advance(plan.beat_ids), payload, relevant_assets["characters"]), *_prop_entrance.segment_rule_text(_prop_entrance.moments_for_segment(plan.beat_ids, props_plan, covered_prop_ids)), *_revision_notes.segment_rule_text(revision_notes),
             ],
             **segment_narrative_arc_payload_fields(
                 segment_no=plan.segment_no,

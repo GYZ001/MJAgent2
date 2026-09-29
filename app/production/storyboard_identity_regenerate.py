@@ -29,14 +29,34 @@ def refreshed_required_dialogue(stored: dict, quotes: list) -> list[dict]:
     return required_dialogue_for_segments(kept, quotes).get(stored["segment_no"], [])
 
 
-def _existing_plan(stored: list[dict]) -> _AiBeatSheetDraft:
-    """已知限制（2026-09-29，P0-D）：``wardrobe_plan``/``prop_entrances``
-    （全集服装表/道具入场计划，见 ``app.production.storyboard_wardrobe_plan``/
-    ``storyboard_prop_entrance``）不落库在每段的 ``storyboard_pack_segment``
-    里，这里重建不出来——``_AiBeatSheetDraft`` 的两个字段默认空列表兼容旧存量
-    行，验证仍然通过，只是单段身份重生成这条路径不会带上计划驱动的着装/道具
-    入场规则文本（不影响其余规则）。要接上需要先把整份计划持久化到集级产物，
-    不在本次改动范围内，不在这里发明一种新的存储方式顶替。"""
+def _restored_plan_items(conn, episode_id: str) -> dict[str, list[dict]]:
+    """从最近一次整集生成落库的 ``storyboard_pack_adaptation`` 产物里取回
+    ``wardrobe_plan_full``/``prop_entrances_full``（见 ``storyboard_beat_
+    causality.assemble_adaptation_summary`` 文档）——``shots.shot_contract_json``
+    只存逐段结果，不存整集规划阶段的原始提名，这两个字段只能从那份产物找回。
+    取『该集这个类型 version 最高的一条』且必须 ``validated``（与
+    ``app.domain.video_ops.storyboard_adaptation.current_storyboard_adaptation``
+    同一判据，但那个函数在 L5，本文件是 L4，不能反向依赖，这里用显式
+    ``conn`` 直接查同一张表，不写第二套判据）；没有留档、非 validated、或
+    是改造前生成的老留档（没有这两个字段）时两项都降级为空列表——与
+    ``_AiBeatSheetDraft`` 两个字段本来的默认值一致，不是新的失败模式。"""
+    row = conn.execute(
+        "SELECT status, content_json FROM artifacts WHERE type='storyboard_pack_adaptation' "
+        "AND scope_type='episode' AND scope_id=? ORDER BY version DESC LIMIT 1", (episode_id,),
+    ).fetchone()
+    if row is None or row["status"] != "validated":
+        return {"wardrobe_plan": [], "prop_entrances": []}
+    content = json.loads(row["content_json"] or "{}")
+    return {
+        "wardrobe_plan": content.get("wardrobe_plan_full") or [],
+        "prop_entrances": content.get("prop_entrances_full") or [],
+    }
+
+
+def _existing_plan(stored: list[dict], conn, episode_id: str) -> _AiBeatSheetDraft:
+    """重建单段重生成要用的 ``_AiBeatSheetDraft``：节拍表/分段规划从逐段落库
+    的 ``storyboard_pack_segment`` 拼回（真源），全集服装表/道具入场计划从
+    ``_restored_plan_items`` 找回（见该函数文档）。"""
     beats = {}
     plans = []
     for segment in stored:
@@ -44,11 +64,18 @@ def _existing_plan(stored: list[dict]) -> _AiBeatSheetDraft:
             if beat.get("beat_id"):
                 beats[beat["beat_id"]] = beat
         plans.append({key: segment.get(key) for key in ("segment_no", "synopsis", "source_segment_indexes", "beat_ids", "source_unit_ranges", "palette") if segment.get(key) is not None})
-    return _AiBeatSheetDraft.model_validate({"beat_sheet":list(beats.values()), "segments":plans})
+    restored = _restored_plan_items(conn, episode_id)
+    return _AiBeatSheetDraft.model_validate({
+        "beat_sheet": list(beats.values()), "segments": plans,
+        "wardrobe_plan": restored["wardrobe_plan"], "prop_entrances": restored["prop_entrances"],
+    })
 
 
-async def regenerate_identity_candidate(conn, *, episode: dict, shot_id: str, payload: dict, bible) -> dict:
-    """模型只产出候选，成功前不触碰旧分镜、已采用版本和媒体文件。"""
+async def regenerate_identity_candidate(conn, *, episode: dict, shot_id: str, payload: dict, bible, revision_notes: str = "") -> dict:
+    """模型只产出候选，成功前不触碰旧分镜、已采用版本和媒体文件。``revision_notes``
+    （人工复核写下的修订意见）只透传给目标段自己的模型任务——不写进 ``reuse``
+    里其余段落的既有草稿，见 ``storyboard_revision_notes`` 模块文档「为什么
+    裸字符串就够」。"""
     rows = conn.execute("SELECT id, shot_contract_json FROM shots WHERE episode_id=? ORDER BY shot_no", (episode["id"],)).fetchall()
     stored = [(json.loads(row["shot_contract_json"] or "{}").get("storyboard_pack_segment") or {}) for row in rows]
     if not all(stored):
@@ -62,11 +89,12 @@ async def regenerate_identity_candidate(conn, *, episode: dict, shot_id: str, pa
     reuse = {s["segment_no"]:_AiStoryboardSegmentDraft.model_validate(dict(s, beats=s.get("montage_beats") or [])) for s in stored if s is not target}
     _enrich_asset_manifest_canonical_visuals(conn, payload, bible=bible, project_id=episode["project_id"])
     drafts = await _generate_all_segment_prompts(
-        episode_id=episode["id"], episode_no=episode["episode_no"], beat_draft=_existing_plan(stored),
+        episode_id=episode["id"], episode_no=episode["episode_no"], beat_draft=_existing_plan(stored, conn, episode["id"]),
         segments=source, payload=payload, target_video_model=episode.get("target_video_model") or "hiagent",
         bible=bible, required_dialogue_by_segment_no=required, conn=conn, project_id=episode["project_id"], aspect_ratio=resolve_aspect_ratio(conn, episode["project_id"]),
         enhance_music_bed=enhance_music_bed_enabled(conn, episode["project_id"]),
         narrator_voice_character=resolve_narrator_voice_character(conn, episode["project_id"]), reuse_segments=reuse,
+        revision_notes=revision_notes,
     )
     result = dict(target, **drafts[target["segment_no"]].model_dump(mode="json"))
     result["beats"] = target.get("beats") or []

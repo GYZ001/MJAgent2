@@ -121,7 +121,7 @@ def test_guidance_never_names_interface_parameters_and_gives_reachable_paths():
     undefined），旧文案让用户去传一个界面上不存在的参数，是死胡同。
 
     真正走得通的路径有两条，画面描述与台词各一条：
-    - 画面描述触发：分镜台的「复核说话人和群演」，保存后
+    - 画面描述触发：分镜台的「修订本段」，保存后
       ``identity_workspace.save_identity_candidate`` -> ``_record_identity_revision``
       把新 ``prompt_text`` 写回 ``shots.shot_contract_json.storyboard_pack_segment``；
     - 台词原句触发（画面描述改了也没用，台词逐字进提示词）：分镜台「台词 N 条」

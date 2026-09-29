@@ -41,6 +41,14 @@ _AiDroppedSourceSpan``）——这是子字典里的字段，不是顶层新字�
 ``span.model_dump(mode="json")``/``_dropped_span_evidence`` 的 ``**span``
 透传，不需要本模块的换算逻辑感知它。
 
+2026-09-29 再扩展（同一条纪律，只加字段）：``wardrobe_plan_full``/
+``prop_entrances_full``——全集服装表/道具入场计划的完整提名列表（见
+``storyboard_beat_causality.assemble_adaptation_summary`` 文档），供
+``storyboard_identity_regenerate._existing_plan`` 单段重生成时重建
+``_AiBeatSheetDraft`` 两个同名字段用，不是给前端『本集删减』面板消费的
+（``storyboard_adaptation_summary`` 不转发这两个 key）。老留档没有这两个
+字段时 ``_existing_plan`` 降级为空列表，与该字段本来的默认值一致，不抛异常。
+
 忠实档也写这一条（``adaptation_mode="faithful"``、``dropped_source_spans``
 恒空）：门禁按"最高 version 那一条"判定当前留档，只在短剧档才写会让旧的
 短剧留档在忠实档重生后仍被当成当前留档（见 CLAUDE.md 对本次改造的冻结
