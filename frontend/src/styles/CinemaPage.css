@@ -395,6 +395,14 @@
 :where(:root[data-theme="dark"]) .delivery-records .customer-feedback {
   border-top: 1px solid var(--hairline);
 }
+.cinema-enhancements-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cinema-enhancement-item p {
+  margin: 0;
+}
 .cinema-subtitle-panel {
   display: grid;
   gap: 10px;
