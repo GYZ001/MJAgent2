@@ -35,6 +35,17 @@
 布局变化两条判据），因为它们正是本次真实投诉的根因，不是先落库积累数据的
 阶段；判据形状照抄 ``time_of_day``/``time_of_day_source_quote`` 那一套——
 默认逐字沿用，改变必须能在本段原文里逐字找到依据。
+
+2026-09-28 两处修法（《顾念长安（第二版）》EP1 实测）：① travel_direction
+此前也走「默认沿用上一段」的形状，与 wardrobe/layout 同一套逻辑——但走位是
+一次性动作不是持续状态，默认继承会把陈旧走位钉进后续多段提示词、还常与
+本段正文自己写的静止描述矛盾；规则文案与回填判据改写后放进新拆的
+``app.production.storyboard_travel_direction``（本文件已在 500 行硬顶，
+拆分原因见该模块 docstring），本文件只保留 ``travel_direction`` 字段本身。
+② ``continuity_memo_character_advisories`` 的 identity_id
+比对只做精确字符串相等，模型在 ``continuity_memo.characters`` 里偶尔省略
+resources.characters 已解析出的 ``bible:``/``entity:`` 前缀，会被误判成
+「不在本段内」，与实际数据矛盾；比对改成去前缀后的主体值也参与匹配。
 """
 from __future__ import annotations
 
@@ -44,6 +55,8 @@ import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+from app.production.storyboard_travel_direction import travel_direction_rule
 
 log = logging.getLogger(__name__)
 
@@ -93,12 +106,10 @@ class _AiContinuityMemo(BaseModel):
     props: list[_AiPropState] = Field(default_factory=list)
     layout: str = ""
     layout_change_source_quote: str = ""
-    # 屏幕行进方向：同行人物在镜头里的统一走向（例如「一行人自画左向画右沿山路行进」），
-    # 静止场景写「静止」。2026-09-14 用户看片：第 2 集走山路时三个人各走各的方向——提示词
-    # 与备忘里此前没有任何屏幕方向信息，模型每镜自选。与 layout 同一形状：默认逐字沿用，
-    # 原文写到转身/折返/换路才可改并引用原句；只告警不阻断。
+    # 屏幕行进方向：本段镜头里真实发生的位移（例如「一行人自画左向画右沿山路行进」），
+    # 没有位移写「静止」；不像 wardrobe/layout 那样默认沿用上一段——规则文案与回填判据见
+    # app.production.storyboard_travel_direction（拆分原因见该模块 docstring）。
     travel_direction: str = ""
-    travel_direction_change_source_quote: str = ""
 
 
 def continuity_memo_payload(previous_memo: _AiContinuityMemo | None) -> dict[str, Any] | None:
@@ -147,25 +158,8 @@ def _continuity_memo_rules_with_previous(previous_memo: _AiContinuityMemo) -> li
             "改变时必须把 layout_change_source_quote 填成本段原文里写明这次移动的那一句原话"
             "——判据与 time_of_day_source_quote 完全一样，找不到逐字匹配会被判定为编造。"
         ),
-        _travel_direction_rule(previous_memo.travel_direction),
+        travel_direction_rule(previous_memo.travel_direction),
     ]
-
-
-def _travel_direction_rule(previous: str) -> str:
-    """屏幕行进方向的正面陈述：有上一段就逐字沿用，本段每个有行进的镜头都写同一走向。"""
-    inherit = (
-        f"上一段记录的屏幕行进方向是「{previous}」：本段默认逐字复制到 continuity_memo."
-        "travel_direction，本段每一个有人物行进的镜头都按这个走向写清（例如「一行人自画左向画右"
-        "沿山路行进」），同行的人物同一走向、跟拍与切换机位都不反向；"
-        if previous.strip() else
-        "上一段没有记录屏幕行进方向：本段若有人物行进，由第一个行进镜头定下走向并写进 "
-        "continuity_memo.travel_direction（例如「一行人自画左向画右沿山路行进」），本段其余镜头"
-        "与之后各段逐字沿用；静止场景写「静止」；"
-    )
-    return inherit + (
-        "只有本段原文明确写到转身、折返、换路、迎面相遇这类改变走向的动作时才允许改变，改变时把 "
-        "travel_direction_change_source_quote 填成本段原文里写明这次改变的那一句原话。"
-    )
 
 
 def _continuity_memo_rules_first_segment() -> list[str]:
@@ -191,7 +185,7 @@ def _continuity_memo_rules_first_segment() -> list[str]:
             "continuity_memo.layout 由本段画面本身确定人物与人物、人物与家具的相对位置；这两个"
             "字段一旦在本段定下，之后各段默认逐字沿用，不得无原文依据地改变。"
         ),
-        _travel_direction_rule(""),
+        travel_direction_rule(""),
     ]
 
 
@@ -220,9 +214,9 @@ def continuity_memo_output_contract_text() -> str:
         "外观（form，例如网状/透明、颜色材质）、位置（location，谁手里/哪把椅子上/桌面哪一"
         "侧）与状态（state，拉链开合、里面有没有猫）；layout 是本段结束时人物之间以及人物与"
         "家具的相对位置，一两句话；layout 与上一段不同时，layout_change_source_quote 必须是"
-        "本段原文里写明这次移动/变化的那句原话；travel_direction 是本段结束时同行人物在镜头里的"
-        "统一屏幕走向（例如「一行人自画左向画右沿山路行进」，静止写「静止」），与上一段不同时 "
-        "travel_direction_change_source_quote 必须是本段原文里写明转身/折返/换路的那句原话。"
+        "本段原文里写明这次移动/变化的那句原话；travel_direction 是本段镜头里真实发生的屏幕"
+        "行进方向（例如「一行人自画左向画右沿山路行进」），没有位移写「静止」——只描述本段"
+        "自己的位移，不是上一段的默认延续，哪怕恰好与上一段方向相同也要由本段画面自行确认。"
     )
 
 
@@ -297,40 +291,6 @@ def layout_change_advisories(
     if not _quote_found_in_source(quote, segment_source_text):
         return [f"continuity_memo.layout_change_source_quote『{quote}』在本段原文里找不到逐字匹配（未拦截）"]
     return []
-    if memo.layout == previous_memo.layout:
-        return []
-    quote = memo.layout_change_source_quote.strip()
-    if not quote:
-        return [
-            "continuity_memo.layout 与上一段不同，但 layout_change_source_quote 为空：必须"
-            "逐字引用本段原文里写明这次移动/变化的那句话；如果本段布局其实没有变化，请把 "
-            "layout 改回与上一段逐字相同。"
-        ]
-    if not _quote_found_in_source(quote, segment_source_text):
-        return [
-            f"continuity_memo.layout_change_source_quote『{quote}』在本段原文里找不到逐字"
-            "匹配：只能是本段原文中真实存在的一句，不得改写或编造；如果本段布局其实没有变化，"
-            "请把 layout 改回与上一段逐字相同。"
-        ]
-    return []
-
-
-def travel_direction_advisories(
-    memo: _AiContinuityMemo, previous_memo: _AiContinuityMemo | None, segment_source_text: str,
-) -> list[str]:
-    """屏幕行进方向变化的告警判据（不阻断），与 layout_change_advisories 同一形状。"""
-    if previous_memo is None or not previous_memo.travel_direction.strip():
-        return []
-    if memo.travel_direction == previous_memo.travel_direction:
-        return []
-    quote = memo.travel_direction_change_source_quote.strip()
-    if not quote:
-        return ["continuity_memo.travel_direction 与上一段不同但没有给出 travel_direction_change_source_quote（未拦截）"]
-    if not _quote_found_in_source(quote, segment_source_text):
-        return [
-            f"continuity_memo.travel_direction_change_source_quote『{quote}』在本段原文里找不到逐字匹配（未拦截）"
-        ]
-    return []
 
 
 def continuity_memo_errors(
@@ -348,8 +308,6 @@ def continuity_memo_errors(
     errors.extend(_prop_form_errors(memo, previous_memo))
     for advisory in layout_change_advisories(memo, previous_memo, segment_source_text):
         log.warning("[STORYBOARD_CONTINUITY_MEMO_LAYOUT][未拦截] %s", advisory)
-    for advisory in travel_direction_advisories(memo, previous_memo, segment_source_text):
-        log.warning("[STORYBOARD_CONTINUITY_MEMO_TRAVEL][未拦截] %s", advisory)
     if not memo.time_of_day.strip():
         errors.append("continuity_memo.time_of_day 不能为空：每一帧画面都有时段")
     if memo.time_of_day_basis == "inherited":
@@ -385,42 +343,39 @@ def _inherit_time_of_day(memo: _AiContinuityMemo, previous_memo: _AiContinuityMe
     memo.time_of_day_source_quote = ""
 
 
+def _identity_id_core(identity_id: str) -> str:
+    """identity_id 去掉 ``bible:``/``entity:`` 前缀后的主体。
+
+    整个身份体系的前缀集合是封闭的（只有这两种，见 ``app.schemas.segment_
+    identity``），从数据结构本身推导，不是猜测式关键词枚举——与
+    ``storyboard_reference_repair._entry_names``、``storyboard_dialects.
+    reference_mention_errors`` 里 ``identity_id.split(":", 1)`` 同一种归一。
+    """
+    return identity_id.split(":", 1)[-1].strip() if identity_id else identity_id
+
+
 def continuity_memo_character_advisories(
     memo: _AiContinuityMemo, segment_character_ids: set[str],
 ) -> list[str]:
     """人物字段只做 advisory，不参与 chat_structured 的语义重试/失败判定
     ——写法与 ``storyboard_pack._segment_content_advisories`` 里其余
-    ``[未拦截]`` 类信号一致（tag 名同源、可搜索）。"""
+    ``[未拦截]`` 类信号一致（tag 名同源、可搜索）。
+
+    2026-09-28 修正误判：identity_id 比对此前只认精确字符串相等，模型在
+    ``continuity_memo.characters`` 里偶尔省略 resources.characters 已解析出的
+    ``bible:``/``entity:`` 前缀（例如写「顾屿」而不是「bible:顾屿」），会被判成
+    「不在本段内」，但这个人物明明在场——只是前缀被省略；比对同时看去前缀后的
+    主体值，真正不在场的人物才报。
+    """
+    known_cores = {_identity_id_core(cid) for cid in segment_character_ids}
     return [
         f"[STORYBOARD_PACK_CONTINUITY_CHARACTER_UNKNOWN][未拦截] "
         f"continuity_memo.characters[{index}].identity_id=「{character.identity_id}」"
         "不在本段 resources.characters 内，无法确认这是哪个已登记角色的状态"
         for index, character in enumerate(memo.characters)
         if character.identity_id not in segment_character_ids
+        and _identity_id_core(character.identity_id) not in known_cores
     ]
-
-
-#: 提示词里表示屏幕走向的用词——就是方言规则示例里教模型写的那套（「自画左向画右」等）。
-_DIRECTION_WORDS = ("画左", "画右", "画近", "画远", "向左", "向右", "自左", "自右", "屏幕左", "屏幕右")
-
-
-def ensure_travel_direction_in_prompt(draft: Any) -> list[str]:
-    """备忘里声明了行进方向、提示词却没写走向词时，把模型自己声明的方向追加进提示词。
-
-    2026-09-14 第 8 集实测：16 段里 14 段的 continuity_memo.travel_direction 非静止且跨段逐字
-    沿用，但只有 3 段的 prompt_text 出现走向词——视频模型只看提示词，方向留在备忘里等于没写。
-    追加的是模型自己在备忘里的原话，不发明内容；validate 回调里调用，永远返回空错误列表。
-    """
-    memo = getattr(draft, "continuity_memo", None)
-    direction = str(getattr(memo, "travel_direction", "") or "").strip()
-    prompt = str(getattr(draft, "prompt_text", "") or "")
-    if not direction or direction == "静止" or not prompt.strip():
-        return []
-    if any(word in prompt for word in _DIRECTION_WORDS):
-        return []
-    draft.prompt_text = prompt.rstrip() + f"\n本段行进方向：{direction}；同行人物保持同一走向，跟拍与切换机位不反向。"
-    log.info("[STORYBOARD_TRAVEL_DIRECTION_APPENDED] 提示词缺走向词，已按备忘追加：%s", direction[:40])
-    return []
 
 
 def _wardrobe_line_pattern(name: str) -> re.Pattern[str]:

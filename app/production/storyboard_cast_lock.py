@@ -8,7 +8,7 @@
 判据从数据推导（不是关键词枚举）：直接读模型自己产出的
 ``resources.characters``——同一次调用里模型已经按 identity 契约把这一段可见的人物列了出来
 （``visibility == "visible"``），这里只是把这份数据换算成一句写死人数与正名的正面陈述追加进
-``prompt_text``，与 ``storyboard_continuity_memo.ensure_travel_direction_in_prompt`` 同一
+``prompt_text``，与 ``storyboard_travel_direction.ensure_travel_direction_in_prompt`` 同一
 形状：不发明内容，只是把模型自己已经给出的结构化事实，确定性地转成视频模型真正会读的自由
 文本。没有任何可见角色的段（纯画外音/旁白段）不写这句话——“无可见角色”本身就是诚实的事实，
 不是需要补一句空话的缺口。

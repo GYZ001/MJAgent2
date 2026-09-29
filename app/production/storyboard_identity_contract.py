@@ -8,6 +8,52 @@ from app.production.storyboard_pack_identity import resolve_persisted_character_
 from app.schemas.segment_identity import IDENTITY_CONTRACT_VERSION
 
 
+#: ``_backfill_portrait_binding`` 告警的固定前缀（含人物），用于幂等去重——
+#: 见该函数 2026-09-28 幂等改版注记。
+_PORTRAIT_MISSING_MARKER = "[STORYBOARD_PACK_PORTRAIT_MISSING][未拦截] 人物「{identity}」"
+
+
+def _backfill_portrait_binding(entry: dict, manifest_entry: dict, result: dict, identity: str) -> None:
+    """本段草稿没有 portrait_id 时，从全量人物谱补上这个 bible 角色当前生效的定妆照。
+
+    2026-09-28 真实回归（《顾念长安（第二版）》EP1 第 9/15/18 段）：``entries``
+    （``payload["asset_manifest"]["characters"]``）是全集范围的人物谱，同一个
+    bible 角色全集只有一条记录、一个 portrait_id；本段 ``relevant_assets.
+    characters`` 会按映射阶段登记的原文段号收窄过滤（``storyboard_pack.
+    _segment_relevant_assets`` 的 ``_hits``），过滤覆盖有缺口时模型看不到这个
+    角色的 portrait_id，只能诚实留空——但全量人物谱里这条记录明明存在，不
+    该让本段的过滤缺口污染最终产物。这里只读全量人物谱这一份已验证数据，
+    不是编造：identity 已经过 ``resolve_persisted_character_ids`` 确认。
+    人物谱本身也没有 portrait_id（角色确实还没出图）时，记一条准确的告警，
+    不假装补上了一个不存在的值。
+
+    2026-09-28 幂等改版：``canonical_segment_identities`` 在真实流水线里对同一
+    segment 至少被调用两到三次（生成期 ``finalize_generated_identity``、落库期
+    ``persist_storyboard_pack``、身份工作台 ``prepare_identity_candidate``），
+    每次都从上一次的产物（已带着上一轮告警）继续处理；portrait_id 回填分支
+    本就有「已经有值就直接返回」的幂等保护，但告警分支此前没有——人物谱本身
+    确实没图时，每多算一轮就多一条逐字重复的告警，随编辑次数无上限增长。
+    改法与 ``storyboard_cast_lock``/``storyboard_travel_direction`` 里
+    「先剥离旧痕迹再写唯一一条」同一形状：写入前先按这个人物的固定前缀剥掉
+    已有的同类告警，再写回唯一一条。
+    """
+    if entry.get("portrait_id"):
+        return
+    manifest_portrait_id = manifest_entry.get("portrait_id")
+    if manifest_portrait_id:
+        entry["portrait_id"] = manifest_portrait_id
+        return
+    if entry.get("visibility") != "visible":
+        return
+    marker = _PORTRAIT_MISSING_MARKER.format(identity=identity)
+    existing = [n for n in result.get("degraded_capabilities") or [] if not str(n).startswith(marker)]
+    existing.append(
+        f"{marker}本段在场，但本集人物谱里这个角色目前没有已生效的定妆照，正文里这个人物的"
+        "长相没有参考图来源，请人工核对是否需要先出图"
+    )
+    result["degraded_capabilities"] = existing
+
+
 def canonical_segment_identities(segment: dict, payload: dict) -> dict:
     """只按已确认映射正名；不改写语义，不猜未知人物，不产生事务副作用。"""
     result = deepcopy(segment)
@@ -29,6 +75,7 @@ def canonical_segment_identities(segment: dict, payload: dict) -> dict:
             entry["display_name"] = entries[identity].get("display_name") or identity
             if entry.get("subject_kind") not in {"extra", "crowd"}:
                 entry["subject_kind"] = "character"
+            _backfill_portrait_binding(entry, entries[identity], result, identity)
         elif identity in extras:
             entry["display_name"] = extras[identity].get("label") or identity
             entry["subject_kind"] = "crowd" if (extras[identity].get("provenance") or {}).get("collective") else "extra"

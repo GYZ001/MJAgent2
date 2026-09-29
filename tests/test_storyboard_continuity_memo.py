@@ -299,6 +299,21 @@ def test_character_advisory_silent_when_identity_known():
     assert continuity_memo_character_advisories(memo, {"id_a"}) == []
 
 
+def test_character_advisory_silent_when_only_bible_prefix_omitted():
+    """2026-09-28 真实回归：顾念长安 EP1 第 15 段模型在 continuity_memo.characters
+    里写「顾屿」，resources.characters 里是「bible:顾屿」——同一个人，只是前缀被
+    省略，不该报「不在本段内」。"""
+    memo = _memo(characters=[_AiCharacterState(identity_id="顾屿")])
+    assert continuity_memo_character_advisories(memo, {"bible:顾屿"}) == []
+
+
+def test_character_advisory_still_flags_genuinely_unknown_name():
+    """去前缀比对不能变成万能放行——core 值也对不上的人物仍要报。"""
+    memo = _memo(characters=[_AiCharacterState(identity_id="佚名路人")])
+    advisories = continuity_memo_character_advisories(memo, {"bible:顾屿"})
+    assert len(advisories) == 1 and "佚名路人" in advisories[0]
+
+
 # ---------------------------------------------------------------------------
 # continuity_memo_payload：task_payload["previous_continuity_memo"] 的取值
 # ---------------------------------------------------------------------------
