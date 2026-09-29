@@ -31,6 +31,7 @@ from app.production.scene_granularity import (
 from app.refs import SCENE_CANONICAL_MAX_CHARS, SCENE_CANONICAL_MIN_CHARS
 from app.scene_contract import SCENE_SAME_LOCATION_MATCH_RULE
 from app.schemas import Scene, extract_json
+from app.visual_styles import is_photographic_style_prompt
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +65,6 @@ async def assess_new_scene(label: str, spatial_context: str, *, style: str,
     role/era_anchor/anchor_phrase，判据见 app.production.scene_granularity）。
     ``known_prop_labels``：本次映射同时产出（含跨集已登记）的道具卡名称/别名，
     用于场景卡与道具卡的边界核验（见模块 docstring）。"""
-    from app.visual_styles import is_photographic_style_prompt
     scene_canonical_style_rule = (
         f"必须贴合画风「{style}」，是照片级摄影质感的实景环境描述，允许并鼓励真实材质、自然光影与摄影级细节。"
         if is_photographic_style_prompt(style)
