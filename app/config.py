@@ -512,6 +512,7 @@ DEFAULT_SETTINGS = {
     # 反打视角图进分镜可选资源与视频请求的总开关；只有带「确实反向」判定证据的图才会被用
     "scene_reverse_angle_reference_enabled": "true",
     "narrative_keyframe_required": "true",
+    "music_library_dir": "data/music_library",  # 统一配乐曲库目录，见 app.final_edit_enhance.music_library
 }
 
 PROJECTS_DIR.mkdir(exist_ok=True)

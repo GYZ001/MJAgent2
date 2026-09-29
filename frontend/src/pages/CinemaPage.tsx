@@ -8,6 +8,7 @@ import DecisionDialog from '../components/DecisionDialog'
 import OperationError from '../components/OperationError'
 import { deliveryWarningLabel } from './cinema/deliveryLabels'
 import SubtitlePanel from './cinema/SubtitlePanel'
+import EnhancementsPanel from './cinema/EnhancementsPanel'
 import { subtitleSummaryLine } from './cinema/subtitleSummary'
 import { autoAdoptedSummary, finalSkipSummary } from './cinema/mixTimelineSummary'
 import CustomerFeedbackPanel from './cinema/CustomerFeedbackPanel'
@@ -556,6 +557,7 @@ export default function CinemaPage() {
                 <>
                   <video src={mix.final_video_url} controls playsInline preload="metadata" />
                   <SubtitlePanel report={mix.final_edit_report} srtUrl={mix.subtitle_srt_url} episodeNo={ep.episode_no} />
+                  <EnhancementsPanel report={mix.final_edit_report} />
                   {mix.final_video_stale && (
                     <p className="hint" role="status">
                       新的分镜成品已就绪；当前合成成品继续保留并可正常播放，重新合成后会更新为最新版本。

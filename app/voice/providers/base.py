@@ -53,6 +53,25 @@ class VoiceDesignResult:
     latency_ms: int
 
 
+@dataclass(frozen=True)
+class SpeechSynthesisRequest:
+    """用已有音色合成任意文本（2026-09-28 成片增强·主角内心独白新增）。"""
+
+    voice_id: str
+    text: str
+
+
+@dataclass(frozen=True)
+class SpeechSynthesisResult:
+    """与 ``VoiceDesignResult`` 同形状，语义上是"任意文本合成"而非"新建音色"。"""
+
+    audio: bytes
+    audio_format: str
+    sample_rate: int | None
+    request_id: str
+    latency_ms: int
+
+
 class VoiceProviderError(Exception):
     """声音生成失败：``message`` 面向界面，``failure_kind`` 供上层归类。"""
 

@@ -14,6 +14,7 @@ from app import config
 from app.artifacts import _adopted_video_paths
 from app.atomic_io import atomic_copy
 from app.db import get_conn, new_id, now, rows_to_dicts
+from app.final_edit_enhance import apply_enhancements_sync
 from app.media_pipeline.delivery_encode import (
     low_priority, encode_timeout_s, probe_resolution, probe_video_codec, uniform_resolution,
 )
@@ -1288,6 +1289,19 @@ def concatenate_episode(
         conn, episode_id=episode_id, piece_specs=piece_specs,
         probe_by_shot=probe_by_shot, manifest_items=video_delivery_manifest["items"], play_res=play_res)
     final_path = _final_video_path(ep["project_id"], ep["episode_no"])
+
+    def _enhance(report: dict, candidate_path: Path, base_duration_s: float, work_dir: Path) -> tuple[Path, float]:
+        """两条合成路径共用：调用 ``app.final_edit_enhance`` 三项增强，结果写回 ``report``；开关全关时零 IO、原样透传。"""
+        enhanced = apply_enhancements_sync(
+            conn, ep_row=ep, episode_id=episode_id, candidate_path=candidate_path, final_path=final_path,
+            subtitles_section=report["subtitles"], piece_specs=piece_specs, play_res=play_res,
+            style=subtitle_plan.style if subtitle_plan else None, base_duration_s=base_duration_s,
+            work_dir=work_dir, video_delivery_manifest_hash=video_delivery_manifest["manifest_hash"],
+        )
+        report["subtitles"] = enhanced.subtitles
+        report["enhancements"] = enhanced.enhancements
+        return enhanced.video_path, enhanced.duration_s
+
     started_at = time.perf_counter()
     common_result = {
         "shots": len(piece_specs), "ffmpeg_missing": False,
@@ -1309,12 +1323,7 @@ def concatenate_episode(
     # final-edit 是质量增强层，不是交付门禁。任何字体/滤镜/转场失败都回退到
     # 下方的传统硬拼，上一版成片仍在原子替换成功前保持可用。
     final_edit_failure: str | None = None
-    final_edit_enabled, final_edit_reason = _final_edit_decision(
-        conn,
-        episode_id,
-        piece_specs,
-        skipped_shot_nos,
-    )
+    final_edit_enabled, final_edit_reason = _final_edit_decision(conn, episode_id, piece_specs, skipped_shot_nos)
     final_edit_elapsed_s: float | None = None
     if final_edit_enabled:
         final_edit_started_at = time.perf_counter()
@@ -1343,6 +1352,7 @@ def concatenate_episode(
                     expected_duration_s=float(edit_report["total_duration_s"]),
                     decode_timeout_s=concat_timeout_s,
                 )
+                edited_video, validated_duration_s = _enhance(edit_report, edited_video, validated_duration_s, edit_dir)
                 result = {
                     "total_duration_s": round(validated_duration_s, 1),
                     **common_result,
@@ -1350,17 +1360,11 @@ def concatenate_episode(
                     "final_edit": edit_report,
                 }
                 _publish_concat_output(
-                    conn,
-                    episode_id=episode_id,
-                    candidate_path=edited_video,
-                    final_path=final_path,
-                    report=edit_report,
-                    result=result,
-                    release_authority=release_authority,
+                    conn, episode_id=episode_id, candidate_path=edited_video, final_path=final_path,
+                    report=edit_report, result=result, release_authority=release_authority,
                     video_delivery_manifest=video_delivery_manifest,
                     operation_idempotency_key=operation_idempotency_key,
-                    operation_request_fingerprint=operation_request_fingerprint,
-                    operation_claim_token=operation_claim_token,
+                    operation_request_fingerprint=operation_request_fingerprint, operation_claim_token=operation_claim_token,
                 )
             return result
         except Exception as exc:  # noqa: BLE001 - 质量增强失败必须继续完整交付
@@ -1389,28 +1393,24 @@ def concatenate_episode(
         "audio_normalization": "per_clip_linear", "clip_loudness": clip_loudness,  # 如实标出，不借用 _compose 的 "loudnorm"
         "canvas": {"width": play_res[0], "height": play_res[1]}, "ai_label_enabled": label_event is not None,
     }
-    result = {
-        "total_duration_s": round(total_dur, 1),
-        **common_result,
-        "elapsed_s": round(time.perf_counter() - started_at, 3),
-        "final_edit": fallback_edit_report,
-    }
-    try:
-        _publish_concat_output(
-            conn,
-            episode_id=episode_id,
-            candidate_path=publish_candidate,
-            final_path=final_path,
-            report=fallback_edit_report,
-            result=result,
-            release_authority=release_authority,
-            video_delivery_manifest=video_delivery_manifest,
-            operation_idempotency_key=operation_idempotency_key,
-            operation_request_fingerprint=operation_request_fingerprint,
-            operation_claim_token=operation_claim_token,
-        )
-    finally:
-        publish_candidate.unlink(missing_ok=True)
+    with tempfile.TemporaryDirectory() as enhance_td:
+        enhanced_candidate, total_dur = _enhance(fallback_edit_report, publish_candidate, total_dur, _P(enhance_td))
+        result = {
+            "total_duration_s": round(total_dur, 1),
+            **common_result,
+            "elapsed_s": round(time.perf_counter() - started_at, 3),
+            "final_edit": fallback_edit_report,
+        }
+        try:
+            _publish_concat_output(
+                conn, episode_id=episode_id, candidate_path=enhanced_candidate, final_path=final_path,
+                report=fallback_edit_report, result=result, release_authority=release_authority,
+                video_delivery_manifest=video_delivery_manifest,
+                operation_idempotency_key=operation_idempotency_key,
+                operation_request_fingerprint=operation_request_fingerprint, operation_claim_token=operation_claim_token,
+            )
+        finally:
+            publish_candidate.unlink(missing_ok=True)
     return result
 
 __all__ = [name for name in globals() if not name.startswith("__")]

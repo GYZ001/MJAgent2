@@ -563,6 +563,14 @@ allowed_exceptions = []
 "app.continuity" = 4
 "app.evaluations" = 4  # 前缀：覆盖 .issues
 "app.final_edit" = 4
+"app.final_edit_enhance" = 4  # 2026-09-28 新增：成片合成三项增强（统一配乐/片头
+                               # 预告/主角内心独白），与 app.final_edit/
+                               # app.subtitles.episode/app.voice.providers 同层；
+                               # 依赖 app.harness.model_gateway(3)/app.subtitles(1,
+                               # .episode=4)/app.voice.*(2-4)/app.source_chapters(2)/
+                               # app.textmatch(1)/app.media_pipeline(4)，被
+                               # app.media_exec.concat(5) 单向调用——不反向 import
+                               # app.media_exec，避免 L4→L5 上行边。
 "app.identity_adjudication" = 4
 "app.identity_contracts" = 4
 "app.loops" = 4  # 前缀：覆盖 .base

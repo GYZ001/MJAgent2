@@ -35,6 +35,7 @@ import httpx
 
 from app.voice.providers.base import (
     FailureKind,
+    SpeechSynthesisResult,
     VoiceConnection,
     VoiceDesignRequest,
     VoiceDesignResult,
@@ -179,6 +180,91 @@ async def design_voice(
     latency_ms = int((time.perf_counter() - started) * 1000)
     _raise_for_status(response)
     return _parse_design_response(response, latency_ms)
+
+
+_SYNTHESIS_PATH = "services/aigc/multimodal-generation/generation"
+_MAX_SYNTHESIS_TEXT_CHARS = 2000  # 防御性保守值，官方页未逐字核实过这个端点的上限
+
+
+def _synthesis_endpoint(base_url: str) -> str:
+    return f"{_normalize_base_url(base_url)}/{_SYNTHESIS_PATH}"
+
+
+def _parse_synthesis_response(response: httpx.Response, latency_ms: int) -> SpeechSynthesisResult:
+    """响应形态未经真实调用核实（WebFetch 摘要可能编造，见调用方文档）——
+    兼容 ``output.audio.data``（base64）与 ``output.audio.url``（下载链接）
+    两种 DashScope 多模态生成接口常见形态，两者都取不到就明确报错，不猜测
+    第三种形态、不拼一个假音频。"""
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise VoiceProviderError(
+            "千问语音合成返回的不是合法 JSON", failure_kind="malformed_response",
+            http_status=response.status_code,
+        ) from exc
+    output = data.get("output") if isinstance(data, dict) else None
+    audio = (output or {}).get("audio") if isinstance(output, dict) else None
+    audio_b64 = str((audio or {}).get("data") or "") if isinstance(audio, dict) else ""
+    if audio_b64:
+        try:
+            audio_bytes = base64.b64decode(audio_b64, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise VoiceProviderError(
+                f"千问语音合成返回的音频不是合法 base64：{exc}", failure_kind="malformed_response",
+            ) from exc
+        return SpeechSynthesisResult(
+            audio=audio_bytes, audio_format="wav", sample_rate=24000,
+            request_id=str(data.get("request_id") or ""), latency_ms=latency_ms,
+        )
+    audio_url = str((audio or {}).get("url") or "") if isinstance(audio, dict) else ""
+    if audio_url:
+        raise VoiceProviderError(
+            "千问语音合成返回了下载链接而非内联音频，本适配器暂未实现下载分支"
+            "（需要先用一次真实调用确认响应形态再补，见模块文档）",
+            failure_kind="malformed_response", http_status=response.status_code,
+        )
+    raise VoiceProviderError(
+        "千问语音合成返回缺少音频（未知响应形态，需要真实调用核实后再适配）",
+        failure_kind="malformed_response", http_status=response.status_code,
+    )
+
+
+async def synthesize_speech(
+    conn: VoiceConnection, text: str, voice_id: str, *, client: httpx.AsyncClient | None = None,
+) -> SpeechSynthesisResult:
+    """用已有音色合成任意文本（主角内心独白用）。
+
+    端点与请求体依据 2026-09-28 WebFetch 对官方页
+    https://help.aliyun.com/zh/model-studio/qwen-tts-voice-design 的核对结论：
+    ``POST {base}/services/aigc/multimodal-generation/generation``，模型名
+    必须与设计该音色时的 ``target_model`` 一致——调用方（``app.voice.providers.
+    dispatch.synthesize_speech_for_voice``）负责按该音色落库时记录的模型条目
+    重新解析出同一个 ``conn.model_ref``，本函数不做一致性校验，只管发请求。
+    这条推断没有真实调用验证过，失败按 ``VoiceProviderError`` 明确报出，调用方
+    （``app.final_edit_enhance.monologue_audio``）必须能优雅跳过，不得让整份
+    成片合成因为这一步失败而中断。
+    """
+    if not conn.api_key.strip():
+        raise VoiceProviderError("未配置千问声音设计的 API Key", failure_kind="not_configured")
+    if not voice_id.strip():
+        raise VoiceProviderError("缺少音色 ID", failure_kind="invalid_request")
+    if len(text) > _MAX_SYNTHESIS_TEXT_CHARS:
+        raise VoiceProviderError(
+            f"合成文本过长（{len(text)} 字符），建议不超过 {_MAX_SYNTHESIS_TEXT_CHARS} 字符",
+            failure_kind="invalid_request",
+        )
+    payload = {"model": conn.model_ref, "input": {"text": text, "voice": voice_id}}
+    started = time.perf_counter()
+    try:
+        async with ensure_client(client, timeout_s=60) as active:
+            response = await active.post(_synthesis_endpoint(conn.base_url), headers=_headers(conn), json=payload)
+    except httpx.HTTPError as exc:
+        raise VoiceProviderError(
+            f"连接千问语音合成失败：{type(exc).__name__}", failure_kind="connection_failed", retryable=True,
+        ) from exc
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    _raise_for_status(response)
+    return _parse_synthesis_response(response, latency_ms)
 
 
 async def probe(conn: VoiceConnection, *, client: httpx.AsyncClient | None = None) -> dict[str, Any]:

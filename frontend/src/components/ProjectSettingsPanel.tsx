@@ -5,12 +5,13 @@ import { buildAspectRatioImpactDialog } from '../lib/aspectRatioImpact'
 
 /**
  * 项目设置面板（2026-09-23 用户拍板；2026-09-28 加统一配乐/片头预告/主角内心
- * 独白三个开关）：改编强度 / 画幅 / AI 生成标识 / 统一配乐 / 片头预告 / 主角内心
- * 独白。挂在分集规划页（EpisodesPage.tsx），全部字段都走 PUT /projects/{id}/settings
+ * 独白三个开关，同日接上成片合成消费方——见 app.final_edit_enhance）：
+ * 改编强度 / 画幅 / AI 生成标识 / 统一配乐 / 片头预告 / 主角内心独白。挂在
+ * 分集规划页（EpisodesPage.tsx），全部字段都走 PUT /projects/{id}/settings
  * （命令总线，非法值 409 中文 detail，直接展示 ApiError.message 即可，同
  * StageTextModelPicker 的简单 try/catch 模式——这个端点不涉及审批/确认形态的响应）。
- * 片头预告 / 主角内心独白两项后端本次只加开关，暂无消费方，界面如实标注「功能开发中」，
- * 不假装开关已经生效。
+ * 三个开关现在都有真实消费方：开启后下一次成片合成会生效（已合成的成片需要
+ * 重新合成才生效，同 AI 标识）；界面文案不再写「尚未上线」/「功能开发中」。
  *
  * 画幅是唯一需要二次确认的字段：切换前调用影响预估接口，如实告知有多少已采用
  * 视频/场景图仍是旧画幅，用户确认后才真正提交（其余字段改动不影响已有产物，
@@ -127,9 +128,10 @@ export default function ProjectSettingsPanel({
           {' '}统一配乐
         </label>
         <p className="hint">
-          开启后，分镜台生成的每段视频不再各自带配乐，只保留人物对白与环境音；只影响之后新
-          生成的分镜。成片合成阶段统一铺配乐的功能尚未上线（后续任务实现），在此之前开启本
-          开关会让成片暂时没有任何配乐。
+          开启后，分镜台生成的每段视频不再各自带配乐，只保留人物对白与环境音；成片合成时
+          会按剧情自动配一条贯穿全集的背景音乐（曲库为公有领域/CC0 钢琴曲，相邻情绪相近的
+          段落会复用同一首减少切歌感），并按台词自动闪避音量。只消耗少量免费文本调用与本地
+          算力，不花视频额度。
         </p>
       </div>
       <div className="project-settings-field">
@@ -138,7 +140,11 @@ export default function ProjectSettingsPanel({
             onChange={event => void save({ enhance_teaser: event.target.checked })} />
           {' '}片头预告
         </label>
-        <p className="hint">功能开发中，本开关暂不影响任何生成结果。</p>
+        <p className="hint">
+          开启后，成片合成时会从本集画面挑 3-5 个高能瞬间剪成约 8-12 秒的预告片，硬切拼接并
+          接在正片最前面，正片字幕与连播章节会自动按预告时长整体后移。只消耗少量免费文本
+          调用与本地算力，不花视频额度。
+        </p>
       </div>
       <div className="project-settings-field">
         <label htmlFor={enhanceMonologueId}>
@@ -146,7 +152,11 @@ export default function ProjectSettingsPanel({
             onChange={event => void save({ enhance_monologue: event.target.checked })} />
           {' '}主角内心独白
         </label>
-        <p className="hint">功能开发中，本开关暂不影响任何生成结果。</p>
+        <p className="hint">
+          开启后，成片合成时会在剧情静默处插入 1-8 句取自原文的角色心理描写旁白（逐字引用，
+          不改写、不编造），用该角色已设置的固定音色朗读并出字幕；未设置固定音色的角色会
+          跳过。会产生少量语音合成费用（非视频额度），文本编排本身不计费。
+        </p>
       </div>
       {aspectRatioDialog && (
         <DecisionDialog

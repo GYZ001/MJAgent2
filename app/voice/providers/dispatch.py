@@ -18,10 +18,11 @@ import hashlib
 import time
 from typing import Any
 
-from app import hiagent
+from app import hiagent, model_registry
 from app.models_registry import routing
 from app.voice.providers import adapter_for
 from app.voice.providers.base import (
+    SpeechSynthesisResult,
     VoiceConnection,
     VoiceDesignRequest,
     VoiceDesignResult,
@@ -97,6 +98,61 @@ async def design_voice(
     hiagent.log_provider_call(
         "voice_design", conn.model_ref, "OK", 200, result.latency_ms,
         meta=meta, request_json=request_log, response_json=_redact_result_for_log(result),
+    )
+    return result
+
+
+def _connection_by_model_id(model_id: str) -> tuple[VoiceConnection, str]:
+    """按落库时记录的 ``character_voices.model_id`` 重新解析出与设计该音色时
+    完全相同的模型条目（含 ``model_ref``/``base_url``/``api_key``），不走
+    purpose 选路——purpose 绑定的"当前生效模型"可能在设计之后被运维改过，
+    用它合成会违反"合成模型必须与设计时的 target_model 一致"这条官方约束
+    （见 ``app.voice.providers.qwen_voice_design.synthesize_speech`` 模块文档）。
+    """
+
+    item = model_registry.catalog_item_by_id(model_id)
+    if item is None or item.get("enabled") is False:
+        raise VoiceProviderError(
+            f"音色绑定的模型条目已失效（model_id={model_id}）", failure_kind="not_configured",
+        )
+    return VoiceConnection(
+        base_url=str(item.get("base_url") or ""), api_key=str(item.get("api_key") or ""),
+        model_ref=str(item.get("model") or ""), params={},
+    ), str(item.get("protocol") or "")
+
+
+async def synthesize_speech_for_voice(
+    model_id: str, text: str, voice_id: str, *, call_meta: dict[str, Any] | None = None,
+) -> SpeechSynthesisResult:
+    """用已有音色合成任意文本（主角内心独白用）；未配置/协议不支持/供应商失败
+    都明确抛 ``VoiceProviderError``，调用方（``app.final_edit_enhance.
+    monologue_audio``）据此跳过并在报告里写明原因，不重试（同 ``design_voice``
+    的付费调用不自动重试的理由）。"""
+    conn, protocol = _connection_by_model_id(model_id)
+    adapter = adapter_for(protocol)
+    synthesize = getattr(adapter, "synthesize_speech", None) if adapter is not None else None
+    if synthesize is None:
+        raise VoiceProviderError(
+            f"音色供应商（协议 {protocol or '未知'}）不支持任意文本合成", failure_kind="invalid_request",
+        )
+    meta = {**(call_meta or {}), "model_id": model_id}
+    started = time.perf_counter()
+    try:
+        result = await synthesize(conn, text, voice_id)
+    except VoiceProviderError as exc:
+        hiagent.log_provider_call(
+            "voice_synthesize", conn.model_ref, "FAILED", exc.http_status,
+            int((time.perf_counter() - started) * 1000), error=str(exc)[:500],
+            meta=meta, request_json={"text": text, "voice_id": voice_id, "model_ref": conn.model_ref},
+        )
+        raise
+    hiagent.log_provider_call(
+        "voice_synthesize", conn.model_ref, "OK", 200, result.latency_ms,
+        meta=meta, request_json={"text": text, "voice_id": voice_id, "model_ref": conn.model_ref},
+        response_json={
+            "audio": f"[omitted {len(result.audio)} bytes sha256:{hashlib.sha256(result.audio).hexdigest()[:16]}]",
+            "audio_format": result.audio_format, "sample_rate": result.sample_rate, "request_id": result.request_id,
+        },
     )
     return result
 
