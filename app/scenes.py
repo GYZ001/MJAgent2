@@ -762,14 +762,13 @@ async def _generate_one_scene_reference(
                     log.warning("场景「%s」侧视角未补齐（status=%s），仍采用已落盘主图", sc.name, (pack or {}).get("status"))
             if is_atomic_replacement and old_current:
                 # 完整包已通过：先把旧当前版本移入新的历史槽，再把候选切为当前。
-                minimum = conn.execute(
-                    "SELECT MIN(ep_start) AS value FROM scene_references "
-                    "WHERE project_id=? AND scene_name=? AND ep_start<=0 AND id<>?",
-                    (project_id, sc.name, scene_id),
-                ).fetchone()
-                history_start = int(
-                    minimum["value"] if minimum and minimum["value"] is not None else 0
-                ) - 1
+                # history_start 直接取 candidate_start-1，不再重新查一遍 MIN 并
+                # 排除候选自己：候选是本场景唯一负值行时，排除后 MIN 为空、退回
+                # 默认值 -1，与仍占着 -1 的候选自己撞 UNIQUE 约束——这正是任何
+                # 已有场景首次整包重生必然触发的根因（2026-09-28 生产复现
+                # run_d185a4e13006：候选与多视角包都成功，卡在这条 UPDATE 上被
+                # 吞掉重试两次，整包重生 100% 静默失败）。
+                history_start = candidate_start - 1
                 adopted_start = int(old_current["ep_start"] or 1)
                 conn.execute(
                     "UPDATE scene_references SET ep_start=?,ep_end=0 WHERE id=?",

@@ -360,7 +360,7 @@ async def _scene_refs_task(
         return
     try:
         recorder.start()
-        await recorder.step(
+        _, result = await recorder.step(
             "scene_references",
             lambda: generate_scene_refs(
                 project_id,
@@ -370,6 +370,26 @@ async def _scene_refs_task(
             ),
             agent_name="reference_asset_loop",
         )
+        # generate_scene_refs 对单场景失败是「记进 warnings、批次继续跑完其余场景」
+        # 的有界重试语义（见该函数 docstring），本身不抛异常；recorder.step 只看
+        # operation() 有没有抛异常判步骤 SUCCEEDED，结构上看不见「返回值里带着失败」，
+        # 不在这里显式读这份返回值就会把「某场景整包重生实际没换成新图」的事实报成
+        # 运行 SUCCEEDED（CLAUDE.md「Gates and Criteria」；2026-09-28 生产复现
+        # run_d185a4e13006：两个场景的候选生成、QA 都成功，仅因 UPDATE 撞了
+        # UNIQUE 约束被吞并重试耗尽，run/step 全部 SUCCEEDED，旧图原封不动、
+        # pending_redraw 也没清掉，界面没有任何可见信号）。
+        failed_scenes = list((result or {}).get("warnings") or [])
+        if failed_scenes:
+            failure_message = "场景参考资产未完全生成：" + "；".join(failed_scenes[:8])
+            conn.execute(
+                "UPDATE projects SET scene_refs_status='failed', scene_refs_error=? WHERE id=?",
+                (failure_message, project_id),
+            )
+            conn.commit()
+            recorder.fail_result(
+                failure_message, failure_code="SCENE_REFS_GATE_RETRY_EXHAUSTED", conn=None,
+            )
+            return
         conn.execute(
             "UPDATE projects SET scene_refs_status='ready',scene_refs_error=NULL,"
             "scene_refs_batch_started_at=NULL WHERE id=?",
