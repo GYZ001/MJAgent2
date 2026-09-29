@@ -68,13 +68,13 @@ def test_amnesty_validate_reports_errors_on_first_attempt_then_amnesties_second(
 def test_semantic_errors_flags_teaser_clip_count_out_of_range() -> None:
     context = _context()
     draft = EnhancementPlanDraft(teaser_clips=[
-        TeaserClipDraft(shot_no=1, start_s=0.0, end_s=3.0, reason="a"),
-        TeaserClipDraft(shot_no=1, start_s=4.0, end_s=7.0, reason="b"),
-    ])  # 只有 2 段——低于「3-5 段」目标区间
+        TeaserClipDraft(shot_no=1, start_s=0.0, reason="a"),
+        TeaserClipDraft(shot_no=1, start_s=4.0, reason="b"),
+    ])  # 只有 2 段——低于「3-4 段」目标区间（片长固定 3 秒后，段数上限从 5 收紧到 4）
     errors = plan_generate._semantic_errors(
         draft, context=context, library=None, windows=[], switches=(False, False, False),
     )
-    assert any("目标区间 3-5 段" in e for e in errors)
+    assert any("目标区间 3-4 段" in e for e in errors)
 
 
 def test_semantic_errors_flags_monologue_line_count_out_of_range() -> None:
@@ -117,7 +117,7 @@ def test_semantic_errors_empty_teaser_with_switch_on_is_error() -> None:
     errors = plan_generate._semantic_errors(
         draft, context=context, library=None, windows=[], switches=(False, True, False),
     )
-    assert any("预告" in e and "3-5 段" in e for e in errors)
+    assert any("预告" in e and "3-4 段" in e for e in errors)
 
 
 def test_semantic_errors_empty_teaser_with_switch_off_is_not_error() -> None:
@@ -253,9 +253,9 @@ async def test_generate_plan_resolves_valid_and_drops_invalid_items(monkeypatch,
     draft = EnhancementPlanDraft(
         music_cues=[MusicCueDraft(shot_no=1, track_id="t1"), MusicCueDraft(shot_no=99, track_id="t1")],
         teaser_clips=[
-            TeaserClipDraft(shot_no=1, start_s=0.0, end_s=3.0, reason="开场"),
-            TeaserClipDraft(shot_no=1, start_s=4.0, end_s=7.0, reason="转折"),
-            TeaserClipDraft(shot_no=1, start_s=8.0, end_s=11.0, reason="高潮"),
+            TeaserClipDraft(shot_no=1, start_s=0.0, reason="开场"),
+            TeaserClipDraft(shot_no=1, start_s=4.0, reason="转折"),
+            TeaserClipDraft(shot_no=1, start_s=8.0, reason="高潮"),
         ],
         monologue_lines=[MonologueLineDraft(window_index=0, character_name="顾屿", text="我不会认输")],
     )
@@ -279,11 +279,11 @@ async def test_generate_plan_resolves_valid_and_drops_invalid_items(monkeypatch,
 # ---------- _resolve：总长越界整批丢弃 / 同窗口多句独白不重叠（2026-09-28 评审）----------
 
 def test_resolve_drops_entire_teaser_batch_when_total_duration_below_min() -> None:
-    """单段各自合法（1.5-4s、落在段时长内）但总长低于 8s 目标区间下限时，不能
+    """单段合法（片长固定、落在段时长内）但总长低于 8s 目标区间下限时，不能
     当作"个体合法就都保留"——必须整批丢弃并在 ``dropped`` 里写明原因，不能
     产出一个明显偏离目标区间的预告片却仍标记为已应用。"""
     context = _context()
-    draft = EnhancementPlanDraft(teaser_clips=[TeaserClipDraft(shot_no=1, start_s=0.0, end_s=2.0, reason="开场")])
+    draft = EnhancementPlanDraft(teaser_clips=[TeaserClipDraft(shot_no=1, start_s=0.0, reason="开场")])  # 1 段=3s，远低于 8s
     plan = plan_generate._resolve(draft, context=context, library=None, windows=[])
     assert plan.teaser_clips == ()
     assert plan.teaser_total_duration_s == 0.0

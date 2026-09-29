@@ -30,6 +30,13 @@ def load_cached_plan(path: Path, fingerprint: str) -> EnhancementPlan | None:
         return None
     if not isinstance(payload, dict) or payload.get("fingerprint") != fingerprint:
         return None
+    # 第二道防线（第一道是上面的指纹比对，指纹已经把 ``_PLAN_RULES_VERSION``
+    # 编码进去，规则变了指纹必变）：就算指纹意外撞车，旧缓存里 dataclass 的
+    # 字段集合若与当前代码不一致，下面的 ``ResolvedTeaserClip(**c)`` 之类
+    # 构造调用会因未知/缺失关键字参数直接报 ``TypeError``——2026-09-29
+    # 把 ``end_s`` 从 ``ResolvedTeaserClip`` 里去掉之后，任何仍带着旧
+    # ``end_s`` 字段的缓存 JSON 走到这里都会被下面的 except 捕获，安全地
+    # 当作"没有可用缓存"处理，退回重新生成，不会把半旧的形状"半读"进来。
     try:
         return EnhancementPlan(
             music_cues=tuple(ResolvedMusicCue(**c) for c in payload["music_cues"]),

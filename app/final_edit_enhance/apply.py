@@ -19,16 +19,26 @@ from pathlib import Path
 from typing import Any
 
 from app.final_edit_enhance import context as context_mod
-from app.final_edit_enhance import music_mix, monologue_audio, monologue_burn, plan_generate, plan_store, silence, teaser
+from app.final_edit_enhance import (
+    music_mix, monologue_audio, monologue_burn, plan_generate, plan_store, plan_validate, silence, teaser,
+)
 from app.final_edit_enhance.ffutil import probe_duration_s
 from app.final_edit_enhance.music_library import MusicLibrary, load_music_library, resolve_library_dir
 from app.final_edit_enhance.music_runs import MusicRun, build_music_runs, expand_sparse_cues
+from app.final_edit_enhance.plan_schema import TEASER_CLIP_LENGTH_S
 from app.final_edit_enhance.subtitle_shift import shift_and_augment_subtitles
 from app.db import get_setting
 from app.project_settings import enhance_monologue_enabled, enhance_music_bed_enabled, enhance_teaser_enabled
 from app.subtitles.ass import SubtitleStyle
 
-MONOLOGUE_MIN_WINDOW_S = 30.0  # 冻结常量，见 pilot 设计文档「冻结的关键常量」
+# 冻结常量，2026-09-29 由固定 30s 改为数据推导（原 pilot 设计文档「冻结的关键
+# 常量」条目已废止，理由见下）：候选静默窗口只需要装得下一句最短独白（约 3
+# 秒的话）+ 首尾各 1 秒余量，不必是完整 30 秒无台词——固定 30s 阈值在台词
+# 密集的短剧里会把候选窗口筛成空列表（2026-09-29 生产实测：全集最长的无台词
+# 间隙只有 27.7 秒），模型因此只能自己编造越界的 window_index。与
+# ``plan_validate.estimated_speech_span_s`` 用同一份速率/余量参数，避免两处
+# 各自维护一份"多长算够"的判断。
+MONOLOGUE_MIN_WINDOW_S = plan_validate.MONOLOGUE_MIN_LINE_S + 2 * plan_validate.MONOLOGUE_WINDOW_MARGIN_S
 
 
 @dataclass(frozen=True)
@@ -138,7 +148,10 @@ def _teaser_stage(
         return main_video_path, 0.0, _disabled_fragment(f"预告片剪辑失败：{exc}")
     fragment = {
         "applied": True, "reason": "", "duration_s": round(offset_s, 2),
-        "clips": [{"shot_no": c.shot_no, "start_s": c.start_s, "end_s": c.end_s, "reason": c.reason} for c in plan.teaser_clips],
+        "clips": [
+            {"shot_no": c.shot_no, "start_s": c.start_s, "end_s": c.start_s + TEASER_CLIP_LENGTH_S, "reason": c.reason}
+            for c in plan.teaser_clips
+        ],
     }
     return merged_path, offset_s, fragment
 

@@ -14,18 +14,29 @@ from typing import Any
 from app import textmatch
 from app.final_edit_enhance.context import EpisodeContext
 from app.final_edit_enhance.music_library import MusicLibrary
-from app.final_edit_enhance.plan_schema import MonologueLineDraft, MusicCueDraft, TeaserClipDraft
+from app.final_edit_enhance.plan_schema import (
+    TEASER_CLIP_LENGTH_S, MonologueLineDraft, MusicCueDraft, TeaserClipDraft,
+)
 
 TEASER_TOTAL_MIN_S = 8.0
 TEASER_TOTAL_MAX_S = 12.0
-TEASER_CLIP_MIN_S = 1.5
-TEASER_CLIP_MAX_S = 4.0
 TEASER_CLIP_COUNT_MIN = 3
-TEASER_CLIP_COUNT_MAX = 5
+# 片段时长固定为 TEASER_CLIP_LENGTH_S=3 秒后，总长由「段数 × 3 秒」决定：
+# 3 段=9s、4 段=12s，都落在 8-12s 目标区间；5 段会是 15s，超出既有总长预算，
+# 所以上限从（可变片长时代的）5 段收紧到 4 段——不是棘轮意义上的收紧质量
+# 门槛，是配合片长改为固定值之后重新推导的同一个总长约束。
+TEASER_CLIP_COUNT_MAX = 4
 MONOLOGUE_LINE_COUNT_MIN = 3
 MONOLOGUE_LINE_COUNT_MAX = 8
 MONOLOGUE_SPEECH_RATE_CHARS_PER_S = 4.5
 MONOLOGUE_WINDOW_MARGIN_S = 1.0  # 首尾各留 1 秒余量，不把独白贴着台词边界播
+# 短剧原文里较短的一句完整内心独白大致的口播时长（按 MONOLOGUE_SPEECH_RATE_
+# CHARS_PER_S 换算约 13-14 字，例如"我不会认输"这类 5-12 字的短句量级）——
+# 用它反推 app.final_edit_enhance.apply.MONOLOGUE_MIN_WINDOW_S「候选静默
+# 窗口至少要多长才可能塞下任意一句独白」，取代原先固定 30 秒的门槛（2026-09-29
+# 生产实测：这部台词密集的短剧全集最长的无台词间隙只有 27.7 秒，固定 30s
+# 阈值筛出的候选窗口永远是空列表，模型只能自己编造越界的 window_index）。
+MONOLOGUE_MIN_LINE_S = 3.0
 # 三个 15 秒叙事段的量级：短于此仍是「几秒一换」的翻版——本模块要修的失败模式
 # 本身（见 app.final_edit_enhance.plan_generate 系统提示词）。最后一段允许更短
 # （全集本身可能就没剩多少），只对非末尾段落强制。
@@ -101,15 +112,25 @@ def validate_music_sections(
     return kept, dropped, first_gap_reason
 
 
+def teaser_clip_end_s(clip: TeaserClipDraft) -> float:
+    """预告片段的结束秒数不是模型给的，是 ``start_s`` 加固定片长算出来的——
+    唯一权威算法，``teaser.py``/``plan_generate.py`` 都要调这个函数，不要
+    各自重复 ``start_s + TEASER_CLIP_LENGTH_S``。"""
+    return clip.start_s + TEASER_CLIP_LENGTH_S
+
+
 def _teaser_item_errors(clip: TeaserClipDraft, shots: dict[int, Any]) -> str | None:
     shot = shots.get(clip.shot_no)
     if shot is None:
         return f"段号 {clip.shot_no} 不在本集实际参与合成的段列表中"
-    if not (0 <= clip.start_s < clip.end_s <= shot.duration_s + 1e-6):
-        return f"起止秒 [{clip.start_s},{clip.end_s}] 超出段 {clip.shot_no} 时长 {shot.duration_s:.2f}s"
-    clip_len = clip.end_s - clip.start_s
-    if not (TEASER_CLIP_MIN_S - 1e-6 <= clip_len <= TEASER_CLIP_MAX_S + 1e-6):
-        return f"单段片长 {clip_len:.2f}s 不在 {TEASER_CLIP_MIN_S}-{TEASER_CLIP_MAX_S}s 区间"
+    if clip.start_s < 0:
+        return f"起始秒 {clip.start_s} 不能为负"
+    end_s = teaser_clip_end_s(clip)
+    if end_s > shot.duration_s + 1e-6:
+        return (
+            f"起始秒 {clip.start_s} + 固定片长 {TEASER_CLIP_LENGTH_S:.0f}s = {end_s:.2f}s，"
+            f"超出段 {clip.shot_no} 时长 {shot.duration_s:.2f}s"
+        )
     return None
 
 
@@ -129,11 +150,25 @@ def validate_teaser_clips(
 
 
 def teaser_total_duration_s(clips: list[TeaserClipDraft]) -> float:
-    return sum(clip.end_s - clip.start_s for clip in clips)
+    """片长固定，总长就是「段数 × 固定片长」——不再需要逐条把 end_s-start_s
+    加总（草稿里已经没有 end_s 这个字段了）。"""
+    return len(clips) * TEASER_CLIP_LENGTH_S
 
 
-def _estimated_speech_span_s(text: str) -> float:
+def estimated_speech_span_s(text: str) -> float:
+    """一句独白（含首尾余量）预计占用的秒数——``validate_monologue_lines``/
+    ``allocate_monologue_placements``（本模块）与
+    ``app.final_edit_enhance.apply.MONOLOGUE_MIN_WINDOW_S``（候选窗口筛选
+    阈值）共用同一份速率/余量参数，避免两处各自维护一份"多长算够"的判断。"""
     return len(text) / MONOLOGUE_SPEECH_RATE_CHARS_PER_S + 2 * MONOLOGUE_WINDOW_MARGIN_S
+
+
+def _episode_delivered_lines_condensed(context: EpisodeContext) -> tuple[str, ...]:
+    """本集已经播出的台词/旁白（含 ``speaker == "旁白"`` 的叙述句），压成
+    纯内容字符串——独白正文不能与这里的任何一句重复或互相包含（见
+    ``_monologue_line_error`` 里"已经说出口的话不能再当独白"判据）。"""
+    condensed = (textmatch.condense(d.text) for shot in context.shots for d in shot.dialogue)
+    return tuple(line for line in condensed if line)
 
 
 def validate_monologue_lines(
@@ -142,17 +177,18 @@ def validate_monologue_lines(
     """``windows``：调用方（``plan_generate``）算好并原样发给模型的候选静默窗口
     列表，``window_index`` 是其中的下标——不接受模型自己报的秒数。"""
     condensed_source = textmatch.condense(context.source_text)
+    delivered_lines = _episode_delivered_lines_condensed(context)
     remaining_capacity = list(windows)
     valid: list[MonologueLineDraft] = []
     dropped: list[dict[str, Any]] = []
     for line in lines:
         item = line.model_dump()
-        reason = _monologue_line_error(line, context, condensed_source, windows)
+        reason = _monologue_line_error(line, context, condensed_source, windows, delivered_lines)
         if reason is not None:
             dropped.append({"item": item, "reason": reason})
             continue
         start, end = remaining_capacity[line.window_index]
-        needed = _estimated_speech_span_s(line.text)
+        needed = estimated_speech_span_s(line.text)
         if needed > end - start + 1e-6:
             dropped.append({"item": item, "reason": f"静默窗口 #{line.window_index} 容量不足以放下这句独白"})
             continue
@@ -175,7 +211,7 @@ def allocate_monologue_placements(
     placements: list[tuple[float, float]] = []
     for line in lines:
         start, end = remaining_capacity[line.window_index]
-        needed = _estimated_speech_span_s(line.text)
+        needed = estimated_speech_span_s(line.text)
         placements.append((start, start + needed))
         remaining_capacity[line.window_index] = (start + needed, end)
     return placements
@@ -183,6 +219,7 @@ def allocate_monologue_placements(
 
 def _monologue_line_error(
     line: MonologueLineDraft, context: EpisodeContext, condensed_source: str, windows: list[tuple[float, float]],
+    delivered_lines: tuple[str, ...],
 ) -> str | None:
     if not (0 <= line.window_index < len(windows)):
         return f"静默窗口下标 {line.window_index} 越界（候选共 {len(windows)} 个）"
@@ -191,6 +228,9 @@ def _monologue_line_error(
     text = (line.text or "").strip()
     if not text:
         return "独白正文为空"
-    if textmatch.condense(text) not in condensed_source:
+    condensed_line = textmatch.condense(text)
+    if condensed_line not in condensed_source:
         return "独白正文不是本集原文的逐字子串"
+    if any(condensed_line in existing or existing in condensed_line for existing in delivered_lines):
+        return "独白正文与本集已经出现过的台词/旁白重复（或互为子串），不能是已经说出口的话"
     return None

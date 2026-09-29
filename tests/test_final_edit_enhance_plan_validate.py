@@ -4,8 +4,8 @@
 """
 from __future__ import annotations
 
-from app.final_edit_enhance import plan_validate
-from app.final_edit_enhance.context import EpisodeContext, ShotContext
+from app.final_edit_enhance import plan_schema, plan_validate
+from app.final_edit_enhance.context import DialogueLineContext, EpisodeContext, ShotContext
 from app.final_edit_enhance.music_library import MusicLibrary, MusicTrack
 from app.final_edit_enhance.plan_schema import MonologueLineDraft, MusicCueDraft, TeaserClipDraft
 
@@ -115,36 +115,41 @@ def test_validate_music_sections_sorts_out_of_order_input_by_shot_no() -> None:
     assert dropped == []
 
 
-# ---------- teaser clips ----------
+# ---------- teaser clips：模型只给 start_s，片长固定为 TEASER_CLIP_LENGTH_S ----------
 
 def test_validate_teaser_clips_accepts_in_range_clip() -> None:
     context = _context()
-    clip = TeaserClipDraft(shot_no=1, start_s=1.0, end_s=3.0, reason="心动瞬间")
+    clip = TeaserClipDraft(shot_no=1, start_s=1.0, reason="心动瞬间")
     valid, dropped = plan_validate.validate_teaser_clips([clip], context=context)
     assert len(valid) == 1
     assert dropped == []
 
 
+def test_validate_teaser_clips_rejects_negative_start() -> None:
+    context = _context()
+    clip = TeaserClipDraft(shot_no=1, start_s=-1.0, reason="x")
+    valid, dropped = plan_validate.validate_teaser_clips([clip], context=context)
+    assert valid == []
+    assert "负" in dropped[0]["reason"]
+
+
 def test_validate_teaser_clips_rejects_out_of_shot_bounds() -> None:
     context = _context()
-    clip = TeaserClipDraft(shot_no=1, start_s=10.0, end_s=20.0, reason="x")  # 段只有 15 秒
+    # 段只有 15 秒，start_s=13 + 固定片长 3 秒 = 16 秒，超出段时长。
+    clip = TeaserClipDraft(shot_no=1, start_s=13.0, reason="x")
     valid, dropped = plan_validate.validate_teaser_clips([clip], context=context)
     assert valid == []
     assert "超出" in dropped[0]["reason"]
 
 
-def test_validate_teaser_clips_rejects_clip_length_out_of_range() -> None:
-    context = _context()
-    too_short = TeaserClipDraft(shot_no=1, start_s=0.0, end_s=0.5, reason="x")
-    too_long = TeaserClipDraft(shot_no=2, start_s=0.0, end_s=6.0, reason="x")
-    valid, dropped = plan_validate.validate_teaser_clips([too_short, too_long], context=context)
-    assert valid == []
-    assert len(dropped) == 2
+def test_teaser_clip_end_s_is_start_plus_fixed_length() -> None:
+    clip = TeaserClipDraft(shot_no=1, start_s=2.0, reason="x")
+    assert plan_validate.teaser_clip_end_s(clip) == 2.0 + plan_schema.TEASER_CLIP_LENGTH_S
 
 
-def test_teaser_total_duration_sums_valid_clips() -> None:
-    clips = [TeaserClipDraft(shot_no=1, start_s=0.0, end_s=2.0, reason=""), TeaserClipDraft(shot_no=2, start_s=0.0, end_s=3.0, reason="")]
-    assert plan_validate.teaser_total_duration_s(clips) == 5.0
+def test_teaser_total_duration_is_clip_count_times_fixed_length() -> None:
+    clips = [TeaserClipDraft(shot_no=1, start_s=0.0, reason=""), TeaserClipDraft(shot_no=2, start_s=0.0, reason="")]
+    assert plan_validate.teaser_total_duration_s(clips) == 2 * plan_schema.TEASER_CLIP_LENGTH_S
 
 
 # ---------- monologue lines ----------
@@ -192,6 +197,50 @@ def test_validate_monologue_lines_rejects_when_window_capacity_exhausted() -> No
     valid, dropped = plan_validate.validate_monologue_lines([line], context=context, windows=windows)
     assert valid == []
     assert "容量不足" in dropped[0]["reason"]
+
+
+# ---------- monologue content：不能是本集已经说出口的台词/旁白（内心独白） ----------
+
+def _context_with_dialogue(source_text: str, *, delivered_lines: tuple[str, ...]) -> EpisodeContext:
+    dialogue = tuple(
+        DialogueLineContext(utterance_id=f"U{i:02d}", speaker="顾屿", text=text)
+        for i, text in enumerate(delivered_lines, start=1)
+    )
+    shots = (ShotContext(shot_no=1, start_s=0.0, duration_s=15.0, prompt_text="开场", dialogue=dialogue),)
+    return EpisodeContext(shots=shots, total_duration_s=15.0, source_text=source_text, character_roster=("顾屿",))
+
+
+def test_validate_monologue_lines_rejects_line_already_delivered_as_dialogue() -> None:
+    """证据（proj_ca86b15ab7d7 EP1）：模型提名的独白正文其实是本集台词
+    （「我们六岁就说好了，长大要住在一起。」是顾屿已经说出口的台词），
+    不是心里话——必须被拒。"""
+    text = "我们六岁就说好了，长大要住在一起"
+    context = _context_with_dialogue(f"他心想，{text}。", delivered_lines=(f"{text}。",))
+    line = MonologueLineDraft(window_index=0, character_name="顾屿", text=text)
+    valid, dropped = plan_validate.validate_monologue_lines([line], context=context, windows=[(0.0, 30.0)])
+    assert valid == []
+    assert "已经出现过" in dropped[0]["reason"]
+
+
+def test_validate_monologue_lines_rejects_line_containing_delivered_dialogue() -> None:
+    """互为子串的两个方向都要拦：独白正文比已播出台词更长，但完整包含了它。"""
+    delivered = "你不是十二年前就搬去北方了吗"
+    text = f"顾屿，{delivered}"
+    context = _context_with_dialogue(f"温念心想：{text}。", delivered_lines=(f"{delivered}？",))
+    line = MonologueLineDraft(window_index=0, character_name="顾屿", text=text)
+    valid, dropped = plan_validate.validate_monologue_lines([line], context=context, windows=[(0.0, 30.0)])
+    assert valid == []
+    assert "已经出现过" in dropped[0]["reason"]
+
+
+def test_validate_monologue_lines_accepts_inner_thought_not_delivered() -> None:
+    """未在本集台词/旁白里出现过的内心独白正常通过。"""
+    text = "我到底该不该相信他"
+    context = _context_with_dialogue(f"他心想：{text}。", delivered_lines=("这是另一句完全不同的台词",))
+    line = MonologueLineDraft(window_index=0, character_name="顾屿", text=text)
+    valid, dropped = plan_validate.validate_monologue_lines([line], context=context, windows=[(0.0, 30.0)])
+    assert len(valid) == 1
+    assert dropped == []
 
 
 # ---------- allocate_monologue_placements ----------

@@ -21,6 +21,7 @@ from pathlib import Path
 from app.final_edit import FINAL_FPS
 from app.final_edit_enhance.ffutil import probe_duration_s, run_ffmpeg
 from app.final_edit_enhance.plan_generate import ResolvedTeaserClip
+from app.final_edit_enhance.plan_schema import TEASER_CLIP_LENGTH_S
 from app.media_pipeline.delivery_encode import DELIVERY_VIDEO_ARGS, canvas_filter, encode_timeout_s
 from app.media_pipeline.loudness import FINAL_AUDIO_RATE
 
@@ -76,13 +77,15 @@ def build_teaser(
         raise ValueError("预告片段列表为空")
     rate_by_shot = {shot_no: rate for shot_no, _path, rate in piece_specs}
     path_by_shot = {shot_no: path for shot_no, path, _rate in piece_specs}
-    total_duration_s = sum(c.end_s - c.start_s for c in clips)
+    # 片长固定为 TEASER_CLIP_LENGTH_S：clip 上已经没有 end_s 字段，总长直接是
+    # 「段数 × 固定片长」，与 plan_validate.teaser_total_duration_s 同一套算法。
+    total_duration_s = len(clips) * TEASER_CLIP_LENGTH_S
     timeout_s = encode_timeout_s(total_duration_s)
     prepared: list[Path] = []
     for i, clip in enumerate(clips):
         rate = rate_by_shot[clip.shot_no]
         start_source = _source_seconds(clip.start_s, rate)
-        end_source = _source_seconds(clip.end_s, rate)
+        end_source = _source_seconds(clip.start_s + TEASER_CLIP_LENGTH_S, rate)
         out_path = work_dir / f"teaser-clip-{i}.mp4"
         _extract_clip(path_by_shot[clip.shot_no], start_source, end_source, rate, play_res, out_path, timeout_s)
         prepared.append(out_path)

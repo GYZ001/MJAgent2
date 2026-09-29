@@ -130,7 +130,7 @@ def test_switches_off_skips_even_with_valid_library_and_plan_available(episode, 
     set_setting("music_library_dir", str(library_dir))
 
     plan = EnhancementPlan(
-        music_cues=(ResolvedMusicCue(1, "t1"),), teaser_clips=(ResolvedTeaserClip(1, 0.0, 2.0, "开场心动"),),
+        music_cues=(ResolvedMusicCue(1, "t1"),), teaser_clips=(ResolvedTeaserClip(1, 0.0, "开场心动"),),
         monologue_lines=(), dropped=(), teaser_total_duration_s=2.0,
     )
 
@@ -177,9 +177,9 @@ def test_full_pipeline_with_all_three_switches_on(episode, tmp_path, monkeypatch
 
     plan = EnhancementPlan(
         music_cues=(ResolvedMusicCue(1, "t1"),),
-        teaser_clips=(ResolvedTeaserClip(1, 0.0, 2.0, "开场心动"),),
+        teaser_clips=(ResolvedTeaserClip(1, 0.0, "开场心动"),),
         monologue_lines=(ResolvedMonologueLine(3.0, 5.5, "顾屿", "我到底该不该相信他"),),
-        dropped=(), teaser_total_duration_s=2.0,
+        dropped=(), teaser_total_duration_s=3.0,
     )
 
     async def fake_generate_plan(**_kwargs):

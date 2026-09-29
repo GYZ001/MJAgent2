@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import json
+
 from app.final_edit_enhance import plan_store
 from app.final_edit_enhance.plan_generate import EnhancementPlan, ResolvedMusicCue, ResolvedTeaserClip
 
@@ -11,7 +13,7 @@ from app.final_edit_enhance.plan_generate import EnhancementPlan, ResolvedMusicC
 def _plan() -> EnhancementPlan:
     return EnhancementPlan(
         music_cues=(ResolvedMusicCue(1, "t1"),),
-        teaser_clips=(ResolvedTeaserClip(1, 0.0, 2.0, "开场"),),
+        teaser_clips=(ResolvedTeaserClip(1, 0.0, "开场"),),
         monologue_lines=(),
         dropped=({"feature": "teaser", "item": {"shot_no": 2}, "reason": "越界"},),
         teaser_total_duration_s=2.0,
@@ -44,4 +46,23 @@ def test_load_cached_plan_fingerprint_mismatch_returns_none(tmp_path) -> None:
 def test_load_cached_plan_corrupted_json_returns_none(tmp_path) -> None:
     path = tmp_path / "episode.enhancement-plan.json"
     path.write_text("{not valid json", encoding="utf-8")
+    assert plan_store.load_cached_plan(path, "fp-1") is None
+
+
+def test_load_cached_plan_with_legacy_end_s_field_fails_clean_into_none(tmp_path) -> None:
+    """2026-09-29 之前 ``ResolvedTeaserClip`` 还带 ``end_s`` 字段，旧缓存 JSON
+    的 ``teaser_clips`` 条目里因此仍有 ``end_s`` 这个键。即便指纹恰好撞车
+    （比如 ``_PLAN_RULES_VERSION`` 忘记 bump），``ResolvedTeaserClip(**c)``
+    也会因为多出一个未知关键字参数直接 ``TypeError``——不能把半旧的形状半读
+    进来，必须干净地退回"没有可用缓存"，交给调用方按新规则重新生成一份。"""
+    path = tmp_path / "episode.enhancement-plan.json"
+    legacy_payload = {
+        "fingerprint": "fp-1",
+        "music_cues": [],
+        "teaser_clips": [{"shot_no": 1, "start_s": 0.0, "end_s": 3.0, "reason": "开场"}],
+        "monologue_lines": [],
+        "dropped": [],
+        "teaser_total_duration_s": 3.0,
+    }
+    path.write_text(json.dumps(legacy_payload, ensure_ascii=False), encoding="utf-8")
     assert plan_store.load_cached_plan(path, "fp-1") is None

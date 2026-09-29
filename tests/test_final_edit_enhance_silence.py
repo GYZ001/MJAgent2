@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+from app.final_edit_enhance.apply import MONOLOGUE_MIN_WINDOW_S
 from app.final_edit_enhance.silence import (
     merged_occupied_intervals, speech_free_windows, window_containing, windows_at_least,
 )
@@ -54,3 +55,16 @@ def test_window_containing_finds_covering_window() -> None:
     windows = [(0.0, 5.0), (10.0, 45.0)]
     assert window_containing(windows, 20.0) == (10.0, 45.0)
     assert window_containing(windows, 7.0) is None
+
+
+def test_evidence_dialogue_free_gaps_pass_production_min_window_threshold() -> None:
+    """2026-09-29 生产实测（proj_ca86b15ab7d7 EP1）：这部台词密集的短剧全集
+    无台词间隙依次为 27.7/24.8/15.9/12.6/10.2/10.1/8.0/6.7 秒，旧的固定 30s
+    门槛（``app.final_edit_enhance.apply.MONOLOGUE_MIN_WINDOW_S`` 当时的值）
+    会把全部 8 个间隙筛没，模型因此拿不到任何候选窗口、只能自己编造越界的
+    ``window_index``。新阈值（同一常量，2026-09-29 起改为数据推导）必须让
+    这些间隙全部入选。"""
+    gaps_s = [27.7, 24.8, 15.9, 12.6, 10.2, 10.1, 8.0, 6.7]
+    windows = [(0.0, g) for g in gaps_s]  # 起点无所谓，只关心时长能否通过筛选
+    assert windows_at_least(windows, MONOLOGUE_MIN_WINDOW_S) == windows
+    assert windows_at_least(windows, 30.0) == []  # 旧阈值下的失败现象，留作对照

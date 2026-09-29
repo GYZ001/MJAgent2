@@ -26,8 +26,15 @@ _SEMANTIC_RETRY_LIMIT = 1
 # 规则文案（系统提示词/Schema 字段描述）或核验逻辑有实质变化时必须递增：
 # 指纹（``plan_fingerprint``）把它编码进输入，旧规则生成并缓存的计划会因指纹
 # 变化而失效，不会被新规则部署后继续复用（2026-09-29：修配乐"换曲点"语义 +
-# 三项开关开启却空输出必须重试两项改动，从 1 bump 到 2）。
-_PLAN_RULES_VERSION = 2
+# 三项开关开启却空输出必须重试两项改动，从 1 bump 到 2；同日预告片改为"模型
+# 只选起点、片长固定为常量" + 独白候选窗口阈值从固定 30s 改为数据推导 + 独白
+# 正文新增"不能与本集已播出台词/旁白重复"校验，三项改动再从 2 bump 到 3——
+# 见 ``app.final_edit_enhance.plan_store.load_cached_plan`` 顶部注释：旧缓存
+# 里 ``TeaserClipDraft``/``ResolvedTeaserClip`` 形状里的 ``end_s`` 字段在新
+# dataclass 里已不存在，就算指纹意外撞车，反序列化本身也会因未知关键字参数
+# 报 ``TypeError`` 被现有 except 分支吞掉、退回重新生成，指纹变化只是第一道、
+# 不是唯一一道防线）。
+_PLAN_RULES_VERSION = 3
 
 _SYSTEM_PROMPT = (
     "你是短剧成片后期剪辑师。只输出符合 Schema 的一个 JSON 对象，不输出 Markdown 或解释。"
@@ -39,10 +46,15 @@ _SYSTEM_PROMPT = (
     "shot_no；除最后一段允许因全集本身较短而不足外，每一段都要覆盖足够时长（把该段起点到"
     "下一条 cue 之间的段落时长加起来，至少约 45 秒），不要几秒钟就换一首曲子——那正是要"
     "避免的「观众跟不上音乐」的问题；track_id 必须逐字取自给定曲库清单。"
-    "预告片段给出 3-5 个（shot_no/start_s/end_s 必须落在给定段落时长内，单段 1.5-4 秒，"
-    "总长 8-12 秒）；独白给出 3-8 句，正文必须逐字取自给定原文，character_name 必须是"
-    "给定人物谱中的真实角色，window_index 必须是给定候选静默窗口的下标（不要自己编造"
-    "秒数）。"
+    "预告片段给出 3-4 个：每条只给 shot_no 和 start_s，不要给结束时间——片段时长系统"
+    "固定为 3 秒，从 start_s 起自动截取到 start_s+3 秒，你只需要选「从哪一秒开始最有"
+    "悬念/信息量」，并保证 start_s+3 秒不超出该段时长；3 段共 9 秒、4 段共 12 秒，都在"
+    "预告总长 8-12 秒目标区间内。"
+    "独白给出 3-8 句：正文必须是原文里描述该角色内心感受/想法的叙述句（引号之外的叙述，"
+    "不是角色已经用引号说出口的台词），逐字取自给定原文；不能与给定 segments 的 dialogue"
+    "里已经出现过的台词/旁白重复或互相包含——独白是观众听不到的心里话，不是把已经说过的"
+    "话再念一遍；character_name 必须是给定人物谱中的真实角色，window_index 必须是给定"
+    "候选静默窗口的下标（不要自己编造秒数）。"
 )
 
 
@@ -54,9 +66,11 @@ class ResolvedMusicCue:
 
 @dataclass(frozen=True)
 class ResolvedTeaserClip:
+    """``end_s`` 不再是字段：片长固定为 ``plan_schema.TEASER_CLIP_LENGTH_S``，
+    需要结束秒数的地方（``teaser.py``/``apply.py``）现算
+    ``start_s + TEASER_CLIP_LENGTH_S``，不在这里存一份可能与常量脱节的副本。"""
     shot_no: int
     start_s: float
-    end_s: float
     reason: str
 
 
@@ -164,7 +178,10 @@ def _teaser_semantic_errors(draft: EnhancementPlanDraft, *, context: EpisodeCont
     errors = [f"预告：{d['reason']}" for d in dropped_clips]
     if not valid_clips:
         if teaser_on:
-            errors.append("预告：开关已开启，请至少给出 3-5 段可用的预告片段")
+            errors.append(
+                f"预告：开关已开启，请至少给出 {plan_validate.TEASER_CLIP_COUNT_MIN}-"
+                f"{plan_validate.TEASER_CLIP_COUNT_MAX} 段可用的预告片段",
+            )
         return errors
     total = plan_validate.teaser_total_duration_s(valid_clips)
     if not (plan_validate.TEASER_TOTAL_MIN_S <= total <= plan_validate.TEASER_TOTAL_MAX_S):
@@ -184,7 +201,10 @@ def _monologue_semantic_errors(
     errors = [f"独白：{d['reason']}" for d in dropped_lines]
     if not valid_lines:
         if monologue_on:
-            errors.append("独白：开关已开启，请至少给出 3-8 句可用的独白台词")
+            errors.append(
+                f"独白：开关已开启，请至少给出 {plan_validate.MONOLOGUE_LINE_COUNT_MIN}-"
+                f"{plan_validate.MONOLOGUE_LINE_COUNT_MAX} 句可用的独白台词",
+            )
         return errors
     if not (plan_validate.MONOLOGUE_LINE_COUNT_MIN <= len(valid_lines) <= plan_validate.MONOLOGUE_LINE_COUNT_MAX):
         errors.append(
@@ -298,7 +318,7 @@ def _resolve(draft: EnhancementPlanDraft, *, context: EpisodeContext, library: M
     dropped = dropped + monologue_dropped
     return EnhancementPlan(
         music_cues=tuple(ResolvedMusicCue(c.shot_no, c.track_id) for c in music_valid),
-        teaser_clips=tuple(ResolvedTeaserClip(c.shot_no, c.start_s, c.end_s, c.reason) for c in teaser_valid),
+        teaser_clips=tuple(ResolvedTeaserClip(c.shot_no, c.start_s, c.reason) for c in teaser_valid),
         monologue_lines=tuple(monologue_lines),
         dropped=tuple(dropped),
         teaser_total_duration_s=teaser_total,

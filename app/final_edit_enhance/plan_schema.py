@@ -1,7 +1,7 @@
 """成片增强编排计划的结构化输出 Schema（``app.harness.model_gateway.chat_structured``
 的 ``model_type``）。
 
-三项设计简化（都在本模块 docstring 里交代，不在别处重复）：
+四项设计简化（都在本模块 docstring 里交代，不在别处重复）：
 
 1. **配乐是"换曲点"而不是逐段配乐表**：``music_cues`` 里每一条是把全集
    按情绪切成几个大段之后的一个分段起点——模型只在真正换曲的 ``shot_no``
@@ -22,10 +22,27 @@
 3. **独白角色不写死名字**：``character_name`` 由模型按原文与人物谱判断，
    代码只核验它是否是本集真实出现的角色（``app.final_edit_enhance.
    plan_validate``），不是从枚举里选、也不是代码自己猜"主角是谁"。
+4. **预告片段模型只选起点，不选时长**：``teaser_clips`` 每条只给
+   ``start_s``（该段自身时间轴上的起始秒数），片段时长固定为
+   ``TEASER_CLIP_LENGTH_S`` 秒，由代码（``app.final_edit_enhance.
+   plan_validate``/``teaser``）据此算出 ``end_s``——不问模型"选多长"：
+   "片长必须落在 1.5-4 秒区间" 是一个 JSON Schema 数值类型表达不了的区间
+   约束（``end_s - start_s``），只能写进提示词文字里指望模型自己算对。
+   2026-09-29 之前的版本确实让模型自己给 ``start_s``/``end_s`` 两个数，
+   生产实测同一集两次作答（含一次重试）都给出整整 10 秒的片段，与目标区间
+   相差数倍，校验只能逐条丢弃，导致预告片经常被判定为空。改成"只选起点、
+   时长固定"后，这类片长直接从模型的自由度里消失，不再需要校验它。
 """
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
+
+# 预告片段的固定时长：3-4 段 × 3 秒 = 9-12 秒，落在既有预告总长目标区间
+# 8-12 秒内（``app.final_edit_enhance.plan_validate.TEASER_TOTAL_MIN_S``/
+# ``MAX_S``）——取代原先要求模型自己给 1.5-4 秒可变片长的做法（见上方
+# docstring 第 4 条）。唯一权威定义处：其余模块（``plan_validate``/
+# ``teaser``/``apply``）一律从这里导入，不各自重复这个数字。
+TEASER_CLIP_LENGTH_S = 3.0
 
 
 class MusicCueDraft(BaseModel):
@@ -50,18 +67,40 @@ class MusicCueDraft(BaseModel):
 class TeaserClipDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    shot_no: int
-    start_s: float
-    end_s: float
-    reason: str = ""
+    shot_no: int = Field(
+        description="预告片段取材的段号（shot_no），必须是给定 segments 列表中的段。",
+    )
+    start_s: float = Field(
+        description=(
+            f"该段自身时间轴上的起始秒数（从 0 开始，不是全集绝对时间）。片段"
+            f"时长系统固定为 {TEASER_CLIP_LENGTH_S:.0f} 秒，从这个秒数起自动"
+            f"截取到 start_s+{TEASER_CLIP_LENGTH_S:.0f} 秒——不要给出结束时间，"
+            f"只需要选「从哪一秒开始最有悬念/信息量」；start_s 必须使"
+            f"start_s+{TEASER_CLIP_LENGTH_S:.0f} 秒不超出该段总时长。"
+        ),
+    )
+    reason: str = Field(
+        default="", description="选中这一段作为预告的原因，仅供人工复核，不参与时长判定。",
+    )
 
 
 class MonologueLineDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    window_index: int
-    character_name: str
-    text: str
+    window_index: int = Field(
+        description="从给定候选静默窗口列表中选择的下标（不要自己编造秒数）。",
+    )
+    character_name: str = Field(
+        description="给定人物谱中的真实角色姓名，逐字取用。",
+    )
+    text: str = Field(
+        description=(
+            "本集原文里描述该角色内心感受/想法的一句叙述文字，取引号之外的"
+            "叙述句（不是角色已经用引号说出口的台词），逐字原样摘录；不能与"
+            "本集 segments 的 dialogue 中已经出现过的台词/旁白重复或互相"
+            "包含——独白是观众听不到的心里话，不是把已经说过的话再念一遍。"
+        ),
+    )
 
 
 class EnhancementPlanDraft(BaseModel):
