@@ -82,6 +82,7 @@ from .discovery import (
     _discover_new_scenes,
     _discovery_errored_names,
     _load_project_bible,
+    _prep_pack_build_prop_manifest,
 )
 from .entry import run_episode_prep_pack
 from .functional_candidate_verdict import (
@@ -148,7 +149,6 @@ from .publish import (
     verify_completion_certificate,
 )
 from .resolve_assets import (
-    _prep_pack_build_prop_manifest,
     _resolve_assets,
     visual_entity_id_for_resolution,
 )

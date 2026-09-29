@@ -1561,7 +1561,7 @@ def test_scene_label_aliased_to_two_scenes_still_resolves_via_this_calls_own_ver
         "前提条件失败：历史别名平局没有复现，这个测试就没有意义"
     )
 
-    async def fake_assess_new_scene(label, spatial_context, *, style, known_scenes, ep_label):
+    async def fake_assess_new_scene(label, spatial_context, *, style, known_scenes, ep_label, known_prop_labels=()):
         assert label == "洞府"
         # 真实两次调用（round 30/32）的裁决完全一致：这是既有场景"南峰山脚
         # 洞府"的简称，不是新场景。
@@ -4899,12 +4899,10 @@ def test_prop_mention_with_literal_evidence_appears_in_asset_manifest_props():
     )
     assert errors == []
     assert props == [{
-        "label": "血玉玦",
-        "description": "一枚泛着血光的玉玦，边缘刻着古老符文",
+        "label": "血玉玦", "description": "一枚泛着血光的玉玦，边缘刻着古老符文",
         "segment_indexes": [1],
-        "provenance": {
-            "method": "direct", "anchor_segments": [1], "anchor_phrase": "血玉玦",
-        },
+        "provenance": {"method": "direct", "anchor_segments": [1], "anchor_phrase": "血玉玦"},
+        "plot_significant": False, "plot_significant_quote": "",
     }]
 
 

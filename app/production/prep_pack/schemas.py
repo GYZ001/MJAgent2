@@ -58,11 +58,25 @@ class _ModelPropMention(BaseModel):
     """2.0.0, new: a physical object/item the episode actually shows on
     screen. No bible image library exists for props (unlike characters/
     scenes) -- this is a text-only asset, ``description`` is its only
-    payload, never a portrait_id/scene_reference_id/visual_entity_id."""
+    payload, never a portrait_id/scene_reference_id/visual_entity_id.
+
+    2026-09-28: added ``plot_significant``/``plot_significant_quote`` (model
+    nomination, code-verified downstream by app.props.judge.
+    is_key_prop_mention) -- a foreshadowing/keepsake/hand-off prop can be a
+    single terse mention that clears none of the existing structural gates
+    (segment count >= 2, description clause count >= 3, source occurrence
+    count >= 2); the real EP1 case this fixes is a heirloom felt through a
+    character's sweater ("隔着毛衫也能摸出边缘的凸弧") that never gets a
+    multi-clause description and is easy to under-count against the raw
+    source text. Required (not Optional), matching _ModelSceneMention.quote's
+    strict-schema convention: legal to be False/"" when this mention is
+    genuinely not plot-significant, never fabricated to look important."""
     model_config = ConfigDict(extra="forbid")
     label: str
     description: str
     segment_indexes: list[int]
+    plot_significant: bool
+    plot_significant_quote: str
 
 
 class _ChunkResponse(BaseModel):

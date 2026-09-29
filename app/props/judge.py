@@ -2,7 +2,7 @@
 
 只登记"关键道具"，不是每一次提及都建库：一次性出现的背景物件（用户举例：路过
 桌上的一只杯子）建库只会浪费出图成本、稀释真正需要跨集稳定的道具。判据从数据
-推导，二选一（结构信号，零语义，不针对任何具体道具名做特判）：
+推导，四选一（结构信号，零语义，不针对任何具体道具名做特判）：
   a) mention.segment_indexes 去重后覆盖 ≥2 个原文段——跨段落反复出现，说明
      不是一次性入镜；
   b) description 按中文顿号/逗号/分号/空白切分后，非空子句数 ≥3——结构上
@@ -14,7 +14,15 @@
      中文名词短语是修饰语 + 中心词的结构，「旧猫包」的中心词是「猫包」）在原文里出现
      ≥2 次——真实投诉的「旧猫包」在 EP1 原文里只占一个原文段、描述只有一句，但「猫包」
      出现 5 次，正是跨段被反复拍到、最容易漂移的那类道具。
-三条都不满足时不发起模型调用（省成本），标签维持"只有 label+description 文字
+  d) 模型提名 + 代码核验（2026-09-28 新增，真实缺陷：《顾念长安》第1集贴身佩戴的
+     黄铜旧星盘、只出现一次的童年合影都漏建卡——它们是剧情伏笔/交接物，不是背景
+     陈设，但只在原文里出现一两次、描述也往往只有一句，前三条结构信号天然覆盖
+     不到）：mention.plot_significant=true 且 plot_significant_quote 逐字命中
+     source_text——这不是"模型说重要就信"，是模型必须交出可核验的原文证据（这件
+     物品在剧情里被拿起/交接/特写/作为伏笔反复强调），代码只核验证据是否真实存在，
+     不判断"重要"这件事本身该不该成立。证据编造（quote 在原文里查无实据）一律
+     不采信，不走这一条。
+四条都不满足时不发起模型调用（省成本），标签维持"只有 label+description 文字
 描述"的原状，与此前完全一致——不是退化，是本来就不该入库。
 """
 from __future__ import annotations
@@ -49,6 +57,16 @@ def source_occurrences(label: str, source_text: str) -> int:
     return best
 
 
+def is_plot_significant_prop_mention(mention: dict, *, source_text: str) -> bool:
+    """判据 d) 的独立核验：模型提名 + 代码核验，见模块 docstring。``source_text``
+    为空时结构上不可能核验出任何一条 quote，直接返回 False（不是"宽松放过"，是
+    "没有原文可核对，就不能采信"）。"""
+    if not mention.get("plot_significant") or not source_text:
+        return False
+    quote = str(mention.get("plot_significant_quote") or "").strip()
+    return bool(quote) and quote in source_text
+
+
 def is_key_prop_mention(mention: dict, *, source_text: str = "") -> bool:
     """纯数据结构判据，不发模型调用；``source_text`` 为空时只看前两条。"""
     segment_indexes = {int(i) for i in mention.get("segment_indexes") or []}
@@ -57,7 +75,9 @@ def is_key_prop_mention(mention: dict, *, source_text: str = "") -> bool:
     description = str(mention.get("description") or "")
     if _description_clause_count(description) >= MIN_DESCRIPTION_CLAUSES:
         return True
-    return source_occurrences(str(mention.get("label") or ""), source_text) >= MIN_SOURCE_OCCURRENCES
+    if source_occurrences(str(mention.get("label") or ""), source_text) >= MIN_SOURCE_OCCURRENCES:
+        return True
+    return is_plot_significant_prop_mention(mention, source_text=source_text)
 
 
 class _PropAppearanceResponse(BaseModel):

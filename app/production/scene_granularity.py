@@ -81,6 +81,26 @@ def _candidates_section(candidates_block: str) -> str:
 """
 
 
+def _scene_space_and_prop_boundary_rule(prop_block: str) -> str:
+    """场景卡的两条边界正面陈述（空间-道具边界 + 首次出场状态），抽成独立函数
+    ——规则每增删一段就顶 scene_granularity_prompt 自己的 function_lines 棘轮，
+    而这块本来就不该算进那个函数的复杂度（同 chunk_extraction.py 的
+    _ASSET_DECLARATION_RULES 处置一致）。"""
+    return f"""- 场景卡只写空间本身（布局、材质、固定不可移动的陈设、光线基调），不写会被剧情拿起、
+  交给某人、单独特写的可移动物件——那些物件各自建有独立的道具卡与道具参考图，由分镜
+  引用道具参考图来表现，写进场景卡反而会让定场图把它画成道具卡以外的另一种样子（真实
+  事故：床头柜上一枚用红绳穿的小木星星被写进场景描述，定场图因此画成一整串花环，跟
+  道具卡自己的参考图对不上）。本次映射已经建卡的道具名称/别名：{prop_block}——
+  scene_canonical 里不要出现它们的名字或外观描述，画面里如果确实需要它们，写"陈设"
+  「摆件」这类不点名的泛称即可，具体外观交给道具参考图。
+- scene_canonical 写这个地点在本集原文里首次出现时的样子；如果同一段原文依据里，这个
+  地点后来因为剧情中的某个事件（例如被水淹、被打砸、被重新布置）变成了另一种样子，
+  只写事件发生前、首次出现时的状态，事件造成的变化不写进场景卡——那是这一集里的一次性
+  剧情进展，应该由分镜逐段单独描述，不是这个地点固定不变的锚点（真实事故：出租屋场景卡
+  被写成"半掌深积水、鞋柜歪倒、纸箱塌陷"的水管爆裂后现场，导致开场几段尚未发生水灾的
+  戏也被套上了这张灾后定场图）。"""
+
+
 def scene_granularity_prompt(
     label: str,
     spatial_context: str,
@@ -93,13 +113,17 @@ def scene_granularity_prompt(
     canonical_max: int,
     same_location_match_rule: str,
     candidates_block: str = "",
+    known_prop_labels: list[str] = (),
 ) -> str:
     """构造粒度判定提示词（正面陈述，不用黑名单/词表）。``known_scenes`` 是
     ``[(name, scene_canonical), ...]``——带上锚点串本身，而不只是名字，模型才有
-    材料判断候选与已有场景是否属于同一 location_key。"""
+    材料判断候选与已有场景是否属于同一 location_key。``known_prop_labels``：本次
+    映射同时产出（含跨集已登记）的道具卡名称/别名，供模型在写空间描述时主动避开
+    ——真实案例见下方「场景卡只写空间本身」一节。"""
     known_block = "\n".join(
         f"- {name}：{canonical}" for name, canonical in known_scenes
     ) or "（无）"
+    prop_block = "、".join(label for label in known_prop_labels if label) or "（无）"
     return f"""任务：判定已确认剧本场次地点「{label}」的画面粒度，决定它该不该单独建为可复用场景图。
 
 全片画风（场景锚点必须与之一致）：{style}
@@ -136,12 +160,24 @@ def scene_granularity_prompt(
 - scene_canonical 是"固定场景锚点串"：{canonical_min}~{canonical_max} 字（硬门禁，写完
   数一遍），须含 地点/室内外/光线时段/标志陈设/氛围色调；只写视觉可见的环境信息，不写
   人物、不写剧情动作。{style_rule}
+{_scene_space_and_prop_boundary_rule(prop_block)}
 
 只输出一个 JSON 对象：
 {{"important": true/false, "existing_scene_name": "已有规范场景完整名称或空字符串",
   "reason": "一句话依据", "name": str, "scene_canonical": str,
   "location_kind": "室内|室外|其他", "location_key": str, "role": "anchor|transitional",
   "era_anchor": str, "anchor_phrase": str}}"""
+
+
+def scene_canonical_prop_leak(scene_canonical: str, prop_labels: list[str]) -> list[str]:
+    """结构核验（代码侧，零语义）：``prop_labels``——本次映射同时产出（含跨集已
+    登记）的道具卡名称/别名——原样出现在 ``scene_canonical`` 里，说明模型没有守住
+    上面「场景卡只写空间本身」的正面陈述，把剧情道具写进了空间描述。``prop_labels``
+    来自这个项目真实的道具卡数据，不是预置词表，判据仍然从数据推导（CLAUDE.md
+    禁止黑白名单）。返回命中的道具名称列表（可能为空）；纯字符串包含判断，不发起
+    模型调用、不碰数据库。"""
+    text = scene_canonical or ""
+    return [label for label in prop_labels if label and label.strip() and label.strip() in text]
 
 
 def _verified_anchor_phrase(anchor_phrase: str, spatial_context: str) -> str:

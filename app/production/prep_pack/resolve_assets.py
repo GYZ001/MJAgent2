@@ -1,19 +1,20 @@
 """_resolve_assets: the main per-episode asset-resolution pass (characters,
-scenes, props, functional extras) plus the prop-manifest builder.
+scenes, props, functional extras).
 
 Split out of app/production/prep_pack.py. _resolve_assets is kept as one
 function verbatim (moved, not rewritten) -- it is ~970 lines, so this file
 exceeds the usual 600-line/200-function-line file-shape targets; see the
 package's split report for why further splitting was out of scope here.
+The prop-manifest builder (``_prep_pack_build_prop_manifest``) moved to
+``.discovery`` (2026-09-28, this file's own line-count baseline is already
+pinned at its exact current value -- new logic goes in a module with room,
+see FILE_CONVENTIONS.toml's ratchet note).
 """
 from __future__ import annotations
 
 from app.identity_authority import visual_entity_id_for_resolution
 from app.portraits.card_owner import resolve_card_owner
-from app.source_excerpt import (
-    SourceSegment,
-    index_source_segments,
-)
+from app.source_excerpt import index_source_segments
 from typing import Any
 
 from .alias_resolution import (
@@ -37,6 +38,7 @@ from .discovery import (
     _discover_new_scenes,
     _discovery_errored_names,
     _load_project_bible,
+    _prep_pack_build_prop_manifest,
 )
 from .functional_candidate_verdict import _prep_pack_resolve_functional_extra_candidate
 from .provenance import (
@@ -789,6 +791,19 @@ async def _resolve_assets(
     # 最后跟第二遍的合并去重。
     true_name_hints_pass1 = true_name_hints
 
+    # 道具发现必须先于场景发现跑（2026-09-28 顺序修复）：assess_new_scene 的
+    # 场景卡/道具卡边界核验（app.production.scene_discovery_assess）要从
+    # bible.props 读出"本次映射已经建卡的道具"，如果道具发现仍留在函数末尾，
+    # 场景卡产出时这批道具还没落库，边界核验永远看不到同一次映射刚建的卡——
+    # 真实事故：「小木星星」在本集内先被道具库登记，却因为原来的调用顺序，
+    # 场景「顾屿家客房」判定时读到的仍是没有它的旧 bible。提前到这里（两遍
+    # 角色/场景解析开始之前）执行，之后任何一次 ensure_scenes_for_labels 重新
+    # 读 bible 都能看到本集已建的道具卡。
+    props_payload = await _discover_new_props(
+        conn, project_id=project_id, episode_no=episode_no,
+        props_payload=_prep_pack_build_prop_manifest(prop_mentions, segments), source_text=source_text,
+    )
+
     if unresolved_chars or unresolved_scenes:
         skip_character_names: set[str] = set()
         character_rename: dict[str, str] = {}
@@ -989,7 +1004,8 @@ async def _resolve_assets(
         }
         for label, data in functional_extras.items()
     ]
-    props_payload = await _discover_new_props(conn, project_id=project_id, episode_no=episode_no, props_payload=_prep_pack_build_prop_manifest(prop_mentions, segments), source_text=source_text)
+    # props_payload 已在函数前部（两遍角色/场景解析之前）算好，见上方顺序修复
+    # 注释——这里不重复调用。
     # appellation_map 真源出参（2.0.1 bug fix，见本函数 docstring
     # ``appellation_resolutions`` 一节与 _prep_pack_build_appellation_map
     # 上方大注释）：只在调用方真的传了列表时才写，默认 None 不记录，
@@ -1000,43 +1016,3 @@ async def _resolve_assets(
         list(characters.values()), list(scenes.values()), props_payload, functional_extras_payload,
         errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     )
-
-
-# 2.0.0 新增：道具没有世界书图像素材库，不需要身份消歧/发现，也不需要
-# suspected_true_name 声明-核验通道——一个道具就是它自己（结构判据，零
-# 语义），按 label 精确字符串去重合并 segment_indexes 即可。
-#
-# 道具没有 characters/scenes 那样的"经解析路径绑定可豁免逐字"这条路
-# （没有身份消歧、没有候选判别——道具的 label 就是它唯一的名字，不存在
-# "解析成另一个规范名"这件事），因此每一个道具都等价于角色侧的"裸直接
-# 命中"，反幻觉主防线必须适用：只保留 label 真的逐字出现在该段落原文里的
-# segment_indexes（跟角色侧"称谓证据闸"同一判据，_prep_pack_gate_segment_
-# indexes 的结构闸不做这一步是因为它对全部三种资产统一处理、且要给
-# characters/scenes 的解析路径留豁免空间——道具没有这个豁免需求，在这里
-# 单独把关不冲突）。一个道具的全部段号都验不过字面证据，整条提及丢弃（不
-# 计入清单，不阻断发布——跟 scene 侧"没证据就当未解析"同一处置，不是
-# "空口提名也发布"）。
-def _prep_pack_build_prop_manifest(
-    prop_mentions: list[dict[str, Any]], segments: list[SourceSegment],
-) -> list[dict[str, Any]]:
-    props: dict[str, dict[str, Any]] = {}
-    for mention in prop_mentions:
-        label = str(mention.get("label") or "").strip()
-        if not label:
-            continue
-        segment_indexes = sorted(
-            index for index in {int(i) for i in mention.get("segment_indexes") or []}
-            if 1 <= index <= len(segments) and label in segments[index - 1].text
-        )
-        if not segment_indexes:
-            continue
-        entry = props.setdefault(label, {
-            "label": label,
-            "description": str(mention.get("description") or "").strip(),
-            "segment_indexes": [],
-            "provenance": _prep_pack_provenance("direct", [segment_indexes[0]], label),
-        })
-        entry["segment_indexes"] = sorted(
-            set(entry["segment_indexes"]) | set(segment_indexes)
-        )
-    return list(props.values())

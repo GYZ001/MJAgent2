@@ -156,6 +156,30 @@ def _prep_pack_build_appellation_map(
     return rows
 
 
+def _prep_pack_prop_mention_entry(
+    mention: Any, chunk_global_indexes: set[int], chunk_by_index: dict[int, Any],
+) -> dict[str, Any] | None:
+    """把模型申报的一条道具提及转成 prop_mentions 条目；段号结构闸不通过就丢弃
+    （见 _prep_pack_gate_segment_indexes）。``plot_significant``/
+    ``plot_significant_quote``（2026-09-28 新增）原样透传，逐字核验是消费侧
+    app.props.judge.is_key_prop_mention 的职责（需要完整 source_text，这里只
+    有单个 chunk），同 scenes 的 quote 字段一个口径，这里不做结构闸。抽成独立
+    函数只是为了不让 _generate_prep_pack_once 自己的 function_lines 计数往上
+    顶——逻辑与内联时完全一致。"""
+    valid_indexes = _prep_pack_gate_segment_indexes(
+        mention.label, mention.segment_indexes, chunk_global_indexes, chunk_by_index,
+    )
+    if not valid_indexes:
+        return None
+    return {
+        "label": mention.label.strip(),
+        "description": mention.description.strip(),
+        "segment_indexes": valid_indexes,
+        "plot_significant": mention.plot_significant,
+        "plot_significant_quote": mention.plot_significant_quote.strip(),
+    }
+
+
 async def _generate_prep_pack_once(
     *,
     episode_id: str,
@@ -277,17 +301,9 @@ async def _generate_prep_pack_once(
                 "quote": mention.quote.strip(),
             })
         for mention in response.props:
-            valid_indexes = _prep_pack_gate_segment_indexes(
-                mention.label, mention.segment_indexes,
-                chunk_global_indexes, chunk_by_index,
-            )
-            if not valid_indexes:
-                continue
-            prop_mentions.append({
-                "label": mention.label.strip(),
-                "description": mention.description.strip(),
-                "segment_indexes": valid_indexes,
-            })
+            entry = _prep_pack_prop_mention_entry(mention, chunk_global_indexes, chunk_by_index)
+            if entry:
+                prop_mentions.append(entry)
 
     if not character_mentions and not scene_mentions and not prop_mentions:
         raise PrepPackGateError("本集未发现任何人物/场景/道具", had_events=False)

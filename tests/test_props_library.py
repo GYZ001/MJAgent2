@@ -258,6 +258,69 @@ def test_key_prop_when_head_noun_repeats_in_source_text():
     assert is_key_prop_mention(mention) is False
 
 
+# ---------------------------------------------------------------------------
+# 判据 d)：模型提名 + 代码核验（真实缺陷：《顾念长安（第二版）》proj_ca86b15ab7d7
+# EP1 贴身佩戴的黄铜旧星盘只出现一次、描述也只有一句，前三条结构信号覆盖不到）
+# ---------------------------------------------------------------------------
+
+
+def test_key_prop_when_plot_significant_and_quote_verified():
+    """星盘只出现一次、描述单薄（不满足 segment_count/clause/occurrence 任一条），
+    但模型申报的证据逐字命中原文，代码核验通过后仍应判定为关键道具。"""
+    from app.props.judge import is_key_prop_mention
+
+    source = "顾屿快一步把照片收回内袋，指尖顺势碰了碰贴身挂着的一枚硬物——是一枚黄铜色的旧星盘，用皮质表袋裹着。"
+    mention = {
+        "label": "黄铜旧星盘", "description": "贴身佩戴的旧物件", "segment_indexes": [5],
+        "plot_significant": True,
+        "plot_significant_quote": "指尖顺势碰了碰贴身挂着的一枚硬物——是一枚黄铜色的旧星盘",
+    }
+    assert is_key_prop_mention(mention, source_text=source) is True
+
+
+def test_key_prop_plot_significant_without_verified_quote_is_rejected():
+    """红灯（手写一份修复前逻辑的临时副本）：如果代码只信模型的 plot_significant
+    自报、不核验 quote 是否真的出现在原文里，编造证据也会被判定为关键道具——
+    这正是"模型说重要就信"要避免的漏洞，必须先复现再证明修复关上了它。"""
+    from app.props.judge import is_key_prop_mention
+
+    source = "顾屿把大衣脱下来换成一件浅灰色卫衣，随手搭在沙发扶手上。"
+    fabricated = {
+        "label": "凭空捏造的圣物", "description": "一件从未在原文出现过的法器",
+        "segment_indexes": [5], "plot_significant": True,
+        "plot_significant_quote": "这句话在原文里根本不存在",
+    }
+
+    def _pre_fix_trusts_model_claim_without_verification(mention: dict) -> bool:
+        return bool(mention.get("plot_significant"))  # 修复前：不核验 quote，直接信
+
+    assert _pre_fix_trusts_model_claim_without_verification(fabricated) is True, "前提校验：红灯必须先复现"
+    assert is_key_prop_mention(fabricated, source_text=source) is False
+
+
+def test_key_prop_plot_significant_false_does_not_pass_even_with_real_quote():
+    """plot_significant=false 时即使 quote 恰好逐字命中原文，也不该被这条判据
+    采信——正面陈述要求"证据真实存在"是 true 的必要条件，不是 quote 命中就够。"""
+    from app.props.judge import is_key_prop_mention
+
+    source = "桌上摆着一只泡面碗，还没来得及收拾。"
+    mention = {
+        "label": "泡面碗", "description": "桌上的泡面碗", "segment_indexes": [1],
+        "plot_significant": False, "plot_significant_quote": "桌上摆着一只泡面碗",
+    }
+    assert is_key_prop_mention(mention, source_text=source) is False
+
+
+def test_key_prop_plot_significant_missing_source_text_never_passes():
+    from app.props.judge import is_key_prop_mention
+
+    mention = {
+        "label": "黄铜旧星盘", "description": "贴身佩戴的旧物件", "segment_indexes": [5],
+        "plot_significant": True, "plot_significant_quote": "指尖顺势碰了碰贴身挂着的一枚硬物",
+    }
+    assert is_key_prop_mention(mention) is False
+
+
 async def test_ensure_props_for_labels_normalises_quantifier_and_compound_labels(monkeypatch: pytest.MonkeyPatch) -> None:
     """第 11 轮物件库核查：野鸡/两只野鸡、灵石/半块灵石/凝灵丹与半块灵石 各建了一条。归一后本体已登记只补别名，
     未登记的以本体名建卡、原标签作别名。"""

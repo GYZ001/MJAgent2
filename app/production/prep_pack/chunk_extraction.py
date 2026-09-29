@@ -167,8 +167,14 @@ async def _extract_chunk(
   在本段确实没有可摘录的原文依据就填空字符串，绝不编造"}}；已登记场景名（仅供拼写对齐，同
   上一条的原则）：{known_scenes}；
 - props：本段原文中画面里明确出现、有辨识度的物品/道具（不是随口一提，例如武器、信物、
-  法宝、书信等），每个给 {{"label": "道具名称", "description": "这个道具的外观/特征简述",
-  "segment_indexes": [该道具实际出现的编号列表]}}；没有就给空列表，不要为了填满而虚构。
+  法宝、书信、照片、纪念品等），每个给 {{"label": "道具名称", "description": "这个道具的
+  外观/特征简述", "segment_indexes": [该道具实际出现的编号列表],
+  "plot_significant": true/false, "plot_significant_quote": "从上面 segment_indexes
+  任一编号原文中逐字摘录的一段原文（不超过约40字），要能证明这件物品在这段剧情里被某个
+  角色拿起/递给/接过/放下、被贴身佩戴或收藏、被镜头意味着特写描写，或作为悬念/伏笔被
+  原文特别强调其存在——不确定就填空字符串，绝不编造"}}；plot_significant=true 当且仅当
+  上面这条证据真实存在，不确定或原文只是把它当背景陈设一笔带过就填 false；没有道具就给
+  空列表，不要为了填满而虚构。
 
 {_ASSET_DECLARATION_RULES}
 {confirmed_title_section}{hint}

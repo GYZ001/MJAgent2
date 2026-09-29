@@ -1,20 +1,25 @@
-"""New-character/new-scene discovery: loading the project bible and driving
-app.portraits/app.scenes discovery for mentions that do not resolve against
-the existing bible.
+"""New-character/new-scene/new-prop discovery: loading the project bible and
+driving app.portraits/app.scenes/app.props discovery for mentions that do not
+resolve against the existing bible, plus the prop-manifest builder.
 
-Split out of app/production/prep_pack.py.
+Split out of app/production/prep_pack.py. ``_prep_pack_build_prop_manifest``
+moved here from ``.resolve_assets`` (2026-09-28, that file's line-count
+baseline was already pinned at its exact current value in
+FILE_CONVENTIONS.toml -- this module still has room).
 """
 from __future__ import annotations
 
 import json
 import logging
 from app.schemas import Bible
+from app.source_excerpt import SourceSegment
 from typing import Any
 
 from .contracts import (
     _FALLBACK_VISUAL_STYLE,
     _FUNCTIONAL_RESOLUTION_KINDS,
 )
+from .provenance import _prep_pack_provenance
 
 log = logging.getLogger(__name__)
 
@@ -215,6 +220,70 @@ async def _discover_new_props(
             project_id, episode_no, message,
         )
     return props_payload
+
+
+# 2.0.0 新增：道具没有世界书图像素材库，不需要身份消歧/发现，也不需要
+# suspected_true_name 声明-核验通道——一个道具就是它自己（结构判据，零
+# 语义），按 label 精确字符串去重合并 segment_indexes 即可。
+#
+# 道具没有 characters/scenes 那样的"经解析路径绑定可豁免逐字"这条路
+# （没有身份消歧、没有候选判别——道具的 label 就是它唯一的名字，不存在
+# "解析成另一个规范名"这件事），因此每一个道具都等价于角色侧的"裸直接
+# 命中"，反幻觉主防线必须适用：只保留 label 真的逐字出现在该段落原文里的
+# segment_indexes（跟角色侧"称谓证据闸"同一判据，_prep_pack_gate_segment_
+# indexes 的结构闸不做这一步是因为它对全部三种资产统一处理、且要给
+# characters/scenes 的解析路径留豁免空间——道具没有这个豁免需求，在这里
+# 单独把关不冲突）。一个道具的全部段号都验不过字面证据，整条提及丢弃（不
+# 计入清单，不阻断发布——跟 scene 侧"没证据就当未解析"同一处置，不是
+# "空口提名也发布"）。
+#
+# plot_significant/plot_significant_quote（2026-09-28 新增，见
+# .chunk_extraction 提示词与 app.props.judge.is_key_prop_mention 的同名
+# 判据）：原样透传模型这次申报的两个字段，不在这里做任何核验——逐字核验
+# 是 is_key_prop_mention 消费时的职责（它同时还需要 source_text，本函数
+# 不持有），这里只负责把模型的申报值带到 props_payload 里，缺省时按假/空
+# 兜底（旧调用方构造的 mention dict 没有这两个键时不报错，向后兼容
+# tests/test_props_library.py 里手写的 mention 夹具）。
+def _prep_pack_build_prop_manifest(
+    prop_mentions: list[dict[str, Any]], segments: list[SourceSegment],
+) -> list[dict[str, Any]]:
+    props: dict[str, dict[str, Any]] = {}
+    for mention in prop_mentions:
+        label = str(mention.get("label") or "").strip()
+        if not label:
+            continue
+        segment_indexes = sorted(
+            index for index in {int(i) for i in mention.get("segment_indexes") or []}
+            if 1 <= index <= len(segments) and label in segments[index - 1].text
+        )
+        if not segment_indexes:
+            continue
+        entry = props.setdefault(label, {
+            "label": label,
+            "description": str(mention.get("description") or "").strip(),
+            "segment_indexes": [],
+            "provenance": _prep_pack_provenance("direct", [segment_indexes[0]], label),
+            "plot_significant": bool(mention.get("plot_significant")),
+            "plot_significant_quote": str(mention.get("plot_significant_quote") or "").strip(),
+        })
+        entry["segment_indexes"] = sorted(
+            set(entry["segment_indexes"]) | set(segment_indexes)
+        )
+        # plot_significant/plot_significant_quote 必须跨同 label 的多条提及做
+        # "任一为真即采纳"的合并，不能只取 setdefault 首次插入时那一条
+        # （2026-09-28 code review 实测发现：同一道具先在早期 chunk 里被平淡
+        # 提及、后在更晚的 chunk 里才因交接/特写/伏笔揭示被模型正确标记
+        # plot_significant=True，是 Part C 明确要接住的形状——黄铜旧星盘、
+        # 童年合影都是这种贴身出现多次、其中一次才是剧情重要时刻的道具。按
+        # 处理顺序固定取第一条会让靠后到达的真实证据被静默丢弃，且没有任何
+        # 信号提示丢弃发生过）。一旦某条提及命中就不再被后续 False 的提及
+        # 覆盖回去——先到的真证据比后到的"这条不重要"更可信。
+        if mention.get("plot_significant") and not entry["plot_significant"]:
+            entry["plot_significant"] = True
+            entry["plot_significant_quote"] = str(
+                mention.get("plot_significant_quote") or ""
+            ).strip()
+    return list(props.values())
 
 
 # ---------- 未解析角色标签候选判别（1.8.0，见 PREP_PACK_VERSION 上方大注释

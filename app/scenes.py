@@ -33,16 +33,10 @@ from app.evidence.media import record_reference_asset
 from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
 from app.production.scene_refresh import refresh_verdict_if_scenes_changed
-from app.production.scene_evidence import candidate_block, structural_scene_candidates
-from app.production.scene_granularity import (
-    ROLE_TRANSITIONAL,
-    anchor_discovery_sources,
-    resolve_existing_anchor_name,
-    resolve_scene_granularity_verdict,
-    scene_granularity_prompt,
-)
+from app.production.scene_discovery_assess import assess_new_scene as assess_new_scene
+from app.production.scene_granularity import ROLE_TRANSITIONAL, anchor_discovery_sources, resolve_existing_anchor_name
 from app.refs import _safe_name, scene_visual_style_lock
-from app.scene_contract import SCENE_SAME_LOCATION_MATCH_RULE, split_legacy_scene_setting
+from app.scene_contract import split_legacy_scene_setting
 from app.schemas import Bible, Scene, extract_json
 from app.validators import match_scene_name
 
@@ -198,6 +192,9 @@ def scene_ref_prompt(
         functional_constraints,
         f"{canvas_phrase(aspect_ratio)}，构图完整的环境定场镜头，空间纵深清晰，光影与色调统一，电影质感，高清",
         "画面必须无人物；不得生成任何文字、字幕、招牌字、角标、水印或 logo",
+        "只画空间本身的布局、材质、固定陈设与光线氛围；不画可被单独拿起、随身携带、或作为"
+        "剧情道具反复出现的小件物品——那些物件由各自的道具参考图单独提供，分镜引用道具"
+        "参考图叠加，不需要在这张定场图里出现它们的具体外观",
         f"再次确认：地点是「{scene_name.strip()}」，画风是「{visual_style.strip()}」"
         if scene_name.strip() and visual_style.strip()
         else "",
@@ -823,33 +820,16 @@ async def _generate_one_scene_reference(
 
 
 # ---------- 分镜阶段反应式发现新场景（对照 portraits.ensure_character_card 的新角色路径） ----------
+# assess_new_scene 本身已挪到 app.production.scene_discovery_assess（见该模块
+# docstring：本文件行数已顶在 FILE_CONVENTIONS.toml 的棘轮基线上，新逻辑放新
+# 模块），这里只保留同名再导出（见上方 import 块），调用方/测试用的
+# scenes.assess_new_scene 引用不变。
 
-async def assess_new_scene(label: str, spatial_context: str, *, style: str,
-                           known_scenes: list[Scene], ep_label: str) -> dict:
-    """把已确认剧本场次解析为新场景或已有场景别名，并产出粒度判定字段（location_key/
-    role/era_anchor/anchor_phrase，判据见 app.production.scene_granularity）。"""
-    from app.visual_styles import is_photographic_style_prompt
-    scene_canonical_style_rule = (
-        f"必须贴合画风「{style}」，是照片级摄影质感的实景环境描述，允许并鼓励真实材质、自然光影与摄影级细节。"
-        if is_photographic_style_prompt(style)
-        else f"必须贴合画风「{style}」，是 CG/动画/漫画类非真人渲染场景，严禁真人实拍/实景照片描述。"
-    )
-    prompt = scene_granularity_prompt(
-        label, spatial_context, style=style, style_rule=scene_canonical_style_rule,
-        known_scenes=[(s.name, s.scene_canonical) for s in known_scenes],
-        ep_label=ep_label, canonical_min=SCENE_CANONICAL_MIN, canonical_max=SCENE_CANONICAL_MAX,
-        same_location_match_rule=SCENE_SAME_LOCATION_MATCH_RULE,
-        candidates_block=candidate_block(structural_scene_candidates(label, known_scenes)),  # 字面互含的既有场景连同原文摘录做选择题
-    )
-    raw = await model_gateway.chat(
-        [{"role": "user", "content": prompt}], temperature=0.3, max_tokens=600,
-        call_meta={"stage": "assess_new_scene", "scene_label": label},
-    )
-    verdict = resolve_scene_granularity_verdict(
-        extract_json(raw), label=label, spatial_context=spatial_context,
-        canonical_min=SCENE_CANONICAL_MIN, canonical_max=SCENE_CANONICAL_MAX,
-    )
-    return verdict.as_dict()
+
+def _known_prop_labels(props: list) -> list[str]:
+    """本项目已登记的道具卡名称/别名（供 assess_new_scene 做场景卡/道具卡边界
+    核验，见 app.production.scene_discovery_assess 模块 docstring）。"""
+    return [name for prop in props for name in (prop.name, *prop.aliases) if name]
 
 
 def _commit_scene_bible_mutation(
@@ -1126,6 +1106,7 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
     补齐，见 app/domain/screenplay_ops/background_portraits.py。"""
     scenes = list(getattr(bible, "scenes", None) or [])
     style = bible.world.visual_style_canonical
+    known_prop_labels = _known_prop_labels(getattr(bible, "props", None) or [])
     conn = get_conn()
 
     labels = _collect_scene_labels(screenplay)
@@ -1151,7 +1132,7 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
             verdict = await assess_new_scene(
                 label, spatial_context, style=style,
                 known_scenes=scenes,
-                ep_label=f"第 {episode_no} 集")
+                ep_label=f"第 {episode_no} 集", known_prop_labels=known_prop_labels)
         except Exception as exc:  # noqa: BLE001
             message = f"{label}：场景识别失败" + code_ref(
                 exc, action="assess_new_scene",
@@ -1352,6 +1333,7 @@ async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: lis
     bible = Bible.model_validate(json.loads(project["bible_json"]))
     scenes = list(bible.scenes)
     style = bible.world.visual_style_canonical
+    known_prop_labels = _known_prop_labels(bible.props)
 
     unmatched = [
         label for label in labels
@@ -1380,14 +1362,14 @@ async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: lis
             verdict = await assess_new_scene(
                 label, spatial_context, style=style,
                 known_scenes=scenes,
-                ep_label=f"第 {episode_no} 集")
+                ep_label=f"第 {episode_no} 集", known_prop_labels=known_prop_labels)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{label}：场景识别失败" + code_ref(
                 exc, action="assess_new_scene",
                 context={"project_id": project_id, "scene": label, "episode_no": episode_no},
             ))
             continue
-        scenes, verdict = await refresh_verdict_if_scenes_changed(conn, project_id, scenes, verdict, assess=lambda fresh, _l=label, _c=spatial_context: assess_new_scene(_l, _c, style=style, known_scenes=fresh, ep_label=f"第 {episode_no} 集"))  # 并发建场景复核，见 scene_refresh
+        scenes, verdict = await refresh_verdict_if_scenes_changed(conn, project_id, scenes, verdict, assess=lambda fresh, _l=label, _c=spatial_context: assess_new_scene(_l, _c, style=style, known_scenes=fresh, ep_label=f"第 {episode_no} 集", known_prop_labels=known_prop_labels))  # 并发建场景复核，见 scene_refresh
         anchor_name = resolve_existing_anchor_name(
             location_key=verdict.get("location_key") or verdict.get("name") or "", scenes=scenes,
             era_anchor=verdict.get("era_anchor") or "", existing_scene_name=verdict.get("existing_scene_name") or "",

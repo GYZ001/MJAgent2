@@ -24,6 +24,7 @@ from app.production.scene_granularity import (
     find_anchor_by_location,
     resolve_existing_anchor_name,
     resolve_scene_granularity_verdict,
+    scene_canonical_prop_leak,
     scene_granularity_prompt,
 )
 from app.schemas import Scene
@@ -274,3 +275,64 @@ def test_prompt_no_known_scenes_renders_placeholder() -> None:
         ep_label="第 1 集", canonical_min=30, canonical_max=80, same_location_match_rule="口径",
     )
     assert "（无）" in prompt
+
+
+# ---------------------------------------------------------------------------
+# 场景卡只写空间本身 + 首次出场状态（《顾念长安》proj_ca86b15ab7d7 EP1 真实缺陷：
+# 「顾屿家客房」scene_canonical 把「小木星星」道具写了进去，定场图因此把单颗
+# 星星画成一整串花环；「温念的出租屋」scene_canonical 写成了水管爆裂后的灾后
+# 状态，而原文开场时这里只是墙角一小滩水渍）
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_includes_space_only_and_first_appearance_positive_statements() -> None:
+    prompt = scene_granularity_prompt(
+        "顾屿家客房", "客房床头柜上摆着一枚用红绳穿着的小木星星",
+        style="真人实拍风", style_rule="必须贴合画风", known_scenes=[],
+        ep_label="第 1 集", canonical_min=30, canonical_max=80, same_location_match_rule="口径",
+        known_prop_labels=["小木星星"],
+    )
+    assert "场景卡只写空间本身" in prompt
+    assert "小木星星" in prompt  # 已建卡道具名称原样列进提示词，供模型主动避开
+    assert "首次出现时的样子" in prompt
+    assert "事件造成的变化不写进场景卡" in prompt
+
+
+def test_prompt_known_prop_labels_defaults_to_placeholder_when_empty() -> None:
+    prompt = scene_granularity_prompt(
+        "温念的出租屋", "墙角那处水渍不知何时又洇大了一圈",
+        style="真人实拍风", style_rule="必须贴合画风", known_scenes=[],
+        ep_label="第 1 集", canonical_min=30, canonical_max=80, same_location_match_rule="口径",
+    )
+    assert "本次映射已经建卡的道具名称/别名：（无）" in prompt
+
+
+# ---------------------------------------------------------------------------
+# scene_canonical_prop_leak：场景卡/道具卡边界的结构核验（代码侧，零语义）
+# ---------------------------------------------------------------------------
+
+
+def test_scene_canonical_prop_leak_detects_verbatim_prop_name() -> None:
+    """红灯（手写一份修复前的判据）：没有这道核验时，「小木星星」原样出现在
+    scene_canonical 里会被判定为「无问题」——这正是真实事故会被静默放行的形状。"""
+    canonical = "室内空间，暖黄色灯光照明，床头柜摆放红绳穿的摩挲发亮的小木星星，整体温暖写实"
+    prop_labels = ["小木星星", "深灰色围巾"]
+
+    def _pre_fix_leak_check(_canonical: str, _labels: list[str]) -> list[str]:
+        return []  # 修复前：压根不存在这道核验，永远放行
+
+    assert _pre_fix_leak_check(canonical, prop_labels) == [], "前提校验：红灯必须先复现"
+    assert scene_canonical_prop_leak(canonical, prop_labels) == ["小木星星"]
+
+
+def test_scene_canonical_prop_leak_no_hit_when_prop_not_mentioned() -> None:
+    canonical = "室内空间，暖黄色灯光照明，环境整洁，温暖写实"
+    assert scene_canonical_prop_leak(canonical, ["小木星星", "深灰色围巾"]) == []
+
+
+def test_scene_canonical_prop_leak_empty_prop_labels_never_flags() -> None:
+    assert scene_canonical_prop_leak("任意场景描述", []) == []
+
+
+def test_scene_canonical_prop_leak_ignores_blank_labels() -> None:
+    assert scene_canonical_prop_leak("任意场景描述", ["", "   "]) == []
