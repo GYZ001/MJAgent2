@@ -104,8 +104,8 @@ from app.production.storyboard_narrative_arc import (
     phase2_segment_rules,
     segment_narrative_arc_payload_fields,
 )
-from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_beats as _action_beats, storyboard_action_density as _action_density, storyboard_cast_lock as _cast_lock, storyboard_shot_mandates as _shot_mandates, storyboard_music_bed as _music_bed, storyboard_prop_entrance as _prop_entrance, storyboard_wardrobe_plan as _wardrobe_plan, storyboard_revision_notes as _revision_notes, storyboard_prop_appearance_lock as _prop_lock, storyboard_stimulus_voice as _stim_voice, storyboard_transition_plan as _transition_plan
-from app.visual_styles import current_visual_style_prompt
+from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_beats as _action_beats, storyboard_action_density as _action_density, storyboard_cast_lock as _cast_lock, storyboard_shot_mandates as _shot_mandates, storyboard_music_bed as _music_bed, storyboard_skin_blush as _skin_blush, storyboard_prop_entrance as _prop_entrance, storyboard_wardrobe_plan as _wardrobe_plan, storyboard_revision_notes as _revision_notes, storyboard_prop_appearance_lock as _prop_lock, storyboard_stimulus_voice as _stim_voice, storyboard_transition_plan as _transition_plan
+from app.visual_styles import current_visual_style_prompt, is_photographic_style_prompt
 from app.production.storyboard_segment_ranges import (
     _PARATEXT_PLACEHOLDER_TEXT,
     segment_source_payload,
@@ -948,7 +948,7 @@ async def _generate_all_segment_prompts(
     profile, target_model_literal, dialect_instructions = _dialect_for_target_video_model(target_video_model)
     beats_by_id = {beat.beat_id: beat for beat in beat_draft.beat_sheet}
     paratext_indexes = _paratext_segment_indexes(payload)
-    visual_style = current_visual_style_prompt(bible.world.visual_style_canonical) if bible is not None and bible.world is not None else ""
+    visual_style = current_visual_style_prompt(bible.world.visual_style_canonical) if bible is not None and bible.world is not None else ""; visual_style_is_photographic = is_photographic_style_prompt(visual_style)
     shared_rules = [*_segment_shared_rules(), *IDENTITY_GENERATION_RULES]
 
     by_segment_no: dict[int, _AiStoryboardSegmentDraft] = {}
@@ -1030,7 +1030,7 @@ async def _generate_all_segment_prompts(
             "recent_camera_language": camera_history,
             "visual_style": visual_style, "aspect_ratio": aspect_ratio,
             "target_video_model": target_model_literal,
-            "dialect_instructions": f"{dialect_instructions}\n{_action_beats.decisive_action_dialect_rule(profile.render_format)}\n{_action_density.shot_action_beats_rule()}\n{_shot_mandates.shot_mandates_dialect_rule(profile.render_format)}{_music_bed.music_bed_dialect_addendum(profile.render_format, enabled=enhance_music_bed)}",
+            "dialect_instructions": f"{dialect_instructions}\n{_action_beats.decisive_action_dialect_rule(profile.render_format)}\n{_action_density.shot_action_beats_rule()}\n{_shot_mandates.shot_mandates_dialect_rule(profile.render_format)}{_music_bed.music_bed_dialect_addendum(profile.render_format, enabled=enhance_music_bed)}{_skin_blush.skin_blush_dialect_addendum(profile.render_format, photographic=visual_style_is_photographic)}",
             # app.video_prompt_profiles 的 SEEDANCE_2_PROFILE/MINIMAX_H3_PROFILE 是
             # 既有的正确接缝（docs/STORYBOARD_PROMPT_IR_DESIGN.md「与既有代码的衔接」），
             # 职责收窄为"交给模型的方言约束"；dialect_instructions 是本模块新写的
