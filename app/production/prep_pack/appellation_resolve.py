@@ -30,6 +30,7 @@ asset_manifest.characters/appellation_map 全空，即使人物谱里"里奥"已
 """
 from __future__ import annotations
 
+import logging
 import re
 
 from app.evidence import repository as evidence_repository
@@ -47,6 +48,8 @@ from .provenance import _prep_pack_locate_phrase, _prep_pack_provenance
 COLLECTIVE = "collective"
 UNRESOLVED = "unresolved"
 APPELLATION_RESOLUTION_METHOD = "appellation_resolution"
+
+log = logging.getLogger(__name__)
 
 
 class _AppellationVerdict(BaseModel):
@@ -191,6 +194,53 @@ def _apply_unresolved_verdict(
         extra["provenance"]["collective"] = True
 
 
+def _verbatim_segments_for_label(
+    raw_label: str, segment_indexes: list[int], segments: list[Any],
+) -> list[int]:
+    """unresolved/collective 判定没有可核验的 evidence 字段（collective 按提示词
+    要求留空；unresolved 本身就是"证据不足"的结论），核验退回到 raw_label 本身：
+    只保留 raw_label 逐字出现在它自己声明的那个段落原文里的段号——不做跨段
+    搜索，不能用"raw_label 出现在别的段"证明"这段里有这个人"。与具名分支的
+    ``_prep_pack_locate_phrase`` 同一纪律：不信任模型的结构性声明，代码侧再
+    核验一遍是否真的逐字出现在原文里。
+
+    真实故障：生产第2集"他"（segment_indexes=[5]，anchor_phrase=""）——第5段
+    原文里根本没有一个独立的"他"字，这条声明没有任何逐字依据，却因为
+    identity=unresolved 被既有实现直接跳过核验，原样进了 functional_extras。
+
+    单字 raw_label（他/她/我/你/它……）额外走 ``_label_occurs_standalone``：
+    纯子串包含会把"他们在村口说笑"里的"他"误判成独立出现过的"他"——复数
+    后缀"们"把子串包含判断打穿，触发条件从"完全不出现"换成了"以复合词形式
+    出现"，是同一类故障的另一个入口，必须同时堵上。
+    """
+    verified: list[int] = []
+    for index in segment_indexes:
+        if 1 <= index <= len(segments) and _label_occurs_standalone(
+            raw_label, segments[index - 1].text,
+        ):
+            verified.append(index)
+    return verified
+
+
+def _label_occurs_standalone(raw_label: str, text: str) -> bool:
+    """单字代词核验专用：排除"单字+们"这一个封闭的汉语复数后缀形态（他们/
+    我们/你们/她们/它们）——这是语法规则（们作代词复数后缀），不是按具体
+    称谓字面枚举的黑名单，对任意单字 raw_label 一视同仁。多字 raw_label
+    （"老人""有人""众猴"）不受影响，仍按原有子串包含判断。
+
+    已知局限：不覆盖"其他""自我"这类单字作为前缀复合词一部分出现的情形
+    （如"其他人""自我介绍"）——排除这类需要真正的分词而本仓库未引入分词
+    依赖，这里没有堵，逐字核验对这一类仍可能假阳性通过，见
+    ``test_single_char_label_prefix_compound_is_a_known_gap``。
+    """
+    if len(raw_label) != 1:
+        return raw_label in text
+    return any(
+        text[hit.end():hit.end() + 1] != "们"
+        for hit in re.finditer(re.escape(raw_label), text)
+    )
+
+
 def _verified_verdicts(
     response: _AppellationResolutionResponse, *, candidates: set[str], source_text: str,
     valid_segment_indexes: set[int], segments: list[Any],
@@ -205,6 +255,16 @@ def _verified_verdicts(
     evidence 换成原文里真实存在的形态。2026-09-14 第 13 集实测：模型判「大汉→曹阳」，
     证据「看到山下有一个大汉，正迈步临近公开区。“是曹阳……”」只差一个跨段换行和一个
     自补的收尾引号，原始子串比较把它打成 unresolved，曹阳在同一段里被拆成两个人。
+
+    模型原始声明的 identity 落在 candidates 之外（即 collective，或字面就是
+    unresolved / 枚举违规被规范化为 unresolved）没有 evidence 字段可核验
+    （collective 按提示词要求留空；unresolved 本身没有第三个证据要求），改核验
+    raw_label 本身（``_verbatim_segments_for_label``）：逐字找不到的段号剔除，
+    全部段号都找不到就整条不发布（``continue``，不进 ``verified``）。这条只管
+    "identity 原始声明就在候选人名之外"这一支——identity 命中候选人名、只是
+    evidence 定位失败被上面那段代码降级为 unresolved 的条目不重复受限，它已经
+    过了自己那一套逐字核验（evidence），核验口径不重复加码。每次剔除都打一条
+    ``log.warning``，剔除不是静默发生的。
     """
     verified: list[_AppellationVerdict] = []
     for item in response.appellations:
@@ -222,8 +282,22 @@ def _verified_verdicts(
                 identity = UNRESOLVED
             else:
                 evidence = phrase
-        elif identity != COLLECTIVE:
-            identity = UNRESOLVED
+        else:
+            if identity != COLLECTIVE:
+                identity = UNRESOLVED
+            kept = _verbatim_segments_for_label(raw_label, segment_indexes, segments)
+            if not kept:
+                log.warning(
+                    "叙述向称谓核验：「%s」声明的段落 %s 逐字核验全部未命中，整条不发布",
+                    raw_label, segment_indexes,
+                )
+                continue
+            if kept != segment_indexes:
+                log.warning(
+                    "叙述向称谓核验：「%s」声明的段落 %s 逐字核验未命中，已剔除仅保留 %s",
+                    raw_label, sorted(set(segment_indexes) - set(kept)), kept,
+                )
+            segment_indexes = kept
         verified.append(_AppellationVerdict(
             raw_label=raw_label, identity=identity, evidence=evidence,
             segment_indexes=segment_indexes,

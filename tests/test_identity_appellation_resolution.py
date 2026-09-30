@@ -110,7 +110,8 @@ def test_out_of_range_segment_indexes_are_dropped_not_kept():
         ar._AppellationVerdict(raw_label="众猴", identity=ar.COLLECTIVE, segment_indexes=[1, 99]),
     ])
     verified = ar._verified_verdicts(
-        response, candidates=set(), source_text="", segments=_segs(""), valid_segment_indexes={1},
+        response, candidates=set(), source_text="", segments=_segs("众猴见了，都拱伏无违。"),
+        valid_segment_indexes={1},
     )
     assert verified[0].segment_indexes == [1]
 
@@ -122,7 +123,8 @@ def test_identity_outside_candidates_and_not_collective_becomes_unresolved():
         ar._AppellationVerdict(raw_label="某人", identity="候选之外的名字", segment_indexes=[1]),
     ])
     verified = ar._verified_verdicts(
-        response, candidates={"里奥"}, source_text="", segments=_segs(""), valid_segment_indexes={1},
+        response, candidates={"里奥"}, source_text="", segments=_segs("有个某人在场。"),
+        valid_segment_indexes={1},
     )
     assert verified[0].identity == ar.UNRESOLVED
 
