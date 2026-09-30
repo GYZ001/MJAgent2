@@ -26,6 +26,30 @@ asset_manifest.characters/appellation_map 全空，即使人物谱里"里奥"已
 出现过的其它称谓），因此对已经工作正常的分集零回归：主解析已经解析出的
 条目只会被"追加更多 segment_indexes/aliases"，不会被覆盖或删除。
 
+设计变更（2026-09-30，PREP_PACK_VERSION 2.0.8）：identity 从三选一改为四选一，
+新增 ``FUNCTIONAL``。根因是原三选一里的 unresolved 同时装着两种判定完全不同的
+情形：①候选名单之外、原文明确写到的另一个具体的人（房东、摊主）——给一个实体
+是诚实的；②看不清到底是谁、甚至可能就是候选名单里已经登记的某个人，只是原文
+没有能逐字对上号的依据——给实体等于编造一个人（CLAUDE.md「不得兜底填充」）。
+真实案例（B 机隔离沙箱，第2集 ep_7623b7b0a49a）：「温老师」（原文「陆一舟笑嘻嘻
+地说："温老师，顺路来蹭个饭的路引子。"」，指的就是温念本人）、「他」「有人」都
+被旧实现判成 unresolved，各自铸出一个独立群演 entity:...；「你俩」（指温念+
+顾屿两位已登记角色）被判 collective，也铸了一个群演。第1集的"妈妈"与"温书棋"
+（同一人）同样被拆成两个实体。下游 ``storyboard_pack._segment_relevant_assets``
+把 functional_extras 交给分镜模型当本段合法出场身份，``storyboard_identity_
+scope.scoped_identity_candidates``/``scoped_name_map`` 用它做台词说话人绑定——
+一个"查不清是谁"的称谓被当成一个独立出镜的人，就是成片里"多出一个人/两个
+同一人"的上游来源之一。
+
+现在：①functional（原文明确写到候选之外的另一个具体的人）与 collective
+（候选之外的一群人）仍然落 functional_extras，语义诚实——这两种都是"确实
+存在的另一个人/一群人"；②unresolved（查不清、或可能是候选里已登记的人但
+原文没有逐字依据）不再铸虚假实体，只记进 ``asset_manifest.unresolved_
+appellations``（按 label 合并段号）供映射台界面人工核查，不进任何身份体系、
+不参与分镜台的台词/出场判定。这推翻了本模块更早版本"缺陷2：unresolved 必须
+带 label 与 visual_entity_id"的要求——可见性改由 unresolved_appellations 列表
++ 映射台界面承担，不再靠铸实体冒充"查清楚了、是另一个人"。
+
 层号：随 ``app.production.prep_pack`` 包前缀归 L4（app/LAYERS.toml）。
 """
 from __future__ import annotations
@@ -46,6 +70,7 @@ from .chunking import _chunk_segments
 from .provenance import _prep_pack_locate_phrase, _prep_pack_provenance
 
 COLLECTIVE = "collective"
+FUNCTIONAL = "functional"
 UNRESOLVED = "unresolved"
 APPELLATION_RESOLUTION_METHOD = "appellation_resolution"
 
@@ -81,16 +106,23 @@ def _appellation_resolution_prompt(
 
 对每一条申报：
 - raw_label 必须逐字使用原文里出现的这个称谓/代词/描述短语本身；
-- identity 三选一：
+- identity 四选一：
   1) 依据本段及相邻段落原文本身，能确定这个称谓指的就是候选名单中的某一位
      本人——填该候选的精确姓名，并在 evidence 里逐字摘录原文中能证明这一点
      的一段（不超过约80字，不得改写/概括/编造，必须是能把这个称谓与候选
      本人对上号的直接原文依据，例如同一段自述里出现的年龄/经历与人物谱
      已知背景吻合）；
-  2) 原文本身明确是复数/集体，天然不指向某一个具体的人（例如"众猴"
-     "百姓们"）——identity 填"{COLLECTIVE}"，evidence 留空；
-  3) 证据不足以确定具体是谁——包括"这个称谓像是某个人但原文没有给出可以
-     逐字对上号的依据"——identity 必须填"{UNRESOLVED}"，不得因为候选名单
+  2) 原文明确写到候选名单之外的另一个具体的人（例如房东、摊主、陌生
+     男子）——identity 填"{FUNCTIONAL}"，并在 evidence 里逐字摘录原文中
+     能证明这是候选之外另一个具体的人的一段（不超过约80字，不得改写/
+     拼接/概括，同第1条对证据的要求）；
+  3) 原文明确是候选名单之外的一群人（例如众猴、百姓们、孩子们），天然
+     不指向某一个具体的人——identity 填"{COLLECTIVE}"，evidence 留空；
+     一个复数称谓如果指的就是候选名单里的几位本人（例如"你俩"指两位已
+     登记角色），它不是集体称谓，按第4条申报；
+  4) 原文证据不足以确定具体指谁——包括这个称谓可能就是候选名单里的某一位
+     本人、但原文没有给出可以逐字对上号的依据，也包括代词（他/她/我/你）
+     指代不明的情况——identity 必须填"{UNRESOLVED}"，不得因为候选名单
      只有一个人就默认填他，不得猜测；
 - segment_indexes 必须是这个称谓在上面目录中实际出现的段号（只能取
   {segment_indexes} 中的值），不要填目录之外的段号；
@@ -111,7 +143,7 @@ async def _appellation_resolution_call(
     )
     schema = _AppellationResolutionResponse.model_json_schema()
     verdict_props = schema["$defs"]["_AppellationVerdict"]["properties"]
-    verdict_props["identity"]["enum"] = [*candidates, COLLECTIVE, UNRESOLVED]
+    verdict_props["identity"]["enum"] = [*candidates, FUNCTIONAL, COLLECTIVE, UNRESOLVED]
     verdict_props["segment_indexes"]["items"]["enum"] = segment_indexes
     operation_id = (
         f"episode_prep_pack:{episode_id}:appellation_resolution:"
@@ -172,26 +204,53 @@ def _apply_named_verdict(
     })
 
 
-def _apply_unresolved_verdict(
+def _apply_functional_or_collective_verdict(
     verdict: _AppellationVerdict, *, functional_extras: dict[str, Any],
 ) -> None:
-    # collective/unresolved 都落 functional_extras（缺陷2的展示端要求：unresolved
-    # 必须带 label 与 visual_entity_id，见本模块 docstring）；collective 在
-    # provenance 上多标一个 collective=True，供消费方区分"这是一群人不是某个人"
-    # 与"这是某个人但没能确定是谁"——两者在界面上应该有不同的措辞。
+    """functional/collective 都落 functional_extras——两者都是"确实存在的、
+    候选名单之外的另一个人/一群人"，给一个实体是诚实的（不是本模块 docstring
+    "设计变更"一节推翻的那种 unresolved 兜底）。anchor_phrase 取
+    ``verdict.evidence``：functional 已在 ``_verified_verdicts`` 里过了与具名
+    分支同一套逐字核验，evidence 是核验通过后落库的那句原文；collective 按
+    提示词要求 evidence 恒为空，anchor_phrase 因此仍是 ""，与此前行为一致。
+    collective 在 provenance 上多标一个 collective=True，供消费方区分"这是
+    一群人"与"这是候选之外的某一个具体的人"。
+    """
     extra = functional_extras.setdefault(verdict.raw_label, {
         "segment_indexes": [],
         "visual_entity_id": visual_entity_id_for_resolution({
             "source_label": verdict.raw_label, "scope_qualifier": "",
         }),
         "provenance": _prep_pack_provenance(
-            APPELLATION_RESOLUTION_METHOD, verdict.segment_indexes, "",
+            APPELLATION_RESOLUTION_METHOD, verdict.segment_indexes, verdict.evidence,
             candidate_verdict_attempted=(verdict.identity == COLLECTIVE),
         ),
     })
     extra["segment_indexes"] = sorted(set(extra["segment_indexes"]) | set(verdict.segment_indexes))
     if verdict.identity == COLLECTIVE:
         extra["provenance"]["collective"] = True
+
+
+_UNRESOLVED_LOG_PREFIX = "[PREP_PACK_APPELLATION_UNRESOLVED][未拦截]"
+
+
+def _record_unresolved_appellation(
+    verdict: _AppellationVerdict, *, unresolved_by_label: dict[str, list[int]],
+) -> None:
+    """unresolved 不进 functional_extras、不铸 visual_entity_id（见本模块
+    docstring"设计变更"一节）：原文证据不足以确定这是谁，甚至可能就是候选
+    名单里已经登记的某个人，给一个独立群演等于把"查不清"伪造成"查清楚了、
+    是另一个人"。按 raw_label 合并段号，写一条固定前缀 warning（供日志
+    检索、同 discovery._prep_pack_record_unanchored_prop 的既有惯例），不
+    阻断发布——调用方（resolve_narration_appellations）把合并结果转成列表
+    交给 asset_manifest.unresolved_appellations，供映射台界面人工核查。
+    """
+    merged = sorted(set(unresolved_by_label.get(verdict.raw_label, [])) | set(verdict.segment_indexes))
+    unresolved_by_label[verdict.raw_label] = merged
+    log.warning(
+        "%s 称谓「%s」在段落 %s 证据不足以确定具体是谁，不计入 functional_extras，请人工核查",
+        _UNRESOLVED_LOG_PREFIX, verdict.raw_label, verdict.segment_indexes,
+    )
 
 
 def _verbatim_segments_for_label(
@@ -256,15 +315,17 @@ def _verified_verdicts(
     证据「看到山下有一个大汉，正迈步临近公开区。“是曹阳……”」只差一个跨段换行和一个
     自补的收尾引号，原始子串比较把它打成 unresolved，曹阳在同一段里被拆成两个人。
 
-    模型原始声明的 identity 落在 candidates 之外（即 collective，或字面就是
-    unresolved / 枚举违规被规范化为 unresolved）没有 evidence 字段可核验
-    （collective 按提示词要求留空；unresolved 本身没有第三个证据要求），改核验
-    raw_label 本身（``_verbatim_segments_for_label``）：逐字找不到的段号剔除，
-    全部段号都找不到就整条不发布（``continue``，不进 ``verified``）。这条只管
-    "identity 原始声明就在候选人名之外"这一支——identity 命中候选人名、只是
-    evidence 定位失败被上面那段代码降级为 unresolved 的条目不重复受限，它已经
-    过了自己那一套逐字核验（evidence），核验口径不重复加码。每次剔除都打一条
-    ``log.warning``，剔除不是静默发生的。
+    模型原始声明的 identity 落在 candidates 之外时分三种：functional 与具名
+    分支同一套证据核验（``_prep_pack_locate_phrase``，定位不到就降级
+    unresolved）；collective 按提示词要求 evidence 恒为空，没有证据可核验；
+    unresolved 本身没有第三个证据要求。这三者（以及具名分支降级来的
+    unresolved）都还要再过 raw_label 本身的核验（``_verbatim_segments_for_
+    label``）：逐字找不到的段号剔除，全部段号都找不到就整条不发布
+    （``continue``，不进 ``verified``）。这条只管"identity 原始声明就在候选
+    人名之外"这一支——identity 命中候选人名、只是 evidence 定位失败被上面那
+    段代码降级为 unresolved 的条目不重复受限，它已经过了自己那一套逐字核验
+    （evidence），核验口径不重复加码。每次剔除都打一条 ``log.warning``，剔除
+    不是静默发生的。
     """
     verified: list[_AppellationVerdict] = []
     for item in response.appellations:
@@ -283,7 +344,13 @@ def _verified_verdicts(
             else:
                 evidence = phrase
         else:
-            if identity != COLLECTIVE:
+            if identity == FUNCTIONAL:
+                located, phrase = _prep_pack_locate_phrase(segments, evidence) if evidence else ([], "")
+                if located:
+                    evidence = phrase
+                else:
+                    identity = UNRESOLVED
+            elif identity != COLLECTIVE:
                 identity = UNRESOLVED
             kept = _verbatim_segments_for_label(raw_label, segment_indexes, segments)
             if not kept:
@@ -334,10 +401,19 @@ async def resolve_narration_appellations(
     conn, project_id: str, episode_id: str, episode_no: int, source_text: str,
     bible: Any, segments: list[Any], characters: dict[str, Any],
     functional_extras: dict[str, Any], character_appellation_rows: list[dict[str, Any]],
+    unresolved_appellations: list[dict[str, Any]] | None = None,
 ) -> None:
     """就地把叙述向称谓归属结果合并进主解析已经在维护的三份结构。候选集为
     空（项目还没有人物谱角色）直接跳过，不发起任何模型调用（同
-    functional_candidate_verdict.py 的既有口径）。"""
+    functional_candidate_verdict.py 的既有口径）。
+
+    ``unresolved_appellations``（2026-09-30 出参，可选，默认 None——同
+    ``_resolve_assets`` 的 ``appellation_resolutions``/``unanchored_prop_
+    mentions`` 同一模式，保持既有调用点/测试签名不变）：本函数内部始终维护
+    一份按 raw_label 合并段号的 unresolved 记录（``unresolved_by_label``），
+    调用方传了列表才在函数末尾把合并结果追加进去；不传时这份记录只在函数
+    内部生效，仍然确保 unresolved 不会混进 ``functional_extras``。
+    """
     candidate_names = [
         name for character in getattr(bible, "characters", None) or []
         if (name := str(getattr(character, "name", "") or "").strip())
@@ -345,6 +421,7 @@ async def resolve_narration_appellations(
     if not candidate_names or not segments:
         return
     candidates_set = set(candidate_names)
+    unresolved_by_label: dict[str, list[int]] = {}
     for chunk in _chunk_segments(segments):
         dossier = [{"segment_index": index, "text": segment.text} for index, segment in chunk]
         valid_segment_indexes = {index for index, _ in chunk}
@@ -364,8 +441,15 @@ async def resolve_narration_appellations(
                     verdict, conn=conn, project_id=project_id, episode_no=episode_no,
                     characters=characters, character_appellation_rows=character_appellation_rows,
                 )
+            elif verdict.identity == UNRESOLVED:
+                _record_unresolved_appellation(verdict, unresolved_by_label=unresolved_by_label)
             else:
-                _apply_unresolved_verdict(verdict, functional_extras=functional_extras)
+                _apply_functional_or_collective_verdict(verdict, functional_extras=functional_extras)
+    if unresolved_appellations is not None:
+        unresolved_appellations.extend(
+            {"label": label, "segment_indexes": indexes}
+            for label, indexes in unresolved_by_label.items()
+        )
 
 
-__all__ = ["resolve_narration_appellations", "COLLECTIVE", "UNRESOLVED"]
+__all__ = ["resolve_narration_appellations", "COLLECTIVE", "FUNCTIONAL", "UNRESOLVED"]

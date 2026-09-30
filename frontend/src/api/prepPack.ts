@@ -145,6 +145,14 @@ export interface PrepPackAssetManifest {
   props?: PrepPackProp[];
   /** 1.3.0+ 字段；1.2.0 及更早的产物没有它，读取时按可选处理。 */
   functional_extras?: PrepPackFunctionalExtra[];
+  /**
+   * 2.0.8+ 字段：证据不足以确定具体指谁的称谓（含代词指代不明，也含"可能就是
+   * 人物谱里已登记的某个人但原文没有逐字依据"这两种情形）——不进 functional_
+   * extras、不是独立出镜的人，只是可见记录供人工核查，见
+   * app/production/prep_pack/appellation_resolve.py 模块 docstring"设计变更"
+   * 一节。2.0.7 及更早的产物没有这个字段。
+   */
+  unresolved_appellations?: { label: string; segment_indexes: number[] }[];
 }
 
 /**

@@ -247,10 +247,15 @@ def test_collective_appellation_never_attributed_to_an_individual(monkeypatch):
     assert appellation_rows == []
 
 
-def test_unresolved_appellation_still_carries_label_and_visual_entity_id(monkeypatch):
-    """神墓同类场景（"老人"/"他父亲"证据不足以确认具体是谁）：unresolved 不
-    等于丢弃——必须像群演一样带 label + visual_entity_id，供缺陷2的展示端
-    使用；不得因为候选只有一个人就默认归给他（不猜）。"""
+def test_unresolved_appellation_recorded_separately_not_as_functional_extra(monkeypatch):
+    """设计变更（2026-09-30，取代本测试此前的断言"unresolved 必须像群演一样
+    带 label + visual_entity_id"）：给一个查不清是谁的称谓铸一个独立群演实体，
+    等于把"查不清"伪造成"查清楚了、是另一个人"——下游分镜台会把这个实体当成
+    本段合法出场身份（真实案例：第2集"温老师"其实就是候选本人温念、"他"
+    "有人"都曾被这样误判）。现在 unresolved 不进 functional_extras、不铸
+    visual_entity_id，只记进按 label 合并段号的 unresolved_appellations 出参，
+    供映射台界面人工核查；不得因为候选只有一个人就默认归给他（不猜，行为
+    不变）。"""
     conn = _make_conn()
     bible = _bible("辰南")
 
@@ -269,17 +274,16 @@ def test_unresolved_appellation_still_carries_label_and_visual_entity_id(monkeyp
     characters: dict = {}
     functional_extras: dict = {}
     appellation_rows: list = []
+    unresolved: list = []
     asyncio.run(ar.resolve_narration_appellations(
         conn, project_id="p1", episode_id="ep1", episode_no=1,
         source_text=source_text, bible=bible, segments=segments,
         characters=characters, functional_extras=functional_extras,
-        character_appellation_rows=appellation_rows,
+        character_appellation_rows=appellation_rows, unresolved_appellations=unresolved,
     ))
     assert characters == {}
-    extra = functional_extras["老人"]
-    assert extra["label"] if "label" in extra else True  # setdefault 结构不含 label 键本身
-    assert extra["visual_entity_id"].startswith("entity:")
-    assert "collective" not in extra["provenance"]
+    assert functional_extras == {}
+    assert unresolved == [{"label": "老人", "segment_indexes": [1]}]
 
 
 def test_empty_bible_skips_model_call_entirely(monkeypatch):

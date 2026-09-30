@@ -371,10 +371,11 @@ async def _generate_prep_pack_once(
     # 生产调用点，传一份空列表进去，_resolve_assets 在解析每条角色提及
     # 时原地写入，调用返回后就是这一集完整、真实的解析结论。
     character_appellation_resolutions: list[dict[str, Any]] = []
-    # unanchored_prop_mentions（2026-09-30，见 discovery._prep_pack_build_
-    # prop_manifest 的 unanchored 出参说明）：同上一个出参同一模式，_resolve_
-    # assets 在道具清单构建时原地写入两条判据都不满足的提及，不静默丢弃。
-    unanchored_prop_mentions: list[dict[str, Any]] = []
+    # unanchored_prop_mentions/unresolved_appellations（2026-09-30，见
+    # discovery._prep_pack_record_unanchored_prop 与 appellation_resolve.py
+    # 模块 docstring"设计变更"一节）：同上一个出参同一模式，_resolve_assets
+    # 原地写入两条判据都不满足的道具提及 / 证据不足以确定是谁的称谓，不静默丢弃。
+    unanchored_prop_mentions, unresolved_appellations = [], []
     (
         characters, scenes, props, functional_extras, asset_errors, discovery_stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
@@ -386,7 +387,7 @@ async def _generate_prep_pack_once(
             character_mentions=character_mentions, scene_mentions=scene_mentions,
             prop_mentions=prop_mentions, run_id=run_id,
             appellation_resolutions=character_appellation_resolutions,
-            unanchored_prop_mentions=unanchored_prop_mentions,
+            unanchored_prop_mentions=unanchored_prop_mentions, unresolved_appellations=unresolved_appellations,
         ),
     )
     # 场景 mention 未解析到 scene_reference_id 的失败已由 _resolve_assets 就地
@@ -407,7 +408,7 @@ async def _generate_prep_pack_once(
     asset_manifest = merge_card_backed_extras({
         "characters": characters, "scenes": scenes, "props": props,
         "functional_extras": functional_extras,
-    })
+    }, unresolved_appellations=unresolved_appellations)
     # 未锚定道具的可见记录（2026-09-30）：不进 props（逐字核验没通过），也不
     # 静默丢弃——见 discovery._prep_pack_record_unanchored_prop。空列表时不加
     # 这个键，维持既有消费者只用 asset_manifest.get("props")/"characters" 等

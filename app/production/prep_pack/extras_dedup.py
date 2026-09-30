@@ -43,14 +43,26 @@ def _card_backed_owners(characters: list[Any]) -> dict[str, dict[str, Any]]:
     return {name: owners[0] for name, owners in by_name.items() if len(owners) == 1}
 
 
-def merge_card_backed_extras(asset_manifest: dict[str, Any]) -> dict[str, Any]:
+def merge_card_backed_extras(
+    asset_manifest: dict[str, Any], *, unresolved_appellations: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """把与有参考图角色同名的群演条目并进该角色并移出清单；原地改并返回同一份清单。
 
     返回 manifest 本身（而不是合并记录）是为了能包在 ``asset_manifest = ...({...})``
     外面调用：``generate_once._generate_prep_pack_once`` 的函数长度正卡在
     FILE_CONVENTIONS 的 function_lines 基线上，而那条基线是只降不升的棘轮，
     不许为了插一行调用把它调大。合并明细走 log。
+
+    ``unresolved_appellations``（2026-09-30，同一"函数长度卡在基线上"的理由）：
+    可选出参列表，非空时原样挂到 ``asset_manifest.unresolved_appellations``——
+    这是叙述向称谓归属证据不足以确定具体是谁的可见记录（见 appellation_
+    resolve.py 模块 docstring"设计变更"一节），不进 functional_extras、不铸
+    虚假实体。空列表/None 时不加这个键，维持既有消费者只用 asset_manifest.
+    get("functional_extras") 等既有键时的行为不变，同 unanchored_prop_mentions
+    的既有处置一致。
     """
+    if unresolved_appellations:
+        asset_manifest["unresolved_appellations"] = unresolved_appellations
     extras = asset_manifest.get("functional_extras") or []
     owners = _card_backed_owners(asset_manifest.get("characters") or [])
     kept: list[Any] = []

@@ -55,7 +55,6 @@ from .true_name import (
     _prep_pack_verify_true_name_hypothesis,
 )
 
-
 async def _resolve_assets(
     conn, *, project_id: str, episode_id: str, episode_no: int,
     source_text: str,
@@ -66,6 +65,7 @@ async def _resolve_assets(
     appellation_resolutions: list[dict[str, Any]] | None = None,
     discovery_text: str | None = None,
     unanchored_prop_mentions: list[dict[str, Any]] | None = None,  # 同 appellation_resolutions 出参模式，见 discovery.py
+    unresolved_appellations: list[dict[str, Any]] | None = None,  # 同上出参模式，见 appellation_resolve.py
 ) -> tuple[
     list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]],
     list[str], dict[str, int],
@@ -992,7 +992,7 @@ async def _resolve_assets(
     # 解析不处理的"被叙述/自述提及、原文未描写其画面出场"的称谓归属。
     await resolve_narration_appellations(
         conn, project_id, episode_id, episode_no, source_text, bible, segments,
-        characters, functional_extras, character_appellation_rows,
+        characters, functional_extras, character_appellation_rows, unresolved_appellations,
     )
 
     functional_extras_payload = [

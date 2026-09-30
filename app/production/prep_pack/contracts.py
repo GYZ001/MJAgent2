@@ -203,7 +203,7 @@ from __future__ import annotations
 # stay defined in app/validators.py, unused-but-not-deleted (same "dormant,
 # not deleted" precedent as app/production/screenplay_repair.py), still
 # exercised directly by tests/test_prep_pack_coverage.py.
-PREP_PACK_VERSION = "2.0.7"  # 2.0.7 见 schemas._ModelSceneMention/_ModelPropMention.source_wording/known_prop_name、chunk_extraction 提示词、app.props.card_match.match_existing_prop_card 上方（2026-09-30 派单+主会话复核：模型称呼非原文连续字面时场景/道具被静默丢弃，道具归属改为模型提名+代码核验）；2.0.6 见 discovery._prep_pack_build_prop_manifest 上方；2.0.5 见 chunk_extraction._ASSET_DECLARATION_RULES 上方；1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
+PREP_PACK_VERSION = "2.0.8"  # 2.0.8 见 appellation_resolve.py 模块 docstring"设计变更"一节与 _apply_functional_or_collective_verdict/_record_unresolved_appellation 上方（2026-09-30：identity 新增 functional 值，unresolved 不再铸虚假群演实体，改记 asset_manifest.unresolved_appellations，真实案例温老师/他/你俩、第1集妈妈/温书棋）；2.0.7 见 schemas._ModelSceneMention/_ModelPropMention.source_wording/known_prop_name、chunk_extraction 提示词、app.props.card_match.match_existing_prop_card 上方（2026-09-30 派单+主会话复核：模型称呼非原文连续字面时场景/道具被静默丢弃，道具归属改为模型提名+代码核验）；2.0.6 见 discovery._prep_pack_build_prop_manifest 上方；2.0.5 见 chunk_extraction._ASSET_DECLARATION_RULES 上方；1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
 # 1.2.0: asset_manifest.characters entries carry aliases; 1.3.0: asset_manifest
 # gained functional_extras; 1.4.0: coverage_ledger gained paratext (deterministic
 # keyword/position classifier, since replaced); 1.4.1: paratext classification

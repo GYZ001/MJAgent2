@@ -17,7 +17,7 @@ import QueryState from '../components/QueryState'
 import OperationError from '../components/OperationError'
 import StaleRefreshBanner from '../components/StaleRefreshBanner'
 import PrepPackPreviewDialog from '../components/script/PrepPackPreviewDialog'
-import PrepPackDiscoverySummary from '../components/script/PrepPackDiscoverySummary'
+import PrepPackDiscoverySummary from '../components/script/PrepPackDiscoverySummary'; import UnresolvedAppellations from '../components/UnresolvedAppellations'
 import PortraitPlaceholder from '../components/PortraitPlaceholder'; import SceneReferencePlaceholder from '../components/SceneReferencePlaceholder'
 import VoiceChip from '../components/voice/VoiceChip'
 import { useDeleteConfirm } from '../hooks/useDeleteConfirm'; import { useRefsSettledRefresh } from '../hooks/useRefsSettledRefresh'
@@ -822,6 +822,8 @@ export function PrepPackView({
         </section>
       )}
 
+      <UnresolvedAppellations items={pack.asset_manifest?.unresolved_appellations} />
+
       {!!scenes.length && (
         <section className="card">
           <h3 className="prep-section-heading">出场场景 · {scenes.length}</h3>
@@ -879,9 +881,7 @@ export function PrepPackView({
         </section>
       )}
 
-      {!hasAnyAsset && (
-        <p className="prep-empty-hint">本集尚未识别到任何人物、场景或道具。</p>
-      )}
+      {!hasAnyAsset && <p className="prep-empty-hint">本集尚未识别到任何人物、场景或道具。</p>}
 
       {/* 称谓总表：角色的附属信息，不是并列主体——次要、可折叠，没有条目整块
           不渲染（不管是本集确实没有模糊称谓，还是旧产物压根没有这个字段）。 */}
