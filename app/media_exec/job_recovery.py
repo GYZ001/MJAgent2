@@ -326,6 +326,9 @@ def _reconcile_stalled_video_jobs(conn, limit: int) -> dict[str, int]:
         "continuity_degraded", "dependency_repair_required",
         "quarantine_released", "episodes_reconciled", "stuck_cancellation_converged",
     ), 0)
+    # stray_slot_converged/stray_slot_staled 不在上面预置：下面 release_and_converge_
+    # quarantine() 每次调用都无条件把它们写进 report（见 quarantine_release.py），
+    # 预置只会占一行行数棘轮却没有额外效果（本文件卡在 function_lines 基线上）。
 
     # video_slot_active=0 必须和取消一起写：这一行本来就没有 version_id
     # （从未提交供应商），继续占着 uq_jobs_active_video_shot 这个每镜唯一
@@ -468,8 +471,11 @@ def _reconcile_stalled_video_jobs(conn, limit: int) -> dict[str, int]:
             except Exception:  # noqa: BLE001
                 pass
 
-    from .quarantine_release import release_orphan_quarantined_versions
-    report["quarantine_released"] = release_orphan_quarantined_versions(conn, limit)
+    # 放行判据与「succeeded 但仍占槽、没有存活 job」的收敛判据都是本文件行数
+    # 棘轮的欠账，合到一个函数里放在 .quarantine_release，不再往这个已经卡在
+    # FILE_CONVENTIONS.toml 基线（500 行/145 函数行）上的文件里加代码。
+    from .quarantine_release import release_and_converge_quarantine
+    report.update(release_and_converge_quarantine(conn, limit))
     episode_rows = conn.execute(
         "SELECT id FROM episodes WHERE status='generating'"
     ).fetchall()

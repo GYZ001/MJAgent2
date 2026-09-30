@@ -160,7 +160,11 @@ def save_identity_candidate(conn, *, shot_id: str, baseline: str, candidate: dic
             conn.rollback()
             return {"unchanged":True}
         artifact_id = _record_identity_revision(conn, row, prepared)
-        changed = conn.execute("UPDATE shot_versions SET status='stale', error='片段发声或人物身份已修订；此版本保留供历史对比', video_slot_active=0 WHERE shot_id=? AND status='succeeded'", (shot_id,)).rowcount
+        # quarantined 版本也要一并作废：它是「历史供应商任务晚到」的素材，内容同样
+        # 出自本次修订前的旧合同；只清 succeeded 会漏掉它，被
+        # release_orphan_quarantined_versions（app/media_exec/quarantine_release.py）
+        # 当「孤儿」放行成当前分镜的候选（生产实例 ver_d967abc82f1c）。
+        changed = conn.execute("UPDATE shot_versions SET status='stale', error='片段发声或人物身份已修订；此版本保留供历史对比', video_slot_active=0 WHERE shot_id=? AND status IN ('succeeded','quarantined')", (shot_id,)).rowcount
         conn.execute("UPDATE episodes SET status='scripted', storyboard_warning=NULL WHERE id=?", (episode["id"],))
         invalidate_episode_delivery_authority(conn, episode["id"])
         conn.commit()

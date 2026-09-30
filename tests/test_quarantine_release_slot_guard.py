@@ -60,7 +60,10 @@ def test_release_still_frees_truly_orphaned_shot(tmp_path):
                     video_path=str(video), created_at=1.0)
     assert quarantine_release.release_orphan_quarantined_versions(conn, 50) == 1
     row = conn.execute("SELECT status, video_slot_active FROM shot_versions WHERE id='v1'").fetchone()
-    assert (row["status"], row["video_slot_active"]) == ("succeeded", 1)
+    # video_slot_active 落 0：与正常结算成功版本的终态一致（job_state._set_job 终态分支）。
+    # 修复前这里写 1，把「已了结」误标成「仍占槽」，让 identity_workspace._assert_idle_current
+    # 判定「该片段仍有视频任务」，此后修订本段永久失败（生产实例 ver_d967abc82f1c）。
+    assert (row["status"], row["video_slot_active"]) == ("succeeded", 0)
 
 
 def test_reconcile_rolls_back_before_raising(monkeypatch):
