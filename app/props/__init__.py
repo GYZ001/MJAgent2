@@ -10,10 +10,16 @@ appearance_canonical 锚点串 + 纯色背景参考图，登记进 ``Bible.props
 公开入口三个：``ensure_props_for_labels``（映射台反应式登记，供
 ``app.production.prep_pack.discovery`` 调用）、``prop_reference_for_episode``/
 ``props_for_project``（按集查询/列表，供 API 用）。``regenerate_prop_reference``
-是列表页"重新生成参考图"按钮的服务端实现，一并导出。
+是列表页"重新生成参考图"按钮的服务端实现，一并导出。``match_existing_prop_
+card``（既有卡片归属判据：唯一胜者规则，见 ``card_match`` 模块 docstring）是
+本包与 ``app.production.prep_pack.discovery`` 清单构建共用的结构性判据，一并
+导出，供包外直接复用，不重复实现一份。
 """
 from __future__ import annotations
 
+from .card_match import (
+    match_existing_prop_card as match_existing_prop_card,
+)
 from .service import (
     ensure_props_for_labels as ensure_props_for_labels,
     props_for_project as props_for_project,

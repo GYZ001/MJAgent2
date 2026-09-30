@@ -76,19 +76,30 @@ def prop_appearance_lock_beat_sheet_rules() -> list[str]:
 
 
 def known_prop_card_appearance_index(payload: dict[str, Any]) -> dict[str, str]:
-    """``label -> 素材库标准外观``（逐字），只收有真实卡片外观的道具（跳过
-    ``_NO_CANONICAL_PROP_APPEARANCE_NOTE`` 占位说明）。数据源与
+    """``label/canonical_name -> 素材库标准外观``（逐字），只收有真实卡片外观
+    的道具（跳过 ``_NO_CANONICAL_PROP_APPEARANCE_NOTE`` 占位说明）。数据源与
     ``manifest_brief_for_prompt`` 喂给模型看到的 ``known_assets.props[].
     appearance`` 完全同一份（都读 ``payload["asset_manifest"]["props"]``），
     保证「模型看到的」与「代码核验用的」是同一份真相。
+
+    2026-09-30：同时按 ``label``（映射台这次的原文写法，模型在
+    ``prop_appearance_locks[].label`` 里通常会原样沿用）与 ``canonical_name``
+    （映射台对照既有卡片绑定的规范卡名，见 app.production.prep_pack.
+    discovery._prep_pack_build_prop_manifest）两个键收录同一段外观——模型
+    偶尔会凭自己的先验知识直接写出卡片的规范名而不是 ``known_assets`` 里
+    展示的原文写法，只按 ``label`` 精确匹配会让这种情形退化成"无卡"分支、
+    原样采信模型自编文字（同 ``_lookup_card_appearance`` 排版归一兜底要解决
+    的同一类漏判）。
     """
     manifest = payload.get("asset_manifest") or {}
     index: dict[str, str] = {}
     for prop in manifest.get("props") or []:
-        label = str(prop.get("label") or "").strip()
         appearance = str(prop.get("appearance") or "").strip()
-        if label and appearance and appearance != _NO_CANONICAL_PROP_APPEARANCE_NOTE:
-            index[label] = appearance
+        if not appearance or appearance == _NO_CANONICAL_PROP_APPEARANCE_NOTE:
+            continue
+        for key in (str(prop.get("label") or "").strip(), str(prop.get("canonical_name") or "").strip()):
+            if key:
+                index[key] = appearance
     return index
 
 

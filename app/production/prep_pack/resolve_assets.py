@@ -800,8 +800,8 @@ async def _resolve_assets(
     # 角色/场景解析开始之前）执行，之后任何一次 ensure_scenes_for_labels 重新
     # 读 bible 都能看到本集已建的道具卡。
     props_payload = await _discover_new_props(
-        conn, project_id=project_id, episode_no=episode_no,
-        props_payload=_prep_pack_build_prop_manifest(prop_mentions, segments), source_text=source_text,
+        conn, project_id=project_id, episode_no=episode_no, source_text=source_text,
+        props_payload=_prep_pack_build_prop_manifest(prop_mentions, segments, cards=bible.props),
     )
 
     if unresolved_chars or unresolved_scenes:

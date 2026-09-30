@@ -166,6 +166,26 @@ def _known_scene_names(conn, project_id: str, episode_no: int) -> list[str]:
     return [str(row["scene_name"]) for row in rows]
 
 
+def _prep_pack_known_prop_names(conn, project_id: str) -> list[str]:
+    """已登记道具库的 name+alias 全量名单（仅供拼写对齐提示，话术同
+    ``known_characters``/``known_scenes``——见 ``_extract_chunk`` 提示词）。
+
+    道具（``Prop``，见 app/schemas/world.py）没有 ``ep_start``/``ep_end`` 时间
+    范围字段，不需要像 ``_known_scene_names`` 那样按集次过滤；也不做
+    ``_prep_pack_character_shortlist`` 那种"本集原文里逐字命中才入选"的裁剪——
+    这里只是给模型看的对齐提示，命中判据本身由
+    ``app.props.card_match.match_existing_prop_card`` 在清单构建阶段独立核验，
+    不依赖这份名单是否精确。"""
+    bible = _load_project_bible(conn, project_id)
+    names: set[str] = set()
+    for prop in bible.props:
+        name = str(prop.name or "").strip()
+        if name:
+            names.add(name)
+        names.update(str(alias or "").strip() for alias in prop.aliases if str(alias or "").strip())
+    return sorted(names)
+
+
 def _prep_pack_chapter_titles(
     conn, project_id: str, chapter_indexes: list[int],
 ) -> list[str]:

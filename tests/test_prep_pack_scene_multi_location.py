@@ -37,7 +37,7 @@ def _capture_prompt() -> str:
         with pytest.raises(_Captured):
             asyncio.run(ce._extract_chunk(
                 chunk=[(14, segment)], known_characters=["周晚"],
-                known_scenes=["晚安宠物医院门口"], attempt_hint="",
+                known_scenes=["晚安宠物医院门口"], known_props=[], attempt_hint="",
                 run_id=None, episode_id="ep1", episode_no=1, chunk_index=0,
             ))
     finally:

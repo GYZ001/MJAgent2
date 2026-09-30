@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import json
 import logging
-from app.schemas import Bible
+from app.schemas import Bible, Prop
 from app.source_excerpt import SourceSegment
-from typing import Any
+from typing import Any, Sequence
 
 from .contracts import (
     _FALLBACK_VISUAL_STYLE,
@@ -226,16 +226,32 @@ async def _discover_new_props(
 # suspected_true_name 声明-核验通道——一个道具就是它自己（结构判据，零
 # 语义），按 label 精确字符串去重合并 segment_indexes 即可。
 #
-# 道具没有 characters/scenes 那样的"经解析路径绑定可豁免逐字"这条路
-# （没有身份消歧、没有候选判别——道具的 label 就是它唯一的名字，不存在
-# "解析成另一个规范名"这件事），因此每一个道具都等价于角色侧的"裸直接
-# 命中"，反幻觉主防线必须适用：只保留 label 真的逐字出现在该段落原文里的
-# segment_indexes（跟角色侧"称谓证据闸"同一判据，_prep_pack_gate_segment_
-# indexes 的结构闸不做这一步是因为它对全部三种资产统一处理、且要给
-# characters/scenes 的解析路径留豁免空间——道具没有这个豁免需求，在这里
-# 单独把关不冲突）。一个道具的全部段号都验不过字面证据，整条提及丢弃（不
-# 计入清单，不阻断发布——跟 scene 侧"没证据就当未解析"同一处置，不是
-# "空口提名也发布"）。
+# 道具的 label 真的逐字出现在该段落原文里时，走跟角色侧"称谓证据闸"同一判据
+# 的"裸直接命中"（method="direct"，_prep_pack_gate_segment_indexes 的结构闸
+# 不做这一步是因为它对全部三种资产统一处理、且要给 characters/scenes 的解析
+# 路径留豁免空间——道具没有这个豁免需求，在这里单独把关不冲突）。
+#
+# 2026-09-30 新增第二条独立判据（method="card_match"）：道具现在也有一条"经
+# 解析路径绑定可豁免逐字"的路，同 characters/scenes 的别名解析同一先例——
+# 世界书已有道具卡的 name/alias 真的逐字出现在这条提及自己声明的段落里、且
+# 与模型这次的 label 存在包含关系（唯一胜者，见 app.props.card_match.
+# match_existing_prop_card）时，这条提及绑定到那张卡：``canonical_name`` 记
+# 卡的规范名，``label`` 仍保留模型这次的原文写法（不篡改，供分镜台
+# known_assets.props 展示 + 下游别名登记）。真实事故（proj_ca86b15ab7d7 系列，
+# 见 2026-09-30 派单）：素材库第1集建的卡叫「行李箱」，第2集模型把同一件东西
+# 报成新标签「旧行李箱」——旧逻辑按 label 精确去重、从不查 bible.props，
+# 结果第2集当成全新道具，外观/参考图都查不到，分镜台只能各自现编。两条判据
+# 是"任一满足即可"，不是"必须同时满足"：一条提及若两条都不满足（label 既不
+# 逐字命中自己声明的段落，也没有唯一胜者的既有卡可绑），整条丢弃（不计入
+# 清单，不阻断发布——跟 scene 侧"没证据就当未解析"同一处置，不是"空口提名
+# 也发布"）。
+#
+# 已知局限（P2，本次不解决）：合并键是 canonical_name（绑定时）或 label（未
+# 绑定时）——同一个原文写法在不同 mention 里若因各自声明的段落证据不同而
+# 时而绑上卡、时而绑不上，会拆成两条独立清单条目而不是合并成一条。card_
+# match 判据本身是纯函数、按同一份 cards 与各自的段落证据独立运算，不做
+# 跨 mention 的二次合并——真实剧情里同一物件反复出现时措辞与上下文通常
+# 一致，这类拆分预计罕见；需要更强一致性时留给后续有专门预算时再评估。
 #
 # plot_significant/plot_significant_quote（2026-09-28 新增，见
 # .chunk_extraction 提示词与 app.props.judge.is_key_prop_mention 的同名
@@ -244,25 +260,77 @@ async def _discover_new_props(
 # 不持有），这里只负责把模型的申报值带到 props_payload 里，缺省时按假/空
 # 兜底（旧调用方构造的 mention dict 没有这两个键时不报错，向后兼容
 # tests/test_props_library.py 里手写的 mention 夹具）。
+def _prep_pack_prop_card_anchor(
+    card: Prop, valid_indexes: list[int], segments: list[SourceSegment],
+) -> tuple[int, str] | None:
+    """card_match 分支的 provenance 锚点：``card`` 的 name/alias 里第一个在
+    ``valid_indexes`` 某一段原文里逐字出现的那个，连同它所在的段号一起返回——
+    保证 anchor_phrase 真的落在 anchor_segments 指向的原文里
+    （verify_manifest_provenance_with_repair 的自校验判据）。match_existing_
+    prop_card 已经确认某个 identifier 在这些段落拼接后的文本里逐字出现过
+    （见调用点），按单段重新定位理应总能找到，这里仍用 ``| None`` 防御性兜底。
+    """
+    identifiers = [str(card.name or "").strip(), *(str(a or "").strip() for a in card.aliases)]
+    for index in valid_indexes:
+        text = segments[index - 1].text
+        for identifier in identifiers:
+            if identifier and identifier in text:
+                return index, identifier
+    return None
+
+
+def _prep_pack_prop_mention_binding(
+    label: str, valid_indexes: list[int], segments: list[SourceSegment], cards: Sequence[Prop],
+) -> tuple[list[int], Prop | None, str, list[int], str] | None:
+    """核验一条道具提及：返回 (segment_indexes, 绑定的卡或 None, provenance.method,
+    anchor_segments, anchor_phrase)；两条判据都不满足时返回 None（整条丢弃）。"""
+    # 延迟导入：避免给 app.production.prep_pack（映射台核心链路）加一条模块级
+    # 常驻依赖到 app.props 的模型/出图调用链——import app.props.card_match 前
+    # Python 必须先跑 app/props/__init__.py，它无条件 import .service，而
+    # service 又模块级 import .image → app.hiagent（HiAgent 网关客户端）。与
+    # 相邻 _discover_new_characters/_discover_new_scenes/_discover_new_props
+    # 的既有写法保持一致（同一文件里三个函数都是函数内 import）。
+    from app.props.card_match import match_existing_prop_card
+
+    literal_indexes = [i for i in valid_indexes if label in segments[i - 1].text]
+    evidence_text = "\n".join(segments[i - 1].text for i in valid_indexes)
+    card = match_existing_prop_card(label, evidence_text, cards)
+    if not literal_indexes and card is None:
+        return None
+    segment_indexes = literal_indexes or valid_indexes
+    if literal_indexes:
+        return segment_indexes, card, "direct", [segment_indexes[0]], label
+    anchor = _prep_pack_prop_card_anchor(card, valid_indexes, segments)
+    anchor_segments = [anchor[0]] if anchor else [segment_indexes[0]]
+    anchor_phrase = anchor[1] if anchor else ""
+    return segment_indexes, card, "card_match", anchor_segments, anchor_phrase
+
+
 def _prep_pack_build_prop_manifest(
     prop_mentions: list[dict[str, Any]], segments: list[SourceSegment],
+    *, cards: Sequence[Prop] = (),
 ) -> list[dict[str, Any]]:
     props: dict[str, dict[str, Any]] = {}
     for mention in prop_mentions:
         label = str(mention.get("label") or "").strip()
-        if not label:
-            continue
-        segment_indexes = sorted(
+        valid_indexes = sorted(
             index for index in {int(i) for i in mention.get("segment_indexes") or []}
-            if 1 <= index <= len(segments) and label in segments[index - 1].text
+            if 1 <= index <= len(segments)
         )
-        if not segment_indexes:
+        if not label or not valid_indexes:
             continue
-        entry = props.setdefault(label, {
+        binding = _prep_pack_prop_mention_binding(label, valid_indexes, segments, cards)
+        if binding is None:
+            continue
+        segment_indexes, card, method, anchor_segments, anchor_phrase = binding
+        canonical_name = card.name if card else None
+        key = canonical_name or label
+        entry = props.setdefault(key, {
             "label": label,
+            "canonical_name": canonical_name,
             "description": str(mention.get("description") or "").strip(),
             "segment_indexes": [],
-            "provenance": _prep_pack_provenance("direct", [segment_indexes[0]], label),
+            "provenance": _prep_pack_provenance(method, anchor_segments, anchor_phrase),
             "plot_significant": bool(mention.get("plot_significant")),
             "plot_significant_quote": str(mention.get("plot_significant_quote") or "").strip(),
         })

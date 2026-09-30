@@ -115,6 +115,7 @@ async def _extract_chunk(
     chunk: list[tuple[int, SourceSegment]],
     known_characters: list[str],
     known_scenes: list[str],
+    known_props: list[str],
     attempt_hint: str,
     run_id: str | None,
     confirmed_title_indexes: set[int] | None = None,
@@ -174,7 +175,9 @@ async def _extract_chunk(
   角色拿起/递给/接过/放下、被贴身佩戴或收藏、被镜头意味着特写描写，或作为悬念/伏笔被
   原文特别强调其存在——不确定就填空字符串，绝不编造"}}；plot_significant=true 当且仅当
   上面这条证据真实存在，不确定或原文只是把它当背景陈设一笔带过就填 false；没有道具就给
-  空列表，不要为了填满而虚构。
+  空列表，不要为了填满而虚构。已登记道具名（仅供拼写对齐，同上两条已登记角色名/场景名的
+  原则——如果原文本身就是这样称呼这件道具的，写法要跟登记名保持一致；原文没有这样称呼，
+  就不要往上面靠）：{known_props}；
 
 {_ASSET_DECLARATION_RULES}
 {confirmed_title_section}{hint}

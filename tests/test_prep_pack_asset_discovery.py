@@ -4899,7 +4899,7 @@ def test_prop_mention_with_literal_evidence_appears_in_asset_manifest_props():
     )
     assert errors == []
     assert props == [{
-        "label": "血玉玦", "description": "一枚泛着血光的玉玦，边缘刻着古老符文",
+        "label": "血玉玦", "canonical_name": None, "description": "一枚泛着血光的玉玦，边缘刻着古老符文",
         "segment_indexes": [1],
         "provenance": {"method": "direct", "anchor_segments": [1], "anchor_phrase": "血玉玦"},
         "plot_significant": False, "plot_significant_quote": "",
@@ -5359,8 +5359,10 @@ def test_prep_pack_version_is_1_8_0():
     自己独立发起一次 strip_paratext 模型调用。是 prompt-contract 变更
     （删字段）+ ledger 判定语义变更（判据来源从模型自报换成确定性投影），
     比照 1.4.1/1.9.0 的先例推进版本号第三位，不动 schema 位（coverage_
-    ledger.paratext 自身仍是 flat [int] list）。2.0.5 见 chunk_extraction 规则常量上方。"""
-    assert prep_pack.PREP_PACK_VERSION == "2.0.5"
+    ledger.paratext 自身仍是 flat [int] list）。2.0.5 见 chunk_extraction 规则常量上方。
+    2.0.6（见 discovery._prep_pack_build_prop_manifest 上方大注释）：道具对照既有卡片绑定，
+    props[] 新增 additive 字段 canonical_name，比照 1.2.0 先例推进版本号第三位。"""
+    assert prep_pack.PREP_PACK_VERSION == "2.0.6"
 
 
 # ---------------------------------------------------------------------------

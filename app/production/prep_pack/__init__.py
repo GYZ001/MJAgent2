@@ -64,6 +64,7 @@ from .chunking import (
     _prep_pack_chapter_titles,
     _prep_pack_character_shortlist,
     _prep_pack_gate_segment_indexes,
+    _prep_pack_known_prop_names,
     _render_chunk,
 )
 from .contracts import (

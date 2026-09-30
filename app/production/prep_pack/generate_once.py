@@ -24,6 +24,7 @@ from .chunking import (
     _prep_pack_chapter_titles,
     _prep_pack_character_shortlist,
     _prep_pack_gate_segment_indexes,
+    _prep_pack_known_prop_names,
 )
 from .contracts import (
     PREP_PACK_VERSION,
@@ -204,6 +205,7 @@ async def _generate_prep_pack_once(
     # 后者才是本次改动要收紧的"拼写对齐提示"。
     known_character_pool, known_characters = _prep_pack_character_shortlist(conn, project_id, episode_no, source_text)
     known_scenes = _known_scene_names(conn, project_id, episode_no)
+    known_props = _prep_pack_known_prop_names(conn, project_id)
     # 1.9.0 (kept in 2.0.0, see PREP_PACK_VERSION's 1.9.0 note above):
     # DB-anchored chapter titles for this episode's own chapters -- fed to
     # both _extract_chunk (prompt injection, told to the model as an
@@ -265,6 +267,7 @@ async def _generate_prep_pack_once(
             chunk=chunk,
             known_characters=known_characters,
             known_scenes=known_scenes,
+            known_props=known_props,
             attempt_hint=attempt_hint,
             run_id=run_id,
             confirmed_title_indexes=deterministic_title_indexes,

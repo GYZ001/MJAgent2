@@ -11,7 +11,9 @@ import sqlite3
 from app.bible_store import mutate_bible_json
 from app.db import get_conn
 from app.schemas import Bible, Prop
+from app.source_excerpt import index_source_segments
 
+from .card_match import evidence_text_for_segments, match_existing_prop_card
 from .image import generate_prop_reference_image, prop_ref_prompt
 from .labels import normalize_prop_label
 from .judge import assess_prop_appearance, is_key_prop_mention
@@ -90,6 +92,18 @@ async def _generate_and_persist_prop_image(
     return image_path
 
 
+def _bind_known_base(
+    conn: sqlite3.Connection, project_id: str, label: str, base: str, canonical: str, known: set[str],
+) -> None:
+    """``base``（连同原始 ``label``，若与它不同）都已归到既有卡片 ``canonical``：
+    把尚未登记过的那个原文写法补成该卡别名（幂等，见 ``_append_prop_alias``），
+    并计入 ``known``——不新建卡、不发模型调用。"""
+    for alias in {base, label}:
+        if alias and alias != canonical and _append_prop_alias(conn, project_id, canonical, alias):
+            known.add(alias)
+    known.add(canonical)
+
+
 async def _register_one_prop(
     conn: sqlite3.Connection, project_id: str, episode_no: int, mention: dict,
     *, style: str, ep_label: str,
@@ -120,6 +134,22 @@ async def ensure_props_for_labels(
     暂不可用"而非错误——道具库是人物/场景库之外的增量能力，不应该反过来挡住
     映射台本身（调用方按约定 advisory 处理，见 app.production.prep_pack.
     discovery._discover_new_props）。
+
+    归一后的每个物件本体（``base``）先对照既有卡片（``card_match.
+    match_existing_prop_card``：唯一胜者、包含关系判据，同
+    ``app.production.prep_pack.discovery`` 清单构建共用的那一份）——命中就
+    只登记别名，不新建卡（真实事故：「行李箱」第2集被模型报成新标签「旧
+    行李箱」，旧逻辑按 label 精确比对，当成全新道具建了第二张卡）。
+
+    喂给 ``match_existing_prop_card`` 的证据面收窄到每条 ``mention`` 自己声明
+    的 ``segment_indexes`` 对应原文（``card_match.evidence_text_for_segments``），
+    不是整集 ``source_text``——2026-09-30 修复评审实测：早先这里传整集原文，
+    只要某张既有卡片的 name/alias 恰好出现在本集任意无关段落且与当前 label
+    存在包含关系，就会被当成"证据"命中，把两个不相关的道具静默合并成一张
+    卡（且因为只命中 1 张卡，不触发 PROP_CARD_MATCH_AMBIGUOUS 告警，完全
+    静默）。窄证据与 ``app.production.prep_pack.discovery.
+    _prep_pack_build_prop_manifest`` 用的范围严格对齐——同一条提及两处不再
+    可能得出不同结论。
     """
     # 建表必须先于本函数下面任何一次写（mutate_bible_json 的 UPDATE）执行：
     # SQLite 连接一旦在某个事务里做过写操作，同一事务内的读写会锁定在写操作
@@ -136,6 +166,10 @@ async def ensure_props_for_labels(
     known = _known_prop_names(bible.props)
     style = bible.world.visual_style_canonical
     ep_label = f"第 {episode_no} 集"
+    # 每条 mention 各自的窄证据都从同一份 segments 切片（见函数 docstring 的
+    # 证据面对齐说明）；source_text 为空时 index_source_segments 会抛错，所以
+    # 只在非空时才算——空 source_text 的调用方（旧测试夹具）本就没有证据可言。
+    segments = index_source_segments(source_text) if source_text else []
     added: list[dict] = []
     errors: list[str] = []
     for mention in mentions:
@@ -144,12 +178,17 @@ async def ensure_props_for_labels(
             continue
         if not is_key_prop_mention(mention, source_text=source_text):
             continue
+        evidence_text = evidence_text_for_segments(segments, mention.get("segment_indexes") or [])
         # 标签先归一成物件本体（「两只野鸡」→野鸡、「凝灵丹与半块灵石」→凝灵丹+灵石，见 props.labels）：
-        # 本体已登记就只补别名，不再另建一件；本体未登记就以本体名建卡、原标签作别名。
+        # 本体已登记（精确命中，或对照既有卡片的包含关系唯一胜者，见 _bind_known_base）
+        # 就只补别名，不再另建一件；两者都不成立才以本体名建卡、原标签作别名。
         for base in normalize_prop_label(label):
-            if base in known:
-                if base != label and _append_prop_alias(conn, project_id, base, label):
-                    known.add(label)
+            canonical = base if base in known else None
+            if canonical is None:
+                card = match_existing_prop_card(base, evidence_text, bible.props)
+                canonical = card.name if card else None
+            if canonical is not None:
+                _bind_known_base(conn, project_id, label, base, canonical, known)
                 continue
             try:
                 result = await _register_one_prop(

@@ -16,6 +16,14 @@ asset_manifest 只给道具写 label/description 两个文字字段，模型每�
 scene_reference_id 时的既有回退语义一致），不阻断分镜生成——道具参考图是
 增量能力，不是分镜生成的前置门禁。测试通过 monkeypatch 本模块的
 ``_prop_reference_lookup`` 验证装配逻辑，不依赖 ``app.props`` 是否已存在。
+
+2026-09-30：``manifest["props"][].canonical_name``（映射台清单构建阶段对照
+既有卡片绑定的规范卡名，见 app.production.prep_pack.discovery._prep_pack_
+build_prop_manifest 与 app.props.card_match.match_existing_prop_card）在
+非空时优先于原始 ``label`` 用于外观/参考图查找——真实事故：素材库卡片叫
+「行李箱」，原文写法「旧行李箱」按 label 精确比对查不到卡片，分镜台只能
+自编外观。``label`` 本身仍保留模型这次的原文写法，供展示与别名登记，不
+被改写。
 """
 from __future__ import annotations
 
@@ -79,10 +87,18 @@ def enrich_prop_manifest_entries(
     appearance_index = _bible_prop_appearance_index(bible)
     for prop in manifest.get("props") or []:
         label = str(prop.get("label") or "").strip()
-        prop["appearance"] = appearance_index.get(label) or _NO_CANONICAL_PROP_APPEARANCE_NOTE
-        if not (label and project_id and episode_no is not None):
+        # 规范卡名（映射台清单构建阶段已绑定，见模块 docstring 2026-09-30 段）优先于
+        # 原始 label：两者都查一次世界书索引，命中任一个即可，不强制要求 canonical_name
+        # 自身也在索引里（防御性，理论上不应发生，见 _prep_pack_build_prop_manifest）。
+        canonical_name = str(prop.get("canonical_name") or "").strip()
+        lookup_name = canonical_name or label
+        prop["appearance"] = (
+            appearance_index.get(canonical_name) or appearance_index.get(label)
+            or _NO_CANONICAL_PROP_APPEARANCE_NOTE
+        )
+        if not (lookup_name and project_id and episode_no is not None):
             continue
-        row = _prop_reference_lookup(conn, project_id, label, episode_no)
+        row = _prop_reference_lookup(conn, project_id, lookup_name, episode_no)
         if not row or str(row["status"] or "") != "ready":
             continue
         image_path = str(row["image_path"] or "").strip()
