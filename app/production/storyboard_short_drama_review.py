@@ -114,6 +114,7 @@ from app.production.storyboard_dialogue_ledger import DialogueQuote, _AiKeptLine
 from app.production import storyboard_short_drama as _short_drama
 from app.production import storyboard_short_drama_budget as _short_drama_budget
 from app.production import storyboard_short_drama_hooks as _short_drama_hooks
+from app.production import storyboard_physical_anchor as _physical_anchor
 from app.production.storyboard_short_drama_beat_guard import _find_covering_segment_no
 from app.production.storyboard_repair_context import storyboard_repair_context
 from app.production.storyboard_segment_ranges import quote_unit_index
@@ -448,7 +449,13 @@ def _must_keep_record(item: _DropReviewItem, evidence_quote: str) -> dict[str, A
     return {"item_id": item.item_id, "kind": item.kind, "text": text, "evidence_quote": evidence_quote}
 
 
-async def generate_beat_sheet_with_drop_review(
+async def generate_beat_sheet_with_drop_review(*, episode_id: str, episode_no: int, segments: list[SourceSegment], payload: dict[str, Any], dialogue_quotes: list[DialogueQuote], contract_version: str, adaptation_mode: str) -> tuple[_AiBeatSheetDraft, int | None, dict[str, Any]]:
+    """公开入口：编排见 ``_beat_sheet_with_drop_review``；返回前核验并覆盖 payload 的体貌专用锚点，须晚于可能存在的第二遍，见 ``storyboard_physical_anchor`` 模块 docstring「覆盖点选在……」一段。"""
+    beat_draft, projected_segment_count, drop_review = await _beat_sheet_with_drop_review(episode_id=episode_id, episode_no=episode_no, segments=segments, payload=payload, dialogue_quotes=dialogue_quotes, contract_version=contract_version, adaptation_mode=adaptation_mode)
+    _physical_anchor.apply_physical_anchor_overrides(payload, _physical_anchor.build_physical_anchor_overrides(beat_draft, payload)); return beat_draft, projected_segment_count, drop_review
+
+
+async def _beat_sheet_with_drop_review(
     *, episode_id: str, episode_no: int, segments: list[SourceSegment], payload: dict[str, Any],
     dialogue_quotes: list[DialogueQuote], contract_version: str, adaptation_mode: str,
 ) -> tuple[_AiBeatSheetDraft, int | None, dict[str, Any]]:

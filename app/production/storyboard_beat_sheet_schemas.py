@@ -116,6 +116,15 @@ class _AiPropEntrance(BaseModel):
     entrance_description: str = Field(min_length=1)
 
 
+class _AiPhysicalAnchor(BaseModel):
+    """体貌专用锚点申报（P0-E，2026-09-30，真实回归 proj_ca86b15ab7d7 EP1 逐帧核对，
+    见 ``app.production.storyboard_physical_anchor`` 模块 docstring）。忠实档/短剧档
+    共用。核验（是完整外观锚点的字符子序列）与覆盖见该模块。"""
+
+    identity_id: str = Field(min_length=1)
+    physical_description: str = Field(min_length=1)
+
+
 class _AiBeatSheetDraft(BaseModel):
     beat_sheet: list[_AiBeat] = Field(min_length=1)
     segments: list[_AiSegmentPlan] = Field(min_length=1)
@@ -132,6 +141,10 @@ class _AiBeatSheetDraft(BaseModel):
     #: 不产出这两个字段，见该模块调用点）。
     wardrobe_plan: list[_AiWardrobeState] = Field(default_factory=list)
     prop_entrances: list[_AiPropEntrance] = Field(default_factory=list)
+    #: 2026-09-30（P0-E）：体貌专用锚点申报，默认空列表兼容旧存量 beat_draft
+    #: （storyboard_identity_regenerate._existing_plan 重建时不产出这个字段，见该
+    #: 模块调用点）——回退行为与改造前完全一致（沿用完整外观锚点）。
+    physical_anchors: list[_AiPhysicalAnchor] = Field(default_factory=list)
 
 
 #: 固定 15 秒/段，不引入分档（用户 09-03 已拍板保留原设计）；短剧档段数目标由
