@@ -136,7 +136,11 @@ def augment_scene_entry_with_reverse_angle(
         return entry
     reverse_view = {
         "id": view.get("id"), "view_role": reverse_evidence.REVERSE_ANGLE_VIEW_ROLE,
-        "image_path": view.get("image_path"), "input_fingerprint": view.get("id"),
+        # input_fingerprint 必须是 scene_reference_views.input_fingerprint 列（真实内容
+        # 哈希），不是 view.get("id")——那是这条视角行自己的主键，与 staleness 判据要比较
+        # 的「视角表现状」概念不同，误用会让资产其实没变的镜头恒判 stale（2026-09-30
+        # proj_ca86b15ab7d7 EP1 8 段反打误报同一根因的另一处）。
+        "image_path": view.get("image_path"), "input_fingerprint": view.get("input_fingerprint"),
         "purposes": list(purposes),
     }
     return {

@@ -332,7 +332,10 @@ max_lines_tests = 500
 "app/domain/storyboard_ops/scene_projection.py" = 72
 "app/domain/storyboard_ops/shot_edit_session.py" = 77
 "app/domain/storyboard_ops/spoken_contract.py" = 54
-"app/domain/storyboard_ops/staleness.py" = 69
+# 2026-09-30：_shot_adopted_assets_stale 拆出 _adopted_reference_manifest /
+# _shot_episode_row / _selected_views_stale 三个 helper 顺带修误报资产 stale
+# 的根因（69 -> 49），已回到默认 50 以内，条目整条删除——棘轮只降不升，收紧
+# 后如实记账。
 "app/domain/storyboard_ops/start_resume.py" = 149
 "app/domain/storyboard_ops/status_snapshot.py" = 295
 "app/domain/storyboard_ops/structure.py" = 183

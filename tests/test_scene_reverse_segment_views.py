@@ -19,17 +19,19 @@ def _conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute(
         "CREATE TABLE scene_reference_views(id TEXT, scene_reference_id TEXT, view_role TEXT, "
-        "image_path TEXT, qa_json TEXT, status TEXT)"
+        "image_path TEXT, qa_json TEXT, status TEXT, input_fingerprint TEXT)"
     )
     return conn
 
 
-def _insert_view(conn, *, scene_reference_id="sr1", image_path, passed=True) -> None:
+def _insert_view(
+    conn, *, scene_reference_id="sr1", image_path, passed=True, input_fingerprint="content-hash-abc123",
+) -> None:
     qa = {"reverse_check": {"checked": True, "passed": passed, "reason": "朝向相反"}}
     conn.execute(
-        "INSERT INTO scene_reference_views(id, scene_reference_id, view_role, image_path, qa_json, status) "
-        "VALUES('rv1', ?, 'reverse_angle', ?, ?, 'ready')",
-        (scene_reference_id, image_path, json.dumps(qa, ensure_ascii=False)),
+        "INSERT INTO scene_reference_views(id, scene_reference_id, view_role, image_path, qa_json, "
+        "status, input_fingerprint) VALUES('rv1', ?, 'reverse_angle', ?, ?, 'ready', ?)",
+        (scene_reference_id, image_path, json.dumps(qa, ensure_ascii=False), input_fingerprint),
     )
     conn.commit()
 
@@ -154,6 +156,28 @@ def test_augment_adds_reverse_view_when_mentioned_and_ready(monkeypatch, tmp_pat
     assert out["selected_views"][-1]["image_path"] == str(image)
     # 不修改传入对象本身
     assert _BASE_ENTRY["available_view_roles"] == ["establishing"]
+
+
+def test_augment_reverse_view_fingerprint_is_content_hash_not_row_id(monkeypatch, tmp_path):
+    """回归：``input_fingerprint`` 必须是视角表的内容哈希列，不能是视角行自己的
+    主键 id——2026-09-30 曾把这两者搞混，staleness 判据拿它去跟
+    ``scene_reference_views.input_fingerprint`` 现状比较，id 形态的字符串永远
+    不等于哈希，资产其实没变也会被判 stale（proj_ca86b15ab7d7 EP1 8 段误报）。"""
+    monkeypatch.setattr(reverse_evidence, "get_setting", lambda key: "true")
+    conn = _conn()
+    image = tmp_path / "reverse.jpg"
+    image.write_bytes(b"jpg")
+    _insert_view(conn, image_path=str(image), input_fingerprint="content-hash-abc123")
+
+    out = segment_views.augment_scene_entry_with_reverse_angle(
+        _BASE_ENTRY, conn=conn, scene_reference_id="sr1", scene_name="修表铺",
+        mentioned_scene_names={"修表铺"}, purposes=["qa_anchor"],
+    )
+
+    reverse_view = out["selected_views"][-1]
+    assert reverse_view["id"] == "rv1"
+    assert reverse_view["input_fingerprint"] == "content-hash-abc123"
+    assert reverse_view["input_fingerprint"] != reverse_view["id"]
 
 
 def test_augment_leaves_entry_unchanged_when_not_mentioned(monkeypatch, tmp_path):

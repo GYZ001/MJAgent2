@@ -57,75 +57,116 @@ def _shot_video_is_stale(conn, shot_row, episode_storyboard_id: str | None) -> b
                 return True
     return _shot_adopted_assets_stale(conn, shot_row, ver)
 
-def _shot_adopted_assets_stale(conn, shot_row, version_row) -> bool:
-    """采用版 reference_manifest 中的人物/场景 revision 是否仍是本集当前生效版本。"""
-    try:
-        from app.multiview import (
-            character_multiview_enabled, scene_multiview_enabled,
-            manifest_asset_revision_ids, manifest_asset_view_fingerprints,
-            portrait_row_for_episode, scene_row_for_episode,
-        )
-    except Exception:  # noqa: BLE001
-        return False
-    if not character_multiview_enabled() and not scene_multiview_enabled():
-        return False
-    meta = {}
+def _adopted_reference_manifest(version_row) -> dict | None:
+    """从采用版的 ``image_inputs`` 里取出冻结时的 reference_manifest；旧记录
+    落在首张参考图的 ``dependency_manifest`` 里时做同等回退。"""
     try:
         meta = json.loads(version_row["image_inputs"] or "{}") if version_row["image_inputs"] else {}
     except (TypeError, ValueError, KeyError):
         meta = {}
     manifest = meta.get("reference_manifest") if isinstance(meta, dict) else None
     if not isinstance(manifest, dict):
-        # 回退：从首张带 dependency_manifest 的参考图读取
         for ref in (meta.get("reference_images") or []) if isinstance(meta, dict) else []:
             if isinstance(ref, dict) and isinstance(ref.get("dependency_manifest"), dict):
                 manifest = ref["dependency_manifest"]
                 break
-    if not isinstance(manifest, dict):
-        return False
-    frozen_ids = manifest_asset_revision_ids(manifest)
-    if not frozen_ids:
-        return False
+    return manifest if isinstance(manifest, dict) else None
+
+
+def _shot_episode_row(conn, shot_row):
     try:
         episode_id = shot_row["episode_id"]
     except (KeyError, IndexError, TypeError):
-        return False
-    ep = conn.execute("SELECT project_id, episode_no FROM episodes WHERE id=?", (episode_id,)).fetchone()
-    if not ep:
-        return False
-    project_id = ep["project_id"]
-    episode_no = ep["episode_no"]
-    for key, frozen_rev in frozen_ids.items():
-        if key.startswith("character:"):
-            name = key.split(":", 1)[1]
-            row = portrait_row_for_episode(project_id, name, episode_no)
-            current_id = row["id"] if row else None
-            if current_id != frozen_rev:
-                return True
-        elif key.startswith("scene:"):
-            name = key.split(":", 1)[1]
-            row = scene_row_for_episode(project_id, name, episode_no)
-            current_id = row["id"] if row else None
-            if current_id != frozen_rev:
-                return True
-    frozen_views = manifest_asset_view_fingerprints(manifest)
-    for (kind, name, role), frozen_fp in frozen_views.items():
-        if kind == "character":
-            parent = portrait_row_for_episode(project_id, name, episode_no)
-            table = "character_portrait_views"
-            parent_column = "portrait_id"
-        else:
-            parent = scene_row_for_episode(project_id, name, episode_no)
-            table = "scene_reference_views"
-            parent_column = "scene_reference_id"
-        if not parent:
-            return True
+        return None
+    return conn.execute(
+        "SELECT project_id, episode_no FROM episodes WHERE id=?", (episode_id,),
+    ).fetchone()
+
+
+def _selected_views_stale(conn, views, *, frozen_rev, current_id, table: str, parent_column: str) -> bool:
+    """冻结视角逐条核对内容指纹；指纹与自身 revision id 相同的那条不是真实多
+    视角内容哈希，是分镜包分支拿当前定妆照/场景图顶替多视角的伪视角（见
+    ``_shot_adopted_assets_stale`` docstring），revision id 那层比较已经覆盖，
+    这里跳过——否则伪视角的 portrait_id/scene_reference_id 字符串永远不可能
+    等于视角表里的真实内容哈希，会把「资产其实没变」恒判成 stale。"""
+    frozen_rev_str = str(frozen_rev or "")
+    for view in views or []:
+        role = str(view.get("view_role") or "")
+        frozen_fp = str(view.get("input_fingerprint") or "")
+        if not role or not frozen_fp or frozen_fp == frozen_rev_str:
+            continue
         current = conn.execute(
             f"SELECT input_fingerprint FROM {table} "
             f"WHERE {parent_column}=? AND view_role=? AND status='ready'",
-            (parent["id"], role),
+            (current_id, role),
         ).fetchone()
         current_fp = current["input_fingerprint"] if current else None
         if current_fp != frozen_fp:
+            return True
+    return False
+
+
+def _shot_adopted_assets_stale(conn, shot_row, version_row) -> bool:
+    """采用版 reference_manifest 中的人物/场景 revision 是否仍是本集当前生效版本。
+
+    人物比较改用 ``current_portrait_ref``（带 ``identity_id`` 当
+    ``visual_entity_id``）——与生成侧 ``app.multiview._storyboard_pack_asset_
+    dependencies`` 冻结 manifest 时用的同一份判据，不再另用只按名字查、且不排除
+    已作废负 ep_start 历史槽位的 ``portrait_row_for_episode``，两份判据不会再
+    漂移（见 app.portraits.current_ref 模块 docstring）。"""
+    try:
+        # 延迟导入且包在 try 里：本模块被 app.domain.storyboard_ops 包 __init__
+        # 全量 import，app.multiview 万一因局部改动导入失败会拖垮整个包；降级成
+        # 「判不 stale」远比全站起不来安全（经验证：module 级导入本身没有循环依赖，
+        # 这里是刻意的失败隔离，不是绕循环）。
+        from app.multiview import character_multiview_enabled, scene_multiview_enabled, scene_row_for_episode
+        # current_portrait_ref 同理：与上面 app.multiview 导入失败时一起降级。
+        from app.portraits import current_portrait_ref
+    except Exception:  # noqa: BLE001
+        return False
+    if not character_multiview_enabled() and not scene_multiview_enabled():
+        return False
+    manifest = _adopted_reference_manifest(version_row)
+    if manifest is None:
+        return False
+    ep = _shot_episode_row(conn, shot_row)
+    if not ep:
+        return False
+    project_id, episode_no = ep["project_id"], ep["episode_no"]
+
+    for ch in manifest.get("characters") or []:
+        name = str(ch.get("name") or "")
+        if not name:
+            continue
+        frozen_rev = ch.get("look_revision_id")
+        identity_id = str(ch.get("identity_id") or "") or None
+        current = current_portrait_ref(
+            project_id, name, episode_no, visual_entity_id=identity_id, conn=conn,
+        )
+        current_id = current["portrait_id"] if current else None
+        if current_id != frozen_rev:
+            return True
+        if _selected_views_stale(
+            conn, ch.get("selected_views"), frozen_rev=frozen_rev, current_id=current_id,
+            table="character_portrait_views", parent_column="portrait_id",
+        ):
+            return True
+
+    scenes = [manifest.get("scene") or {}, *(manifest.get("additional_scenes") or [])]
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        name = str(scene.get("name") or "")
+        if not name:
+            continue
+        frozen_rev = scene.get("scene_revision_id")
+        row = scene_row_for_episode(project_id, name, episode_no, conn=conn)
+        current_id = row["id"] if row else None
+        if current_id != frozen_rev:
+            return True
+        if _selected_views_stale(
+            conn, scene.get("selected_views"), frozen_rev=frozen_rev, current_id=current_id,
+            table="scene_reference_views", parent_column="scene_reference_id",
+        ):
             return True
     return False
