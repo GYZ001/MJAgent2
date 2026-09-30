@@ -455,7 +455,7 @@ DEFAULT_SETTINGS = {
     "video_ready_high_watermark": "6",
     "reference_shot_cohort_limit": "15",
     "video_reference_batch_prompt": "true",   # P1：一镜一次提示词合同
-    "video_reference_role_adaptive": "false", "video_subtitle_gate_enabled": "true",  # 前者实验默认关；后者见 subtitle_gate
+    "video_reference_role_adaptive": "false", "video_subtitle_gate_enabled": "true", "video_character_count_gate_enabled": "false",  # 前两者见 subtitle_gate；后者未标定前默认关，见 character_count_gate
     # 成片台字幕嵌入（PRD/成片台字幕嵌入_台词对齐字幕PRD.md）：总开关默认关，四个样式键取 §8 缺省值。
     "subtitle_burn_in_enabled": "false", "subtitle_font_size": "64", "subtitle_margin_bottom": "400",
     "subtitle_max_chars_per_line": "14", "subtitle_show_speaker": "false",

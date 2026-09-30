@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.db import get_conn
-from app.evidence import repository, subtitle_overlay
+from app.evidence import character_count, repository, subtitle_overlay
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 
 
@@ -211,9 +211,9 @@ def record_video_candidate(version_id: str, *, step_run_id: str | None = None) -
         if artifact:
             return artifact
     qa = json.loads(row["qa_json"] or "{}")
-    technical = subtitle_overlay.technical_with_verdict(
-        validate_video_file(row["video_path"], expected_duration_s=row["duration_s"]), qa,
-    )
+    technical = validate_video_file(row["video_path"], expected_duration_s=row["duration_s"])
+    technical = subtitle_overlay.technical_with_verdict(technical, qa)
+    technical = character_count.technical_with_verdict(technical, qa)
     artifact = repository.create_artifact(
         EvidenceArtifact(
             type="shot_video",

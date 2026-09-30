@@ -167,6 +167,8 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
         description="受供应商上限约束（Seedance 2.0 最多 3 个、总时长 15 秒），实际生效值取两者较小。",
     ),
     "video_subtitle_gate_enabled": _boolean("视频字幕闸门", "true"),
+    # 视频生成后核对画面里的人数与身份是否与分镜登记一致；未标定前默认关，标定后由用户拍板开启。
+    "video_character_count_gate_enabled": _boolean("画面人数与身份闸门", "false", experimental=True),
     # 成片台字幕嵌入（PRD/成片台字幕嵌入_台词对齐字幕PRD.md §8/§10）：总开关 + 四个样式键。
     "subtitle_burn_in_enabled": _boolean("成片字幕嵌入", "false"),
     "subtitle_font_size": _number("字幕字号", "64", 40, 120, unit="px"),

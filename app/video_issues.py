@@ -56,7 +56,11 @@ def _mk(
 #: 技术校验里「提示词本身诱发」的规则：同输入重抽对它没用（2026-09-14 我欲封天第 2 集镜 5
 #: 三次都把「拜见师兄」烧在画面底部，L1 三连败直接 L6 转人工、整集失败）。这类规则从第一次
 #: 重抽起就走 L2 定向重抽，把 repair_hint 作为「上一版必须改正」写进提示词。
-_PROMPT_INDUCED_TECHNICAL_RULES = frozenset({"subtitle_overlay"})
+#: ``headcount_exceeded``/``character_duplicated``（2026-09-30 画面人数与身份闸门）同属此类：
+#: 模型把分镜写明的人数画多了/同一角色画了两次，是模型对同一份提示词的系统性倾向，同输入
+#: 盲抽大概率复现；``app.evidence.character_count`` 的 repair_hint 已经把「上一版画了几个人/
+#: 哪个角色重复了」写成具体正面陈述，值得从第一次重抽起就定向使用。
+_PROMPT_INDUCED_TECHNICAL_RULES = frozenset({"subtitle_overlay", "headcount_exceeded", "character_duplicated"})
 
 
 def _technical_contract_issue(

@@ -733,15 +733,15 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         run_job_steps.record_success_mode_attempt(conn, job, version, meta, task_id)
         # 生成台产生了新片段，旧的整集合成视频即过期 → 删除，避免成片台展示陈旧成品
         _invalidate_final_video(job["project_id"], ep["episode_no"])
-        # VLM 视觉质检已整体下线，run_auto_qa 不再跑独立的自动 QA 步骤，不再有
-        # 跑满读超时的风险；这里仍按 TIMEOUT_VLM_READ 留出余量，只是防御性冗余
-        # （历史事故：lease 到期后 sweeper 抢占，原协程跑完却无法 settle，新
-        # worker 对已成功版本重跑付费链路），未删除是为了 VLM 未来复活时不用
-        # 重新调参，不代表当前真的会跑到这个时长。
+        # 评分制 VLM 视觉质检已整体下线，但 run_auto_qa 现在顺序跑两个窄问题闸门
+        # （subtitle_gate + character_count_gate），各自独立抽帧 + 一次 VLM 调用，
+        # 都可能跑满读超时；按 2 次 TIMEOUT_VLM_READ 留出余量，避免第二个闸门吃掉
+        # 第一个闸门已经消耗的租约余量（历史事故：lease 到期后 sweeper 抢占，原
+        # 协程跑完却无法 settle，新 worker 对已成功版本重跑付费链路）。
         _assert_job_lease(
             job_id,
             owner,
-            lease_seconds=max(180.0, float(config.TIMEOUT_VLM_READ) + 60.0),
+            lease_seconds=max(180.0, 2 * float(config.TIMEOUT_VLM_READ) + 60.0),
         )
         # 完整补齐模式只有 Supervisor 有权重抽和采用；Worker 只执行、校验并产出候选。
         supervisor_controlled = await run_job_steps.run_auto_qa(job, version, dest)

@@ -12,7 +12,7 @@ import json
 import pytest
 
 from app.evidence import subtitle_overlay
-from app.media_exec import run_job_steps, subtitle_gate
+from app.media_exec import character_count_gate, run_job_steps, subtitle_gate
 
 
 def _verdict(overlay: bool) -> dict:
@@ -172,6 +172,26 @@ def test_run_auto_qa_invokes_gate_before_supervisor_decision(monkeypatch) -> Non
     supervisor = asyncio.run(run_job_steps.run_auto_qa({"episode_id": "ep_1"}, {"id": "ver_1"}, "/tmp/v.mp4"))
     assert calls == [("ep_1", "ver_1", "/tmp/v.mp4")]
     assert supervisor is False
+
+
+def test_run_auto_qa_invokes_character_count_gate_after_subtitle_gate(monkeypatch) -> None:
+    """两个窄问题闸门都要跑：字幕闸门先、画面人数与身份闸门后，互不覆盖对方的结论
+    （两者各写各的 qa_json 键，见各自模块）。"""
+    calls: list[str] = []
+
+    async def subtitle_evaluate(job, version, dest):
+        calls.append("subtitle_gate")
+        return _verdict(False)
+
+    async def character_count_evaluate(job, version, dest):
+        calls.append("character_count_gate")
+        return {"checked": False, "reason": "本段没有登记在场的可见角色，跳过画面人数与身份核验"}
+
+    monkeypatch.setattr(subtitle_gate, "evaluate_version", subtitle_evaluate)
+    monkeypatch.setattr(character_count_gate, "evaluate_version", character_count_evaluate)
+    monkeypatch.setattr(run_job_steps, "get_conn", lambda: _NoEpisodeConn())
+    asyncio.run(run_job_steps.run_auto_qa({"episode_id": "ep_1"}, {"id": "ver_1"}, "/tmp/v.mp4"))
+    assert calls == ["subtitle_gate", "character_count_gate"]
 
 
 class _NoEpisodeConn:

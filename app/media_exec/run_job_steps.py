@@ -28,7 +28,7 @@ from app.hiagent import ProviderError, ProviderFailure
 from app.evidence import media as media_evidence
 from app.orchestration import media_scheduler
 
-from . import subtitle_gate
+from . import character_count_gate, subtitle_gate
 from .common import _retry_tasks
 from .job_state import _paid_video_attempt_count, _set_job
 
@@ -183,12 +183,15 @@ def record_success_mode_attempt(conn, job, version, meta: dict, task_id) -> None
 
 
 async def run_auto_qa(job, version, dest) -> bool:
-    """字幕闸门 + 判定完整补齐模式是否由 Supervisor 掌控自动重抽/采用。
+    """字幕闸门 + 人数与身份闸门 + 判定完整补齐模式是否由 Supervisor 掌控自动重抽/采用。
 
-    VLM 视觉质检（评分制）已整体下线；这里只跑 ``subtitle_gate``——一个可标定的
-    二值问题，结论写进 ``qa_json``，由候选登记并进技术校验。返回 ``supervisor_controlled``。
+    VLM 视觉质检（评分制）已整体下线；这里只跑两个可标定的窄问题闸门——
+    ``subtitle_gate``（画面有没有叠加字幕）与 ``character_count_gate``（画面人数
+    与身份是否对得上分镜登记），结论都写进 ``qa_json``，由候选登记并进技术校验。
+    返回 ``supervisor_controlled``。
     """
     await subtitle_gate.evaluate_version(job, version, dest)
+    await character_count_gate.evaluate_version(job, version, dest)
     supervisor_controlled = False
     try:
         ep_mode = get_conn().execute(
