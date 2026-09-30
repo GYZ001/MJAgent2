@@ -386,3 +386,83 @@ async def rollback_portrait_candidate(
         decision="rollback",
     )
     return {"rolled_back": True, "from_portrait_id": portrait_id, **result}
+
+
+@router.post("/projects/{project_id}/characters/portraits/neutral-identity/precheck")
+async def neutral_identity_precheck(project_id: str, body: dict | None = None):
+    """中性身份定妆照只读预检：要生成的图片张数、受影响段，带指纹；确认后带同
+    一指纹调用 ``portrait.stage_neutral_identity``（见 app.portraits.neutral_identity，
+    默认关闭功能，不进入 Capability Registry——只读、不写库、不花钱）。"""
+    # 函数内延迟导入：避免本文件顶层拉入 app.portraits.neutral_identity 的多视角/
+    # 模型网关依赖链，只有这条路由真被调用时才需要
+    from app.portraits.neutral_identity import precheck_neutral_identity
+
+    _project_or_404(project_id)
+    payload = body or {}
+    names = [str(n).strip() for n in (payload.get("names") or []) if str(n).strip()]
+    from_episode = int(payload.get("from_episode") or 0)
+    if not names or from_episode < 1:
+        raise HTTPException(422, "names 不能为空，from_episode 必须 >=1")
+    try:
+        return precheck_neutral_identity(get_conn(), project_id, names, from_episode)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/characters/portraits/neutral-identity/stage")
+async def neutral_identity_stage_route(project_id: str, body: dict | None = None):
+    """中性身份定妆照暂存：REST 入口与 ``portrait.stage_neutral_identity`` Command
+    Handler 共用（``ui_route`` 短路复用，同 ``regenerate_character_view_route``
+    写法）。"""
+    # 延迟导入：app.capabilities.dispatch 经 bus/catalog 反向 import 本文件（命令
+    # 注册会 import 本模块挂 handler），模块级导入会成环，同 app.domain.projects.
+    # listing.set_project_settings 的既有写法
+    from app.capabilities.dispatch import ui_route
+    from app.portraits.neutral_identity import stage_neutral_identity  # 同上，避免拉入多视角/模型网关依赖链
+
+    payload = body or {}
+    routed = await ui_route(
+        "portrait.stage_neutral_identity",
+        {
+            "project_id": project_id, "names": payload.get("names") or [],
+            "from_episode": payload.get("from_episode"), "fingerprint": payload.get("fingerprint"),
+        },
+    )
+    if routed is not None:
+        return routed
+    _project_or_404(project_id)
+    names = [str(n).strip() for n in (payload.get("names") or []) if str(n).strip()]
+    from_episode = int(payload.get("from_episode") or 0)
+    fingerprint = str(payload.get("fingerprint") or "")
+    try:
+        return await stage_neutral_identity(
+            get_conn(), project_id, names, from_episode, fingerprint=fingerprint,
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/characters/{character_name}/portraits/neutral-identity/adopt")
+async def neutral_identity_adopt_route(project_id: str, character_name: str, body: dict | None = None):
+    """中性身份定妆照采纳：REST 入口与 ``portrait.adopt_neutral_identity`` Command
+    Handler 共用，写法同上。"""
+    from app.capabilities.dispatch import ui_route  # 延迟导入理由同 neutral_identity_stage_route
+    from app.portraits.neutral_identity import adopt_neutral_identity  # 同上
+
+    payload = body or {}
+    routed = await ui_route(
+        "portrait.adopt_neutral_identity",
+        {"project_id": project_id, "character_name": character_name, "from_episode": payload.get("from_episode")},
+    )
+    if routed is not None:
+        return routed
+    _project_or_404(project_id)
+    from_episode = int(payload.get("from_episode") or 0)
+    try:
+        return adopt_neutral_identity(get_conn(), project_id, character_name, from_episode)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc

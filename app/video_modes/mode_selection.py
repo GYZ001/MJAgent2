@@ -107,6 +107,10 @@ class ReferenceImageAsset:
     library_revision_id: str | None = None
     library_view_id: str | None = None
     view_role: str | None = None
+    # character_portraits.costume_mode（app.portraits.neutral_identity）：
+    # "neutral" 时 seedance_reference_notes 切到不锁服装的参考图说明文案；
+    # None/"baked"（老数据、未采纳中性身份）行为逐字不变。
+    costume_mode: str | None = None
     purposes: list[str] = field(default_factory=list)
     required: bool = False
     slot_key: str | None = None

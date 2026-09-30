@@ -11,12 +11,16 @@ from __future__ import annotations
 from app.capabilities import inputs as I
 from app.capabilities.commands import build_command as _cmd
 from app.capabilities.handlers import bible as h_bible
+from app.capabilities.inputs_portrait_neutral_identity import (
+    PortraitAdoptNeutralIdentityInput,
+    PortraitStageNeutralIdentityInput,
+)
 from app.capabilities.registry import CommandSpec
 from app.capabilities.schemas import ConfirmationPolicy, IdempotencyPolicy, RiskLevel
 
 
 def commands() -> list[CommandSpec]:
-    return [*_bible_card_commands(), *_portrait_commands()]
+    return [*_bible_card_commands(), *_portrait_commands(), *_neutral_identity_commands()]
 
 
 def _bible_card_commands() -> list[CommandSpec]:
@@ -163,6 +167,44 @@ def _portrait_commands() -> list[CommandSpec]:
             handler=h_bible.portrait_regenerate_view,
             rest_routes=(
                 "POST /api/projects/{project_id}/characters/{character_name}/portraits/{portrait_id}/views/{view_role}/regenerate",
+            ),
+            tags=("portrait", "multiview"),
+        ),
+    ]
+
+
+def _neutral_identity_commands() -> list[CommandSpec]:
+    """中性身份定妆照（默认关闭）：只读预检见 ``app.domain.bible_ops.
+    portrait_candidates`` 的 REST 豁免登记，不进命令总线；这里只登记会真正
+    写库/花钱生成的 stage / adopt 两步，见 app.portraits.neutral_identity。"""
+    return [
+        _cmd(
+            "portrait.stage_neutral_identity",
+            title="暂存中性身份定妆照",
+            description="为选中角色生成体貌专用中性定妆照候选（付费图片），暂存待用户查看，不影响当前生效造型",
+            input_model=PortraitStageNeutralIdentityInput,
+            risk=RiskLevel.R2_MATERIAL,
+            confirmation=ConfirmationPolicy.NEVER,
+            idempotency=IdempotencyPolicy.REQUIRED,
+            scopes={"manju:media-generate"},
+            side_effect="creates_paid_neutral_portrait_candidates",
+            handler=h_bible.portrait_stage_neutral_identity,
+            rest_routes=("POST /api/projects/{project_id}/characters/portraits/neutral-identity/stage",),
+            tags=("portrait", "multiview"),
+        ),
+        _cmd(
+            "portrait.adopt_neutral_identity",
+            title="采纳中性身份定妆照",
+            description="把已暂存的中性定妆候选转正为角色从指定集起生效的造型",
+            input_model=PortraitAdoptNeutralIdentityInput,
+            risk=RiskLevel.R2_MATERIAL,
+            confirmation=ConfirmationPolicy.NEVER,
+            idempotency=IdempotencyPolicy.RECOMMENDED,
+            scopes={"manju:project-write"},
+            side_effect="switches_active_portrait_segment",
+            handler=h_bible.portrait_adopt_neutral_identity,
+            rest_routes=(
+                "POST /api/projects/{project_id}/characters/{character_name}/portraits/neutral-identity/adopt",
             ),
             tags=("portrait", "multiview"),
         ),

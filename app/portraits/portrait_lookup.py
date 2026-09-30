@@ -80,13 +80,18 @@ def portrait_lookup_for_episode(
 ) -> dict:
     """本集有效的定妆照 + 外观锚点，``time_anchor`` 命中优先于集段判据。
 
-    返回 ``{"image_path", "appearance", "portrait_id", "look_mismatch"}``：
-    命中 ``time_anchor`` 时 ``look_mismatch`` 为 None；请求了 ``time_anchor``
-    但未命中时回退集段判据，``look_mismatch`` 非空表示"想要这个锚点的造型，
-    实际用的是别的"（``{"wanted": ..., "used": "episode_segment"|"none"}``）
-    ——调用方（分镜台）据此写警告，本函数只提供信号，不做展示、不发起生成。
+    返回 ``{"image_path", "appearance", "portrait_id", "look_mismatch",
+    "costume_mode"}``：命中 ``time_anchor`` 时 ``look_mismatch`` 为 None；请求了
+    ``time_anchor`` 但未命中时回退集段判据，``look_mismatch`` 非空表示"想要这个
+    锚点的造型，实际用的是别的"（``{"wanted": ..., "used":
+    "episode_segment"|"none"}``）——调用方（分镜台）据此写警告，本函数只提供
+    信号，不做展示、不发起生成。``costume_mode`` 原样取自命中行（老数据/未加
+    该列时为 None，同 ``app.portraits.neutral_identity`` 的既有降级读法）。
     """
     from app.refs import production_appearance_anchor
+
+    def _row_costume_mode(row) -> str | None:
+        return row["costume_mode"] if "costume_mode" in row.keys() else None
 
     anchor_row = None
     if time_anchor:
@@ -99,6 +104,7 @@ def portrait_lookup_for_episode(
             "appearance": production_appearance_anchor(anchor_row["appearance"] or "") or None,
             "portrait_id": str(anchor_row["id"]),
             "look_mismatch": None,
+            "costume_mode": _row_costume_mode(anchor_row),
         }
     fallback_row = None
     if episode_no is not None:
@@ -112,10 +118,14 @@ def portrait_lookup_for_episode(
             "used": "episode_segment" if fallback_row is not None else "none",
         }
     if fallback_row is None:
-        return {"image_path": None, "appearance": None, "portrait_id": None, "look_mismatch": look_mismatch}
+        return {
+            "image_path": None, "appearance": None, "portrait_id": None,
+            "look_mismatch": look_mismatch, "costume_mode": None,
+        }
     return {
         "image_path": fallback_row["image_path"],
         "appearance": production_appearance_anchor(fallback_row["appearance"] or "") or None,
         "portrait_id": str(fallback_row["id"]),
         "look_mismatch": look_mismatch,
+        "costume_mode": _row_costume_mode(fallback_row),
     }

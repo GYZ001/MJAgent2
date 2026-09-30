@@ -3,6 +3,10 @@ from __future__ import annotations
 
 from app.capabilities import inputs as I
 from app.capabilities.handlers.common import accepted, call_guarded, succeeded
+from app.capabilities.inputs_portrait_neutral_identity import (
+    PortraitAdoptNeutralIdentityInput,
+    PortraitStageNeutralIdentityInput,
+)
 from app.capabilities.schemas import CommandResult
 
 
@@ -172,3 +176,31 @@ async def portrait_regenerate_view(args: I.PortraitViewRegenerateInput) -> Comma
             resource_uris=[f"manju://runs/{outcome['run_id']}"] if outcome.get("run_id") else [],
         )
     return succeeded(f"角色视角 {args.view_role} 已重做并通过整包 QA", data=outcome)
+
+
+async def portrait_stage_neutral_identity(args: PortraitStageNeutralIdentityInput) -> CommandResult:
+    """直接从 ``app.domain.bible_ops`` 导入（不经 ``app.api``）：``app/api.py``
+    line_count 棘轮基线零余量，理由同 ``nominate_character``。"""
+    # 不经 app.api：app/api.py line_count 棘轮基线零余量，理由同 nominate_character
+    from app.domain.bible_ops import portrait_candidates
+
+    outcome = await call_guarded(
+        portrait_candidates.neutral_identity_stage_route, args.project_id,
+        body={"names": args.names, "from_episode": args.from_episode, "fingerprint": args.fingerprint},
+    )
+    if isinstance(outcome, CommandResult):
+        return outcome
+    return succeeded(f"中性定妆照候选已暂存（{len(args.names)} 个角色）", data=outcome)
+
+
+async def portrait_adopt_neutral_identity(args: PortraitAdoptNeutralIdentityInput) -> CommandResult:
+    # 不经 app.api：app/api.py line_count 棘轮基线零余量，理由同 nominate_character
+    from app.domain.bible_ops import portrait_candidates
+
+    outcome = await call_guarded(
+        portrait_candidates.neutral_identity_adopt_route, args.project_id, args.character_name,
+        body={"from_episode": args.from_episode},
+    )
+    if isinstance(outcome, CommandResult):
+        return outcome
+    return succeeded(f"角色「{args.character_name}」的中性定妆照已采纳，自第 {args.from_episode} 集起生效", data=outcome)

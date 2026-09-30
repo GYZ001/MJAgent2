@@ -469,10 +469,7 @@ async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenpl
     by_name = {c.name: c for c in bible.characters}
     for name in (item for item in names if item in bible_names):
         result = _backfill_matching_future_portrait(
-            conn,
-            project_id=project_id,
-            name=name,
-            episode_no=episode_no,
+            conn, project_id=project_id, name=name, episode_no=episode_no,
             appearance=by_name[name].appearance_canonical,
         )
         if result:
@@ -486,6 +483,8 @@ async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenpl
             cur = _open_portrait(conn, project_id, n)
             if not cur or cur["ep_start"] >= episode_no:
                 continue
+            if "costume_mode" in cur.keys() and cur["costume_mode"] == "neutral":
+                continue  # 中性定妆照生效：漂移改由 neutral_identity 工作流显式处理，不自动付费重绘
             frags = extract_character_fragments(src_text, n)
             if not frags:
                 continue  # 本集没正面提到 → 沿用，开区间自然覆盖

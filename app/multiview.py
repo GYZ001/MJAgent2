@@ -203,12 +203,11 @@ def character_view_prompt(
     appearance: str,
     view_role: str,
     portrait_prompt: str | None = None,
+    costume_mode: str = "baked",
 ) -> str:
     framing = CHARACTER_VIEW_FRAMING.get(view_role, _DEFAULT_VIEW_FRAMING)[1]
-    source = ensure_portrait_clothing_contract(
-        portrait_override_appearance_anchor(appearance, portrait_prompt)
-        or production_appearance_anchor(appearance)
-    )
+    raw_source = portrait_override_appearance_anchor(appearance, portrait_prompt) or production_appearance_anchor(appearance)
+    source = raw_source if costume_mode == "neutral" else ensure_portrait_clothing_contract(raw_source)
     return (
         f"{character_visual_style_lock(visual_style)}。"
         f"角色外观真值锚点：{source}。"
@@ -1188,13 +1187,14 @@ async def ensure_character_multiview_pack(
     base_portrait_id: str | None = None,
     optional_views: list[str] | None = None,
     primary_qa: dict[str, Any] | None = None,
+    costume_mode: str = "baked",
 ) -> dict[str, Any]:
     """生成/补齐人物必需多视角包；技术产物（文件）存在即 ready，不半包生效。
 
     VLM 图片质检已下线：本函数不再对生成结果做一致性/身份评分，只要每个必需视角的
     图片文件成功落盘（技术产物存在）即视为该视角就绪。``primary_qa`` 形参不再承载
     评分数据（调用方现在恒传 ``{}``），只用其"是否为 None"标记"父图是本次流水线刚
-    生成的候选，可直接复用为 front_full"（见下方 ``use_parent_primary``）。
+    生成的候选，可直接复用为 front_full"（见下方 ``use_parent_primary``）。``costume_mode``="neutral" 时 front/侧视角都不再叠加常规着装合同，appearance/portrait_prompt 已是最终中性定妆照全文。
     """
     if not character_multiview_enabled():
         return {"status": "disabled", "portrait_id": portrait_id}
@@ -1212,11 +1212,10 @@ async def ensure_character_multiview_pack(
         front = existing_views.get("front_full")
         parent = conn.execute("SELECT * FROM character_portraits WHERE id=?", (portrait_id,)).fetchone()
         base_front = base_views.get("front_full") or {}
-        effective_prompt = effective_portrait_prompt(
-            visual_style, appearance, portrait_prompt,
-        )
+        effective_prompt = (portrait_prompt if costume_mode == "neutral" else
+            effective_portrait_prompt(visual_style, appearance, portrait_prompt))
         front_prompt = character_view_prompt(
-            visual_style, appearance, "front_full", effective_prompt,
+            visual_style, appearance, "front_full", effective_prompt, costume_mode,
         )
         parent_prompt_matches = bool(
             parent
@@ -1312,7 +1311,7 @@ async def ensure_character_multiview_pack(
 
         async def _gen_side(view_role: str) -> dict[str, Any]:
             prompt = character_view_prompt(
-                visual_style, appearance, view_role, effective_prompt,
+                visual_style, appearance, view_role, effective_prompt, costume_mode,
             )
             base = base_views.get(view_role) or {}
             fp = view_input_fingerprint(
@@ -2024,6 +2023,7 @@ async def regenerate_character_view(
         row = conn.execute("SELECT * FROM character_portraits WHERE id=?", (portrait_id,)).fetchone()
         if not row or row["project_id"] != project_id:
             raise hiagent.ProviderError("造型版本不存在")
+        if "costume_mode" in row.keys() and row["costume_mode"] == "neutral": raise hiagent.ProviderError("该角色当前是中性定妆照模式，单视角重做暂不支持中性定妆照，请改走整体重新采纳流程覆盖该角色")
         proj = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
         try:
             bible = json.loads(proj["bible_json"] or "{}") if proj else {}

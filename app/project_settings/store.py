@@ -29,6 +29,12 @@ ADAPTATION_MODES: tuple[str, ...] = ("faithful", "short_drama")
 #: 画幅：存量与新建项目都默认 "9:16"。
 ASPECT_RATIOS: tuple[str, ...] = ("9:16", "16:9")
 
+#: 定妆照着装模式：baked=常规（服装写进定妆照，存量项目默认，行为零变化）；
+#: neutral=中性（定妆照只保留体貌，服装/表情按每镜文字正面描述，2026-09-30
+#: 新增，见 app.portraits.neutral_identity）。项目级标记只读，写入由
+#: mark_portrait_costume_mode_neutral 在首个角色采纳中性定妆照后设置。
+PORTRAIT_COSTUME_MODES: tuple[str, ...] = ("baked", "neutral")
+
 _CANVAS_SIZES: dict[str, tuple[int, int]] = {
     "9:16": (1080, 1920),
     "16:9": (1920, 1080),
@@ -135,6 +141,29 @@ def resolve_narrator_voice_character(conn: Any, project_id: str) -> str:
     if row is None:
         raise LookupError(f"项目不存在：{project_id}")
     return str(row["narrator_voice_character"] or "")
+
+
+def resolve_portrait_costume_mode(conn: Any, project_id: str) -> str:
+    """读出项目的定妆照着装模式；语义同 ``resolve_aspect_ratio``。"""
+    row = conn.execute(
+        "SELECT portrait_costume_mode FROM projects WHERE id=?", (project_id,),
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"项目不存在：{project_id}")
+    value = row["portrait_costume_mode"]
+    if value not in PORTRAIT_COSTUME_MODES:
+        raise RuntimeError(f"项目 {project_id} 的 portrait_costume_mode 数据损坏：{value!r}")
+    return value
+
+
+def mark_portrait_costume_mode_neutral(conn: Any, project_id: str) -> None:
+    """中性定妆照工作流采纳首个角色后把项目级标记翻到 neutral；幂等，调用方提交
+    （CLAUDE.md「不得在调用方的连接上隐式提交」）。"""
+    conn.execute(
+        "UPDATE projects SET portrait_costume_mode='neutral' "
+        "WHERE id=? AND portrait_costume_mode<>'neutral'",
+        (project_id,),
+    )
 
 
 def _bible_character_names(conn: Any, project_id: str) -> list[str]:

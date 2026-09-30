@@ -38,6 +38,11 @@ REFERENCE_SINGLE_INSTANCE_NOTE = (
 _TYPE_PURPOSE_ZH: dict[str, str] = {
     "character": "角色{who}的人物参考，只用来锁定长相与服装",
     "character_no_name": "人物参考，只用来锁定长相与服装",
+    # 中性身份定妆照专用说明（app.portraits.neutral_identity，2026-09-30）：参考图
+    # 本身不再烧服装/表情，服装与表情改由本段文字正面给出；老文案（上两条）逐字
+    # 不变，冻结测试锁住，只有 ref["costume_mode"]=="neutral" 才切到这两条。
+    "character_neutral": "角色{who}的人物参考，只用来锁定长相、发型与体型，服装和表情以本段文字为准",
+    "character_neutral_no_name": "人物参考，只用来锁定长相、发型与体型，服装和表情以本段文字为准",
     "scene": "场景参考，只用来锁定环境外观",
     "prop": "道具{who}参考，只用来锁定外观与材质",
     "prop_no_name": "道具参考，只用来锁定外观与材质",
@@ -98,6 +103,16 @@ def _scene_multi_purpose_zh(ref: dict[str, Any]) -> str:
     return f"场景「{name}」参考，只用来锁定环境外观（主视角）"
 
 
+def _character_purpose_key(has_name: bool, costume_mode: Any) -> str:
+    """选人物参考图用途说明的字典 key：``costume_mode=="neutral"``（见
+    app.portraits.neutral_identity）切到中性文案，其余任何值（含老数据没有
+    这个字段的 None）都是老文案，逐字不变。"""
+    neutral = costume_mode == "neutral"
+    if has_name:
+        return "character_neutral" if neutral else "character"
+    return "character_neutral_no_name" if neutral else "character_no_name"
+
+
 def _reference_purpose_zh(ref: dict[str, Any], *, scene_count: int = 1) -> tuple[str, list[str]]:
     """返回 (这张参考图的中文用途说明, 它绑定的具名人物/场景列表)。
 
@@ -110,7 +125,7 @@ def _reference_purpose_zh(ref: dict[str, Any], *, scene_count: int = 1) -> tuple
     if ref_type == "plot_key_frame":
         return _plot_key_frame_purpose_zh(ref, who), related
     if ref_type == "character":
-        template = _TYPE_PURPOSE_ZH["character" if who else "character_no_name"]
+        template = _TYPE_PURPOSE_ZH[_character_purpose_key(bool(who), ref.get("costume_mode"))]
     elif ref_type == "prop":
         template = _TYPE_PURPOSE_ZH["prop" if who else "prop_no_name"]
     elif ref_type == "scene" and scene_count > 1:

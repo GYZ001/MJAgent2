@@ -100,7 +100,7 @@ def test_no_portrait_at_all_returns_empty_result_with_mismatch(tmp_path) -> None
     result = portrait_lookup_for_episode("p1", "里奥", 1, time_anchor="age:35", conn=conn)
     assert result == {
         "image_path": None, "appearance": None, "portrait_id": None,
-        "look_mismatch": {"wanted": "age:35", "used": "none"},
+        "look_mismatch": {"wanted": "age:35", "used": "none"}, "costume_mode": None,
     }
 
 

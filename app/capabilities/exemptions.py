@@ -294,6 +294,7 @@ EXEMPT_ROUTE_PERMISSIONS: dict[str, _RouteExemption] = {
         "定妆照/单视角付费只读预检：返回报价与范围；正式生成仍走 portrait.generate / portrait.regenerate_view",
         _WRITE,
     ),
+    "POST /api/projects/{project_id}/characters/portraits/neutral-identity/precheck": _RouteExemption("中性身份定妆照只读预检：返回图片张数与受影响段；正式暂存仍走 portrait.stage_neutral_identity", _WRITE),
     "POST /api/projects/{project_id}/bible/generate-precheck": _RouteExemption(
         "首次生成人物谱+定妆只读费用预估；正式启动仍走 bible.generate",
         _WRITE,

@@ -259,3 +259,26 @@ def test_append_audio_reference_note_preserves_existing_image_note_and_duration(
     assert REFERENCE_PROMPT_NOTE_MARKER in result
     assert AUDIO_REFERENCE_NOTE_MARKER in result
     assert result.endswith("--ratio 9:16 --dur 15")
+
+
+def test_character_purpose_note_switches_to_neutral_wording_when_costume_mode_neutral():
+    """app.portraits.neutral_identity：costume_mode="neutral" 的人物参考图只
+    锁长相/发型/体型，服装与表情交给本段文字，不再声称"锁定服装"。"""
+    prompt = "镜头1：@温念 端着茶杯站在窗边。"
+    refs = [{**_character_ref("温念"), "costume_mode": "neutral"}]
+
+    result = build_seedance_reference_prompt_notes(prompt, refs, aspect_ratio="9:16")
+
+    assert "图片1：角色温念的人物参考，只用来锁定长相、发型与体型，服装和表情以本段文字为准" in result
+    assert "锁定长相与服装" not in result
+
+
+def test_character_purpose_note_baked_wording_unchanged_without_costume_mode():
+    """默认（不带 costume_mode，老数据/老项目）文案必须逐字不变——冻结测试。"""
+    prompt = "镜头1：@温念 端着茶杯站在窗边。"
+    refs = [_character_ref("温念")]
+
+    result = build_seedance_reference_prompt_notes(prompt, refs, aspect_ratio="9:16")
+
+    assert "图片1：角色温念的人物参考，只用来锁定长相与服装" in result
+    assert "服装和表情以本段文字为准" not in result
