@@ -83,6 +83,16 @@ class _AiEmotionalTurn(BaseModel):
     stimulus_beat_id: str = ""
     stimulus_evidence_quote: str = ""
     stimulus_missing_reason: str = ""
+    #: 2026-09-30（真实回归 proj_ca86b15ab7d7 EP1）：刺激确有其事
+    #: （stimulus_beat_id 非空）时，原文是把这次刺激写成间接转述/叙述（别人
+    #: 说了什么、但原文没有用引号把这句话本身写出来），还是引号台词或一个
+    #: 可以直接看见的动作/画面——这是语义判断，只有读原文的模型分得清，代码
+    #: 判不出（CLAUDE.md「判据从数据推导，模型提名、代码核验」）。true 时
+    #: 阶段二必须在对应段落补一条旁白把这句话说出来，见
+    #: app.production.storyboard_stimulus_voice 模块 docstring；默认 false
+    #: 兼容旧存量 beat_draft（旧提名一律按"不需要额外出声"处理，回退行为与
+    #: 改造前一致）。
+    stimulus_needs_voice: bool = False
 
 
 class _AiForeshadowingBeat(BaseModel):
@@ -125,6 +135,18 @@ class _AiPhysicalAnchor(BaseModel):
     physical_description: str = Field(min_length=1)
 
 
+class _AiPropAppearanceLock(BaseModel):
+    """道具外观全集锁定提名（P0-F，2026-09-30，真实回归 proj_ca86b15ab7d7 EP1 逐帧
+    核对，见 ``app.production.storyboard_prop_appearance_lock`` 模块 docstring）。
+    忠实档/短剧档共用。核验（有卡逐字核对）/按 beat_id 跨段分发见该模块。"""
+
+    label: str = Field(min_length=1)
+    appearance: str = Field(min_length=1)
+    #: 全集范围内这件道具会出现在画面中的每一个节拍，不只是入场那一个——
+    #: 分发依据这份列表，不依赖任何原文段号交集过滤（见该模块 docstring）。
+    beat_ids: list[str] = Field(min_length=1)
+
+
 class _AiBeatSheetDraft(BaseModel):
     beat_sheet: list[_AiBeat] = Field(min_length=1)
     segments: list[_AiSegmentPlan] = Field(min_length=1)
@@ -145,6 +167,10 @@ class _AiBeatSheetDraft(BaseModel):
     #: （storyboard_identity_regenerate._existing_plan 重建时不产出这个字段，见该
     #: 模块调用点）——回退行为与改造前完全一致（沿用完整外观锚点）。
     physical_anchors: list[_AiPhysicalAnchor] = Field(default_factory=list)
+    #: 2026-09-30（P0-F）：道具外观全集锁定，默认空列表兼容旧存量 beat_draft
+    #: （同 physical_anchors，storyboard_identity_regenerate._existing_plan 重建
+    #: 时不产出这个字段）——回退行为是各段各自现编外观，与改造前完全一致。
+    prop_appearance_locks: list[_AiPropAppearanceLock] = Field(default_factory=list)
 
 
 #: 固定 15 秒/段，不引入分档（用户 09-03 已拍板保留原设计）；短剧档段数目标由

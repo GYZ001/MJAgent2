@@ -882,6 +882,14 @@ def test_segment_draft_rejects_shot_count_below_the_new_floor():
         _draft(shot_count=MIN_SHOTS_PER_SEGMENT - 1)
 
 
+def test_segment_draft_shot_action_beats_defaults_to_empty_list():
+    """旧数据（无此字段）经 storyboard_identity_regenerate 的 model_validate
+    重建时必须仍能通过校验——见 storyboard_action_density 模块 docstring。"""
+    assert _draft().shot_action_beats == []
+    old_stored = dict(prompt_text="电影级预告片质感，多镜头叙事。", shot_count=2)
+    assert _AiStoryboardSegmentDraft.model_validate(old_stored).shot_action_beats == []
+
+
 # 2026-08-26（用户拍板，第一版分镜提示词不设任何内容门禁）：
 # _validate_segment_draft 现在只剩「下一环节会真的用不了」的形状检查
 # （prompt_text 空/超限、H3 固定字段名）；内容判断（说话人在场、资源身份是否
@@ -1030,9 +1038,37 @@ def test_segment_content_advisories_empty_for_well_formed_draft():
         )),
         source_segment_indexes=[1, 2], segment_relevant_scene_ids={"scene_a"},
         manifest=_manifest(characters=[_manifest_character("id_a")], scene=_manifest_scene("scene_a")),
-        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(),
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
     )
     assert advisories == []
+
+
+def test_segment_content_advisories_flags_prop_appearance_lock_not_shown_in_prompt():
+    """P0-F 补丁（评审确认，2026-09-30）：ensure_prop_form_matches_lock 只纠正
+    continuity_memo 的旁路记账字段，真正发给视频模型的 prompt_text 是否写成了
+    锁定外观要靠这条 advisory 核对——见 storyboard_prop_appearance_lock.
+    segment_advisories 模块 docstring。"""
+    from types import SimpleNamespace
+
+    lock = SimpleNamespace(label="水泡坏的行李箱", appearance="24寸竖款哑光深卡其色ABS硬壳拉杆箱")
+    advisories = _segment_content_advisories(
+        _draft(), source_segment_indexes=[1, 2], manifest=None,
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(),
+        prop_locks_here=[lock],
+    )
+    assert any("STORYBOARD_PROP_APPEARANCE_LOCK_NOT_SHOWN" in a for a in advisories)
+
+
+def test_segment_content_advisories_silent_when_prop_appearance_lock_shown_in_prompt():
+    from types import SimpleNamespace
+
+    lock = SimpleNamespace(label="水泡坏的行李箱", appearance="硬切")
+    advisories = _segment_content_advisories(
+        _draft(), source_segment_indexes=[1, 2], manifest=None,
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(),
+        prop_locks_here=[lock],
+    )
+    assert not any("STORYBOARD_PROP_APPEARANCE_LOCK_NOT_SHOWN" in a for a in advisories)
 
 
 def test_segment_content_advisories_flags_dialogue_that_cannot_fit_in_fifteen_seconds():
@@ -1059,7 +1095,7 @@ def test_segment_content_advisories_flags_dialogue_that_cannot_fit_in_fifteen_se
     ])
     advisories = _segment_content_advisories(
         over, source_segment_indexes=[1, 2], manifest=None,
-        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(),
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
     )
     flagged = [a for a in advisories if "STORYBOARD_PACK_DIALOGUE_OVER_CAPACITY" in a]
     assert len(flagged) == 1, "超容量必须留下且只留下一条信号"
@@ -1077,7 +1113,7 @@ def test_segment_content_advisories_silent_when_dialogue_fits_the_shot():
     ])
     advisories = _segment_content_advisories(
         fits, source_segment_indexes=[1, 2], manifest=None,
-        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(),
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
     )
     assert not any("OVER_CAPACITY" in a for a in advisories)
 
@@ -1198,7 +1234,7 @@ def test_unknown_character_advisory_says_what_actually_happened() -> None:
     advisories = _segment_content_advisories(
         draft, source_segment_indexes=[1],
         manifest=_manifest(characters=[_manifest_character("马子才")]),
-        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(),
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
     )
     unknown = [a for a in advisories if "RESOURCE_CHARACTER_UNKNOWN" in a]
     assert unknown, "未知身份必须报出来"
@@ -1215,7 +1251,7 @@ def test_segment_content_advisories_flags_misattributed_speaker_but_does_not_rai
     advisories = _segment_content_advisories(
         draft, source_segment_indexes=[1, 2],
         manifest=_manifest(characters=[_manifest_character("id_a")]),
-        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(),
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
     )
     assert any("不在本段 resources.characters 内" in a for a in advisories)
 
@@ -1233,7 +1269,7 @@ def test_segment_content_advisories_offscreen_voice_uses_different_wording():
     advisories = _segment_content_advisories(
         draft, source_segment_indexes=[1, 2],
         manifest=_manifest(characters=[_manifest_character("id_a")]),
-        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(),
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
     )
     flagged = [a for a in advisories if "SPEAKER_ABSENT" in a]
     assert flagged
@@ -1246,7 +1282,7 @@ def test_segment_content_advisories_flags_untraceable_dialogue_source():
     draft = _draft(dialogue=[_AiDialogueLine(speaker_identity_id="id_a", line="走吧", source_segment_index=9)])
     advisories = _segment_content_advisories(
         draft, source_segment_indexes=[1, 2], manifest=None,
-        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(),
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
     )
     assert any("不在本段引用的原文段号" in a for a in advisories)
 
@@ -1261,7 +1297,7 @@ def test_segment_content_advisories_flags_unknown_character_and_scene_resource()
     advisories = _segment_content_advisories(
         draft, source_segment_indexes=[1, 2],
         manifest=_manifest(characters=[_manifest_character("id_a")], scene=_manifest_scene("scene_1")),
-        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(),
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
     )
     assert any("STORYBOARD_PACK_RESOURCE_CHARACTER_UNKNOWN" in a for a in advisories)
     assert any("STORYBOARD_PACK_RESOURCE_SCENE_UNKNOWN" in a for a in advisories)
@@ -1285,7 +1321,7 @@ def test_segment_content_advisories_flags_invented_identity_id_even_when_manifes
     )
     advisories = _segment_content_advisories(
         draft, source_segment_indexes=[1, 2], manifest=_manifest(),
-        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(),
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
     )
     unknown_character_advisories = [a for a in advisories if "STORYBOARD_PACK_RESOURCE_CHARACTER_UNKNOWN" in a]
     unknown_scene_advisories = [a for a in advisories if "STORYBOARD_PACK_RESOURCE_SCENE_UNKNOWN" in a]
@@ -1303,7 +1339,7 @@ def test_segment_content_advisories_flags_manifest_gap_when_no_relevant_scenes_e
     ))
     advisories = _segment_content_advisories(
         draft, source_segment_indexes=[24, 25], segment_relevant_scene_ids=set(), manifest=_manifest(),
-        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(),
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
     )
     assert any("STORYBOARD_PACK_RESOURCE_SCENE_MANIFEST_GAP" in a for a in advisories)
     assert not any("STORYBOARD_PACK_RESOURCE_SCENE_MISSING" in a for a in advisories)
@@ -1319,7 +1355,7 @@ def test_segment_content_advisories_flags_missing_when_relevant_scenes_available
     advisories = _segment_content_advisories(
         draft, source_segment_indexes=[1, 2], segment_relevant_scene_ids={"scene_a"},
         manifest=_manifest(characters=[_manifest_character("id_a")]),
-        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(),
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
     )
     assert any("STORYBOARD_PACK_RESOURCE_SCENE_MISSING" in a for a in advisories)
     assert not any("STORYBOARD_PACK_RESOURCE_SCENE_MANIFEST_GAP" in a for a in advisories)
@@ -1334,7 +1370,7 @@ def test_segment_content_advisories_no_scene_advisory_when_scenes_declared():
     advisories = _segment_content_advisories(
         draft, source_segment_indexes=[1, 2], segment_relevant_scene_ids={"scene_a", "scene_b"},
         manifest=_manifest(characters=[_manifest_character("id_a")], scene=_manifest_scene("scene_a")),
-        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(),
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
     )
     assert not any("STORYBOARD_PACK_RESOURCE_SCENE_MISSING" in a for a in advisories)
     assert not any("STORYBOARD_PACK_RESOURCE_SCENE_MANIFEST_GAP" in a for a in advisories)

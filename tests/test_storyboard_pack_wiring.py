@@ -62,7 +62,7 @@ def test_manifest_none_is_treated_as_missing_and_blocks():
     （非 dict manifest 视为"依赖 manifest 缺失"）。"""
     advisories = _segment_content_advisories(
         _draft(), source_segment_indexes=[1], manifest=None,
-        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(),
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
     )
     blocked = [a for a in advisories if "STORYBOARD_PACK_RESOURCE_CHARACTER_BLOCKED" in a]
     assert blocked, "manifest 缺失必须按 [拦截] 处理，不能静默放行"
@@ -77,7 +77,7 @@ def test_manifest_present_but_empty_falls_back_to_text_only_unknown():
     manifest = {"characters": [], "scene": None, "additional_scenes": []}
     advisories = _segment_content_advisories(
         _draft(), source_segment_indexes=[1], manifest=manifest,
-        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(),
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
     )
     unknown = [a for a in advisories if "STORYBOARD_PACK_RESOURCE_CHARACTER_UNKNOWN" in a]
     assert unknown
@@ -93,7 +93,7 @@ def test_manifest_present_routes_through_shared_resource_advisories():
     }
     advisories = _segment_content_advisories(
         _draft(), source_segment_indexes=[1], manifest=manifest,
-        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(),
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
     )
     character_advisories = [a for a in advisories if "STORYBOARD_PACK_RESOURCE_CHARACTER" in a]
     assert character_advisories, "manifest 判定孟浩缺资产时必须留下可见信号"
@@ -110,7 +110,7 @@ def test_manifest_present_with_asset_available_stays_silent():
     }
     advisories = _segment_content_advisories(
         _draft(), source_segment_indexes=[1], manifest=manifest,
-        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(),
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
     )
     assert not any("STORYBOARD_PACK_RESOURCE_CHARACTER" in a for a in advisories)
 

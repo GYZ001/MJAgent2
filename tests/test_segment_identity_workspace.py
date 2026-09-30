@@ -222,6 +222,7 @@ def test_regenerate_calls_model_only_for_selected_segment(fixture,monkeypatch):
         candidate = candidate_of(segment)
         candidate["prompt_text"] = candidate.pop("speech_template")
         candidate["continuity_memo"] = {"time_of_day":"白天"}
+        candidate["shot_action_beats"] = [{"shot_no":n,"key_actions":["说话"]} for n in range(1,int(candidate.get("shot_count") or 1)+1)]  # 动作密度软检查要求逐镜申报
         draft = _AiStoryboardSegmentDraft.model_validate(candidate)
         assert kwargs["validate"](draft) == []
         return draft

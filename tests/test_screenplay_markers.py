@@ -96,6 +96,15 @@ def test_scene_changed_by_resource_scenes_requires_both_sides_nonempty_and_diffe
     assert scene_changed_by_resource_scenes(set(), set()) is False
 
 
+def test_scene_changed_by_resource_scenes_keeps_same_scene_when_previous_is_subset() -> None:
+    """本段计划场景是上一段场景的超集（真实情形：本段开头仍在上一场景，段尾一条
+    「（钩子：切某地……）」把目的地场景也登记进了本段 asset_manifest）不算换场——钩子切到
+    哪已经由 required_beats 单独告诉模型，镜头1 仍应延续上一段的同场站位起幅。
+    与"部分重叠也算变了"（上一条用例，current 缩小为 previous 的子集）方向相反，不冲突：
+    比较集合用包含，不用相等，只有"previous 不再被 current 完整包含"才算换场。"""
+    assert scene_changed_by_resource_scenes({"scene_a"}, {"scene_a", "scene_b"}) is False
+
+
 def test_transition_with_resource_bypass_upgrades_same_scene_only() -> None:
     """只在文本判据判定为同场时才补台升级；已经是显式/结构化换场转场的不覆盖，
     这样才是与既有判据取「或」而不是替代它。"""

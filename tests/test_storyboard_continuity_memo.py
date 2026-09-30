@@ -36,6 +36,10 @@ from app.production.storyboard_pack import (
 from app.source_excerpt import SourceSegment, index_source_segments
 
 
+#: 动作密度软检查要求草稿逐镜申报关键动作（storyboard_action_density），夹具统一用这份 3 镜申报
+_THREE_SHOT_ACTIONS = [{"shot_no": n, "key_actions": ["动作"]} for n in (1, 2, 3)]
+
+
 @pytest.fixture(autouse=True)
 def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "storyboard-continuity-memo.db")
@@ -344,7 +348,7 @@ async def test_generate_passes_previous_continuity_memo_into_next_segment_payloa
         segment_no = payload["segment_no"]
         basis = "inferred" if segment_no == 1 else "inherited"
         memo = _AiContinuityMemo(time_of_day="黄昏", time_of_day_basis=basis)
-        return _AiStoryboardSegmentDraft(prompt_text=f"提示词-段{segment_no}", shot_count=3, continuity_memo=memo)
+        return _AiStoryboardSegmentDraft(prompt_text=f"提示词-段{segment_no}", shot_count=3, continuity_memo=memo, shot_action_beats=_THREE_SHOT_ACTIONS)
 
     monkeypatch.setattr(storyboard_pack_module.model_gateway, "chat_structured", fake_chat_structured)
     monkeypatch.setattr(storyboard_pack_module, "_ensure_segment_prompt_budget", lambda: None)
@@ -390,7 +394,7 @@ async def test_generate_repairs_segment_that_changes_time_of_day_without_quote(m
             memo = _AiContinuityMemo(time_of_day="黑夜", time_of_day_basis="inferred")  # 擅自改时段
         else:
             memo = _AiContinuityMemo(time_of_day="白天", time_of_day_basis="inherited")  # 重试后改正
-        draft = _AiStoryboardSegmentDraft(prompt_text=f"提示词-段{segment_no}", shot_count=3, continuity_memo=memo)
+        draft = _AiStoryboardSegmentDraft(prompt_text=f"提示词-段{segment_no}", shot_count=3, continuity_memo=memo, shot_action_beats=_THREE_SHOT_ACTIONS)
         errors = kwargs["validate"](draft)
         seen_errors.append(errors)
         if errors:
@@ -461,7 +465,7 @@ def test_persist_storyboard_pack_writes_continuity_memo_per_segment():
         segments=[
             StoryboardPackSegment(
                 segment_no=1, synopsis="x", source_segment_indexes=[1], beat_ids=["B1"],
-                prompt_text="提示词", shot_count=3, dialogue=[],
+                prompt_text="提示词", shot_count=3, dialogue=[], shot_action_beats=_THREE_SHOT_ACTIONS,
                 resources={"characters": [], "scenes": [], "props": []},
                 degraded_capabilities=[], continuity_memo=memo_dict,
             ),

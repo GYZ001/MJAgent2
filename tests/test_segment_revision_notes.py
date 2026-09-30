@@ -135,6 +135,10 @@ def _fake_regenerated_candidate(segment: dict) -> dict:
     candidate["resources"]["characters"][0]["visibility"] = "visible"
     candidate["prompt_text"] = candidate.pop("speech_template")
     candidate["continuity_memo"] = {"time_of_day": "白天"}
+    # 动作密度软检查要求每一镜都申报关键动作（storyboard_action_density），夹具按 shot_count 逐镜补齐
+    candidate["shot_action_beats"] = [
+        {"shot_no": n, "key_actions": ["说话"]} for n in range(1, int(candidate.get("shot_count") or 1) + 1)
+    ]
     return _AiStoryboardSegmentDraft.model_validate(candidate).model_dump(mode="json")
 
 

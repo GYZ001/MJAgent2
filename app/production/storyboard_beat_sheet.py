@@ -84,7 +84,7 @@ from app.production import storyboard_short_drama_hooks as _short_drama_hooks
 from app.production import (
     storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing,
     storyboard_prop_entrance as _prop_entrance, storyboard_wardrobe_plan as _wardrobe_plan,
-    storyboard_physical_anchor as _physical_anchor,
+    storyboard_physical_anchor as _physical_anchor, storyboard_prop_appearance_lock as _prop_lock,
 )
 from app.production.storyboard_short_drama_beat_guard import restore_dropped_lines_with_invalid_beat
 
@@ -275,7 +275,7 @@ def _beat_sheet_rules(
         *_beat_causality.causality_beat_sheet_rules(),
         *_beat_foreshadowing.foreshadowing_beat_sheet_rules(),
         *_wardrobe_plan.wardrobe_plan_beat_sheet_rules(), *_prop_entrance.prop_entrance_beat_sheet_rules(),
-        *_physical_anchor.physical_anchor_beat_sheet_rules(),
+        *_physical_anchor.physical_anchor_beat_sheet_rules(), *_prop_lock.prop_appearance_lock_beat_sheet_rules(),
     ]
     extra = (_paratext_exclusion_rule(paratext_indexes), context_segment_rule(set(context_indexes)))
     rules.extend(rule for rule in extra if rule is not None)

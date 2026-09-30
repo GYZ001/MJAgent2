@@ -79,10 +79,10 @@ from app.production.storyboard_beat_sheet import (
 )
 from app.production.storyboard_short_drama_review import generate_beat_sheet_with_drop_review
 from app.production.storyboard_continuity_memo import (
-    _AiContinuityMemo, ensure_wardrobe_continuity_in_prompt, continuity_memo_character_advisories, continuity_memo_errors, continuity_memo_payload,
+    _AiContinuityMemo, ensure_wardrobe_continuity_in_prompt, ensure_prop_form_matches_lock, continuity_memo_character_advisories, continuity_memo_errors, continuity_memo_payload,
 )
 from app.production.storyboard_travel_direction import ensure_travel_direction_in_prompt
-from app.production.screenplay_markers import joined_source_text, parse_scene_header, required_beats_errors, segment_structure, transition_with_resource_bypass
+from app.production.screenplay_markers import joined_source_text, parse_scene_header, required_beats_errors, segment_structure
 from app.production.storyboard_overlay_text import overlay_text_errors
 from app.production.storyboard_reference_repair import strip_extra_reference_markers
 from app.production.storyboard_dialogue_extract import extract_dialogue_targets
@@ -104,7 +104,7 @@ from app.production.storyboard_narrative_arc import (
     phase2_segment_rules,
     segment_narrative_arc_payload_fields,
 )
-from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_beats as _action_beats, storyboard_cast_lock as _cast_lock, storyboard_shot_mandates as _shot_mandates, storyboard_music_bed as _music_bed, storyboard_prop_entrance as _prop_entrance, storyboard_wardrobe_plan as _wardrobe_plan, storyboard_revision_notes as _revision_notes
+from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_beats as _action_beats, storyboard_action_density as _action_density, storyboard_cast_lock as _cast_lock, storyboard_shot_mandates as _shot_mandates, storyboard_music_bed as _music_bed, storyboard_prop_entrance as _prop_entrance, storyboard_wardrobe_plan as _wardrobe_plan, storyboard_revision_notes as _revision_notes, storyboard_prop_appearance_lock as _prop_lock, storyboard_stimulus_voice as _stim_voice, storyboard_transition_plan as _transition_plan
 from app.visual_styles import current_visual_style_prompt
 from app.production.storyboard_segment_ranges import (
     _PARATEXT_PLACEHOLDER_TEXT,
@@ -645,6 +645,7 @@ class _AiStoryboardSegmentDraft(BaseModel):
     prompt_text: str = Field(min_length=1)
     shot_count: int = Field(ge=MIN_SHOTS_PER_SEGMENT, le=MAX_SHOTS_PER_SEGMENT)
     dialogue: list[_AiDialogueLine] = Field(default_factory=list)
+    shot_action_beats: list[_action_density.ShotActionBeats] = Field(default_factory=list)  #: 每镜自报关键动作清单，不落库，只服务生成期密度核验——见 storyboard_action_density 模块 docstring
     resources: _AiSegmentResources = Field(default_factory=_AiSegmentResources)
     degraded_capabilities: list[str] = Field(default_factory=list)
     #: 2.0.8：只在本段开场确实沿用了 recent_camera_language 清单里出现过的
@@ -774,7 +775,7 @@ def _segment_content_advisories(
     manifest: dict[str, Any] | None,
     segment_relevant_scene_ids: set[str] = frozenset(),
     emotional_turns_here: list[Any],
-    foreshadowing_here: list[Any], prop_entrances_here: list[Any],
+    foreshadowing_here: list[Any], prop_entrances_here: list[Any], prop_locks_here: list[Any],
 ) -> list[str]:
     """Non-blocking content checks: computed every time, never gate generation.
 
@@ -848,8 +849,8 @@ def _segment_content_advisories(
     advisories.extend(
         continuity_memo_character_advisories(draft.continuity_memo, segment_character_ids)
     )
-    # P0-A/C（2026-09-27）：情绪转折/伏笔"是否真的被写成画面"，同一套 advisory 哲学。
-    advisories.extend([*_beat_causality.segment_advisories(list(emotional_turns_here), draft.prompt_text), *_beat_foreshadowing.segment_advisories(list(foreshadowing_here), draft.prompt_text), *_prop_entrance.segment_advisories(list(prop_entrances_here), draft.prompt_text)])
+    # P0-A/C（2026-09-27）/P0-F（2026-09-30）：情绪转折/伏笔/道具锁定外观"是否真的被写成画面"，同一套 advisory 哲学，见各自 segment_advisories 的 docstring。
+    advisories.extend([*_beat_causality.segment_advisories(list(emotional_turns_here), draft.prompt_text), *_beat_foreshadowing.segment_advisories(list(foreshadowing_here), draft.prompt_text), *_prop_entrance.segment_advisories(list(prop_entrances_here), draft.prompt_text), *_prop_lock.segment_advisories(list(prop_locks_here), draft.prompt_text)])
     # 2026-09-29：可见角色正文里除人数锁定句外再无 @ 点名——参考图仍会照发，
     # 常见成因是闪回/回忆换了年龄却仍绑着当前定妆照（真实回归见 storyboard_cast_lock 模块）。
     advisories.extend(_cast_lock.unmentioned_visible_character_advisories(draft))
@@ -956,8 +957,8 @@ async def _generate_all_segment_prompts(
     # 2.4.0：截至当前段已交付的 (segment_no, speaker_identity_id, line)，用于
     # 跨段台词去重（真实故障见 STORYBOARD_PACK_VERSION 2.4.0 changelog）。
     delivered_lines: list[tuple[int, str, str]] = []
-    # P0-A/C（2026-09-27）：情绪转折/伏笔提名按 beat_id 只认领一次，见 moments_for_segment；P0-D（2026-09-29）全集服装表/道具入场同一套机制。
-    covered_turn_ids, covered_signal_ids, covered_prop_ids, wardrobe_state, props_plan = set(), set(), set(), _wardrobe_plan.build_wardrobe_state(beat_draft.wardrobe_plan, payload, set(beats_by_id)), _prop_entrance.valid_prop_entrances(beat_draft.prop_entrances, set(beats_by_id))
+    # P0-A/C（2026-09-27）：情绪转折/伏笔提名按 beat_id 只认领一次，见 moments_for_segment；P0-D（2026-09-29）全集服装表/道具入场同一套机制；P0-F（2026-09-30）道具外观锁定不做"认领一次"（appearance_locks 供每个可见段反复取用，见 storyboard_prop_appearance_lock.moments_for_segment 文档）。
+    covered_turn_ids, covered_signal_ids, covered_prop_ids, covered_voice_ids, wardrobe_state, props_plan, appearance_locks = set(), set(), set(), set(), _wardrobe_plan.build_wardrobe_state(beat_draft.wardrobe_plan, payload, set(beats_by_id)), _prop_entrance.valid_prop_entrances(beat_draft.prop_entrances, set(beats_by_id)), _prop_lock.verify_and_lock_appearances(beat_draft.prop_appearance_locks, set(beats_by_id), _prop_lock.known_prop_card_appearance_index(payload)); _prop_lock.log_missing_appearance_locks(props_plan, appearance_locks)
     for plan in beat_draft.segments:
         _ensure_segment_prompt_budget()
         relevant_assets = _segment_relevant_assets(payload, plan.source_segment_indexes)
@@ -967,7 +968,7 @@ async def _generate_all_segment_prompts(
             by_segment_no[plan.segment_no] = draft
             camera_digest_by_segment_no[plan.segment_no] = draft.camera_digest
             delivered_lines.extend((plan.segment_no, line.speaker_identity_id, line.line) for line in draft.dialogue)
-            (_beat_causality.moments_for_segment(plan.beat_ids, beat_draft.emotional_turns, covered_turn_ids), _beat_foreshadowing.moments_for_segment(plan.beat_ids, beat_draft.foreshadowing_beats, covered_signal_ids), wardrobe_state.advance(plan.beat_ids), _prop_entrance.moments_for_segment(plan.beat_ids, props_plan, covered_prop_ids))
+            (_beat_causality.moments_for_segment(plan.beat_ids, beat_draft.emotional_turns, covered_turn_ids), _beat_foreshadowing.moments_for_segment(plan.beat_ids, beat_draft.foreshadowing_beats, covered_signal_ids), wardrobe_state.advance(plan.beat_ids), _prop_entrance.moments_for_segment(plan.beat_ids, props_plan, covered_prop_ids), _stim_voice.voice_claim_moments(plan.beat_ids, beat_draft.emotional_turns, covered_voice_ids))
             continue
         previous_draft = by_segment_no.get(plan.segment_no - 1)
         previous_segment_no = plan.segment_no - 1 if previous_draft is not None else None
@@ -975,7 +976,7 @@ async def _generate_all_segment_prompts(
         camera_history = _camera_digest_window_payload(camera_digest_by_segment_no, segment_no=plan.segment_no, window=CAMERA_DIGEST_WINDOW)
         continuity_rules = _segment_continuity_rules(previous_segment_no=previous_segment_no, camera_history=camera_history)
         staging_chain = chain_prompt_texts(beat_draft.segments, by_segment_no, plan.segment_no)
-        staging_gate = StagingSoftGate(hard_attempts=2, segment_no=plan.segment_no)  # 与下方 semantic_retry_limit 同值：两次带指引的重试后降级为告警
+        staging_gate = StagingSoftGate(hard_attempts=2, segment_no=plan.segment_no); voice_gate = _stim_voice.StimulusVoiceSoftCheck(hard_attempts=2, segment_no=plan.segment_no); action_gate = _action_density.ActionDensitySoftCheck(hard_attempts=2, segment_no=plan.segment_no)  # 三个 SoftCheck 与下方 semantic_retry_limit 同值：两次带指引的重试后降级为告警
         # 2.4.0：source_text_by_segment 只喂本段 source_unit_ranges 范围内的
         # 单元 + 前后各两个单元的衔接上下文，不再是整段原文（见
         # storyboard_segment_ranges 模块 docstring 的真实故障）。
@@ -983,9 +984,8 @@ async def _generate_all_segment_prompts(
         segment_paratext_hit = set(plan.source_segment_indexes) & paratext_indexes
         required_dialogue = required_dialogue_by_segment_no.get(plan.segment_no, [])
         palette_previous = beat_draft.segments[plan.segment_no - 2].palette if plan.segment_no > 1 else ""
-        structure = segment_structure(joined_source_text(segments, beat_draft.segments[plan.segment_no - 2].source_segment_indexes) if plan.segment_no > 1 else "", joined_source_text(segments, plan.source_segment_indexes))  # 换场/转场/必拍镜头（screenplay_markers）
-        turns_here = _beat_causality.moments_for_segment(plan.beat_ids, beat_draft.emotional_turns, covered_turn_ids)
-        signals_here = _beat_foreshadowing.moments_for_segment(plan.beat_ids, beat_draft.foreshadowing_beats, covered_signal_ids)
+        structure = segment_structure(joined_source_text(segments, beat_draft.segments[plan.segment_no - 2].source_segment_indexes) if plan.segment_no > 1 else "", joined_source_text(segments, plan.source_segment_indexes)); previous_scene_ids = {s.scene_id for s in previous_draft.resources.scenes} if previous_draft is not None else set(); structure, text_transition = _transition_plan.resolve_transition_before_generation(structure, previous_scene_ids, {str(s.get("scene_id") or "") for s in relevant_assets["scenes"]})  # 换场/转场/必拍镜头（screenplay_markers）；转场先定后写——本段计划场景（映射台产出）先定转场写回 structure（storyboard_transition_plan）
+        turns_here, signals_here, voice_here = _beat_causality.moments_for_segment(plan.beat_ids, beat_draft.emotional_turns, covered_turn_ids), _beat_foreshadowing.moments_for_segment(plan.beat_ids, beat_draft.foreshadowing_beats, covered_signal_ids), _stim_voice.voice_claim_moments(plan.beat_ids, beat_draft.emotional_turns, covered_voice_ids)
         task_payload: dict[str, Any] = {
             "task": (
                 "为下面这一段原文和节拍写一整段可直接投喂视频生成模型的提示词（prompt_text）。"
@@ -1005,7 +1005,7 @@ async def _generate_all_segment_prompts(
                 already_delivered_dialogue_rule(delivered_lines, reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no)),
                 *_beat_causality.segment_rule_text(turns_here, plan.beat_ids),
                 *_beat_foreshadowing.segment_rule_text(signals_here, plan.beat_ids),
-                *_wardrobe_plan.segment_rule_text(*wardrobe_state.advance(plan.beat_ids), payload, relevant_assets["characters"]), *_prop_entrance.segment_rule_text(_prop_entrance.moments_for_segment(plan.beat_ids, props_plan, covered_prop_ids)), *_revision_notes.segment_rule_text(revision_notes),
+                *_wardrobe_plan.segment_rule_text(*wardrobe_state.advance(plan.beat_ids), payload, relevant_assets["characters"]), *_prop_entrance.segment_rule_text(_prop_entrance.moments_for_segment(plan.beat_ids, props_plan, covered_prop_ids)), *_prop_lock.segment_rule_text(_prop_lock.moments_for_segment(plan.beat_ids, appearance_locks)), *_revision_notes.segment_rule_text(revision_notes), *_stim_voice.segment_rule_text(voice_here),
             ],
             **segment_narrative_arc_payload_fields(
                 segment_no=plan.segment_no,
@@ -1030,7 +1030,7 @@ async def _generate_all_segment_prompts(
             "recent_camera_language": camera_history,
             "visual_style": visual_style, "aspect_ratio": aspect_ratio,
             "target_video_model": target_model_literal,
-            "dialect_instructions": f"{dialect_instructions}\n{_action_beats.decisive_action_dialect_rule(profile.render_format)}\n{_shot_mandates.shot_mandates_dialect_rule(profile.render_format)}{_music_bed.music_bed_dialect_addendum(profile.render_format, enabled=enhance_music_bed)}",
+            "dialect_instructions": f"{dialect_instructions}\n{_action_beats.decisive_action_dialect_rule(profile.render_format)}\n{_action_density.shot_action_beats_rule()}\n{_shot_mandates.shot_mandates_dialect_rule(profile.render_format)}{_music_bed.music_bed_dialect_addendum(profile.render_format, enabled=enhance_music_bed)}",
             # app.video_prompt_profiles 的 SEEDANCE_2_PROFILE/MINIMAX_H3_PROFILE 是
             # 既有的正确接缝（docs/STORYBOARD_PROMPT_IR_DESIGN.md「与既有代码的衔接」），
             # 职责收窄为"交给模型的方言约束"；dialect_instructions 是本模块新写的
@@ -1060,11 +1060,11 @@ async def _generate_all_segment_prompts(
             model_type=_AiStoryboardSegmentDraft,
             validate=lambda value, _req=required_dialogue, _pm=previous_memo, _struct=structure,
             _st=source_payload["source_text_by_segment"], _dl=list(delivered_lines), _rv=reserved_lines_for(required_dialogue_by_segment_no, plan.segment_no),
-            _no=plan.segment_no, _n2i=manifest_name_to_identity(payload, plan.source_segment_indexes), _sx=plan.source_segment_indexes, _ch=staging_chain, _syn=plan.synopsis, _dp=canonical_phrases(payload), _sg=staging_gate, _rs=relevant_assets["scenes"]: [*ensure_travel_direction_in_prompt(value, _pm), *ensure_wardrobe_continuity_in_prompt(value, prop_factory=_AiResourceProp), *_cast_lock.ensure_cast_lock_in_prompt(value), *strip_extra_reference_markers(value, payload), *overlay_text_errors(value), *required_beats_errors(value, _struct["required_beats"]), *_validate_segment_draft(
+            _lk=_prop_lock.locks_by_label(_prop_lock.moments_for_segment(plan.beat_ids, appearance_locks)), _no=plan.segment_no, _n2i=manifest_name_to_identity(payload, plan.source_segment_indexes), _sx=plan.source_segment_indexes, _ch=staging_chain, _syn=plan.synopsis, _dp=canonical_phrases(payload), _sg=staging_gate, _rs=relevant_assets["scenes"], _vh=list(voice_here), _vg=voice_gate, _ag=action_gate: [*ensure_travel_direction_in_prompt(value, _pm), *ensure_wardrobe_continuity_in_prompt(value, prop_factory=_AiResourceProp), *ensure_prop_form_matches_lock(value, _lk), *_cast_lock.ensure_cast_lock_in_prompt(value), *strip_extra_reference_markers(value, payload), *overlay_text_errors(value), *required_beats_errors(value, _struct["required_beats"]), *_validate_segment_draft(
                 value, dialect_render_format=profile.render_format, required_dialogue=_req, name_to_identity=_n2i,
                 previous_memo=_pm, segment_source_text=_st, delivered_lines=_dl, reserved_lines=_rv, current_segment_no=_no, relevant_scenes=_rs,
             ), *generated_identity_errors(value, payload=payload, source_indexes=_sx, required_dialogue=_req, dialect=profile.render_format, narrator_voice_character=narrator_voice_character),
-            *_sg.filter(repeated_staging_errors(_ch, value.prompt_text, current_segment_no=_no, synopsis=_syn, drop_phrases=_dp)), *_music_bed.ensure_no_music_bed_in_prompt(value, render_format=profile.render_format, enabled=enhance_music_bed)],
+            *_sg.filter(repeated_staging_errors(_ch, value.prompt_text, current_segment_no=_no, synopsis=_syn, drop_phrases=_dp)), *_vg.filter(_vh, value.dialogue), *_ag.filter(value.shot_action_beats, shot_count=value.shot_count), *_music_bed.ensure_no_music_bed_in_prompt(value, render_format=profile.render_format, enabled=enhance_music_bed)],
             operation_id=f"storyboard_pack_segment_{episode_id}_{plan.segment_no}_{fingerprint}",
             max_tokens=SEGMENT_PROMPT_ANSWER_TOKENS,
             format_retry_limit=1,
@@ -1085,7 +1085,7 @@ async def _generate_all_segment_prompts(
         )
         draft = finalize_generated_identity(draft, payload=payload, source_indexes=plan.source_segment_indexes,
                                             required_dialogue=required_dialogue, dialect=profile.render_format, narrator_voice_character=narrator_voice_character)
-        draft.camera_digest.transition_from_previous = transition_with_resource_bypass(structure["transition_from_previous"], {s.scene_id for s in previous_draft.resources.scenes} if previous_draft is not None else set(), {s.scene_id for s in draft.resources.scenes})  # 转场以原文标记/段头为准；段头判不出时用相邻两段 resources.scenes 的 scene_id 差异兜底（小说体没有段头标记）
+        draft.camera_digest.transition_from_previous = _transition_plan.finalize_transition_after_generation(text_transition, previous_scene_ids, {s.scene_id for s in draft.resources.scenes}, told_transition=structure["transition_from_previous"], segment_no=plan.segment_no)  # 本段实际场景出来后按同一套推导核对，漂移时以此为准并告警（storyboard_transition_plan）
         camera_digest_by_segment_no[plan.segment_no] = draft.camera_digest
         by_segment_no[plan.segment_no] = draft
         delivered_lines.extend((plan.segment_no, line.speaker_identity_id, line.line) for line in draft.dialogue)
@@ -1096,7 +1096,7 @@ async def _generate_all_segment_prompts(
     result: dict[int, _AiStoryboardSegmentDraft] = {}
     # P0-A/C：阶段二覆盖 advisory 独立重算一遍"谁先认领"，不复用循环 1 的累加器
     # （循环 1 结束时已"全部认领完毕"）。
-    covered_turn_ids2, covered_signal_ids2, covered_prop_ids2 = set(), set(), set()
+    covered_turn_ids2, covered_signal_ids2, covered_prop_ids2, covered_voice_ids2 = set(), set(), set(), set()
     for plan in beat_draft.segments:
         draft = by_segment_no[plan.segment_no]
         relevant_scene_ids = {str(s.get("scene_id") or "") for s in relevant_assets_by_segment_no[plan.segment_no]["scenes"]}
@@ -1104,13 +1104,13 @@ async def _generate_all_segment_prompts(
             project_id=project_id, episode_no=episode_no, shot_id=f"draft:{plan.segment_no}",
             segment={"resources": draft.resources.model_dump(mode="json")}, conn=conn, bible=bible,
         ) if conn is not None and bible is not None else None
-        turns_here2 = _beat_causality.advisory_moments(plan.beat_ids, beat_draft.emotional_turns, covered_turn_ids2)
+        turns_here2, voice_here2 = _beat_causality.advisory_moments(plan.beat_ids, beat_draft.emotional_turns, covered_turn_ids2), _stim_voice.voice_claim_moments(plan.beat_ids, beat_draft.emotional_turns, covered_voice_ids2)
         signals_here2, props_here2 = _beat_foreshadowing.moments_for_segment(plan.beat_ids, beat_draft.foreshadowing_beats, covered_signal_ids2), _prop_entrance.moments_for_segment(plan.beat_ids, props_plan, covered_prop_ids2)
-        advisories = _segment_content_advisories(
+        advisories = [*_segment_content_advisories(
             draft, source_segment_indexes=plan.source_segment_indexes,
             segment_relevant_scene_ids=relevant_scene_ids, manifest=manifest,
-            emotional_turns_here=turns_here2, foreshadowing_here=signals_here2, prop_entrances_here=props_here2,
-        )
+            emotional_turns_here=turns_here2, foreshadowing_here=signals_here2, prop_entrances_here=props_here2, prop_locks_here=_prop_lock.moments_for_segment(plan.beat_ids, appearance_locks),
+        ), *_stim_voice.segment_advisories(voice_here2, draft.dialogue), *_action_density.segment_advisories(draft.shot_action_beats, shot_count=draft.shot_count)]
         if advisories:
             draft.degraded_capabilities = [*draft.degraded_capabilities, *advisories]
         result[plan.segment_no] = draft

@@ -465,3 +465,29 @@ def ensure_wardrobe_continuity_in_prompt(draft: Any, *, prop_factory: Any) -> li
         log.info("[STORYBOARD_WARDROBE_APPENDED] 提示词缺服装延续，已按备忘追加：%s", "、".join(appended))
     return []
 
+
+def ensure_prop_form_matches_lock(draft: Any, locked_appearance_by_label: dict[str, str]) -> list[str]:
+    """连贯性备忘 ``props[].form`` 以全集道具外观锁定（``app.production.
+    storyboard_prop_appearance_lock``）为准的确定性回填：按 ``name`` 精确匹配
+    锁定的 label，命中就强制覆盖 form。
+
+    只纠正 ``continuity_memo.props[].form`` 这一个旁路记账字段，**不触碰**
+    ``draft.prompt_text``/``resources.props``——真正发给视频模型的是后者，本
+    函数对它是否真的写成了锁定外观完全不知情。直接后果：一旦道具被锁定，
+    ``_prop_form_errors`` 逐段比较 form 的阻断判据会永远比较到"相等"（本段与
+    上一段的 form 都被强制拉齐），这不是遗漏——form 已被构造成恒定正确，继续
+    比较它没有意义——但 ``prompt_text`` 里是否真的写成锁定外观，此前没有环节
+    校验。真正的 prompt_text 核验见 ``storyboard_prop_appearance_lock.
+    segment_advisories``（非阻断，供 ``storyboard_pack._segment_content_
+    advisories`` 合并进 ``degraded_capabilities``），本函数不提供这层保护，与
+    直接改写 ``prompt_text`` 本身的 ``ensure_wardrobe_continuity_in_prompt``
+    形似而保护范围不同。恒返回 ``[]``，不参与语义重试，供调用方 ``*`` 拼进
+    validate 的错误列表；``locked_appearance_by_label`` 为空时是无操作。
+    """
+    memo = getattr(draft, "continuity_memo", None)
+    for prop in getattr(memo, "props", None) or []:
+        appearance = locked_appearance_by_label.get(prop.name)
+        if appearance and prop.form != appearance:
+            prop.form = appearance
+    return []
+

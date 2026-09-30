@@ -81,6 +81,14 @@ def causality_beat_sheet_rules() -> list[str]:
         "evidence_quote 与 stimulus_missing_reason 必须恰好二选一：有刺激时"
         "前两者非空、后者留空；没有刺激时前两者都留空、后者非空，不能同时"
         "填或同时留空。",
+        "刺激确有其事时，再判断原文是把它写成了引号台词，还是别人说了什么、"
+        "却只用转述/叙述带过（原文没有用引号把这句话本身写出来，例如「他问"
+        "她是不是没睡好」这种转述，不是「你是不是没睡好」这种直接引语），或者"
+        "角色只是听到/得知了某个信息。属于后一种时，把 stimulus_needs_voice"
+        "设为 true——这段刺激只被画成画面的话，观众听不出说的是什么，下一步"
+        "会据此在对应段落补一句旁白把这句话说出来；刺激本身就是引号台词，或"
+        "者刺激是一个可以直接看见的动作/画面（不是言语内容）时，"
+        "stimulus_needs_voice 留 false（默认值），不要为了保险起见随手标 true。",
     ]
 
 
@@ -125,7 +133,10 @@ def _turn_problems(
     dropped_source_spans (5) stimulus_beat_id 与 stimulus_missing_reason
     恰好给出一个、且 stimulus_beat_id 非空时 stimulus_evidence_quote 也必须
     非空 (6)-(9) 有 stimulus_beat_id 时：存在/子串/被引用/短剧档删减区间同上
-    四条 (10) 时序：min(stim.segment_indexes) <= min(turn.segment_indexes)。
+    四条 (10) 时序：min(stim.segment_indexes) <= min(turn.segment_indexes)
+    (11) stimulus_needs_voice=true 时必须有 stimulus_beat_id——没有刺激就
+    谈不上要不要出声（见 app.production.storyboard_stimulus_voice 模块，
+    该模块只信任「有刺激且标了需要出声」这一组合，本条是它的输入前提）。
     """
     beat = beats_by_id.get(turn.beat_id)
     if beat is None:
@@ -144,6 +155,12 @@ def _turn_problems(
         problems.append(f"turn_evidence_quote 所在原文单元 {sorted(hit_units)} 已被声明为删减区间")
     has_stimulus = bool(turn.stimulus_beat_id)
     has_reason = bool(turn.stimulus_missing_reason)
+    if turn.stimulus_needs_voice and not has_stimulus:
+        problems.append(
+            "stimulus_needs_voice=true 但没有 stimulus_beat_id：没有刺激就谈"
+            "不上要不要出声，请先给出 stimulus_beat_id/stimulus_evidence_"
+            "quote，或者把 stimulus_needs_voice 改回 false"
+        )
     if has_stimulus == has_reason:
         problems.append(
             "stimulus_beat_id 与 stimulus_missing_reason 必须恰好给出一个"

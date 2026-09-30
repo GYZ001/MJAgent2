@@ -75,6 +75,10 @@ def manifest_brief_for_prompt(payload: dict[str, Any]) -> dict[str, Any]:
             {
                 "label": p.get("label"),
                 "segment_indexes": p.get("segment_indexes") or [],
+                # P0-F（2026-09-30，app.production.storyboard_prop_appearance_lock）：
+                # 已有标准外观的道具在这里带上 appearance，阶段一锁定外观时要求逐字
+                # 复制这段文字，不重新编写——与 characters.appearance 同一先例。
+                "appearance": p.get("appearance") or "",
             }
             for p in (manifest.get("props") or [])
         ],

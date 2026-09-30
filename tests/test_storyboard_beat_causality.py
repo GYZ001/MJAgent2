@@ -84,6 +84,15 @@ def test_rules_are_positive_statements_not_a_blacklist():
     assert "恰好二选一" in joined or "恰好给出一个" in joined
 
 
+def test_rules_mention_stimulus_needs_voice_as_positive_statement():
+    """P0-G（2026-09-30）：间接转述的刺激要标 stimulus_needs_voice，正面陈述
+    给出判断依据（引号台词 vs 转述），不是"不要漏标"这种禁令。"""
+    rules = causality_beat_sheet_rules()
+    joined = "".join(rules)
+    assert "stimulus_needs_voice" in joined
+    assert "引号台词" in joined and "转述" in joined
+
+
 # ---------------------------------------------------------------------------
 # emotional_turn_errors：判据通过/不通过，忠实档与短剧档
 # ---------------------------------------------------------------------------
@@ -168,6 +177,21 @@ def test_reports_when_stimulus_beat_id_set_but_quote_empty():
 
 def test_no_stimulus_with_reason_only_passes():
     draft = _faithful_draft(_BEAT_SHEET, _SEGMENTS, [_no_stimulus_turn()])
+    assert emotional_turn_errors(draft, _SOURCES) == []
+
+
+def test_reports_needs_voice_without_stimulus():
+    """P0-G：stimulus_needs_voice=true 但没有刺激（走 stimulus_missing_reason
+    分支）——没有刺激就谈不上要不要出声。"""
+    turn = _no_stimulus_turn(stimulus_needs_voice=True)
+    draft = _faithful_draft(_BEAT_SHEET, _SEGMENTS, [turn])
+    errors = emotional_turn_errors(draft, _SOURCES)
+    assert any("stimulus_needs_voice=true 但没有 stimulus_beat_id" in e for e in errors)
+
+
+def test_needs_voice_with_stimulus_present_passes():
+    """有刺激时 stimulus_needs_voice=true 是合法组合，不产生额外问题。"""
+    draft = _faithful_draft(_BEAT_SHEET, _SEGMENTS, [_good_turn(stimulus_needs_voice=True)])
     assert emotional_turn_errors(draft, _SOURCES) == []
 
 

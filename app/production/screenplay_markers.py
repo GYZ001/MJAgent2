@@ -114,8 +114,16 @@ def scene_changed_by_resource_scenes(previous_scene_ids: set[str], current_scene
     【段｜地点｜时段】结构标记，``scene_changed`` 的段头判据永远判不出换场，这是它的旁路信号：
     判据仍然是数据（模型为每段登记的场景引用），不是剧情关键词表。两边都非空且不同才算换场：
     任一侧为空只代表这段没有可信场景信息，不是「没有变化」，不能拿缺失数据伪造「同场」的结论。
+
+    比较集合用包含，不用相等：``previous_scene_ids`` 仍然完整地包含在 ``current_scene_ids`` 里
+    时不算换场（本段计划场景是上一段场景的超集，典型情形是本段开头仍在上一场景、段尾才有
+    「（钩子：切某地……）」这类必拍括号镜把目的地场景也登记了进来——钩子切到哪已经由
+    ``required_beats`` 单独告诉模型，不该反过来让整段被判成「换场」，把镜头1 的起幅也带偏）。
+    只有当上一段场景不再是本段计划场景的子集（缩小或完全换成别处）时才算换场。
     """
-    return bool(previous_scene_ids) and bool(current_scene_ids) and previous_scene_ids != current_scene_ids
+    if not previous_scene_ids or not current_scene_ids:
+        return False
+    return not previous_scene_ids <= current_scene_ids
 
 
 def transition_with_resource_bypass(
