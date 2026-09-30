@@ -65,6 +65,7 @@ async def _resolve_assets(
     run_id: str | None,
     appellation_resolutions: list[dict[str, Any]] | None = None,
     discovery_text: str | None = None,
+    unanchored_prop_mentions: list[dict[str, Any]] | None = None,  # 同 appellation_resolutions 出参模式，见 discovery.py
 ) -> tuple[
     list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]],
     list[str], dict[str, int],
@@ -420,10 +421,7 @@ async def _resolve_assets(
             # 判据唯一落地点）核验命中即按已解析处理；「登记名＋师兄/长老…」归到那张卡（第 5 集「韩宗师兄」）。
             resolved_name, portrait_id = _rebind_titled_owner(conn, project_id, episode_no, bible, resolved_name, portrait_id)
             if not portrait_id and resolve_card_owner(bible, resolved_name) != ("owner", resolved_name):
-                errors.append(
-                    f"角色「{name}」（段 {mention_segment_indexes}）未解析到已有 "
-                    "portrait_id，身份消歧也未能将其归类为已有角色或确定性群演"
-                )
+                errors.append(f"角色「{name}」（段 {mention_segment_indexes}）未解析到已有 portrait_id，身份消歧也未能将其归类为已有角色或确定性群演")
                 if name not in unresolved_characters:
                     unresolved_characters.append(name)
                 continue
@@ -448,8 +446,7 @@ async def _resolve_assets(
             if not came_via_resolution and not literal_evidence:
                 errors.append(
                     f"角色「{name}」（段 {mention_segment_indexes}）解析到已有角色"
-                    f"「{resolved_name}」（portrait_id={portrait_id}），但称谓「{name}」"
-                    "未逐字出现在本集原文中，缺少称谓证据，门禁具名拦截"
+                    f"「{resolved_name}」（portrait_id={portrait_id}），但称谓「{name}」未逐字出现在本集原文中，缺少称谓证据，门禁具名拦截"
                 )
                 continue
             # provenance method（1.6.0，第25轮收口）：discovery（本次
@@ -799,9 +796,12 @@ async def _resolve_assets(
     # 场景「顾屿家客房」判定时读到的仍是没有它的旧 bible。提前到这里（两遍
     # 角色/场景解析开始之前）执行，之后任何一次 ensure_scenes_for_labels 重新
     # 读 bible 都能看到本集已建的道具卡。
+    props_payload = _prep_pack_build_prop_manifest(
+        prop_mentions, segments, cards=bible.props, unanchored=unanchored_prop_mentions,
+    )
     props_payload = await _discover_new_props(
         conn, project_id=project_id, episode_no=episode_no, source_text=source_text,
-        props_payload=_prep_pack_build_prop_manifest(prop_mentions, segments, cards=bible.props),
+        props_payload=props_payload,
     )
 
     if unresolved_chars or unresolved_scenes:

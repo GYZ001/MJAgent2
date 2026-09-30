@@ -104,6 +104,20 @@ def _prep_pack_register_scene_alias_if_new(
 # 越权判定某条提及是否成立），供调用方把同一场景的姐妹提及的引文一并
 # 纳入锚点候选——不是编造，每一条都仍要经 _prep_pack_local_text_anchor
 # 逐字核验，找不到照样判定没有本集依据。
+#
+# 2026-09-30（真实案例，proj_ca86b15ab7d7 EP2「回民街巷子」）扩展：聚合的
+# 候选不再只看 ``quote``，一并收 ``source_wording``（见 schemas.
+# _ModelSceneMention.source_wording 上方注释）——quote 要求一段连续原文，
+# source_wording 单独交出"这个地点的原文称呼"本身，往往比 quote 更短、更
+# 容易命中（原文写"两人走在回民街的青石板路上"，quote 可能因为模型跳过中间
+# 一截而非连续，source_wording 只需填"回民街"）。这里不做区分对待——两者
+# 都是"提及自己申报的一段候选原文"，同等收进同一个候选池，调用方
+# （resolve_assets.py 的 scene_quote_cands / _prep_pack_scene_alias_
+# provenance）原样把这个候选池整体解包传给 _prep_pack_local_text_anchor，
+# 不需要因为新增一个字段就改调用点签名。当前这条提及自己的 source_wording
+# 也会被收进自己所属 canonical_name 的候选池（不只是姐妹提及的）——这正是
+# resolve_assets.py 不需要单独再传一次"这条提及自己的 source_wording"的
+# 原因，见该文件 scene_quote_cands 构造处的调用点。
 def _prep_pack_group_scene_quotes_by_canonical(
     conn, project_id: str, episode_no: int, bible: Bible,
     scene_mentions: list[dict], scene_rename: dict[str, str],
@@ -111,8 +125,11 @@ def _prep_pack_group_scene_quotes_by_canonical(
     grouped: dict[str, list[str]] = {}
     for mention in scene_mentions:
         name = str(mention.get("display_name") or "").strip()
-        quote = str(mention.get("quote") or "").strip()
-        if not name or not quote:
+        candidates = [
+            str(mention.get("quote") or "").strip(),
+            str(mention.get("source_wording") or "").strip(),
+        ]
+        if not name or not any(candidates):
             continue
         resolved_name = scene_rename.get(name, name)
         _scene_reference_id, canonical_name = (
@@ -121,8 +138,9 @@ def _prep_pack_group_scene_quotes_by_canonical(
             )
         )
         quotes = grouped.setdefault(canonical_name, [])
-        if quote not in quotes:
-            quotes.append(quote)
+        for candidate in candidates:
+            if candidate and candidate not in quotes:
+                quotes.append(candidate)
     return grouped
 
 

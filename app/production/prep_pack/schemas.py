@@ -52,6 +52,17 @@ class _ModelSceneMention(BaseModel):
     # _prep_pack_local_text_anchor's "同义反复" note and _pass()'s scene
     # anchor-candidate section below for how this flows into anchor_phrase.
     quote: str
+    # 2026-09-30（真实案例，proj_ca86b15ab7d7 EP2「回民街巷子」）新增：quote
+    # 要求一段连续原文，但 display_name 本身常常是综合/省略说法（"回民街
+    # 巷子"），这次模型给的 quote 又恰好没能覆盖地点本身的字面称呼时，三路
+    # 候选（canonical_scene_name/name/quote）全部不是原文连续字面，场景
+    # 绑定的 anchor_phrase 缺失、整段被判未解析。source_wording 单独交出
+    # "这个地点在 segment_indexes 所指原文里的称呼"本身——从原文逐字复制的
+    # 一段连续文字，通常比 quote 短（例如原文写"两人走在回民街的青石板路
+    # 上"就填"回民街"），不改字、不增字、不把原文不相邻的两处文字拼接在
+    # 一起；没有可摘录的原文称呼就填空字符串，绝不编造。必填（非
+    # Optional），跟 quote 同一 strict-schema 惯例。
+    source_wording: str
 
 
 class _ModelPropMention(BaseModel):
@@ -77,6 +88,29 @@ class _ModelPropMention(BaseModel):
     segment_indexes: list[int]
     plot_significant: bool
     plot_significant_quote: str
+    # 2026-09-30（真实案例，proj_ca86b15ab7d7 EP2：原文「一支缠着细银丝的
+    # 木簪」被 label 概括成「缠银丝木簪」、原文「那枚旧旧的木星星」被 label
+    # 概括成「小木星星」）：label 允许是概括/规范化写法，但逐字核验因此找不
+    # 到锚点，这类真实道具被静默丢弃。source_wording 单独交出"这件道具在
+    # segment_indexes 所指原文里的称呼"本身——从原文逐字复制的一段连续
+    # 文字（名词短语，例如上面两例分别填"缠着细银丝的木簪"/"木簪"、"木星
+    # 星"），不改字、不增字、不把原文不相邻的两处文字拼接在一起；没有可
+    # 摘录的原文称呼就填空字符串，绝不编造。必填（非 Optional），跟 quote/
+    # plot_significant_quote 同一 strict-schema 惯例。
+    source_wording: str
+    # 2026-09-30（主会话复核后改，见 app.props.card_match 模块 docstring
+    # 「模型提名、代码核验」一节）：纯字符串包含关系无法分辨"同一件物品的
+    # 缩略说法"（木星星⊂小木星星）与"恰好包含该词的另一件东西"（水晶球⊂
+    # 老式水晶球，博物馆展品，不是同一件），这需要语义判断，不能让代码自己
+    # 猜。known_prop_name 让模型明确提名："这件道具如果就是已登记道具名单
+    # 中的某一件（同一件实物，不只是同类或名字相近的东西），从名单里逐字
+    # 复制那个名字；原文里这是另一件东西、或名单里没有它，填空字符串。"
+    # 提名只是候选，不是免核验通道——下游仍要求 label/source_wording 至少
+    # 一个真的逐字出现在这条提及自己的证据原文里才会采信（见 app.props.
+    # card_match._resolve_nominated_card），提名的卡不存在或证据核验不过时
+    # 退回常规判据，不静默信任模型的提名。必填（非 Optional），跟 quote/
+    # source_wording 同一 strict-schema 惯例，合法值包括空字符串。
+    known_prop_name: str
 
 
 class _ChunkResponse(BaseModel):

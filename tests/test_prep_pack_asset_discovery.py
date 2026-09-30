@@ -4902,7 +4902,7 @@ def test_prop_mention_with_literal_evidence_appears_in_asset_manifest_props():
         "label": "血玉玦", "canonical_name": None, "description": "一枚泛着血光的玉玦，边缘刻着古老符文",
         "segment_indexes": [1],
         "provenance": {"method": "direct", "anchor_segments": [1], "anchor_phrase": "血玉玦"},
-        "plot_significant": False, "plot_significant_quote": "",
+        "plot_significant": False, "plot_significant_quote": "", "source_wording": "", "known_prop_name": "",
     }]
 
 
@@ -5361,8 +5361,8 @@ def test_prep_pack_version_is_1_8_0():
     比照 1.4.1/1.9.0 的先例推进版本号第三位，不动 schema 位（coverage_
     ledger.paratext 自身仍是 flat [int] list）。2.0.5 见 chunk_extraction 规则常量上方。
     2.0.6（见 discovery._prep_pack_build_prop_manifest 上方大注释）：道具对照既有卡片绑定，
-    props[] 新增 additive 字段 canonical_name，比照 1.2.0 先例推进版本号第三位。"""
-    assert prep_pack.PREP_PACK_VERSION == "2.0.6"
+    props[] 新增 additive 字段 canonical_name；2.0.7（见 schemas._ModelSceneMention/_ModelPropMention.source_wording 上方注释）：scenes/props 新增 source_wording 字段——均比照 1.2.0 先例推进版本号第三位。"""
+    assert prep_pack.PREP_PACK_VERSION == "2.0.7"
 
 
 # ---------------------------------------------------------------------------
@@ -5421,7 +5421,7 @@ def test_empty_character_mentions_with_nonempty_scene_mentions_is_flagged_visibl
                     display_name="演武场",
                     suspected_true_name=None,
                     segment_indexes=[1],
-                    quote=source_text,
+                    quote=source_text, source_wording="",
                 )
             ],
             props=[],
@@ -5473,7 +5473,7 @@ def test_empty_character_mentions_without_known_roster_is_not_flagged(monkeypatc
                     display_name="演武场",
                     suspected_true_name=None,
                     segment_indexes=[1],
-                    quote=source_text,
+                    quote=source_text, source_wording="",
                 )
             ],
             props=[],

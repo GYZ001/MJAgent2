@@ -179,13 +179,20 @@ async def ensure_props_for_labels(
         if not is_key_prop_mention(mention, source_text=source_text):
             continue
         evidence_text = evidence_text_for_segments(segments, mention.get("segment_indexes") or [])
+        # source_wording/known_prop_name（2026-09-30）：跟 discovery.py 那侧传同一个
+        # mention 字段，见 app.props.card_match 模块 docstring「两个调用点必须传同一份」。
+        source_wording = str(mention.get("source_wording") or "").strip()
+        nominated_card = str(mention.get("known_prop_name") or "").strip()
         # 标签先归一成物件本体（「两只野鸡」→野鸡、「凝灵丹与半块灵石」→凝灵丹+灵石，见 props.labels）：
-        # 本体已登记（精确命中，或对照既有卡片的包含关系唯一胜者，见 _bind_known_base）
+        # 本体已登记（精确命中，或模型提名+代码核验/卡名包含关系命中既有卡，见 _bind_known_base）
         # 就只补别名，不再另建一件；两者都不成立才以本体名建卡、原标签作别名。
         for base in normalize_prop_label(label):
             canonical = base if base in known else None
             if canonical is None:
-                card = match_existing_prop_card(base, evidence_text, bible.props)
+                card = match_existing_prop_card(
+                    base, evidence_text, bible.props,
+                    source_wording=source_wording, nominated_card=nominated_card,
+                )
                 canonical = card.name if card else None
             if canonical is not None:
                 _bind_known_base(conn, project_id, label, base, canonical, known)

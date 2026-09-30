@@ -164,6 +164,11 @@ async def recheck_chunk_scenes(
             "suspected_true_name": None,
             "segment_indexes": valid,
             "quote": str(mention.quote or "").strip(),
+            # 复核走的是本文件自己的精简 schema（见 response_model），不问
+            # source_wording——这里补空字符串只是满足 _ModelSceneMention(**item)
+            # 的必填字段，不是遗漏：复核场景仍会经同一套 _prep_pack_local_text_
+            # anchor 逐字核验（quote 本身就是它的锚点候选）。
+            "source_wording": "",
         })
     return added
 

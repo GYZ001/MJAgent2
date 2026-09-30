@@ -164,9 +164,12 @@ def _prep_pack_prop_mention_entry(
     （见 _prep_pack_gate_segment_indexes）。``plot_significant``/
     ``plot_significant_quote``（2026-09-28 新增）原样透传，逐字核验是消费侧
     app.props.judge.is_key_prop_mention 的职责（需要完整 source_text，这里只
-    有单个 chunk），同 scenes 的 quote 字段一个口径，这里不做结构闸。抽成独立
-    函数只是为了不让 _generate_prep_pack_once 自己的 function_lines 计数往上
-    顶——逻辑与内联时完全一致。"""
+    有单个 chunk），同 scenes 的 quote 字段一个口径，这里不做结构闸。``source_
+    wording``/``known_prop_name``（分别 2026-09-30 新增，见 schemas.
+    _ModelPropMention 上方注释）原样透传，逐字/提名核验是 discovery.
+    _prep_pack_prop_mention_binding 与 app.props.card_match 的职责。抽成
+    独立函数只是为了不让 _generate_prep_pack_once 自己的 function_lines 计数
+    往上顶——逻辑与内联时完全一致。"""
     valid_indexes = _prep_pack_gate_segment_indexes(
         mention.label, mention.segment_indexes, chunk_global_indexes, chunk_by_index,
     )
@@ -178,6 +181,8 @@ def _prep_pack_prop_mention_entry(
         "segment_indexes": valid_indexes,
         "plot_significant": mention.plot_significant,
         "plot_significant_quote": mention.plot_significant_quote.strip(),
+        "source_wording": mention.source_wording.strip(),
+        "known_prop_name": mention.known_prop_name.strip(),
     }
 
 
@@ -302,6 +307,11 @@ async def _generate_prep_pack_once(
                 # scene_name/name 两个既有候选走的是同一条核验路径，不重复
                 # 造一遍。
                 "quote": mention.quote.strip(),
+                # 2026-09-30：该提及自己申报的原文称呼，见 _ModelSceneMention.
+                # source_wording 上方注释——同 quote 一样不做结构闸，下游经
+                # asset_lookup._prep_pack_group_scene_quotes_by_canonical 并入
+                # 场景锚点候选，仍要逐字核验。
+                "source_wording": mention.source_wording.strip(),
             })
         for mention in response.props:
             entry = _prep_pack_prop_mention_entry(mention, chunk_global_indexes, chunk_by_index)
@@ -361,6 +371,10 @@ async def _generate_prep_pack_once(
     # 生产调用点，传一份空列表进去，_resolve_assets 在解析每条角色提及
     # 时原地写入，调用返回后就是这一集完整、真实的解析结论。
     character_appellation_resolutions: list[dict[str, Any]] = []
+    # unanchored_prop_mentions（2026-09-30，见 discovery._prep_pack_build_
+    # prop_manifest 的 unanchored 出参说明）：同上一个出参同一模式，_resolve_
+    # assets 在道具清单构建时原地写入两条判据都不满足的提及，不静默丢弃。
+    unanchored_prop_mentions: list[dict[str, Any]] = []
     (
         characters, scenes, props, functional_extras, asset_errors, discovery_stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
@@ -372,6 +386,7 @@ async def _generate_prep_pack_once(
             character_mentions=character_mentions, scene_mentions=scene_mentions,
             prop_mentions=prop_mentions, run_id=run_id,
             appellation_resolutions=character_appellation_resolutions,
+            unanchored_prop_mentions=unanchored_prop_mentions,
         ),
     )
     # 场景 mention 未解析到 scene_reference_id 的失败已由 _resolve_assets 就地
@@ -393,6 +408,12 @@ async def _generate_prep_pack_once(
         "characters": characters, "scenes": scenes, "props": props,
         "functional_extras": functional_extras,
     })
+    # 未锚定道具的可见记录（2026-09-30）：不进 props（逐字核验没通过），也不
+    # 静默丢弃——见 discovery._prep_pack_record_unanchored_prop。空列表时不加
+    # 这个键，维持既有消费者只用 asset_manifest.get("props")/"characters" 等
+    # 既有键时的行为不变。
+    if unanchored_prop_mentions:
+        asset_manifest["unanchored_prop_mentions"] = unanchored_prop_mentions
     # provenance 发布前自校验（1.6.0，第25轮收口）：见
     # _prep_pack_verify_manifest_provenance 上方完整说明——每一条非空
     # anchor_phrase 必须真的逐字命中它自己 anchor_segments 指向的原文段，

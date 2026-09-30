@@ -120,7 +120,7 @@ def test_recheck_result_is_union_never_removes_declared(monkeypatch) -> None:
     async def fake(**kwargs):
         return [{
             "display_name": "晚安宠物医院门口", "suspected_true_name": None,
-            "segment_indexes": [14], "quote": "从门口升到街道",
+            "segment_indexes": [14], "quote": "从门口升到街道", "source_wording": "",
         }]
 
     monkeypatch.setattr(scene_recheck, "recheck_chunk_scenes", fake)
@@ -130,7 +130,7 @@ def test_recheck_result_is_union_never_removes_declared(monkeypatch) -> None:
     response = type("R", (), {})()
     response.scenes = [_ModelSceneMention(
         display_name="人间老街区", suspected_true_name=None,
-        segment_indexes=[14], quote="老街清晨",
+        segment_indexes=[14], quote="老街清晨", source_wording="",
     )]
     result = asyncio.run(scene_recheck.attach_scene_recheck(
         response, chunk=[], chunk_index=1, episode_id="ep1",

@@ -233,25 +233,24 @@ async def _discover_new_props(
 #
 # 2026-09-30 新增第二条独立判据（method="card_match"）：道具现在也有一条"经
 # 解析路径绑定可豁免逐字"的路，同 characters/scenes 的别名解析同一先例——
-# 世界书已有道具卡的 name/alias 真的逐字出现在这条提及自己声明的段落里、且
-# 与模型这次的 label 存在包含关系（唯一胜者，见 app.props.card_match.
-# match_existing_prop_card）时，这条提及绑定到那张卡：``canonical_name`` 记
-# 卡的规范名，``label`` 仍保留模型这次的原文写法（不篡改，供分镜台
-# known_assets.props 展示 + 下游别名登记）。真实事故（proj_ca86b15ab7d7 系列，
-# 见 2026-09-30 派单）：素材库第1集建的卡叫「行李箱」，第2集模型把同一件东西
-# 报成新标签「旧行李箱」——旧逻辑按 label 精确去重、从不查 bible.props，
-# 结果第2集当成全新道具，外观/参考图都查不到，分镜台只能各自现编。两条判据
-# 是"任一满足即可"，不是"必须同时满足"：一条提及若两条都不满足（label 既不
-# 逐字命中自己声明的段落，也没有唯一胜者的既有卡可绑），整条丢弃（不计入
-# 清单，不阻断发布——跟 scene 侧"没证据就当未解析"同一处置，不是"空口提名
-# 也发布"）。
+# 世界书已有道具卡与这条提及存在绑定关系（判据本身见 app.props.card_match.
+# match_existing_prop_card 模块 docstring「模型提名、代码核验」一节：既可能
+# 是模型经 known_prop_name 明确提名 + 代码核验证据，也可能是卡名/别名本身
+# 逐字出现在证据里并与 label 存在包含关系）时，这条提及绑定到那张卡：
+# ``canonical_name`` 记卡的规范名，``label`` 仍保留模型这次的原文写法（不
+# 篡改，供分镜台 known_assets.props 展示 + 下游别名登记）。真实事故
+# （proj_ca86b15ab7d7 系列，见 2026-09-30 派单）：素材库第1集建的卡叫「行李
+# 箱」，第2集模型把同一件东西报成新标签「旧行李箱」——旧逻辑按 label 精确
+# 去重、从不查 bible.props，结果第2集当成全新道具，外观/参考图都查不到。
+# 两条判据（本函数的字面锚定 + card_match 的卡片绑定）是"任一满足即可"：一
+# 条提及若两条都不满足，整条丢弃（不计入清单，不阻断发布——跟 scene 侧
+# "没证据就当未解析"同一处置，不是"空口提名也发布"）。
 #
-# 已知局限（P2，本次不解决）：合并键是 canonical_name（绑定时）或 label（未
-# 绑定时）——同一个原文写法在不同 mention 里若因各自声明的段落证据不同而
-# 时而绑上卡、时而绑不上，会拆成两条独立清单条目而不是合并成一条。card_
-# match 判据本身是纯函数、按同一份 cards 与各自的段落证据独立运算，不做
-# 跨 mention 的二次合并——真实剧情里同一物件反复出现时措辞与上下文通常
-# 一致，这类拆分预计罕见；需要更强一致性时留给后续有专门预算时再评估。
+# 已知局限（P2，本次不解决）：合并键是 canonical_name（绑定时）或 label（未绑定时）——
+# 同一个原文写法在不同 mention 里若因各自声明的段落证据不同而时而绑上卡、时而绑不上，
+# 会拆成两条独立清单条目而不是合并成一条。card_match 判据本身是纯函数、按同一份 cards
+# 与各自的段落证据独立运算，不做跨 mention 的二次合并——同一物件反复出现时措辞通常一致，
+# 这类拆分预计罕见；需要更强一致性时留给后续有专门预算时再评估。
 #
 # plot_significant/plot_significant_quote（2026-09-28 新增，见
 # .chunk_extraction 提示词与 app.props.judge.is_key_prop_mention 的同名
@@ -280,10 +279,24 @@ def _prep_pack_prop_card_anchor(
 
 
 def _prep_pack_prop_mention_binding(
-    label: str, valid_indexes: list[int], segments: list[SourceSegment], cards: Sequence[Prop],
+    label: str, source_wording: str, nominated_card: str, valid_indexes: list[int],
+    segments: list[SourceSegment], cards: Sequence[Prop],
 ) -> tuple[list[int], Prop | None, str, list[int], str] | None:
     """核验一条道具提及：返回 (segment_indexes, 绑定的卡或 None, provenance.method,
-    anchor_segments, anchor_phrase)；两条判据都不满足时返回 None（整条丢弃）。"""
+    anchor_segments, anchor_phrase)；两条判据都不满足时返回 None（整条丢弃，调用方
+    须把丢弃的提及记入可见的 unanchored 出参，见 _prep_pack_build_prop_manifest /
+    _prep_pack_record_unanchored_prop，不静默 continue）。
+
+    字面候选依次试 label、``source_wording``（2026-09-30 新增，见 schemas.
+    _ModelPropMention.source_wording 上方注释与 2026-09-30 派单真实案例「木星星」
+    「缠着细银丝的木簪」）：模型有时给的是概括/规范化标签，原文真实写法要靠
+    source_wording 单独交出。谁先在这条提及自己声明的段落里逐字出现，就取谁作
+    anchor_phrase（method 仍是 "direct"），segment_indexes 窄化到它实际出现的
+    那些段——跟原有 label-only 分支同一收窄纪律，不因为多了一条候选就放宽。
+
+    ``nominated_card``（2026-09-30 见 app.props.card_match 模块 docstring
+    「模型提名、代码核验」一节）原样透传给 ``match_existing_prop_card``。
+    """
     # 延迟导入：避免给 app.production.prep_pack（映射台核心链路）加一条模块级
     # 常驻依赖到 app.props 的模型/出图调用链——import app.props.card_match 前
     # Python 必须先跑 app/props/__init__.py，它无条件 import .service，而
@@ -292,35 +305,82 @@ def _prep_pack_prop_mention_binding(
     # 的既有写法保持一致（同一文件里三个函数都是函数内 import）。
     from app.props.card_match import match_existing_prop_card
 
-    literal_indexes = [i for i in valid_indexes if label in segments[i - 1].text]
+    label_indexes = [i for i in valid_indexes if label in segments[i - 1].text]
+    wording_indexes = [
+        i for i in valid_indexes if source_wording and source_wording in segments[i - 1].text
+    ]
+    literal_indexes, literal_phrase = (
+        (label_indexes, label) if label_indexes else (wording_indexes, source_wording)
+    )
     evidence_text = "\n".join(segments[i - 1].text for i in valid_indexes)
-    card = match_existing_prop_card(label, evidence_text, cards)
+    card = match_existing_prop_card(
+        label, evidence_text, cards, source_wording=source_wording, nominated_card=nominated_card,
+    )
     if not literal_indexes and card is None:
         return None
     segment_indexes = literal_indexes or valid_indexes
     if literal_indexes:
-        return segment_indexes, card, "direct", [segment_indexes[0]], label
+        return segment_indexes, card, "direct", [segment_indexes[0]], literal_phrase
     anchor = _prep_pack_prop_card_anchor(card, valid_indexes, segments)
     anchor_segments = [anchor[0]] if anchor else [segment_indexes[0]]
     anchor_phrase = anchor[1] if anchor else ""
     return segment_indexes, card, "card_match", anchor_segments, anchor_phrase
 
 
+def _prep_pack_record_unanchored_prop(
+    unanchored: list[dict[str, Any]] | None,
+    label: str, source_wording: str, valid_indexes: list[int],
+) -> None:
+    """道具提及两条判据（label/source_wording 逐字命中声明段落、或对照既有
+    卡片）都不满足时的可见记录（2026-09-30，见派单真实案例「木星星」「缠着
+    细银丝的木簪」「妈妈的字条」）：此前 ``_prep_pack_build_prop_manifest``
+    直接 ``continue``，没有任何日志或可见记录，这三件真实道具从
+    asset_manifest.props 静默消失。现在打一条固定前缀日志（同 card_match.
+    match_existing_prop_card 的 PROP_CARD_MATCH_AMBIGUOUS 同一惯例，供日志
+    检索）+ 写入调用方传入的 ``unanchored`` 列表（生成台 payload 的
+    asset_manifest.unanchored_prop_mentions，供人工核查；不进 props 清单，
+    不阻断发布——跟场景侧 degrade_unresolved_scene 同一处置）。``unanchored``
+    为 None（旧调用点未接线，例如既有测试夹具）时只记日志，不因此报错。"""
+    reason = (
+        "source_wording 非原文字面" if source_wording
+        else "缺少 source_wording 且 label 非原文字面，也未匹配到既有道具卡"
+    )
+    log.warning(
+        "[PREP_PACK_PROP_UNANCHORED][未拦截] 道具「%s」在声明段落 %s 未能锚定"
+        "（%s），不计入 props 清单，请人工核查",
+        label, valid_indexes, reason,
+    )
+    if unanchored is not None:
+        unanchored.append({
+            "label": label, "source_wording": source_wording,
+            "segment_indexes": valid_indexes, "reason": reason,
+        })
+
+
 def _prep_pack_build_prop_manifest(
     prop_mentions: list[dict[str, Any]], segments: list[SourceSegment],
-    *, cards: Sequence[Prop] = (),
+    *, cards: Sequence[Prop] = (), unanchored: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    """``unanchored``（2026-09-30 出参，可选，默认 None 不记录——同
+    ``_resolve_assets`` 的 ``appellation_resolutions`` 同一模式，保持既有
+    调用点/测试签名不变）：两条判据都不满足、被丢弃的提及原地写入这个列表，
+    见 _prep_pack_record_unanchored_prop。"""
     props: dict[str, dict[str, Any]] = {}
     for mention in prop_mentions:
         label = str(mention.get("label") or "").strip()
+        source_wording = str(mention.get("source_wording") or "").strip()
+        known_prop_name = str(mention.get("known_prop_name") or "").strip()
         valid_indexes = sorted(
             index for index in {int(i) for i in mention.get("segment_indexes") or []}
             if 1 <= index <= len(segments)
         )
         if not label or not valid_indexes:
             continue
-        binding = _prep_pack_prop_mention_binding(label, valid_indexes, segments, cards)
+        binding = _prep_pack_prop_mention_binding(
+            label, source_wording, known_prop_name, valid_indexes, segments, cards,
+        )
         if binding is None:
+            _prep_pack_record_unanchored_prop(unanchored, label, source_wording, valid_indexes)
             continue
         segment_indexes, card, method, anchor_segments, anchor_phrase = binding
         canonical_name = card.name if card else None
@@ -333,6 +393,8 @@ def _prep_pack_build_prop_manifest(
             "provenance": _prep_pack_provenance(method, anchor_segments, anchor_phrase),
             "plot_significant": bool(mention.get("plot_significant")),
             "plot_significant_quote": str(mention.get("plot_significant_quote") or "").strip(),
+            "source_wording": source_wording,
+            "known_prop_name": known_prop_name,
         })
         entry["segment_indexes"] = sorted(
             set(entry["segment_indexes"]) | set(segment_indexes)
