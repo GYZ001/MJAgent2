@@ -34,15 +34,39 @@ def location_text(label: str) -> str:
     return text
 
 
+def _centered_excerpt(text: str, needle: str, limit: int) -> str:
+    """把证据窗口定在 ``needle`` 第一次出现的位置附近，不是段落开头：命中判定用的是
+    整段原文，证据若只给段首前 ``limit`` 字，命中点晚于这个长度时会把判据依据的那个
+    地点字面本身漏在证据外面（模型看不到「回民街」三个字却要凭它判定地点，2026-09-30
+    proj_ca86b15ab7d7 第2集实证：命中偏移 365，前 300 字前缀里没有这三个字）。
+
+    ``text`` 本身不超过 ``limit`` 时原样返回。``needle`` 理论上必然能在 ``text`` 里
+    找到（调用方已经做过同一个 ``in`` 判定），真的找不到（防御性：不假设这个约定一定
+    成立）时退回"从头部截取"的兜底，不崩、不猜。"""
+    if len(text) <= limit:
+        return text
+    pos = text.find(needle)
+    if pos < 0:
+        return text[:limit]
+    half = max(0, (limit - len(needle)) // 2)
+    start = max(0, min(pos - half, len(text) - limit))
+    return text[start:start + limit]
+
+
 def scene_label_evidence(label: str, segments: list[SourceSegment]) -> str:
     """含该地点字面的原文段（最多 ``EVIDENCE_SEGMENT_LIMIT`` 段）；整串找不到时按尾部
-    子串退让（「外宗中心广场」→「中心广场」→「广场」），退到 2 字为止；没有就空串。"""
+    子串退让（「外宗中心广场」→「中心广场」→「广场」），退到 2 字为止；没有就空串。
+    单段原文长于 ``EVIDENCE_SEGMENT_CHARS`` 时，证据窗口以命中位置为中心截取（同段
+    多次命中取第一次出现的位置），不取段首前缀——见 ``_centered_excerpt``。"""
     location = location_text(label)
     for start in range(0, max(1, len(location) - 1)):
         needle = location[start:]
         if len(needle) < 2:
             break
-        hits = [seg.text.strip()[:EVIDENCE_SEGMENT_CHARS] for seg in segments if needle in seg.text]
+        hits = [
+            _centered_excerpt(seg.text.strip(), needle, EVIDENCE_SEGMENT_CHARS)
+            for seg in segments if needle in seg.text
+        ]
         if hits:
             return "\n".join(hits[:EVIDENCE_SEGMENT_LIMIT])
     return ""
