@@ -1,4 +1,4 @@
-import { compressSegmentIndexes } from '../lib/segmentIndexes'
+import { compressSegmentIndexes } from '../../lib/segmentIndexes'
 
 /**
  * 未确定指代的称谓（asset_manifest.unresolved_appellations，2.0.8+ 字段）。
