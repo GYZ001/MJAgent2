@@ -14,11 +14,11 @@ import pytest
 
 from app import db as db_mod
 from app.hiagent import ProviderError
-from app.media_exec import enqueue as enqueue_mod
 from app.media_exec import run_job_steps
 from app.media_pipeline import retry_policy
 from app.orchestration import media_scheduler
 from app.video_supervisor import issues_cascade
+from tests.conftest import patch_worker_everywhere
 
 
 # ---------------------------------------------------------------------------
@@ -29,7 +29,8 @@ def _wire(monkeypatch, *, set_job_ok: bool = True, limit: int = 2):
     calls: dict[str, list] = {"set_job": [], "settle": [], "reconcile": [], "resubmit": []}
     monkeypatch.setattr(run_job_steps, "_set_job", lambda job_id, status, lease_owner=None: calls["set_job"].append((job_id, status)) or set_job_ok)
     monkeypatch.setattr(media_scheduler, "settle_budget", lambda job_id, cost, success: calls["settle"].append((job_id, cost, success)))
-    monkeypatch.setattr(enqueue_mod, "reconcile_episode_generation_status", lambda ep: calls["reconcile"].append(ep))
+    # run_job_steps 在模块级绑定了 reconcile_episode_generation_status，只改 enqueue 模块属性打不到它
+    patch_worker_everywhere(monkeypatch, "reconcile_episode_generation_status", lambda ep: calls["reconcile"].append(ep))
     monkeypatch.setattr(run_job_steps, "resubmit_after_technical_failure", lambda job, resubmits, meta: calls["resubmit"].append(resubmits))
     monkeypatch.setattr(retry_policy, "technical_resubmit_limit", lambda: limit)
     return calls
