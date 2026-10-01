@@ -22,7 +22,14 @@
 与 ``storyboard_dialects`` 贯穿全片的「镜头之间硬切」全局规则冲突——叠化不是
 段内可选项，fix 文案已改为只建议硬切。
 
-## 判据只认八类，取值集合单源
+2026-10-01（第 1 集重做第三轮分镜 ``/tmp/mjtest/ep1_redo/segments_r3.json``
+多代理核查新增第九类）：第 26 段收尾镜写「镜头从餐桌上方缓慢升起并向后拉远，
+越过窗台退到窗外巷子上空，透过窗户俯看整间餐厅」——真人实拍摄影机做不到
+穿过墙体/玻璃从室内直接运动到室外。新增 ``impossible_camera_move``，只在
+写实画风启用（``is_photographic_style_prompt``），判据与 fix 形状照抄
+``skin_blush``/``time_jump`` 的「正面陈述 + 必须逐字核验 quote」先例。
+
+## 判据只认九类，取值集合单源
 
 ``_KIND_RULES`` 既是喂给复核模型的判据正面陈述，也是代码核验 ``kind`` 合法性的
 唯一依据（``v.kind in _KIND_RULES``）——CLAUDE.md「模型契约两侧必须对齐」：schema
@@ -115,6 +122,9 @@ _REVIEW_CONCURRENCY = 3
 _REVIEW_ANSWER_TOKENS = 1800
 #: 要求 previous_quote 必须逐字核验到的三类——本段开场状态与上一段末镜矛盾。
 _NEEDS_PREVIOUS_QUOTE = {"screen_side", "prop_appearance", "repeated_transition_action"}
+#: 只在写实画风项目出现的两类——判据本身预设真人实拍物理约束（脸红的生理蔓延
+#: 过程、摄影机的物理可达范围），动画/插画风格不受这两条约束。
+_PHOTOGRAPHIC_ONLY_KINDS = {"skin_blush", "impossible_camera_move"}
 
 #: 八类判据的正面陈述，单源用于「喂给模型的提示词」与「核验 kind 合法性」两处
 #: （见模块 docstring「判据只认八类，取值集合单源」）。``{max_actions}`` 由
@@ -168,6 +178,14 @@ _KIND_RULES: dict[str, str] = {
         "天亮、从白天写到夜晚），镜头描述里却没有用硬切把这段时间过去交代清楚——即违规。quote 填这一镜"
         "里描述大跨度时间推移的原文；fix 建议把它拆成两个镜头，之间硬切——下一镜起幅直接呈现时间过去"
         "之后的光线与环境（例如窗外天已亮），与本项目镜头之间统一硬切的规则一致。"
+    ),
+    "impossible_camera_move": (
+        "impossible_camera_move（运镜物理不可达，仅写实画风）：一个连续镜头的摄影机路径必须留在真实"
+        "摄影机能到达的连续空间里——沿可通行的地面/空中路径平移、升降、环绕；镜头描述如果要求这一个"
+        "不间断的运动从室内直接到室外（或反过来），或者要求镜头穿过门、窗、墙体、玻璃这类真人实拍"
+        "摄影机无法穿越的障碍物，即违规。quote 填这段描述不可达运镜路径的原文；fix 把它拆成两个镜头，"
+        "之间硬切：前一个镜头停在室内/室外一侧的收尾画面，后一个镜头直接从另一侧的画面起幅，不描述"
+        "穿越过程本身，与本项目镜头之间统一硬切的规则一致。"
     ),
     "negated_action": (
         "negated_action（用否定句写人物动作）：镜头描述里用否定句描写人物正在做的动作或穿着状态（例如"
@@ -241,9 +259,10 @@ def _previous_shot_text(previous_draft: Any | None) -> str:
 
 
 def _review_rules_text(*, photographic: bool, max_shots: int) -> str:
-    """八类判据的完整正面陈述；``skin_blush`` 只在写实画风项目出现（见模块
-    docstring），非写实项目这条规则连提示词都不会收到。"""
-    kinds = [k for k in _KIND_RULES if k != "skin_blush" or photographic]
+    """九类判据的完整正面陈述；``skin_blush``/``impossible_camera_move`` 只在
+    写实画风项目出现（见模块 docstring、``_PHOTOGRAPHIC_ONLY_KINDS``），非写实
+    项目这两条规则连提示词都不会收到。"""
+    kinds = [k for k in _KIND_RULES if k not in _PHOTOGRAPHIC_ONLY_KINDS or photographic]
     numbered = "\n".join(
         f"{i}. " + _KIND_RULES[kind].format(
             max_actions=_action_density.MAX_KEY_ACTIONS_PER_SHOT, skin_blush_rule=_skin_blush.SEEDANCE_SKIN_BLUSH_RULE,

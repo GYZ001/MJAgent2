@@ -13,6 +13,12 @@ degraded_capabilities、重写抛异常保留原稿、开关关闭逐字不变�
 把 ``time_jump`` 的 fix 文案从「硬切或叠化」改成只建议硬切——``storyboard_
 dialects`` 贯穿全片「镜头之间硬切」的全局规则下叠化不是段内可选项。
 
+2026-10-01 新增 ``impossible_camera_move``（第 1 集重做第三轮分镜独立核查，
+``/tmp/mjtest/ep1_redo/segments_r3.json`` 第 26 段）：收尾镜写「镜头从餐桌上方
+缓慢升起并向后拉远，越过窗台退到窗外巷子上空，透过窗户俯看整间餐厅」——真人
+实拍摄影机做不到穿过墙体/玻璃从室内直接运动到室外；只在写实画风启用，与
+``skin_blush`` 同一开关先例（``_PHOTOGRAPHIC_ONLY_KINDS``）。
+
 monkeypatch 策略：``storyboard_prose_review`` 是普通 Python 包内模块（不是
 ``app/stages``/``app/portraits`` 那类 ``exec()`` 聚合外观），``_generate_all_
 segment_prompts``/``_review_segment`` 都通过 ``from x import y`` 在本模块里持有
@@ -86,6 +92,11 @@ _REAL_VIOLATION_CASES = [
         "镜头从深夜接水的水龙头缓缓横摇到天亮时分她已沉沉睡去的床头", None, "",
     ),
     ("negated_action", "镜头2：她站在门口，她没有往里走。", "她没有往里走", None, ""),
+    (
+        "impossible_camera_move",
+        "镜头4：镜头从餐桌上方缓慢升起并向后拉远，越过窗台退到窗外巷子上空，透过窗户俯看整间餐厅。",
+        "镜头从餐桌上方缓慢升起并向后拉远，越过窗台退到窗外巷子上空，透过窗户俯看整间餐厅", None, "",
+    ),
 ]
 
 
@@ -174,6 +185,15 @@ def test_review_rules_text_includes_skin_blush_only_when_photographic():
     assert "口型说明" in text_on, "系统写入的口型说明不算否定句违规"
     assert "repeated_transition_action" in text_on
     assert "叠化" not in text_on, "段内只用硬切，time_jump 的 fix 不得再建议叠化（与全局硬切规则冲突）"
+
+
+def test_review_rules_text_includes_impossible_camera_move_only_when_photographic():
+    text_on = prose_review._review_rules_text(photographic=True, max_shots=4)
+    text_off = prose_review._review_rules_text(photographic=False, max_shots=4)
+    assert "impossible_camera_move" in text_on
+    assert "穿过门、窗、墙体、玻璃" in text_on
+    assert "之间硬切" in text_on
+    assert "impossible_camera_move" not in text_off, "非写实画风项目不应收到这条规则"
 
 
 # ---------------------------------------------------------------------------
