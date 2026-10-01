@@ -95,15 +95,15 @@ def _commit_provider_acceptance_in_transaction(
 ) -> None:
     """Write paid provider acceptance while the caller owns the transaction."""
     from app.completion_grant import ensure_video_budget_authority_tables
-
     ensure_video_budget_authority_tables(conn)
     stamp = now()
     accepted_at = float(submitted_at or stamp)
+    # 重置为 1：release_provider_poll 放弃旧任务时清 0 交给重试、此后无人写回，曾致重试成功被当历史任务永久隔离（2026-10-01）。
     claimed = conn.execute(
         """UPDATE jobs
               SET provider_operation_id=?,provider_create_state='accepted',
                   provider_non_cancellable=1,provider_submitted_at=?,
-                  provider_poll_required=1,
+                  provider_poll_required=1,provider_result_adoptable=1,
                   provider_failure_category=NULL,provider_failure_kind=NULL,
                   provider_failure_disposition=NULL,provider_failure_retryable=NULL,
                   updated_at=?
