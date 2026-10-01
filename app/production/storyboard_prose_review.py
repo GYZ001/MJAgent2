@@ -7,11 +7,22 @@
 规则拼进提示词从不核验（脸红措辞）。独立核验成立的七类真实缺陷——单镜动作
 过载、写实画风脸红措辞、无台词的持续说话、跨段左右站位翻转、道具凭空出现、
 单镜大跨度时间跳跃、镜头描述用否定句写动作——共同根因是「规则都写进了提示词，
-但没有任何一步读最终 prompt_text 正文去核对」。本模块补这一步：整集逐段
+但没有任何一步读最终 prompt_text 正文去核对」。本模块补这一步：每段
 ``prompt_text`` 定稿后，发一次独立复核调用（模型提名、代码核验），有已核验
-违规的段按升序走既有单段重生成通道定向重写一次，重写后再复核该段与紧邻下一段，
-仍有问题就写进 ``degraded_capabilities`` 不阻断整集（CLAUDE.md「修补器与校验器
-死锁」：后处理同样不得把整集卡死）。
+违规就带着修改意见原地重写这一段一次，重写稿再复核一次，仍有问题就写进
+``degraded_capabilities`` 不阻断（CLAUDE.md「修补器与校验器死锁」：复核同样
+不得把整集卡死）。
+
+2026-10-01（边写边审，真实耗时驱动：第 1 集 30 段一轮 118 分钟，逐段写分镜
+73 次占 96.8 分钟、正文复核 77 次占 26.3 分钟，全程串行）：复核与定向重写从
+「整集写完后单独一次批量后处理」改成「每段生成完立刻复核、立刻重写」，挪进
+``storyboard_pack._generate_all_segment_prompts`` 自己的逐段循环（见
+``review_segment_inline``）。旧设计下第 N 段重写后，第 N+1 段当初是照着旧的
+第 N 段写的，只能靠「复核下一段」补救（``screen_side``/``prop_appearance``/
+``repeated_transition_action`` 这三类跨段判据因此需要一张「待处理违规」表和
+邻段复核的覆盖规则）；新设计下第 N 段的复核与重写在第 N+1 段开始生成之前就
+已经定稿，第 N+1 段天然衔接的是修正后的草稿，不再需要这张表、也不再需要
+批量并发（复核与生成现在严格同步、无并发）。
 
 2026-10-01（第 1 集重做第二轮分镜 ``/tmp/mjtest/ep1_redo/segments_r2.json``
 独立核查新增第八类）：第 30 段末镜已写温念转身背对镜头望向窗户，硬切到第 31
@@ -59,48 +70,55 @@ SHOT``，不另立常量；``skin_blush`` 的判据文本直接引用
 拖累同一段其余已核验违规，打印
 ``[STORYBOARD_PROSE_REVIEW_UNVERIFIED]`` 前缀日志——可见，不静默。
 
-## 定向重写与死锁规避
+## 边写边审：`review_segment_inline`
 
-有已核验违规的段按段号升序逐段调用既有单段重生成通道
-（``storyboard_pack._generate_all_segment_prompts`` 的 ``reuse_segments``/
-``revision_notes`` 参数，与 ``storyboard_identity_regenerate.regenerate_identity_
-candidate`` 用户点「修订本段」同一条通道，但不走那个路由——避免嵌套循环）。
-每段最多重写一次；重写成功后立即再复核该段与紧邻下一段（下一段的跨段判据
-``screen_side``/``prop_appearance``/``repeated_transition_action`` 依赖它），
-结果覆盖式更新「待处理违规」表：
-如果那个邻段本来就排在后面等自己的处理轮次，就把结果留给它自己那一轮（可能
-因此被跳过重写，也可能带着刷新后的违规正常重写）；如果邻段不在待处理表里
-（首轮复核没发现问题，是这次重写才牵连出来的），就没有下一轮会处理它了，
-当场把剩余违规记进它的 ``degraded_capabilities``。重写调用抛异常（含重写稿
-未通过 ``_generate_all_segment_prompts`` 自身既有校验耗尽重试后向上抛出，两者
-对调用方是同一种表现）时保留原稿，``exc_info=True`` 记录完整异常
-（``[STORYBOARD_PROSE_REVIEW_FAILED]``，不吞异常信息），不让整集失败。
+调用方（``_generate_all_segment_prompts`` 的逐段循环）每生成一次草稿就调用一次
+本函数，传入 ``attempt``（这是本段第几次生成尝试，从 0 开始）。没有已核验违规、
+或 ``attempt`` 已到 ``INLINE_MAX_ATTEMPTS - 1``（最后一次尝试）时返回空串，前者
+什么都不做，后者把剩余违规写进 ``draft.degraded_capabilities``（``draft`` 是调用
+方持有的同一个对象，原地改写、不需要回传）；否则返回修改意见文本，调用方据此
+把同一个 ``task_payload`` 构造逻辑用这份意见重新跑一次、拿到重写稿后再调用本
+函数一次——``INLINE_MAX_ATTEMPTS = 2`` 即每段最多两次生成尝试（1 次初稿 + 最多
+1 次重写），与旧设计「每段最多重写一次」同一上限，只是不再需要单独的重生成
+通道：``task_payload`` 本来就支持按 ``revision_notes`` 拼一条正面陈述规则
+（``storyboard_revision_notes.segment_rule_text``），边写边审只是把这份能力从
+「只服务 storyboard_identity_regenerate 的单段重生成」扩展成「调用方自己的循环
+内也能用」，不新造一条模型调用通道。重写调用本身复用生成这一段已有的
+format/semantic 重试与校验（不单独处理异常——它们和首次生成是同一段代码）。
 
 ## 并发与循环导入
 
-所有段先并发复核，上限 ``_REVIEW_CONCURRENCY``（opus 有限流）；复核通过后的
-定向重写必须串行（同一份 ``reuse_segments`` 快照不能被并发重写互相踩踏）。
+复核与生成现在严格同步：第 N 段生成→复核→（可能）重写→复核，全部完成才轮到
+第 N+1 段，不再有批量并发（见上「边写边审」changelog）。
 
-依赖方向：本模块不导入 ``storyboard_pack``。定向重写所需的「按修订意见重写一段」
-由调用方（``storyboard_pack.generate_storyboard_pack``）以 ``regenerate(reuse_segments,
-revision_notes)`` 回调注入——单向依赖 ``storyboard_pack -> 本模块``，不需要任何一侧
-用函数内延迟导入把循环藏进运行时（CLAUDE.md「函数内 import app.* 不是解耦手段」）。
+依赖方向：本模块不导入 ``storyboard_pack``，``review_segment_inline`` 只读写
+调用方传入的 ``draft``/``outcomes``，不持有、不回调任何 ``storyboard_pack`` 侧
+的生成能力——单向依赖 ``storyboard_pack -> 本模块``，不需要任何一侧用函数内
+延迟导入把循环藏进运行时（CLAUDE.md「函数内 import app.* 不是解耦手段」）。
+
+## 可观测：`log_review_summary`
+
+每段终态（是否重写、剩余违规数）由调用方累积进一个 ``outcomes`` 列表，整集
+``_generate_all_segment_prompts`` 跑完后调一次本函数，打一条
+``[STORYBOARD_PROSE_REVIEW_SUMMARY]`` 前缀的汇总日志，便于下次对比耗时与重写率；
+``enabled=False``（开关关闭、或调用方是不接复核的 ``storyboard_identity_
+regenerate``「修订本段」）时不打印。
 
 ## 开关
 
 ``storyboard_prose_review_enabled()``：全局设置键 ``storyboard_prose_review_
 enabled``，默认开启（``app.config.DEFAULT_SETTINGS`` + ``app.monitoring.
 SETTINGS_SCHEMA`` 两处登记，未声明的设置键写接口会拒写）；关闭时
-``review_and_revise_segments`` 原样返回入参，不发起任何复核调用，产物与今天
-逐字一致。
+``_generate_all_segment_prompts`` 的 ``enable_prose_review`` 由调用方按这个开关
+决定是否传 ``True``（见 ``storyboard_pack.generate_storyboard_pack``），关闭后
+不发起任何复核调用，产物与复核上线前逐字一致。
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -111,13 +129,10 @@ from app.production import storyboard_action_density as _action_density
 from app.production import storyboard_skin_blush as _skin_blush
 from app.production.storyboard_continuity_memo import continuity_memo_payload
 from app.production.storyboard_staging_repeat import sub_shots
-from app.visual_styles import current_visual_style_prompt, is_photographic_style_prompt
 
 _LOGGER = logging.getLogger(__name__)
 
 PROSE_REVIEW_SETTING_KEY = "storyboard_prose_review_enabled"
-#: 并发复核上限：opus 有限流，见模块 docstring「并发与循环导入」。
-_REVIEW_CONCURRENCY = 3
 #: 复核调用只需要返回一份不长的违规清单，不是整段 prompt_text。
 _REVIEW_ANSWER_TOKENS = 1800
 #: 要求 previous_quote 必须逐字核验到的三类——本段开场状态与上一段末镜矛盾。
@@ -221,15 +236,6 @@ def storyboard_prose_review_enabled() -> bool:
     开启，两者都以『未显式写否定值』为真/假的判定起点）。"""
     raw = str(get_setting(PROSE_REVIEW_SETTING_KEY) or "").strip().lower()
     return raw not in {"0", "false", "off", "no"}
-
-
-def _is_photographic(bible: Any) -> bool:
-    """与 ``_generate_all_segment_prompts`` 推导 ``visual_style_is_photographic``
-    同一表达式（见 ``storyboard_pack`` 模块内该局部变量），这里独立重算一遍：
-    本模块只拿到调用方传入的 ``bible``，不持有那次调用内部的局部变量。"""
-    if bible is None or bible.world is None:
-        return False
-    return is_photographic_style_prompt(current_visual_style_prompt(bible.world.visual_style_canonical))
 
 
 def _dialogue_placeholders(dialogue: list[Any]) -> list[dict[str, str]]:
@@ -351,22 +357,6 @@ async def _review_segment(
     return response.violations
 
 
-async def _run_batch_review(
-    segment_drafts: dict[int, Any], *, episode_id: str, photographic: bool, max_shots: int,
-) -> dict[int, list[ProseViolation]]:
-    """全部段落并发复核（上限 ``_REVIEW_CONCURRENCY``），只返回有已核验违规的段。"""
-    semaphore = asyncio.Semaphore(_REVIEW_CONCURRENCY)
-
-    async def _one(no: int) -> tuple[int, list[ProseViolation]]:
-        previous = segment_drafts.get(no - 1)
-        async with semaphore:
-            raw = await _review_segment(episode_id=episode_id, segment_no=no, draft=segment_drafts[no], previous_draft=previous, photographic=photographic, max_shots=max_shots)
-        return no, _verified_violations(raw, segment_no=no, draft=segment_drafts[no], previous_draft=previous)
-
-    results = await asyncio.gather(*[_one(no) for no in sorted(segment_drafts)])
-    return {no: violations for no, violations in results if violations}
-
-
 def _revision_notes_text(violations: list[ProseViolation]) -> str:
     """把已核验违规整理成正面修改意见，交给 ``_revision_notes.segment_rule_
     text`` 包装（该函数由 ``_generate_all_segment_prompts`` 内部调用，本模块不
@@ -379,57 +369,50 @@ def _remaining_advisory_texts(violations: list[ProseViolation]) -> list[str]:
     return [f"[STORYBOARD_PROSE_REVIEW_REMAINING][未拦截] [{v.kind}] {v.shot_label or '对应镜头'}：{v.fix}（原文：{v.quote[:80]}）" for v in violations]
 
 
-Regenerate = Callable[[dict[int, Any], str], Awaitable[dict[int, Any]]]
-"""``regenerate(reuse_segments, revision_notes)``：调用方注入的单段重写回调，语义同
-``storyboard_pack._generate_all_segment_prompts`` 的同名两个参数（见模块 docstring
-「依赖方向」）。"""
+INLINE_MAX_ATTEMPTS = 2
+"""每段最多两次生成尝试：第一次 + 复核违规触发的一次重写，见模块 docstring
+「边写边审」。"""
 
 
-async def _regenerate_segment(
-    no: int, segment_drafts: dict[int, Any], violations: list[ProseViolation], *, regenerate: Regenerate,
-) -> dict[int, Any] | None:
-    """按既有单段重生成通道重写第 ``no`` 段；失败（含重写稿未通过既有校验耗尽
-    重试后向上抛出）返回 None，调用方保留原稿——不让整集失败，见模块 docstring
-    「定向重写与死锁规避」。"""
-    reuse = {segno: d for segno, d in segment_drafts.items() if segno != no}
-    try:
-        return await regenerate(reuse, _revision_notes_text(violations))
-    except Exception:  # noqa: BLE001 -- 不吞异常信息：exc_info=True 保留完整堆栈
-        _LOGGER.warning("[STORYBOARD_PROSE_REVIEW_FAILED] 第 %s 段定向重写调用失败，保留原稿", no, exc_info=True)
-        return None
+async def review_segment_inline(
+    draft: Any, *, previous_draft: Any | None, episode_id: str, segment_no: int,
+    photographic: bool, max_shots: int, attempt: int, enabled: bool,
+    outcomes: list[dict[str, Any]] | None = None,
+) -> str:
+    """调用方每生成一次草稿后调用一次，见模块 docstring「边写边审」。没有已核验
+    违规、或已到 ``INLINE_MAX_ATTEMPTS - 1``（最后一次尝试）时返回空串收尾——
+    后者先把剩余违规写进 ``draft.degraded_capabilities``（原地改写调用方持有的
+    同一个对象，不需要回传）；否则返回修改意见文本，调用方据此重新生成一次再
+    调用本函数一次。``enabled=False``（开关关闭，或调用方是不接复核的
+    ``storyboard_identity_regenerate``「修订本段」）原样返回空串，不发起任何
+    复核调用。复核调用本身失败时 ``_review_segment`` 已吞成空列表并记
+    ``[STORYBOARD_PROSE_REVIEW_FAILED]``，这里按「没有违规」处理，不重写不
+    阻断。``outcomes`` 非空时追加一条本段终态记录，供 ``log_review_summary``
+    打汇总日志。"""
+    if not enabled:
+        return ""
+    raw = await _review_segment(
+        episode_id=episode_id, segment_no=segment_no, draft=draft, previous_draft=previous_draft,
+        photographic=photographic, max_shots=max_shots,
+    )
+    violations = _verified_violations(raw, segment_no=segment_no, draft=draft, previous_draft=previous_draft)
+    if violations and attempt < INLINE_MAX_ATTEMPTS - 1:
+        return _revision_notes_text(violations)
+    if violations:
+        draft.degraded_capabilities = [*draft.degraded_capabilities, *_remaining_advisory_texts(violations)]
+    if outcomes is not None:
+        outcomes.append({"segment_no": segment_no, "rewritten": attempt > 0, "remaining": len(violations)})
+    return ""
 
 
-async def review_and_revise_segments(
-    segment_drafts: dict[int, Any], *, episode_id: str, bible: Any, max_shots: int, regenerate: Regenerate,
-) -> dict[int, Any]:
-    """整集复核 → 定向重写一次 → 再复核；开关关闭时原样返回，逐字不变。
-
-    ``outstanding`` 是「待处理违规」表：初始来自首轮批量复核，处理某段时若它的
-    紧邻下一段也被重新核验过，按该段是否还会轮到自己的处理轮次决定是现在就
-    收尾（写 degraded_capabilities）还是把结果留给它自己那一轮（见模块
-    docstring「定向重写与死锁规避」）。
-    """
-    if not storyboard_prose_review_enabled():
-        return segment_drafts
-    photographic = _is_photographic(bible)
-    outstanding = await _run_batch_review(segment_drafts, episode_id=episode_id, photographic=photographic, max_shots=max_shots)
-    for no in sorted(outstanding):
-        violations = outstanding.get(no) or []
-        if not violations:
-            continue  # 已被更早一段重写后的邻段复核清空
-        rewritten = await _regenerate_segment(no, segment_drafts, violations, regenerate=regenerate)
-        if rewritten is None:
-            segment_drafts[no].degraded_capabilities = [*segment_drafts[no].degraded_capabilities, *_remaining_advisory_texts(violations)]
-            continue
-        segment_drafts = rewritten
-        for check_no in (no, no + 1):
-            if check_no not in segment_drafts:
-                continue
-            draft, previous = segment_drafts[check_no], segment_drafts.get(check_no - 1)
-            raw = await _review_segment(episode_id=episode_id, segment_no=check_no, draft=draft, previous_draft=previous, photographic=photographic, max_shots=max_shots)
-            verified = _verified_violations(raw, segment_no=check_no, draft=draft, previous_draft=previous)
-            if check_no != no and check_no in outstanding:
-                outstanding[check_no] = verified
-            elif verified:
-                draft.degraded_capabilities = [*draft.degraded_capabilities, *_remaining_advisory_texts(verified)]
-    return segment_drafts
+def log_review_summary(outcomes: list[dict[str, Any]], *, episode_id: str, enabled: bool) -> None:
+    """整集逐段生成结束后打一条汇总日志，便于下次对比耗时与重写率（见模块
+    docstring「可观测」）；``enabled=False`` 或 ``outcomes`` 为空时不打印。"""
+    if not enabled or not outcomes:
+        return
+    rewritten = sum(1 for o in outcomes if o["rewritten"])
+    remaining = sum(o["remaining"] for o in outcomes)
+    _LOGGER.info(
+        "[STORYBOARD_PROSE_REVIEW_SUMMARY] episode=%s segments=%s rewritten=%s remaining_violations=%s",
+        episode_id, len(outcomes), rewritten, remaining,
+    )

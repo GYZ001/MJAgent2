@@ -2,13 +2,18 @@
 供 ``storyboard_pack._generate_all_segment_prompts`` 在只重生成一段时把意见转成
 这一段专属的正面陈述规则，不广播给其余段落。
 
-只服务单段重生成路径（``storyboard_identity_regenerate.regenerate_identity_
-candidate``）：该路径把除目标段以外的全部段落放进 ``reuse_segments``，
-``_generate_all_segment_prompts`` 对 reuse 命中的段落直接 continue、不进入
-下面构造 ``task_payload["rules"]`` 的分支（见该函数循环体）。因此
-``revision_notes`` 只要是一个不分段号的裸字符串，天然只会被拼进真正发起模型
-调用的那一段——不需要 ``{segment_no: notes}`` 这种映射结构。整集生成
-（``generate_storyboard_pack``）从不传这个参数，用默认空串，行为不变。
+两处消费方，同一个函数：① 单段重生成路径（``storyboard_identity_regenerate.
+regenerate_identity_candidate``）——该路径把除目标段以外的全部段落放进
+``reuse_segments``，``_generate_all_segment_prompts`` 对 reuse 命中的段落直接
+continue、不进入下面构造 ``task_payload["rules"]`` 的分支（见该函数循环体），
+因此函数参数 ``revision_notes`` 只要是一个不分段号的裸字符串，天然只会被拼进
+真正发起模型调用的那一段，不需要 ``{segment_no: notes}`` 这种映射结构；
+② 2026-10-01 边写边审的逐段循环内重写（``storyboard_prose_review.review_
+segment_inline`` 判定有已核验违规后返回的意见文本）——这条路径不经过函数参数
+``revision_notes``，而是循环体内局部变量 ``revision_text``（每段开始时重置为
+``revision_notes``，复核判定需要重写时覆盖成复核意见），两者共用同一句拼接
+逻辑、不新造第二套。``generate_storyboard_pack`` 的整集生成调用仍然从不传函数
+参数 ``revision_notes``（用默认空串），①②两条路径互不冲突。
 """
 from __future__ import annotations
 

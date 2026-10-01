@@ -1,10 +1,18 @@
 """分镜台「分镜正文复核」（``app.production.storyboard_prose_review``）。
 
-真人短剧《顾念长安》第 1 集多代理逐段核查成立的八类真实缺陷（单镜动作过载、写实
+真人短剧《顾念长安》第 1 集多代理逐段核查成立的九类真实缺陷（单镜动作过载、写实
 画风脸红措辞、无台词的持续说话、跨段左右站位翻转、道具凭空出现、跨段重复的动作
-转换、单镜大跨度时间跳跃、否定句写动作）各用一条真实形状的句子覆盖代码核验；再
-覆盖「模型提名、代码核验」的丢弃路径、按升序定向重写、重写仍违规写
-degraded_capabilities、重写抛异常保留原稿、开关关闭逐字不变。
+转换、单镜大跨度时间跳跃、运镜物理不可达、否定句写动作）各用一条真实形状的句子
+覆盖代码核验；再覆盖「模型提名、代码核验」的丢弃路径。
+
+2026-10-01 边写边审：``review_and_revise_segments``/``_run_batch_review``/
+``_regenerate_segment`` 批量后处理已退场（见 ``storyboard_prose_review`` 模块
+docstring「边写边审」），本文件对应的「按升序只重写违规段」整集级测试改为
+``review_segment_inline``（没有违规/有违规未到最后一次尝试/最后一次尝试仍违规
+写 degraded_capabilities/复核调用失败不重写不阻断/开关关闭不发起复核调用）与
+``log_review_summary``（汇总日志）两组单段级测试；「第 N 段重写后第 N+1 段衔接
+的是修正稿」「开关关闭产物逐字不变」这两条需要 ``_generate_all_segment_prompts``
+自己的逐段循环才能验证，见 ``tests/test_storyboard_pack.py``。
 
 2026-10-01 新增 ``repeated_transition_action``（第 1 集重做第二轮分镜独立核查，
 ``/tmp/mjtest/ep1_redo/segments_r2.json`` 第 30/31 段）：上一段末镜已写温念转身
@@ -32,18 +40,15 @@ segment_prompts``/``_review_segment`` 都通过 ``from x import y`` 在本模块
 from __future__ import annotations
 
 import logging
-from types import SimpleNamespace
 
 import pytest
 
-from app.db import set_setting
 from app.harness import model_gateway
 from app.production import storyboard_prose_review as prose_review
 from app.production.storyboard_action_density import MAX_KEY_ACTIONS_PER_SHOT, key_action_definition, over_limit_remedy
 from app.production.storyboard_pack import _AiStoryboardSegmentDraft
 from app.production.storyboard_skin_blush import SEEDANCE_SKIN_BLUSH_RULE
 from app.schemas.segment_identity import SegmentDialogue
-from app.visual_styles import VISUAL_STYLE_PRESETS
 
 
 def _draft(prompt_text: str, *, dialogue: list | None = None, degraded_capabilities: list[str] | None = None) -> _AiStoryboardSegmentDraft:
@@ -216,16 +221,6 @@ def test_previous_shot_text_empty_without_previous_draft():
     assert prose_review._previous_shot_text(None) == ""
 
 
-def test_is_photographic_true_for_real_photo_preset():
-    preset = next(p for p in VISUAL_STYLE_PRESETS if p.photographic)
-    bible = SimpleNamespace(world=SimpleNamespace(visual_style_canonical=preset.prompt))
-    assert prose_review._is_photographic(bible) is True
-
-
-def test_is_photographic_false_without_bible():
-    assert prose_review._is_photographic(None) is False
-
-
 # ---------------------------------------------------------------------------
 # 开关登记：两处声明必须一致，未声明的设置键写接口会拒写
 # ---------------------------------------------------------------------------
@@ -251,108 +246,105 @@ def test_enabled_false_on_explicit_negative_values(monkeypatch, raw):
 
 
 # ---------------------------------------------------------------------------
-# review_and_revise_segments：按升序只重写违规段
+# review_segment_inline：边写边审，调用方每生成一次草稿后调用一次
 # ---------------------------------------------------------------------------
 
-def _three_segment_drafts() -> dict[int, _AiStoryboardSegmentDraft]:
-    return {
-        1: _draft("镜头1：A动作一，动作二，动作三。"),
-        2: _draft("镜头1：B干净无问题。"),
-        3: _draft("镜头1：C动作一，动作二，动作三。"),
-    }
-
-
 @pytest.mark.asyncio
-async def test_only_violated_segments_rewritten_in_ascending_order(monkeypatch):
-    drafts = _three_segment_drafts()
-    review_counts: dict[int, int] = {}
+async def test_no_violation_returns_empty_and_records_clean_outcome(monkeypatch):
+    draft = _draft("镜头1：她安静地坐着看向窗外。")
 
-    async def fake_review_segment(*, episode_id, segment_no, draft, previous_draft, photographic, max_shots):
-        review_counts[segment_no] = review_counts.get(segment_no, 0) + 1
-        if segment_no in (1, 3) and review_counts[segment_no] == 1:
-            return [prose_review.ProseViolation(kind="action_density", shot_label="镜头1", quote="动作一，动作二，动作三", fix="拆镜")]
+    async def clean(*, episode_id, segment_no, draft, previous_draft, photographic, max_shots):
         return []
 
-    regenerated_order: list[int] = []
-
-    async def fake_generate_all(reuse, notes):
-        no = next(n for n in drafts if n not in reuse)
-        regenerated_order.append(no)
-        fixed = dict(reuse)
-        fixed[no] = _draft(f"镜头1：{no}号已改好，干净。")
-        return fixed
-
-    monkeypatch.setattr(prose_review, "_review_segment", fake_review_segment)
-    result = await prose_review.review_and_revise_segments(drafts, episode_id="ep1", bible=None, max_shots=4, regenerate=fake_generate_all)
-
-    assert regenerated_order == [1, 3], "只有违规段被重写，且按段号升序"
-    assert result[1].prompt_text == "镜头1：1号已改好，干净。"
-    assert result[3].prompt_text == "镜头1：3号已改好，干净。"
-    assert result[2] is drafts[2], "干净段原样保留，未被重写"
+    monkeypatch.setattr(prose_review, "_review_segment", clean)
+    outcomes: list[dict] = []
+    revision_text = await prose_review.review_segment_inline(
+        draft, previous_draft=None, episode_id="ep1", segment_no=1, photographic=False, max_shots=4,
+        attempt=0, enabled=True, outcomes=outcomes,
+    )
+    assert revision_text == ""
+    assert draft.degraded_capabilities == []
+    assert outcomes == [{"segment_no": 1, "rewritten": False, "remaining": 0}]
 
 
 @pytest.mark.asyncio
-async def test_remaining_violation_after_rewrite_is_recorded_not_blocking(monkeypatch):
-    drafts = {1: _draft("镜头1：A动作一，动作二，动作三。")}
+async def test_violation_on_first_attempt_returns_revision_notes_without_degrading(monkeypatch):
+    draft = _draft("镜头1：A动作一，动作二，动作三。")
+
+    async def violating(*, episode_id, segment_no, draft, previous_draft, photographic, max_shots):
+        return [prose_review.ProseViolation(kind="action_density", shot_label="镜头1", quote="动作一，动作二，动作三", fix="拆镜")]
+
+    monkeypatch.setattr(prose_review, "_review_segment", violating)
+    outcomes: list[dict] = []
+    revision_text = await prose_review.review_segment_inline(
+        draft, previous_draft=None, episode_id="ep1", segment_no=1, photographic=False, max_shots=4,
+        attempt=0, enabled=True, outcomes=outcomes,
+    )
+    assert "action_density" in revision_text and "拆镜" in revision_text
+    assert draft.degraded_capabilities == [], "还没到最后一次尝试，不写 degraded_capabilities"
+    assert outcomes == [], "还会再来一轮，这次不是终态，不记汇总"
+
+
+@pytest.mark.asyncio
+async def test_violation_on_last_attempt_writes_degraded_and_stops(monkeypatch):
+    draft = _draft("镜头1：依然是动作一，动作二，动作三。")
 
     async def always_violating(*, episode_id, segment_no, draft, previous_draft, photographic, max_shots):
         return [prose_review.ProseViolation(kind="action_density", shot_label="镜头1", quote="动作一，动作二，动作三", fix="拆镜")]
 
-    async def fake_generate_all(reuse, notes):
-        no = next(n for n in drafts if n not in reuse)
-        fixed = dict(reuse)
-        fixed[no] = _draft("镜头1：依然是动作一，动作二，动作三。")  # 重写后仍然超限
-        return fixed
-
     monkeypatch.setattr(prose_review, "_review_segment", always_violating)
-    result = await prose_review.review_and_revise_segments(drafts, episode_id="ep1", bible=None, max_shots=4, regenerate=fake_generate_all)
-
-    assert result[1].shot_count == 3  # 没有抛异常，整集没被阻断
-    assert any("[STORYBOARD_PROSE_REVIEW_REMAINING][未拦截]" in note for note in result[1].degraded_capabilities)
+    outcomes: list[dict] = []
+    revision_text = await prose_review.review_segment_inline(
+        draft, previous_draft=None, episode_id="ep1", segment_no=1, photographic=False, max_shots=4,
+        attempt=prose_review.INLINE_MAX_ATTEMPTS - 1, enabled=True, outcomes=outcomes,
+    )
+    assert revision_text == "", "没有下一轮了，返回空串收尾，不阻断"
+    assert any("[STORYBOARD_PROSE_REVIEW_REMAINING][未拦截]" in note for note in draft.degraded_capabilities)
+    assert outcomes == [{"segment_no": 1, "rewritten": True, "remaining": 1}]
 
 
 @pytest.mark.asyncio
-async def test_rewrite_exception_keeps_original_draft(monkeypatch, caplog):
-    original = _draft("镜头1：A动作一，动作二，动作三。")
-    drafts = {1: original}
+async def test_review_call_failure_does_not_rewrite_or_block(monkeypatch, caplog):
+    """复核调用失败（供应商错误）时 _review_segment 已吞成空列表并记
+    [STORYBOARD_PROSE_REVIEW_FAILED]；review_segment_inline 按「没有违规」
+    处理，不重写不阻断。"""
+    draft = _draft("镜头1：她没有往里走。")
 
-    async def violating_once(*, episode_id, segment_no, draft, previous_draft, photographic, max_shots):
-        return [prose_review.ProseViolation(kind="action_density", shot_label="镜头1", quote="动作一，动作二，动作三", fix="拆镜")]
-
-    async def failing_generate_all(reuse, notes):
+    async def failing(*args, **kwargs):
         raise RuntimeError("供应商 500")
 
-    monkeypatch.setattr(prose_review, "_review_segment", violating_once)
+    monkeypatch.setattr(model_gateway, "chat_structured", failing)
     with caplog.at_level(logging.WARNING):
-        result = await prose_review.review_and_revise_segments(drafts, episode_id="ep1", bible=None, max_shots=4, regenerate=failing_generate_all)
-
-    assert result[1] is original, "重写调用抛异常时保留原稿"
-    assert "[STORYBOARD_PROSE_REVIEW_FAILED]" in caplog.text, "不吞异常信息"
-    assert any("[STORYBOARD_PROSE_REVIEW_REMAINING][未拦截]" in note for note in result[1].degraded_capabilities)
+        revision_text = await prose_review.review_segment_inline(
+            draft, previous_draft=None, episode_id="ep1", segment_no=1, photographic=False, max_shots=4,
+            attempt=0, enabled=True,
+        )
+    assert revision_text == ""
+    assert draft.degraded_capabilities == []
+    assert "[STORYBOARD_PROSE_REVIEW_FAILED]" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_disabled_switch_skips_all_review_calls(monkeypatch):
-    set_setting(prose_review.PROSE_REVIEW_SETTING_KEY, "false")
-    drafts = _three_segment_drafts()
+async def test_disabled_skips_review_call_entirely(monkeypatch):
+    draft = _draft("镜头1：她没有往里走。")
 
     async def _must_not_be_called(*args, **kwargs):
-        raise AssertionError("开关关闭时不应发起任何复核调用")
+        raise AssertionError("enabled=False 时不应发起任何复核调用")
 
-    monkeypatch.setattr(model_gateway, "chat_structured", _must_not_be_called)
-    async def _must_not_regenerate(reuse, notes):
-        raise AssertionError("开关关闭时不应重写")
-
-    result = await prose_review.review_and_revise_segments(drafts, episode_id="ep1", bible=None, max_shots=4, regenerate=_must_not_regenerate)
-
-    assert result is drafts, "开关关闭时产物逐字不变（同一对象，未经任何改写）"
+    monkeypatch.setattr(prose_review, "_review_segment", _must_not_be_called)
+    revision_text = await prose_review.review_segment_inline(
+        draft, previous_draft=None, episode_id="ep1", segment_no=1, photographic=False, max_shots=4,
+        attempt=0, enabled=False,
+    )
+    assert revision_text == ""
+    assert draft.degraded_capabilities == []
 
 
 @pytest.mark.asyncio
-async def test_batch_review_calls_chat_structured_when_enabled(monkeypatch):
+async def test_review_segment_inline_calls_chat_structured_when_enabled(monkeypatch):
     """复核确实走 model_gateway.chat_structured（而不是绕过它），且 kind 来自
     schema 允许的同一份取值——两侧对齐，不靠本文件自己猜一份。"""
-    drafts = {1: _draft("镜头1：她没有往里走。")}
+    draft = _draft("镜头1：她没有往里走。")
     calls = []
 
     async def fake_chat_structured(*args, **kwargs):
@@ -361,9 +353,34 @@ async def test_batch_review_calls_chat_structured_when_enabled(monkeypatch):
         return model_type(violations=[{"kind": "negated_action", "shot_label": "镜头1", "quote": "她没有往里走", "fix": "改成正面写法"}])
 
     monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
-
-    outstanding = await prose_review._run_batch_review(drafts, episode_id="ep1", photographic=False, max_shots=4)
-
+    revision_text = await prose_review.review_segment_inline(
+        draft, previous_draft=None, episode_id="ep1", segment_no=1, photographic=False, max_shots=4,
+        attempt=0, enabled=True,
+    )
     assert len(calls) == 1
     assert calls[0]["call_meta"]["stage_key"] == "storyboard_prose_review"
-    assert outstanding[1][0].kind == "negated_action"
+    assert "negated_action" in revision_text
+
+
+# ---------------------------------------------------------------------------
+# log_review_summary
+# ---------------------------------------------------------------------------
+
+def test_log_review_summary_prints_aggregate_counts(caplog):
+    outcomes = [
+        {"segment_no": 1, "rewritten": True, "remaining": 0},
+        {"segment_no": 2, "rewritten": False, "remaining": 0},
+        {"segment_no": 3, "rewritten": True, "remaining": 2},
+    ]
+    with caplog.at_level(logging.INFO):
+        prose_review.log_review_summary(outcomes, episode_id="ep1", enabled=True)
+    assert "[STORYBOARD_PROSE_REVIEW_SUMMARY]" in caplog.text
+    assert "episode=ep1" in caplog.text
+    assert "segments=3" in caplog.text and "rewritten=2" in caplog.text and "remaining_violations=2" in caplog.text
+
+
+def test_log_review_summary_silent_when_disabled_or_empty(caplog):
+    with caplog.at_level(logging.INFO):
+        prose_review.log_review_summary([{"segment_no": 1, "rewritten": False, "remaining": 0}], episode_id="ep1", enabled=False)
+        prose_review.log_review_summary([], episode_id="ep1", enabled=True)
+    assert "[STORYBOARD_PROSE_REVIEW_SUMMARY]" not in caplog.text
