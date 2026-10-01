@@ -85,8 +85,16 @@ from app.production import (
     storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing,
     storyboard_prop_entrance as _prop_entrance, storyboard_wardrobe_plan as _wardrobe_plan,
     storyboard_physical_anchor as _physical_anchor, storyboard_prop_appearance_lock as _prop_lock,
+    storyboard_beat_action_capacity as _beat_action_capacity,
 )
 from app.production.storyboard_short_drama_beat_guard import restore_dropped_lines_with_invalid_beat
+
+#: 必须与 storyboard_pack.MAX_SHOTS_PER_SEGMENT 同值；本模块不能 import
+#: storyboard_pack（见上方模块 docstring「依赖方向是单向的」），只能复制字面量
+#: ——与下面 _beat_sheet_rules 里已经硬编码的「2-4 个镜头」文案同一先例。改
+#: storyboard_pack.MAX_SHOTS_PER_SEGMENT 时必须同步改这里；漂移由 tests/
+#: test_storyboard_beat_action_capacity.py 的一条断言兜底。
+_MAX_SHOTS_PER_SEGMENT = 4
 
 
 def _validate_beat_sheet_draft(
@@ -277,7 +285,7 @@ def _beat_sheet_rules(
         *_wardrobe_plan.wardrobe_plan_beat_sheet_rules(), *_prop_entrance.prop_entrance_beat_sheet_rules(),
         *_physical_anchor.physical_anchor_beat_sheet_rules(), *_prop_lock.prop_appearance_lock_beat_sheet_rules(),
     ]
-    extra = (_paratext_exclusion_rule(paratext_indexes), context_segment_rule(set(context_indexes)))
+    extra = (_paratext_exclusion_rule(paratext_indexes), context_segment_rule(set(context_indexes)), _beat_action_capacity.segment_key_actions_rule(max_shots=_MAX_SHOTS_PER_SEGMENT))
     rules.extend(rule for rule in extra if rule is not None)
     if adaptation_mode == "short_drama":
         rules = _short_drama.adjust_faithful_rules_for_short_drama(rules)
@@ -318,15 +326,18 @@ def _beat_sheet_draft_cls(adaptation_mode: str) -> type[_AiBeatSheetDraft]:
 def _beat_sheet_soft_checks(
     *, adaptation_mode: str, retry_limit: int, dialogue_quotes: list[DialogueQuote], segments: list[SourceSegment],
 ):
-    """打包全部 5 个 SoftCheck 对象，为 ``_generate_beat_sheet``（已在
+    """打包全部 6 个 SoftCheck 对象，为 ``_generate_beat_sheet``（已在
     function_lines 棘轮基线上零余量）腾函数行数。P0-A/C 两个新检查不接收
-    ``adaptation_mode``——判据本身两档都跑，见各自模块 docstring。"""
+    ``adaptation_mode``——判据本身两档都跑，见各自模块 docstring；段级动作
+    容量（``SegmentActionCapacitySoftCheck``）同一立场，另见 _MAX_SHOTS_
+    PER_SEGMENT 字面量说明。"""
     return (
         _short_drama.SegmentCountSoftCap(adaptation_mode=adaptation_mode, retry_limit=retry_limit, quotes=dialogue_quotes, source_segments=segments),
         _short_drama_budget.DialogueBudgetSoftCap(adaptation_mode=adaptation_mode, retry_limit=retry_limit, quotes=dialogue_quotes),
         _short_drama_hooks.HookBeatSoftCheck(adaptation_mode=adaptation_mode, retry_limit=retry_limit, source_segments=segments),
         _beat_causality.EmotionalTurnSoftCheck(retry_limit=retry_limit, source_segments=segments),
         _beat_foreshadowing.ForeshadowingSoftCheck(retry_limit=retry_limit, source_segments=segments),
+        _beat_action_capacity.SegmentActionCapacitySoftCheck(retry_limit=retry_limit, max_shots=_MAX_SHOTS_PER_SEGMENT),
     )
 
 
@@ -405,7 +416,7 @@ async def _generate_beat_sheet(
     fingerprint = hashlib.sha256(
         json.dumps(task_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()[:24]
-    soft_cap, budget_cap, hook_check, causality_check, foreshadow_check = _beat_sheet_soft_checks(
+    soft_cap, budget_cap, hook_check, causality_check, foreshadow_check, action_capacity_check = _beat_sheet_soft_checks(
         adaptation_mode=adaptation_mode, retry_limit=_BEAT_SHEET_SEMANTIC_RETRY_LIMIT,
         dialogue_quotes=dialogue_quotes, segments=segments,
     )
@@ -424,7 +435,7 @@ async def _generate_beat_sheet(
             *budget_cap.errors(value),
             *hook_check.errors(value),
             *causality_check.errors(value),
-            *foreshadow_check.errors(value),
+            *foreshadow_check.errors(value), *action_capacity_check.errors(value),
         ],
         normalize_payload=_normalize_beat_sheet_payload,
         operation_id=f"storyboard_pack_beat_sheet_{episode_id}_{fingerprint}",

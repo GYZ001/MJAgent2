@@ -104,7 +104,7 @@ from app.production.storyboard_narrative_arc import (
     phase2_segment_rules,
     segment_narrative_arc_payload_fields,
 )
-from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_beats as _action_beats, storyboard_action_density as _action_density, storyboard_cast_lock as _cast_lock, storyboard_shot_mandates as _shot_mandates, storyboard_music_bed as _music_bed, storyboard_skin_blush as _skin_blush, storyboard_prose_review as _prose_review, storyboard_prop_entrance as _prop_entrance, storyboard_wardrobe_plan as _wardrobe_plan, storyboard_revision_notes as _revision_notes, storyboard_prop_appearance_lock as _prop_lock, storyboard_stimulus_voice as _stim_voice, storyboard_transition_plan as _transition_plan
+from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_beats as _action_beats, storyboard_action_density as _action_density, storyboard_cast_lock as _cast_lock, storyboard_shot_mandates as _shot_mandates, storyboard_music_bed as _music_bed, storyboard_skin_blush as _skin_blush, storyboard_prose_review as _prose_review, storyboard_prop_entrance as _prop_entrance, storyboard_wardrobe_plan as _wardrobe_plan, storyboard_revision_notes as _revision_notes, storyboard_prop_appearance_lock as _prop_lock, storyboard_stimulus_voice as _stim_voice, storyboard_transition_plan as _transition_plan, storyboard_beat_action_capacity as _beat_action_capacity
 from app.visual_styles import current_visual_style_prompt, is_photographic_style_prompt
 from app.production.storyboard_segment_ranges import (
     _PARATEXT_PLACEHOLDER_TEXT,
@@ -1064,7 +1064,7 @@ async def _generate_all_segment_prompts(
                 value, dialect_render_format=profile.render_format, required_dialogue=_req, name_to_identity=_n2i,
                 previous_memo=_pm, segment_source_text=_st, delivered_lines=_dl, reserved_lines=_rv, current_segment_no=_no, relevant_scenes=_rs,
             ), *generated_identity_errors(value, payload=payload, source_indexes=_sx, required_dialogue=_req, dialect=profile.render_format, narrator_voice_character=narrator_voice_character),
-            *_sg.filter(repeated_staging_errors(_ch, value.prompt_text, current_segment_no=_no, synopsis=_syn, drop_phrases=_dp)), *_vg.filter(_vh, value.dialogue), *_ag.filter(value.shot_action_beats, shot_count=value.shot_count), *_music_bed.ensure_no_music_bed_in_prompt(value, render_format=profile.render_format, enabled=enhance_music_bed)],
+            *_sg.filter(repeated_staging_errors(_ch, value.prompt_text, current_segment_no=_no, synopsis=_syn, drop_phrases=_dp)), *_vg.filter(_vh, value.dialogue), *_ag.filter(value.shot_action_beats, shot_count=value.shot_count, dialogue_shot_nos=_action_density.dialogue_shot_numbers(value.prompt_text)), *_music_bed.ensure_no_music_bed_in_prompt(value, render_format=profile.render_format, enabled=enhance_music_bed)],
             operation_id=f"storyboard_pack_segment_{episode_id}_{plan.segment_no}_{fingerprint}",
             max_tokens=SEGMENT_PROMPT_ANSWER_TOKENS,
             format_retry_limit=1,
@@ -1110,7 +1110,7 @@ async def _generate_all_segment_prompts(
             draft, source_segment_indexes=plan.source_segment_indexes,
             segment_relevant_scene_ids=relevant_scene_ids, manifest=manifest,
             emotional_turns_here=turns_here2, foreshadowing_here=signals_here2, prop_entrances_here=props_here2, prop_locks_here=_prop_lock.moments_for_segment(plan.beat_ids, appearance_locks),
-        ), *_stim_voice.segment_advisories(voice_here2, draft.dialogue), *_action_density.segment_advisories(draft.shot_action_beats, shot_count=draft.shot_count)]
+        ), *_stim_voice.segment_advisories(voice_here2, draft.dialogue), *_action_density.segment_advisories(draft.shot_action_beats, shot_count=draft.shot_count, dialogue_shot_nos=_action_density.dialogue_shot_numbers(draft.prompt_text))]
         if advisories:
             draft.degraded_capabilities = [*draft.degraded_capabilities, *advisories]
         result[plan.segment_no] = draft
@@ -1325,7 +1325,7 @@ async def generate_storyboard_pack(
             # 整份 beat_draft 里出现的引用异常，不是某一段独有的问题。
             degraded_capabilities=[
                 *segment_drafts[plan.segment_no].degraded_capabilities,
-                *paratext_strip_notes,
+                *paratext_strip_notes, *_beat_action_capacity.segment_advisories_for_plan(plan, max_shots=MAX_SHOTS_PER_SEGMENT),
             ],
             required_dialogue=required_dialogue_by_segment_no.get(plan.segment_no, []),
             palette=plan.palette,

@@ -45,6 +45,14 @@ class _AiSegmentPlan(BaseModel):
     #: 2.4.0：这一段对它引用的每个非 paratext 原文段号声明的句单元范围，
     #: 每个 source_segment_index 恰好一条；校验见 segment_unit_range_errors。
     source_unit_ranges: list[_AiSourceUnitRange] = Field(default_factory=list)
+    #: 2026-10-01：这一段需要呈现的关键动作清单（模型提名，口径与阶段二
+    #: storyboard_action_density.key_action_definition() 完全相同）；代码核验
+    #: 条数是否超过本段承载量，超了必须拆成更多段——见 storyboard_beat_action_
+    #: capacity.segment_action_capacity_errors。默认空列表兼容旧存量 beat_draft
+    #: （storyboard_identity_regenerate._existing_plan 重建时只挑选固定字段，
+    #: 不产出这个字段，同 physical_anchors 等既有字段先例）；不落库，同阶段二
+    #: shot_action_beats（见 storyboard_beat_action_capacity 模块 docstring）。
+    key_actions: list[str] = Field(default_factory=list)
 
 
 #: 弃置只对语气词/寒暄这类短句成立；有说话人、正文超过这个字数的整句台词不是那三类。

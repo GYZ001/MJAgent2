@@ -56,7 +56,12 @@ from app.source_excerpt import SourceSegment
 # 忠实档 causality_beat_sheet_rules 追加一条阶段一 rule（引号台词 vs 转述的判断依据）
 # + _AiEmotionalTurn 新增 stimulus_needs_voice 一个字段——同一份"覆盖忠实档的落点"
 # 逻辑，新值同样用本文件夹具实测得到。
-_EXPECTED_FAITHFUL_FINGERPRINT = "136fb18de4c4e96720f2ed1d"
+# 2026-10-01（段级动作容量，真实回归第 1 集重做 /tmp/mjtest/ep1_redo/segments_r2.json
+# 逐段核查）：忠实档追加一条阶段一 rule（storyboard_beat_action_capacity.
+# segment_key_actions_rule，无条件追加、不按 paratext/context 判空）+ _AiSegmentPlan
+# 新增 key_actions 一个字段——同一份"覆盖忠实档的落点"逻辑，新值同样用本文件夹具
+# 实测得到。
+_EXPECTED_FAITHFUL_FINGERPRINT = "4d64677af4be1d9ff0cd76ff"
 
 
 def _fixture_segments() -> list[SourceSegment]:
@@ -260,7 +265,8 @@ def test_faithful_rules_are_historically_unchanged():
     """把 2026-09-23 改造前 _beat_sheet_rules() 的原始规则文本逐字抄进来做独立
     比对（CLAUDE.md「手写一份修复前的函数体副本」），而不是只信任新函数自己
     的输出。"""
-    from app.production.storyboard_beat_sheet import _beat_sheet_rules
+    from app.production.storyboard_beat_sheet import _beat_sheet_rules, _MAX_SHOTS_PER_SEGMENT
+    from app.production.storyboard_beat_action_capacity import segment_key_actions_rule
     from app.production.storyboard_beat_causality import causality_beat_sheet_rules
     from app.production.storyboard_beat_foreshadowing import foreshadowing_beat_sheet_rules
     from app.production.storyboard_dialogue_ledger import beat_sheet_dialogue_ledger_rules
@@ -302,5 +308,8 @@ def test_faithful_rules_are_historically_unchanged():
         *causality_beat_sheet_rules(), *foreshadowing_beat_sheet_rules(),
         *wardrobe_plan_beat_sheet_rules(), *prop_entrance_beat_sheet_rules(),
         *physical_anchor_beat_sheet_rules(), *prop_appearance_lock_beat_sheet_rules(),
+        # 2026-10-01：段级动作容量规则无条件追加（不像 paratext/context 那样判空），
+        # 见 storyboard_beat_sheet._beat_sheet_rules 的 extra 元组。
+        segment_key_actions_rule(max_shots=_MAX_SHOTS_PER_SEGMENT),
     ]
     assert _beat_sheet_rules(set(), adaptation_mode="faithful") == expected

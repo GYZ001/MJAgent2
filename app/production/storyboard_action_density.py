@@ -39,6 +39,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from app.production.storyboard_staging_repeat import sub_shots
+
 #: 15 秒段固定 2-4 镜（MIN/MAX_SHOTS_PER_SEGMENT，见 storyboard_pack），4 镜时
 #: 每镜约 3-4 秒：一个动作起止加镜头运动至少要 1.5-2 秒才看得清，一镜超过 2 个
 #: 关键动作意味着平均每个动作不到 2 秒——真实回归里十余个动作塞进 4 镜（每镜
@@ -61,11 +63,20 @@ def key_action_definition() -> str:
     （``storyboard_prose_review``）共用这一句原文，两侧不会各数各的（2026-09-30 第 1 集
     重做实测：复核把抬眼/点头/抿嘴笑也算进去，生成侧没算，同一镜两边永远对不上）。
     面部表演不计入的理由见模块 docstring 的真实故障：编造家具、空间错乱都出在身体
-    位移与手部操作物件塞得太多，不在表情。"""
+    位移与手部操作物件塞得太多，不在表情。
+
+    2026-10-01（同一次第 1 集重做实测）新增两条口径：双人镜合并计数（第 5/27/19 段
+    双人各自 2 个动作被当成"各自没超限"放行，实际这一镜总共 4 个）、台词镜收紧到 1
+    （第 6 段镜头1 三个动作叠加约 30 字台词，台词本身就占去了一镜大部分时长）。两条
+    都接入 ``action_density_errors``（见该函数）。"""
     return (
         "关键动作指需要身体位移、手部操作物件或改变画面环境状态的动作：走位、起身/坐下/蹲下、"
         "拿起/放下/递交物品、换装、开关灯或拉电闸都各算一个；面部表情、视线变化、呼吸与嘴部开合"
         "不需要位移也不需要手部操作，可以伴随关键动作同时发生，不单独计数。"
+        "同一镜里有多个人物各自做动作时，这些动作合并计入这一镜的关键动作总数，不按人分别计数"
+        "（两个人各做两个动作，这一镜就是四个，不是各自两个都在限额内）。"
+        "这一镜如果要说出一句台词（写了 {{speech:Uxx}} 占位符），这一镜最多算 1 个关键动作——"
+        "台词本身占去这一镜的大部分时长，装不下更多身体动作。"
     )
 
 
@@ -92,17 +103,45 @@ def shot_action_beats_rule(*, max_shots: int, max_per_shot: int = MAX_KEY_ACTION
     )
 
 
+def _merged_key_actions_by_shot(shot_action_beats: list[ShotActionBeats]) -> dict[int, list[str]]:
+    """同一 shot_no 的多条申报合并（例如模型按人物分开报）：按发生顺序把 key_actions
+    拼起来再核验总数，不按申报条目数核验——2026-10-01 真实回归第 5/27/19 段双人各自
+    申报 2 个、分成两条 ShotActionBeats，若各自核验都在限额内放行，实际这一镜总共
+    4 个（见 key_action_definition 的新增口径）。"""
+    merged: dict[int, list[str]] = {}
+    for beat in shot_action_beats:
+        merged.setdefault(beat.shot_no, []).extend(beat.key_actions)
+    return merged
+
+
+def dialogue_shot_numbers(prompt_text: str) -> frozenset[int]:
+    """``prompt_text`` 里带 ``{{speech:`` 占位符的镜头号（1-based，与
+    ``ShotActionBeats.shot_no`` 同一套编号，取自 ``storyboard_staging_repeat.
+    sub_shots`` 的「镜头N：」切分）。这一镜要说出台词，台词本身占去大部分时长，
+    关键动作上限收紧到 1（见 key_action_definition 的新增口径）。"""
+    return frozenset(i for i, text in enumerate(sub_shots(prompt_text), start=1) if "{{speech:" in text)
+
+
 def action_density_errors(
     shot_action_beats: list[ShotActionBeats], *, max_per_shot: int = MAX_KEY_ACTIONS_PER_SHOT,
+    dialogue_shot_nos: frozenset[int] = frozenset(),
 ) -> list[str]:
-    """阻断判据：申报的动作数是否超过上限，只数模型自己报的条数。"""
-    return [
-        f"镜头 {beat.shot_no} 申报了 {len(beat.key_actions)} 个关键动作"
-        f"（{'、'.join(beat.key_actions)}），超过每镜 {max_per_shot} 个的上限：请把这一镜拆成更多"
-        "镜头，或把非关键动作交给镜头之间的硬切省略（例如换装用硬切直接呈现换好后的样子）"
-        for beat in shot_action_beats
-        if len(beat.key_actions) > max_per_shot
-    ]
+    """阻断判据：申报的动作数（同一镜多条申报先合并，见 ``_merged_key_actions_
+    by_shot``）是否超过上限，只数模型自己报的条数。``dialogue_shot_nos`` 内的
+    镜头上限收紧到 1（台词镜，见 ``dialogue_shot_numbers``）。"""
+    errors = []
+    for shot_no, actions in sorted(_merged_key_actions_by_shot(shot_action_beats).items()):
+        is_dialogue_shot = shot_no in dialogue_shot_nos
+        limit = 1 if is_dialogue_shot else max_per_shot
+        if len(actions) <= limit:
+            continue
+        reason = "这一镜有台词占位符，台词本身占去大部分时长，" if is_dialogue_shot else ""
+        errors.append(
+            f"镜头 {shot_no} 申报了 {len(actions)} 个关键动作"
+            f"（{'、'.join(actions)}），超过每镜 {limit} 个的上限：{reason}请把这一镜拆成更多"
+            "镜头，或把非关键动作交给镜头之间的硬切省略（例如换装用硬切直接呈现换好后的样子）"
+        )
+    return errors
 
 
 def undeclared_shot_errors(
@@ -136,10 +175,13 @@ class ActionDensitySoftCheck:
         self.segment_no = segment_no
         self.calls = 0
 
-    def filter(self, shot_action_beats: list[ShotActionBeats], *, shot_count: int) -> list[str]:
+    def filter(
+        self, shot_action_beats: list[ShotActionBeats], *, shot_count: int,
+        dialogue_shot_nos: frozenset[int] = frozenset(),
+    ) -> list[str]:
         self.calls += 1
         problems = [
-            *action_density_errors(shot_action_beats),
+            *action_density_errors(shot_action_beats, dialogue_shot_nos=dialogue_shot_nos),
             *undeclared_shot_errors(shot_action_beats, shot_count=shot_count),
         ]
         if not problems or self.calls <= self.hard_attempts:
@@ -147,7 +189,9 @@ class ActionDensitySoftCheck:
         return []
 
 
-def segment_advisories(shot_action_beats: list[ShotActionBeats], *, shot_count: int) -> list[str]:
+def segment_advisories(
+    shot_action_beats: list[ShotActionBeats], *, shot_count: int, dialogue_shot_nos: frozenset[int] = frozenset(),
+) -> list[str]:
     """非阻断，供 ``storyboard_pack`` 合并进 ``degraded_capabilities``——超限
     判据与 ``ActionDensitySoftCheck`` 同源（``action_density_errors``），独立
     重算；未申报判据同样独立重算，但用区别于「超限」的独立标记
@@ -155,7 +199,7 @@ def segment_advisories(shot_action_beats: list[ShotActionBeats], *, shot_count: 
     """
     return [
         f"[STORYBOARD_PACK_ACTION_DENSITY][未拦截] {error}"
-        for error in action_density_errors(shot_action_beats)
+        for error in action_density_errors(shot_action_beats, dialogue_shot_nos=dialogue_shot_nos)
     ] + [
         f"[STORYBOARD_PACK_ACTION_DENSITY_UNDECLARED][未拦截] {error}"
         for error in undeclared_shot_errors(shot_action_beats, shot_count=shot_count)
