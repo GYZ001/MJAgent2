@@ -496,7 +496,7 @@ DEFAULT_SETTINGS = {
     # PRD-03 分镜台独立灰度/回滚开关；P0 服务端防线不受 UI 开关影响。
     "storyboard_workspace_safe_readonly": "false",
     "storyboard_structure_edit_enabled": "true",
-    "storyboard_source_rebind_enabled": "true",
+    "storyboard_source_rebind_enabled": "true", "storyboard_prose_review_enabled": "true",  # 分镜正文复核默认开启
     "video_reference_max_images": "9",
     "video_reference_min_generated": "1",   # 参考图模式每镜至少新生成几张关键帧参考图（防止只剩定妆照）
     "video_supporting_keyframe_candidates": "3", # 每张辅助时序关键帧同样固定生成 3 张，并独立择优保留 1 张

@@ -157,6 +157,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "storyboard_workspace_safe_readonly": _boolean("分镜台安全只读模式", "false"),
     "storyboard_structure_edit_enabled": _boolean("分镜结构编辑", "true", experimental=True),
     "storyboard_source_rebind_enabled": _boolean("分镜原文重绑定", "true", experimental=True),
+    "storyboard_prose_review_enabled": _boolean("分镜正文复核", "true", experimental=True),
     "video_reference_batch_prompt": _boolean("批量参考图提示词", "true"),
     "video_reference_role_adaptive": _boolean("质量角色自适应", "false", experimental=True),
     # 角色固定音色 U3（2026-09-24）：视频请求接入参考音频，默认开启（用户要求默认就走，没有声音的角色逐个跳过）；见

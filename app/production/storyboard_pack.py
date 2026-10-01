@@ -104,7 +104,7 @@ from app.production.storyboard_narrative_arc import (
     phase2_segment_rules,
     segment_narrative_arc_payload_fields,
 )
-from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_beats as _action_beats, storyboard_action_density as _action_density, storyboard_cast_lock as _cast_lock, storyboard_shot_mandates as _shot_mandates, storyboard_music_bed as _music_bed, storyboard_skin_blush as _skin_blush, storyboard_prop_entrance as _prop_entrance, storyboard_wardrobe_plan as _wardrobe_plan, storyboard_revision_notes as _revision_notes, storyboard_prop_appearance_lock as _prop_lock, storyboard_stimulus_voice as _stim_voice, storyboard_transition_plan as _transition_plan
+from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_beats as _action_beats, storyboard_action_density as _action_density, storyboard_cast_lock as _cast_lock, storyboard_shot_mandates as _shot_mandates, storyboard_music_bed as _music_bed, storyboard_skin_blush as _skin_blush, storyboard_prose_review as _prose_review, storyboard_prop_entrance as _prop_entrance, storyboard_wardrobe_plan as _wardrobe_plan, storyboard_revision_notes as _revision_notes, storyboard_prop_appearance_lock as _prop_lock, storyboard_stimulus_voice as _stim_voice, storyboard_transition_plan as _transition_plan
 from app.visual_styles import current_visual_style_prompt, is_photographic_style_prompt
 from app.production.storyboard_segment_ranges import (
     _PARATEXT_PLACEHOLDER_TEXT,
@@ -1294,17 +1294,14 @@ async def generate_storyboard_pack(
     # 旧路径下并行意味着生成第 N 段的那次调用互相看不到彼此，是跨段割裂感
     # 的结构性根因。答案装不进一次 completion 时顺序分批，后续批次带着已写
     # 段落，不退回互不可见的并行。
-    segment_drafts = await _generate_all_segment_prompts(
-        episode_id=episode_id,
-        episode_no=episode_no,
-        beat_draft=beat_draft,
-        segments=segments,
-        payload=payload,
-        target_video_model=target_video_model,
-        bible=bible,
-        required_dialogue_by_segment_no=required_dialogue_by_segment_no,
-        conn=conn, project_id=ep["project_id"], aspect_ratio=resolve_aspect_ratio(conn, ep["project_id"]), enhance_music_bed=enhance_music_bed_enabled(conn, ep["project_id"]), narrator_voice_character=resolve_narrator_voice_character(conn, ep["project_id"]),
-    )
+    # 2026-09-30：与 storyboard_prose_review 的定向重写回调共用同一套关键字参数，收进 dict 复用，避免两处重复写参数表。
+    segment_prompt_kwargs: dict[str, Any] = {
+        "episode_id": episode_id, "episode_no": episode_no, "beat_draft": beat_draft, "segments": segments, "payload": payload, "target_video_model": target_video_model, "bible": bible,
+        "required_dialogue_by_segment_no": required_dialogue_by_segment_no, "conn": conn, "project_id": ep["project_id"], "aspect_ratio": resolve_aspect_ratio(conn, ep["project_id"]),
+        "enhance_music_bed": enhance_music_bed_enabled(conn, ep["project_id"]), "narrator_voice_character": resolve_narrator_voice_character(conn, ep["project_id"]),
+    }
+    segment_drafts = await _generate_all_segment_prompts(**segment_prompt_kwargs)
+    segment_drafts = await _prose_review.review_and_revise_segments(segment_drafts, episode_id=episode_id, bible=bible, regenerate=lambda reuse, notes: _generate_all_segment_prompts(**segment_prompt_kwargs, reuse_segments=reuse, revision_notes=notes))
     pack_segments = [
         StoryboardPackSegment(
             segment_no=plan.segment_no,
