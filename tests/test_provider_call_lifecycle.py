@@ -119,10 +119,9 @@ def test_every_storyboard_pack_stage_key_clears_the_generic_ceiling() -> None:
     import pathlib
     import re
 
-    source = pathlib.Path(
-        hiagent.__file__
-    ).with_name("production") / "storyboard_pack.py"
-    declared = set(re.findall(r'"stage_key":\s*"(storyboard_[^"]+)"', source.read_text()))
+    production = pathlib.Path(hiagent.__file__).with_name("production")  # 2026-10-01 起扫全部分镜模块：逐段生成已拆出 storyboard_pack.py
+    sources = [p.read_text() for p in production.glob("storyboard*.py")]
+    declared = {k for text in sources for k in re.findall(r'"stage_key":\s*"(storyboard_[^"]+)"', text)}
     assert declared, "分镜包必须自报 stage_key，否则读超时只能落回通用兜底"
     for stage_key in sorted(declared):
         assert hiagent._chat_read_timeout_s({"stage_key": stage_key}) > (
