@@ -29,7 +29,10 @@ from app.evidence import media as media_evidence
 from app.orchestration import media_scheduler
 
 from . import character_count_gate, subtitle_gate
+from .authority import _assert_review_dependency_fence_async
 from .common import _retry_tasks
+from .enqueue import reconcile_episode_generation_status
+from .fences import ReviewDependencyFence
 from .job_state import _paid_video_attempt_count, _set_job
 
 
@@ -146,8 +149,6 @@ async def review_fence_capture(job, version_id, write_point, provider_recovery_o
     ``raise``，不花额度。"""
     if provider_recovery_only:
         return stale_detail
-    from .authority import _assert_review_dependency_fence_async
-    from .fences import ReviewDependencyFence
     try:
         await _assert_review_dependency_fence_async(job, version_id, write_point)
     except ReviewDependencyFence as exc:
@@ -191,9 +192,6 @@ async def fence_or_downgrade(conn, job, job_id, owner, version, cost, write_poin
     """``candidate_evidence``/``adoption_relation`` 写点：版本此时已经是
     succeeded，命中依赖围栏同样不得直接判 failed 丢弃——降级为 waiting_human。
     返回 True 时调用方必须 ``return``（结果已处理完毕，不再继续采纳尾段）。"""
-    from .authority import _assert_review_dependency_fence_async
-    from .enqueue import reconcile_episode_generation_status
-    from .fences import ReviewDependencyFence
     try:
         await _assert_review_dependency_fence_async(job, version["id"], write_point)
     except ReviewDependencyFence as exc:
@@ -380,7 +378,6 @@ def settle_technical_failure(
       VideoTechnicalGateExhausted 交人工，文案带具体原因与出路。
     """
     from app.media_pipeline.retry_policy import technical_resubmit_limit
-    from .enqueue import reconcile_episode_generation_status
 
     if not supervisor_controlled and resubmits >= technical_resubmit_limit():
         reason = _technical_issue_summary(version_id)
@@ -398,8 +395,6 @@ def settle_technical_failure(
 
 async def adopt_and_settle_candidate(conn, job, job_id, owner, version, cost, supervisor_controlled) -> None:
     """非 Supervisor 掌控时采用最佳候选；随后统一结算预算并推进分集状态。"""
-    from .enqueue import reconcile_episode_generation_status
-
     if not supervisor_controlled:
         if await fence_or_downgrade(conn, job, job_id, owner, version, cost, "adoption_relation"):
             return
