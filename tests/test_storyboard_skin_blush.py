@@ -28,6 +28,7 @@ from app.production.storyboard_pack import (
     _AiStoryboardSegmentDraft,
     _generate_all_segment_prompts,
 )
+from app.production.storyboard_prop_visibility import prop_visibility_dialect_rule
 from app.production.storyboard_shot_mandates import shot_mandates_dialect_rule
 from app.schemas import Bible, World
 from app.source_excerpt import SourceSegment
@@ -71,24 +72,34 @@ def test_rules_are_non_empty_strings():
         assert isinstance(rule, str) and rule
 
 
-def test_seedance_rule_is_a_positive_statement_with_mild_degree_words():
-    """正面陈述：给出怎么写的具体样例与程度词，不是一句孤立的禁令。"""
+def test_seedance_rule_is_a_positive_statement_covering_every_color_source():
+    """2026-10-01 第五版 35 段复查推翻初版"写轻一点"的修法（轻量写法仍有相当比例被画成
+    色块）：正面陈述要求人脸不写任何局部颜色，而不是只要求写得轻；覆盖情绪泛红、妆容颜色、
+    环境光映在脸上三类触发源，并给出替代表演维度与光线该写在哪里。"""
     rule = skin_blush.SEEDANCE_SKIN_BLUSH_RULE
-    assert "轻微、自然、渐变的红晕" in rule
-    assert "脸颊泛起淡淡的红晕" in rule
-    assert "眼神" in rule and "嘴唇" in rule and "手部动作" in rule and "停顿" in rule
+    assert "不写任何局部颜色" in rule
+    assert "妆容呈现的颜色" in rule
+    assert "彩色光线照在脸颊或半边脸上" in rule
+    assert "眼神" in rule and "嘴唇" in rule and "手部动作" in rule and "停顿" in rule and "呼吸" in rule
+    assert "整段画面/场景的光线描述" in rule
 
 
-def test_h3_rule_is_a_positive_statement_with_mild_degree_words():
+def test_h3_rule_is_a_positive_statement_covering_every_color_source():
     rule = skin_blush.MINIMAX_H3_SKIN_BLUSH_RULE
-    assert "a faint blush rises on her cheeks" in rule
-    assert "the eyes" in rule and "the lips" in rule and "hand gestures" in rule and "a held pause" in rule
+    assert "do not write any localized color on a character's face" in rule
+    assert "a color applied by makeup" in rule
+    assert "a colored light tint landing on a cheek" in rule
+    assert "the eyes" in rule and "the lips" in rule and "hand gestures" in rule and "a held pause" in rule and "breath" in rule
+    assert "scene lighting description" in rule
 
 
-def test_rule_text_does_not_prescribe_a_spreading_range_or_path():
-    """根因是「范围+路径」式描述（"一路漫到耳根"），规则正文不应示范同一种写法——
-    只按数据（规则文本本身）核验，不靠对生成结果搜关键字「红」做判据。"""
+def test_rule_text_no_longer_prescribes_writing_a_blush_at_all():
+    """初版规则示范过「脸颊泛起淡淡的红晕」这类轻量写法本身——2026-10-01 实测这类写法仍
+    有相当比例被画成色块，新规则不应再给出任何"该怎么写脸红"的正面范例，只给出不写脸红时
+    改写去哪（眼神/嘴唇/手部/停顿、或场景光线描述）。只按数据（规则文本本身）核验。"""
+    assert "脸颊泛起淡淡的红晕" not in skin_blush.SEEDANCE_SKIN_BLUSH_RULE
     assert "漫到" not in skin_blush.SEEDANCE_SKIN_BLUSH_RULE
+    assert "a faint blush rises" not in skin_blush.MINIMAX_H3_SKIN_BLUSH_RULE
     assert "spread" not in skin_blush.MINIMAX_H3_SKIN_BLUSH_RULE
 
 
@@ -167,12 +178,15 @@ async def _run_with_bible(monkeypatch, bible: Bible | None):
 @pytest.mark.asyncio
 async def test_no_bible_leaves_dialect_instructions_byte_identical(monkeypatch):
     """CLAUDE.md「未启用分支必须逐字不变」：没有圣经（画风解析不出）时，
-    dialect_instructions 必须与本次改动之前逐字相同。"""
+    dialect_instructions 必须与本次改动之前逐字相同——除了 2026-10-01 新增的道具可见性
+    规则（``storyboard_prop_visibility``），它和 shot_mandates 同一先例，无条件拼接、
+    不随开关/画风变化，因此这里也要算进预期基线。"""
     captured = await _run_with_bible(monkeypatch, bible=None)
     expected_dialect_instructions = (
         f"{SEEDANCE_DIALECT_INSTRUCTIONS}\n{decisive_action_dialect_rule(_SEEDANCE_FORMAT)}"
         f"\n{shot_action_beats_rule(max_shots=MAX_SHOTS_PER_SEGMENT)}"
         f"\n{shot_mandates_dialect_rule(_SEEDANCE_FORMAT)}"
+        f"\n{prop_visibility_dialect_rule(_SEEDANCE_FORMAT)}"
     )
     assert captured["dialect_instructions"] == expected_dialect_instructions
 
