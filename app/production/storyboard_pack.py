@@ -82,12 +82,12 @@ from app.production.storyboard_continuity_memo import (
     _AiContinuityMemo, ensure_wardrobe_continuity_in_prompt, ensure_prop_form_matches_lock, continuity_memo_character_advisories, continuity_memo_errors, continuity_memo_payload,
 )
 from app.production.storyboard_travel_direction import ensure_travel_direction_in_prompt
+from app.production.storyboard_continuity_advisories import segment_continuity_location_advisories
 from app.production.screenplay_markers import joined_source_text, parse_scene_header, required_beats_errors, segment_structure
 from app.production.storyboard_overlay_text import overlay_text_errors
 from app.production.storyboard_reference_repair import strip_extra_reference_markers
 from app.production.storyboard_dialogue_extract import extract_dialogue_targets
-from app.production.storyboard_dialogue_attribution import (dialogue_speaker_errors, manifest_name_to_identity,
-                                                             repair_draft_tail)
+from app.production.storyboard_dialogue_attribution import dialogue_speaker_errors, manifest_name_to_identity, repair_draft_tail
 from app.production.storyboard_dialogue_ledger import (
     dialogue_ledger_summary,
     required_dialogue_for_segments,
@@ -775,7 +775,7 @@ def _segment_content_advisories(
     manifest: dict[str, Any] | None,
     segment_relevant_scene_ids: set[str] = frozenset(),
     emotional_turns_here: list[Any],
-    foreshadowing_here: list[Any], prop_entrances_here: list[Any], prop_locks_here: list[Any],
+    foreshadowing_here: list[Any], prop_entrances_here: list[Any], prop_locks_here: list[Any], continuity_location_advisories: list[str] = (),
 ) -> list[str]:
     """Non-blocking content checks: computed every time, never gate generation.
 
@@ -789,7 +789,7 @@ def _segment_content_advisories(
     段落里在场"的结论），不是全集已知人物表，与
     app.validators.storyboard_pack_dialogue_errors 用的是同一套判据，只是
     这里在生成时就先算一遍、写进产物，那边在确认时再算一遍、当作可见但
-    不拦截的 warning——两处判据不重复发明，只是消费方式不同。
+    不拦截的 warning——两处判据不重复发明，只是消费方式不同；``continuity_location_advisories``（layout/道具位置跨段变化两条告警）由调用方用 ``storyboard_continuity_advisories.segment_continuity_location_advisories`` 算好传入，默认空元组兼容本文件其余不关心连贯性备忘的直接调用点。
     """
     # Tag names deliberately match app.validators.storyboard_pack_dialogue_errors'
     # [STORYBOARD_PACK_DIALOGUE_*] codes -- same underlying judgment computed
@@ -849,8 +849,8 @@ def _segment_content_advisories(
     advisories.extend(
         continuity_memo_character_advisories(draft.continuity_memo, segment_character_ids)
     )
-    # P0-A/C（2026-09-27）/P0-F（2026-09-30）：情绪转折/伏笔/道具锁定外观"是否真的被写成画面"，同一套 advisory 哲学，见各自 segment_advisories 的 docstring。
-    advisories.extend([*_beat_causality.segment_advisories(list(emotional_turns_here), draft.prompt_text), *_beat_foreshadowing.segment_advisories(list(foreshadowing_here), draft.prompt_text), *_prop_entrance.segment_advisories(list(prop_entrances_here), draft.prompt_text), *_prop_lock.segment_advisories(list(prop_locks_here), draft.prompt_text)])
+    # P0-A/C（2026-09-27）/P0-F（2026-09-30）：情绪转折/伏笔/道具锁定外观"是否真的被写成画面"，同一套 advisory 哲学，见各自 segment_advisories 的 docstring；2026-10-01 并入 continuity_location_advisories（layout/道具位置跨段变化，见 storyboard_continuity_advisories 模块 docstring）。
+    advisories.extend([*_beat_causality.segment_advisories(list(emotional_turns_here), draft.prompt_text), *_beat_foreshadowing.segment_advisories(list(foreshadowing_here), draft.prompt_text), *_prop_entrance.segment_advisories(list(prop_entrances_here), draft.prompt_text), *_prop_lock.segment_advisories(list(prop_locks_here), draft.prompt_text), *continuity_location_advisories])
     # 2026-09-29：可见角色正文里除人数锁定句外再无 @ 点名——参考图仍会照发，
     # 常见成因是闪回/回忆换了年龄却仍绑着当前定妆照（真实回归见 storyboard_cast_lock 模块）。
     advisories.extend(_cast_lock.unmentioned_visible_character_advisories(draft))
@@ -1109,7 +1109,7 @@ async def _generate_all_segment_prompts(
         advisories = [*_segment_content_advisories(
             draft, source_segment_indexes=plan.source_segment_indexes,
             segment_relevant_scene_ids=relevant_scene_ids, manifest=manifest,
-            emotional_turns_here=turns_here2, foreshadowing_here=signals_here2, prop_entrances_here=props_here2, prop_locks_here=_prop_lock.moments_for_segment(plan.beat_ids, appearance_locks),
+            emotional_turns_here=turns_here2, foreshadowing_here=signals_here2, prop_entrances_here=props_here2, prop_locks_here=_prop_lock.moments_for_segment(plan.beat_ids, appearance_locks), continuity_location_advisories=segment_continuity_location_advisories(draft, plan, by_segment_no, segments, paratext_indexes),
         ), *_stim_voice.segment_advisories(voice_here2, draft.dialogue), *_action_density.segment_advisories(draft.shot_action_beats, shot_count=draft.shot_count, dialogue_shot_nos=_action_density.dialogue_shot_numbers(draft.prompt_text))]
         if advisories:
             draft.degraded_capabilities = [*draft.degraded_capabilities, *advisories]
