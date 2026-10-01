@@ -357,30 +357,20 @@ def _assert_review_dependency_fence(job, version_id: str, write_point: str) -> N
     # The current shot's gallery is produced/updated by this very job.  It is
     # an output of the run, not an upstream dependency: comparing it here
     # makes a successful reference build invalidate its own captured token.
-    # Other shots remain fenced, so unrelated asset edits still stop a stale
-    # provider result from becoming a candidate.
     target_shot_id = row["shot_id"] if row else None
 
-    # Modern narrative jobs bind exact asset revisions in the validated video
-    # plan and recheck them again at provider submission. Shot galleries are
-    # downstream outputs: parallel sibling jobs naturally add images and must
-    # not invalidate one another's captured qualification snapshot — a sibling
-    # shot resolving its own gallery for the first time only ever *adds* an
-    # entry, it never touches this shot's own dependencies.
-    #
-    # This must therefore be a subset check (every asset this job's snapshot
-    # depended on is still present, unchanged, right now), not a full-set
-    # equality: exact equality also breaks the moment any sibling shot's
-    # gallery grows mid-flight, even though nothing this job depends on
-    # actually changed. Reproduced on EP1: shots 5/6/7 were technically valid
-    # and already downloaded, but got fenced out purely because shot 5/6's
-    # own galleries gained entries while an earlier sibling's job was still
-    # awaiting its own later checkpoint. A previously-captured entry that
-    # disappears or changes (a real edit/removal of a qualified asset) must
-    # still fail closed; a snapshot merely gaining unrelated entries must not.
+    # Subset check, not full-set equality: a sibling shot resolving/growing its
+    # own gallery must not invalidate this job (EP1 shots 5/6/7, 2026-09-15).
+    # Narrowed further to shared-library entities only (2026-10-01《顾念长安》
+    # EP1 二次生产事故：段 20 自己改选哪几件道具、段 19 丢一张本镜用不到的
+    # "反打"场景图，都把毫不相关的段 5/18 任务判成过期——见
+    # _review_shared_asset_entities 文档）。disappearing/changed entries within
+    # that narrowed scope still fail closed.
+    shared_entities = _review_shared_asset_entities(expected_assets, target_shot_id)
     assets_equal = bool(
         not expected_assets
-        or _review_asset_contract(expected_assets, target_shot_id) <= _review_asset_contract(current_assets, target_shot_id)
+        or _review_asset_contract(expected_assets, target_shot_id, shared_entities)
+        <= _review_asset_contract(current_assets, target_shot_id, shared_entities)
     )
     if (
         current.get("eligible_for_production")
@@ -429,11 +419,34 @@ def _assert_job_lease(job_id: str, owner: str, *, lease_seconds: float = 180.0) 
 __all__ = [name for name in globals() if not name.startswith("__")]
 
 
-def _review_asset_contract(items, target_shot_id):
-    """比较其他镜头的素材身份，忽略每次重建产生的引用行编号。"""
-    # 契约只看「哪个镜头用了哪个素材版本、门禁结果」：version_id/ref_id 是每次任务新生成的
-    # 行 id，同一素材再入队就换一个。EP1 串接实测：链上相邻镜头先后重建参考图行，彼此把
-    # 对方快照里的旧 ref_id 判成消失 → REVIEW_DEPENDENCY_STALE → 重入队 → 再互相打死。
+def _review_shared_asset_entities(items, target_shot_id):
+    """本镜自己在捕获快照时实际依赖的「共享素材库」实体集合。
+
+    只有 (entity_type, entity_name) 且带着真实 ``asset_version``（人物库
+    portrait_id / 场景库 scene_reference_id）的条目才代表"多个镜头引用同一条
+    库记录"；道具参考图在本仓库没有稳定库版本号（见
+    ``app.video_modes.prop_references.prop_library_anchors``，从不写
+    library_revision_id/library_view_id），它的 selectedForSeedance 勾选只是
+    那一镜自己这次生成的输出，不是任何其它镜头的上游依赖。
+
+    2026-10-01《顾念长安》EP1 两次生产事故实测复现：段 20 自己换了一次道具
+    勾选（与本镜无关）、段 19 的参考图少了一张本镜根本不用的"反打"场景图，
+    都曾把毫不相关的段 18/段 5 任务判成 REVIEW_DEPENDENCY_STALE——前者没有
+    asset_version、后者的实体不在本镜自己的依赖集合里，两者都不该参与比较。
+    """
+    return {
+        (item.get("entity_type"), item.get("entity_name"))
+        for item in items
+        if item.get("shot_id") == target_shot_id and item.get("asset_version")
+    }
+
+
+def _review_asset_contract(items, target_shot_id, shared_entities):
+    """比较其他镜头里、本镜真正共享依赖的素材身份，忽略引用行编号。"""
+    # version_id/ref_id 是每次任务新生成的行 id，同一素材再入队就换一个
+    # （EP1 串接实测：链上相邻镜头先后重建参考图行，彼此把对方快照里的旧
+    # ref_id 判成消失）；shared_entities 把比较范围收窄到本镜自己依赖、且真有
+    # 库版本号的实体（见 _review_shared_asset_entities 文档）。
     return {
         json.dumps(
             {key: value for key, value in item.items() if key not in {"version_id", "ref_id"}},
@@ -441,4 +454,6 @@ def _review_asset_contract(items, target_shot_id):
         )
         for item in items
         if item.get("shot_id") != target_shot_id
+        and item.get("asset_version")
+        and (item.get("entity_type"), item.get("entity_name")) in shared_entities
     }
