@@ -56,14 +56,39 @@ class ShotActionBeats(BaseModel):
     )
 
 
-def shot_action_beats_rule(max_per_shot: int = MAX_KEY_ACTIONS_PER_SHOT) -> str:
+def key_action_definition() -> str:
+    """「关键动作」的计数口径——生成时的自报（``shot_action_beats_rule``）与正文复核
+    （``storyboard_prose_review``）共用这一句原文，两侧不会各数各的（2026-09-30 第 1 集
+    重做实测：复核把抬眼/点头/抿嘴笑也算进去，生成侧没算，同一镜两边永远对不上）。
+    面部表演不计入的理由见模块 docstring 的真实故障：编造家具、空间错乱都出在身体
+    位移与手部操作物件塞得太多，不在表情。"""
+    return (
+        "关键动作指需要身体位移、手部操作物件或改变画面环境状态的动作：走位、起身/坐下/蹲下、"
+        "拿起/放下/递交物品、换装、开关灯或拉电闸都各算一个；面部表情、视线变化、呼吸与嘴部开合"
+        "不需要位移也不需要手部操作，可以伴随关键动作同时发生，不单独计数。"
+    )
+
+
+def over_limit_remedy(*, max_shots: int) -> str:
+    """一镜超过上限时的正确应对，生成与复核共用。``max_shots`` 由调用方显式传入
+    ``storyboard_pack.MAX_SHOTS_PER_SEGMENT``（本模块不能反向导入 storyboard_pack）。
+    2026-09-30 实测：旧写法只说「拆成更多镜头」，而一段最多 ``max_shots`` 镜——已经
+    满镜的段落照着改不了，复核判它违规、重写也改不掉，同一条问题原样留到最后。"""
+    return (
+        f"一段最多 {max_shots} 个镜头。镜头数还没到 {max_shots} 时，可以把动作拆到新增的镜头里；"
+        f"已经是 {max_shots} 个镜头时，把动作之间的过渡过程交给镜头之间的硬切省略——下一镜起幅直接"
+        "呈现动作已经完成后的状态（例如不拍蹲下的过程，起幅时她已蹲在墙角；不拍逐颗扣扣子的过程，"
+        "起幅时扣子已经扣好），原文写到的每个结果状态都要在画面里出现，原文节拍一个都不删。"
+    )
+
+
+def shot_action_beats_rule(*, max_shots: int, max_per_shot: int = MAX_KEY_ACTIONS_PER_SHOT) -> str:
     """阶段二正面陈述：declare 字段怎么写、超限时怎么正确应对。"""
     return (
         "shot_action_beats：为 prompt_text 里写到的每一镜各申报一条（shot_no 从 1 开始，与镜头顺序"
-        "对应），key_actions 按发生顺序列出这一镜里的每一个关键动作（换装、开关灯、走位、拿起/放下"
-        f"物品都算一个动作）。一镜最多写 {max_per_shot} 个关键动作——15 秒段每镜只有约 3-4 秒，装不下"
-        "更多：动作多的时候，把它们拆成更多镜头，或者把非关键动作交给镜头之间的硬切省略，例如换装"
-        "不需要拍换的过程，用硬切直接呈现换好后的样子。"
+        "对应），key_actions 按发生顺序列出这一镜里的每一个关键动作。"
+        f"{key_action_definition()}一镜最多写 {max_per_shot} 个关键动作——15 秒段每镜只有约 3-4 秒，"
+        f"装不下更多。{over_limit_remedy(max_shots=max_shots)}"
     )
 
 

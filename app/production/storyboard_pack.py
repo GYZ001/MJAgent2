@@ -1030,7 +1030,7 @@ async def _generate_all_segment_prompts(
             "recent_camera_language": camera_history,
             "visual_style": visual_style, "aspect_ratio": aspect_ratio,
             "target_video_model": target_model_literal,
-            "dialect_instructions": f"{dialect_instructions}\n{_action_beats.decisive_action_dialect_rule(profile.render_format)}\n{_action_density.shot_action_beats_rule()}\n{_shot_mandates.shot_mandates_dialect_rule(profile.render_format)}{_music_bed.music_bed_dialect_addendum(profile.render_format, enabled=enhance_music_bed)}{_skin_blush.skin_blush_dialect_addendum(profile.render_format, photographic=visual_style_is_photographic)}",
+            "dialect_instructions": f"{dialect_instructions}\n{_action_beats.decisive_action_dialect_rule(profile.render_format)}\n{_action_density.shot_action_beats_rule(max_shots=MAX_SHOTS_PER_SEGMENT)}\n{_shot_mandates.shot_mandates_dialect_rule(profile.render_format)}{_music_bed.music_bed_dialect_addendum(profile.render_format, enabled=enhance_music_bed)}{_skin_blush.skin_blush_dialect_addendum(profile.render_format, photographic=visual_style_is_photographic)}",
             # app.video_prompt_profiles 的 SEEDANCE_2_PROFILE/MINIMAX_H3_PROFILE 是
             # 既有的正确接缝（docs/STORYBOARD_PROMPT_IR_DESIGN.md「与既有代码的衔接」），
             # 职责收窄为"交给模型的方言约束"；dialect_instructions 是本模块新写的
@@ -1301,7 +1301,7 @@ async def generate_storyboard_pack(
         "enhance_music_bed": enhance_music_bed_enabled(conn, ep["project_id"]), "narrator_voice_character": resolve_narrator_voice_character(conn, ep["project_id"]),
     }
     segment_drafts = await _generate_all_segment_prompts(**segment_prompt_kwargs)
-    segment_drafts = await _prose_review.review_and_revise_segments(segment_drafts, episode_id=episode_id, bible=bible, regenerate=lambda reuse, notes: _generate_all_segment_prompts(**segment_prompt_kwargs, reuse_segments=reuse, revision_notes=notes))
+    segment_drafts = await _prose_review.review_and_revise_segments(segment_drafts, episode_id=episode_id, bible=bible, max_shots=MAX_SHOTS_PER_SEGMENT, regenerate=lambda reuse, notes: _generate_all_segment_prompts(**segment_prompt_kwargs, reuse_segments=reuse, revision_notes=notes))
     pack_segments = [
         StoryboardPackSegment(
             segment_no=plan.segment_no,

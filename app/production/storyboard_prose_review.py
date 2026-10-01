@@ -111,12 +111,10 @@ _NEEDS_PREVIOUS_QUOTE = {"screen_side", "prop_appearance"}
 #: SHOT`` 填入。
 _KIND_RULES: dict[str, str] = {
     "action_density": (
-        "action_density（单镜动作过载）：按发生顺序列出这一镜里出现的每一个关键动作（换装、开关灯、"
-        "走位、拿起/放下物品都算一个动作，与本段生成时模型自报的 shot_action_beats 同一计数口径）；"
+        "action_density（单镜动作过载）：按发生顺序列出这一镜里出现的每一个关键动作。{key_action_definition}"
         "一镜超过 {max_actions} 个关键动作即违规——15 秒段每镜只有约 3-4 秒，装不下更多，视频生成模型"
-        "会编造画面去'跟上'过多的指令。quote 填这一镜在 prompt_text 里的原文片段；fix 写清楚怎么拆"
-        "（拆成更多镜头，或把非关键动作交给镜头之间的硬切省略，例如换装不需要拍换的过程，用硬切直接"
-        "呈现换好后的样子）。"
+        "会编造画面去'跟上'过多的指令。quote 填这一镜在 prompt_text 里的原文片段；fix 按下面的应对写清楚"
+        "怎么改（本段当前镜头数见输入里的 shot_count）：{over_limit_remedy}"
     ),
     "skin_blush": (
         "skin_blush（写实画风下脸红写法不对）：判据是——{skin_blush_rule} 如果镜头描述没有按这个写法"
@@ -154,9 +152,10 @@ _KIND_RULES: dict[str, str] = {
     "negated_action": (
         "negated_action（用否定句写人物动作）：镜头描述里用否定句描写人物正在做的动作或穿着状态（例如"
         "『没有……』『不再……』『没有再……』），即违规——视频生成模型会忽略否定句，画出来的反而是被"
-        "否定的那个动作。系统统一追加的全局约束行（prompt_text 末尾以『约束——』开头的那一行）与人数"
-        "锁定句（『画面中只有……不出现其他人物或路人。』）不算，那两类是系统追加的安全兜底句，不是对"
-        "人物动作的描写。quote 填这句否定句原文；fix 给出对应的正面写法：直接描述人物实际在做什么/"
+        "否定的那个动作。系统统一追加的全局约束行（prompt_text 末尾以『约束——』开头的那一行）、人数"
+        "锁定句（『画面中只有……不出现其他人物或路人。』）以及台词占位符或台词后面括号里的口型说明"
+        "（例如『画面人物嘴唇闭合无张合动作』『发声者开口，其他可见人物不跟随口型』）都不算，它们是"
+        "系统统一写入的固定说明，不是对人物动作的描写。quote 填这句否定句原文；fix 给出对应的正面写法：直接描述人物实际在做什么/"
         "穿什么，不提被否定的那个动作。"
     ),
 }
@@ -219,13 +218,15 @@ def _previous_shot_text(previous_draft: Any | None) -> str:
     return shots[-1] if shots else ""
 
 
-def _review_rules_text(*, photographic: bool) -> str:
+def _review_rules_text(*, photographic: bool, max_shots: int) -> str:
     """七类判据的完整正面陈述；``skin_blush`` 只在写实画风项目出现（见模块
     docstring），非写实项目这条规则连提示词都不会收到。"""
     kinds = [k for k in _KIND_RULES if k != "skin_blush" or photographic]
     numbered = "\n".join(
         f"{i}. " + _KIND_RULES[kind].format(
             max_actions=_action_density.MAX_KEY_ACTIONS_PER_SHOT, skin_blush_rule=_skin_blush.SEEDANCE_SKIN_BLUSH_RULE,
+            key_action_definition=_action_density.key_action_definition(),
+            over_limit_remedy=_action_density.over_limit_remedy(max_shots=max_shots),
         )
         for i, kind in enumerate(kinds, start=1)
     )
@@ -266,13 +267,14 @@ def _verified_violations(
 
 
 async def _review_segment(
-    *, episode_id: str, segment_no: int, draft: Any, previous_draft: Any | None, photographic: bool,
+    *, episode_id: str, segment_no: int, draft: Any, previous_draft: Any | None, photographic: bool, max_shots: int,
 ) -> list[ProseViolation]:
     """一次独立复核调用，失败（供应商错误/格式修复耗尽）返回空列表，不让整集
     失败——与 ``storyboard_short_drama_review._run_drop_review`` 同一取舍。"""
     payload: dict[str, Any] = {
-        "rules": [_review_rules_text(photographic=photographic)],
+        "rules": [_review_rules_text(photographic=photographic, max_shots=max_shots)],
         "segment_no": segment_no,
+        "shot_count": draft.shot_count,
         "prompt_text": draft.prompt_text,
         "dialogue_placeholders": _dialogue_placeholders(draft.dialogue),
         "previous_segment_last_shot": _previous_shot_text(previous_draft),
@@ -308,7 +310,7 @@ async def _review_segment(
 
 
 async def _run_batch_review(
-    segment_drafts: dict[int, Any], *, episode_id: str, photographic: bool,
+    segment_drafts: dict[int, Any], *, episode_id: str, photographic: bool, max_shots: int,
 ) -> dict[int, list[ProseViolation]]:
     """全部段落并发复核（上限 ``_REVIEW_CONCURRENCY``），只返回有已核验违规的段。"""
     semaphore = asyncio.Semaphore(_REVIEW_CONCURRENCY)
@@ -316,7 +318,7 @@ async def _run_batch_review(
     async def _one(no: int) -> tuple[int, list[ProseViolation]]:
         previous = segment_drafts.get(no - 1)
         async with semaphore:
-            raw = await _review_segment(episode_id=episode_id, segment_no=no, draft=segment_drafts[no], previous_draft=previous, photographic=photographic)
+            raw = await _review_segment(episode_id=episode_id, segment_no=no, draft=segment_drafts[no], previous_draft=previous, photographic=photographic, max_shots=max_shots)
         return no, _verified_violations(raw, segment_no=no, draft=segment_drafts[no], previous_draft=previous)
 
     results = await asyncio.gather(*[_one(no) for no in sorted(segment_drafts)])
@@ -356,7 +358,7 @@ async def _regenerate_segment(
 
 
 async def review_and_revise_segments(
-    segment_drafts: dict[int, Any], *, episode_id: str, bible: Any, regenerate: Regenerate,
+    segment_drafts: dict[int, Any], *, episode_id: str, bible: Any, max_shots: int, regenerate: Regenerate,
 ) -> dict[int, Any]:
     """整集复核 → 定向重写一次 → 再复核；开关关闭时原样返回，逐字不变。
 
@@ -368,7 +370,7 @@ async def review_and_revise_segments(
     if not storyboard_prose_review_enabled():
         return segment_drafts
     photographic = _is_photographic(bible)
-    outstanding = await _run_batch_review(segment_drafts, episode_id=episode_id, photographic=photographic)
+    outstanding = await _run_batch_review(segment_drafts, episode_id=episode_id, photographic=photographic, max_shots=max_shots)
     for no in sorted(outstanding):
         violations = outstanding.get(no) or []
         if not violations:
@@ -382,7 +384,7 @@ async def review_and_revise_segments(
             if check_no not in segment_drafts:
                 continue
             draft, previous = segment_drafts[check_no], segment_drafts.get(check_no - 1)
-            raw = await _review_segment(episode_id=episode_id, segment_no=check_no, draft=draft, previous_draft=previous, photographic=photographic)
+            raw = await _review_segment(episode_id=episode_id, segment_no=check_no, draft=draft, previous_draft=previous, photographic=photographic, max_shots=max_shots)
             verified = _verified_violations(raw, segment_no=check_no, draft=draft, previous_draft=previous)
             if check_no != no and check_no in outstanding:
                 outstanding[check_no] = verified

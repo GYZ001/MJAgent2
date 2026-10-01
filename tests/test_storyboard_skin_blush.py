@@ -18,6 +18,7 @@ import pytest
 from app.production import storyboard_skin_blush as skin_blush
 from app.production.storyboard_action_beats import decisive_action_dialect_rule
 from app.production.storyboard_action_density import shot_action_beats_rule
+from app.production.storyboard_pack import MAX_SHOTS_PER_SEGMENT
 from app.production.storyboard_dialects import SEEDANCE_DIALECT_INSTRUCTIONS
 from app.production.storyboard_pack import (
     _AiBeat,
@@ -163,7 +164,7 @@ async def test_no_bible_leaves_dialect_instructions_byte_identical(monkeypatch):
     captured = await _run_with_bible(monkeypatch, bible=None)
     expected_dialect_instructions = (
         f"{SEEDANCE_DIALECT_INSTRUCTIONS}\n{decisive_action_dialect_rule(_SEEDANCE_FORMAT)}"
-        f"\n{shot_action_beats_rule()}"
+        f"\n{shot_action_beats_rule(max_shots=MAX_SHOTS_PER_SEGMENT)}"
         f"\n{shot_mandates_dialect_rule(_SEEDANCE_FORMAT)}"
     )
     assert captured["dialect_instructions"] == expected_dialect_instructions

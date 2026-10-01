@@ -26,7 +26,7 @@ import pytest
 from app.db import set_setting
 from app.harness import model_gateway
 from app.production import storyboard_prose_review as prose_review
-from app.production.storyboard_action_density import MAX_KEY_ACTIONS_PER_SHOT
+from app.production.storyboard_action_density import MAX_KEY_ACTIONS_PER_SHOT, key_action_definition, over_limit_remedy
 from app.production.storyboard_pack import _AiStoryboardSegmentDraft
 from app.production.storyboard_skin_blush import SEEDANCE_SKIN_BLUSH_RULE
 from app.schemas.segment_identity import SegmentDialogue
@@ -127,11 +127,15 @@ def test_prop_appearance_with_unverifiable_previous_quote_is_discarded():
 # ---------------------------------------------------------------------------
 
 def test_review_rules_text_includes_skin_blush_only_when_photographic():
-    text_on = prose_review._review_rules_text(photographic=True)
-    text_off = prose_review._review_rules_text(photographic=False)
+    text_on = prose_review._review_rules_text(photographic=True, max_shots=4)
+    text_off = prose_review._review_rules_text(photographic=False, max_shots=4)
     assert "skin_blush" in text_on and SEEDANCE_SKIN_BLUSH_RULE in text_on
     assert "skin_blush" not in text_off
     assert str(MAX_KEY_ACTIONS_PER_SHOT) in text_on
+    # 计数口径与满镜应对和生成侧共用同一份原文（两侧不各数各的、满镜时有可执行的改法）
+    assert key_action_definition() in text_on
+    assert over_limit_remedy(max_shots=4) in text_on
+    assert "口型说明" in text_on, "系统写入的口型说明不算否定句违规"
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +209,7 @@ async def test_only_violated_segments_rewritten_in_ascending_order(monkeypatch):
     drafts = _three_segment_drafts()
     review_counts: dict[int, int] = {}
 
-    async def fake_review_segment(*, episode_id, segment_no, draft, previous_draft, photographic):
+    async def fake_review_segment(*, episode_id, segment_no, draft, previous_draft, photographic, max_shots):
         review_counts[segment_no] = review_counts.get(segment_no, 0) + 1
         if segment_no in (1, 3) and review_counts[segment_no] == 1:
             return [prose_review.ProseViolation(kind="action_density", shot_label="镜头1", quote="动作一，动作二，动作三", fix="拆镜")]
@@ -221,7 +225,7 @@ async def test_only_violated_segments_rewritten_in_ascending_order(monkeypatch):
         return fixed
 
     monkeypatch.setattr(prose_review, "_review_segment", fake_review_segment)
-    result = await prose_review.review_and_revise_segments(drafts, episode_id="ep1", bible=None, regenerate=fake_generate_all)
+    result = await prose_review.review_and_revise_segments(drafts, episode_id="ep1", bible=None, max_shots=4, regenerate=fake_generate_all)
 
     assert regenerated_order == [1, 3], "只有违规段被重写，且按段号升序"
     assert result[1].prompt_text == "镜头1：1号已改好，干净。"
@@ -233,7 +237,7 @@ async def test_only_violated_segments_rewritten_in_ascending_order(monkeypatch):
 async def test_remaining_violation_after_rewrite_is_recorded_not_blocking(monkeypatch):
     drafts = {1: _draft("镜头1：A动作一，动作二，动作三。")}
 
-    async def always_violating(*, episode_id, segment_no, draft, previous_draft, photographic):
+    async def always_violating(*, episode_id, segment_no, draft, previous_draft, photographic, max_shots):
         return [prose_review.ProseViolation(kind="action_density", shot_label="镜头1", quote="动作一，动作二，动作三", fix="拆镜")]
 
     async def fake_generate_all(reuse, notes):
@@ -243,7 +247,7 @@ async def test_remaining_violation_after_rewrite_is_recorded_not_blocking(monkey
         return fixed
 
     monkeypatch.setattr(prose_review, "_review_segment", always_violating)
-    result = await prose_review.review_and_revise_segments(drafts, episode_id="ep1", bible=None, regenerate=fake_generate_all)
+    result = await prose_review.review_and_revise_segments(drafts, episode_id="ep1", bible=None, max_shots=4, regenerate=fake_generate_all)
 
     assert result[1].shot_count == 3  # 没有抛异常，整集没被阻断
     assert any("[STORYBOARD_PROSE_REVIEW_REMAINING][未拦截]" in note for note in result[1].degraded_capabilities)
@@ -254,7 +258,7 @@ async def test_rewrite_exception_keeps_original_draft(monkeypatch, caplog):
     original = _draft("镜头1：A动作一，动作二，动作三。")
     drafts = {1: original}
 
-    async def violating_once(*, episode_id, segment_no, draft, previous_draft, photographic):
+    async def violating_once(*, episode_id, segment_no, draft, previous_draft, photographic, max_shots):
         return [prose_review.ProseViolation(kind="action_density", shot_label="镜头1", quote="动作一，动作二，动作三", fix="拆镜")]
 
     async def failing_generate_all(reuse, notes):
@@ -262,7 +266,7 @@ async def test_rewrite_exception_keeps_original_draft(monkeypatch, caplog):
 
     monkeypatch.setattr(prose_review, "_review_segment", violating_once)
     with caplog.at_level(logging.WARNING):
-        result = await prose_review.review_and_revise_segments(drafts, episode_id="ep1", bible=None, regenerate=failing_generate_all)
+        result = await prose_review.review_and_revise_segments(drafts, episode_id="ep1", bible=None, max_shots=4, regenerate=failing_generate_all)
 
     assert result[1] is original, "重写调用抛异常时保留原稿"
     assert "[STORYBOARD_PROSE_REVIEW_FAILED]" in caplog.text, "不吞异常信息"
@@ -281,7 +285,7 @@ async def test_disabled_switch_skips_all_review_calls(monkeypatch):
     async def _must_not_regenerate(reuse, notes):
         raise AssertionError("开关关闭时不应重写")
 
-    result = await prose_review.review_and_revise_segments(drafts, episode_id="ep1", bible=None, regenerate=_must_not_regenerate)
+    result = await prose_review.review_and_revise_segments(drafts, episode_id="ep1", bible=None, max_shots=4, regenerate=_must_not_regenerate)
 
     assert result is drafts, "开关关闭时产物逐字不变（同一对象，未经任何改写）"
 
@@ -300,7 +304,7 @@ async def test_batch_review_calls_chat_structured_when_enabled(monkeypatch):
 
     monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
 
-    outstanding = await prose_review._run_batch_review(drafts, episode_id="ep1", photographic=False)
+    outstanding = await prose_review._run_batch_review(drafts, episode_id="ep1", photographic=False, max_shots=4)
 
     assert len(calls) == 1
     assert calls[0]["call_meta"]["stage_key"] == "storyboard_prose_review"

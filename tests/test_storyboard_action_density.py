@@ -4,12 +4,15 @@
 """
 from __future__ import annotations
 
+from app.production.storyboard_pack import MAX_SHOTS_PER_SEGMENT
 from app.production.storyboard_action_density import (
     MAX_KEY_ACTIONS_PER_SHOT,
     ActionDensitySoftCheck,
     ShotActionBeats,
     action_density_errors,
     segment_advisories,
+    key_action_definition,
+    over_limit_remedy,
     shot_action_beats_rule,
     undeclared_shot_errors,
 )
@@ -24,15 +27,29 @@ def _beats(shot_no: int, *actions: str) -> ShotActionBeats:
 # ---------------------------------------------------------------------------
 
 def test_rule_states_the_limit_and_the_positive_way_out():
-    rule = shot_action_beats_rule()
+    rule = shot_action_beats_rule(max_shots=MAX_SHOTS_PER_SEGMENT)
     assert str(MAX_KEY_ACTIONS_PER_SHOT) in rule
-    assert "拆成更多镜头" in rule
-    assert "硬切省略" in rule
-    assert "用硬切直接呈现换好后的样子" in rule
+    assert key_action_definition() in rule
+    assert over_limit_remedy(max_shots=MAX_SHOTS_PER_SEGMENT) in rule
 
 
 def test_rule_respects_custom_max():
-    assert "3" in shot_action_beats_rule(max_per_shot=3)
+    assert "3" in shot_action_beats_rule(max_shots=MAX_SHOTS_PER_SEGMENT, max_per_shot=3)
+
+
+def test_over_limit_remedy_is_achievable_when_segment_is_already_at_shot_cap():
+    """2026-09-30 第 1 集重做：旧应对只说「拆成更多镜头」，满镜（4 镜）的段落照着改不了，
+    复核判违规、重写改不掉，同一条问题原样留到最后。应对必须同时给出满镜时可执行的
+    做法：硬切省略过渡过程、起幅即完成状态，原文节拍不删。"""
+    remedy = over_limit_remedy(max_shots=4)
+    assert "4" in remedy
+    assert "硬切省略" in remedy and "起幅" in remedy
+    assert "原文节拍一个都不删" in remedy
+
+
+def test_key_action_definition_excludes_facial_performance():
+    definition = key_action_definition()
+    assert "面部表情" in definition and "不单独计数" in definition
 
 
 # ---------------------------------------------------------------------------
