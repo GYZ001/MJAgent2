@@ -137,8 +137,78 @@ def check_supervisor_ownership_fence(job, job_id: str, provider_recovery_only: b
     return fenced
 
 
-async def commit_result_checkpoint(conn, job_id, version, owner, provider_operation_id, meta, dest, result, shot, started):
-    """计算成本/延迟并提交结果 checkpoint。返回 ``(result_adoptable, cost)``。"""
+async def review_fence_capture(job, version_id, write_point, provider_recovery_only, stale_detail):
+    """付费后写点（``provider_poll``/``candidate``）命中依赖围栏时不中断：记录
+    详情继续轮询/下载——任务已被供应商接单，直接判 failed 等于把已花费的额度和
+    已经产出的结果一起丢弃（2026-10-01《顾念长安》EP1 provider_poll 实测）。
+    ``worker_start``/``provider_input_adoption``/``provider_submit`` 等预付费
+    写点不经过本函数，命中仍按 ``_assert_review_dependency_fence_async`` 原样
+    ``raise``，不花额度。"""
+    if provider_recovery_only:
+        return stale_detail
+    from .authority import _assert_review_dependency_fence_async
+    from .fences import ReviewDependencyFence
+    try:
+        await _assert_review_dependency_fence_async(job, version_id, write_point)
+    except ReviewDependencyFence as exc:
+        return stale_detail or str(exc)
+    return stale_detail
+
+
+async def downgrade_to_waiting_human_if_stale(
+    conn, job_id, owner, version, cost, result_adoptable, stale_detail,
+) -> bool:
+    """checkpoint 已经把结果落成 succeeded，但付费后某个写点命中过依赖围栏：
+    降级为 ``waiting_human``（``app.domain.video_ops.adopt._assert_version_
+    adoptable`` 接受这个状态，人工核对后可直接采纳）而不是丢弃；预算按已产生
+    费用结算，不按失败退还。返回更新后的 ``result_adoptable``——调用方据此复用
+    既有"结果不可自动采用"的收尾分支，不重复实现。"""
+    if not (stale_detail and result_adoptable):
+        return result_adoptable
+    message = (
+        "[REVIEW_DEPENDENCY_STALE_AFTER_SUBMIT] 依赖在生成期间发生变化，"
+        f"结果未自动采用，可在生成台人工核对后采纳：{stale_detail}"
+    )
+    changed = conn.execute(
+        """UPDATE jobs SET status='waiting_human',error=?,video_slot_active=0,
+                  lease_owner=NULL,lease_expires_at=NULL,next_retry_at=NULL,updated_at=?
+            WHERE id=? AND lease_owner=?""",
+        (message, now(), job_id, owner),
+    )
+    if changed.rowcount != 1:
+        conn.rollback()
+        return False
+    conn.execute(
+        "UPDATE shot_versions SET status='waiting_human',error=?,video_slot_active=0 WHERE id=?",
+        (message, version["id"]),
+    )
+    conn.commit()
+    media_scheduler.settle_budget(job_id, cost, success=True)
+    return False
+
+
+async def fence_or_downgrade(conn, job, job_id, owner, version, cost, write_point) -> bool:
+    """``candidate_evidence``/``adoption_relation`` 写点：版本此时已经是
+    succeeded，命中依赖围栏同样不得直接判 failed 丢弃——降级为 waiting_human。
+    返回 True 时调用方必须 ``return``（结果已处理完毕，不再继续采纳尾段）。"""
+    from .authority import _assert_review_dependency_fence_async
+    from .enqueue import reconcile_episode_generation_status
+    from .fences import ReviewDependencyFence
+    try:
+        await _assert_review_dependency_fence_async(job, version["id"], write_point)
+    except ReviewDependencyFence as exc:
+        await downgrade_to_waiting_human_if_stale(conn, job_id, owner, version, cost, True, str(exc))
+        reconcile_episode_generation_status(job["episode_id"])
+        return True
+    return False
+
+
+async def commit_result_checkpoint(
+    conn, job_id, version, owner, provider_operation_id, meta, dest, result, shot, started, stale_detail,
+):
+    """计算成本/延迟并提交结果 checkpoint；``stale_detail`` 非空时把已落盘的
+    succeeded 结果降级为 waiting_human（见 ``downgrade_to_waiting_human_if_
+    stale``），不直接丢弃。返回 ``(result_adoptable, cost)``。"""
     from .checkpoints import _commit_video_result_checkpoint
 
     latency = round(time.time() - started, 1)
@@ -160,6 +230,9 @@ async def commit_result_checkpoint(conn, job_id, version, owner, provider_operat
         cost_cny=cost,
         latency_s=latency,
         image_inputs=json.dumps(meta, ensure_ascii=False),
+    )
+    result_adoptable = await downgrade_to_waiting_human_if_stale(
+        conn, job_id, owner, version, cost, result_adoptable, stale_detail,
     )
     return result_adoptable, cost
 
@@ -325,13 +398,11 @@ def settle_technical_failure(
 
 async def adopt_and_settle_candidate(conn, job, job_id, owner, version, cost, supervisor_controlled) -> None:
     """非 Supervisor 掌控时采用最佳候选；随后统一结算预算并推进分集状态。"""
-    from .authority import _assert_review_dependency_fence_async
     from .enqueue import reconcile_episode_generation_status
 
     if not supervisor_controlled:
-        await _assert_review_dependency_fence_async(
-            job, version["id"], "adoption_relation",
-        )
+        if await fence_or_downgrade(conn, job, job_id, owner, version, cost, "adoption_relation"):
+            return
         media_evidence.select_best_video_candidate(job["shot_id"])
         adopted = conn.execute(
             "SELECT adopted_version_id FROM shots WHERE id=?",

@@ -17,9 +17,13 @@
 ``except`` 处理器（``.run_job_errors`` / ``.run_job_errors_provider``，最大
 的 ``except (ProviderError, Exception)`` 分支单独占一个文件，见其 module
 docstring）。核心状态机（供应商提交 + 轮询 + 成功后校验/采纳，try 主体约
-735 行）**留在本文件未再拆分**：它对 ``_assert_review_dependency_fence_async``
-的调用散布在几乎每个阶段（worker_start/provider_input_adoption/
-provider_submit/provider_poll/candidate/candidate_evidence 六处），
+735 行）**留在本文件未再拆分**：它对依赖围栏的判定散布在几乎每个阶段——
+worker_start/provider_input_adoption/provider_submit 三处预付费写点仍直接
+``await _assert_review_dependency_fence_async``；provider_poll/candidate 两处
+改经 ``run_job_steps.review_fence_capture``、candidate_evidence/adoption_relation
+（后者在 ``run_job_steps.adopt_and_settle_candidate`` 里）改经 ``.fence_or_
+downgrade``——命中时不再直接判 failed 丢弃已接单的供应商结果，而是落成
+waiting_human 供人工核对采纳（2026-10-01，见这三个函数自己的文档）。
 ``image_inputs``/``video_inputs``/``actual_mode``/``task_id``/``meta``/
 ``prompt_text``/``result`` 七个局部变量在一个不可重入的 ``while True`` 状态
 机里被反复读写，且内层是两层嵌套 try/except（供应商 create 失败必须原子释放
@@ -387,7 +391,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
 
         image_inputs: list[tuple[str, str]] | None = None
         video_inputs: list[tuple[str, str]] | None = None
-
+        stale_detail: str | None = None
         while True:
             if not task_id:  # 重启恢复时可能已有 task_id，直接续轮询
                 _assert_job_lease(job_id, owner)
@@ -625,10 +629,9 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             )
             from app.media_pipeline import stages as media_stages
             async with semaphore_for(media_stages.RESOURCE_VIDEO_POLL):
-                if not provider_recovery_only:
-                    await _assert_review_dependency_fence_async(
-                        job, version["id"], "provider_poll",
-                    )
+                stale_detail = await run_job_steps.review_fence_capture(
+                    job, version["id"], "provider_poll", provider_recovery_only, stale_detail,
+                )
                 try:
                     result = await hiagent.poll_video_task(
                         task_id,
@@ -714,12 +717,11 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         _assert_job_lease(job_id, owner)
         if run_job_steps.check_supervisor_ownership_fence(job, job_id, provider_recovery_only):
             return
-        if not provider_recovery_only:
-            await _assert_review_dependency_fence_async(
-                job, version["id"], "candidate",
-            )
+        stale_detail = await run_job_steps.review_fence_capture(
+            job, version["id"], "candidate", provider_recovery_only, stale_detail,
+        )
         result_adoptable, cost = await run_job_steps.commit_result_checkpoint(
-            conn, job_id, version, owner, provider_operation_id, meta, dest, result, shot, started,
+            conn, job_id, version, owner, provider_operation_id, meta, dest, result, shot, started, stale_detail,
         )
         if not result_adoptable:
             mark_media_job_state(
@@ -746,9 +748,8 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         # 完整补齐模式只有 Supervisor 有权重抽和采用；Worker 只执行、校验并产出候选。
         supervisor_controlled = await run_job_steps.run_auto_qa(job, version, dest)
         _assert_job_lease(job_id, owner)
-        await _assert_review_dependency_fence_async(
-            job, version["id"], "candidate_evidence",
-        )
+        if await run_job_steps.fence_or_downgrade(conn, job, job_id, owner, version, cost, "candidate_evidence"):
+            return
         media_evidence.record_video_candidate(
             version["id"], step_run_id=_row_value(job, "step_run_id")
         )
