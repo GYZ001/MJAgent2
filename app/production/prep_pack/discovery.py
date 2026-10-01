@@ -20,6 +20,7 @@ from .contracts import (
     _FUNCTIONAL_RESOLUTION_KINDS,
 )
 from .provenance import _prep_pack_provenance
+from .trailing_anchor import prop_literal_or_trailing_anchor, trailing_anchor_phrase
 
 log = logging.getLogger(__name__)
 
@@ -261,41 +262,41 @@ async def _discover_new_props(
 # tests/test_props_library.py 里手写的 mention 夹具）。
 def _prep_pack_prop_card_anchor(
     card: Prop, valid_indexes: list[int], segments: list[SourceSegment],
-) -> tuple[int, str] | None:
+) -> tuple[int, str, bool] | None:
     """card_match 分支的 provenance 锚点：``card`` 的 name/alias 里第一个在
-    ``valid_indexes`` 某一段原文里逐字出现的那个，连同它所在的段号一起返回——
-    保证 anchor_phrase 真的落在 anchor_segments 指向的原文里
-    （verify_manifest_provenance_with_repair 的自校验判据）。match_existing_
-    prop_card 已经确认某个 identifier 在这些段落拼接后的文本里逐字出现过
-    （见调用点），按单段重新定位理应总能找到，这里仍用 ``| None`` 防御性兜底。
-    """
+    ``valid_indexes`` 某段原文里逐字出现的那个，连同段号、是否经尾部退让
+    一起返回。全串定位不到时退让到尾部子串再试一遍（2026-10-01，见
+    .trailing_anchor 模块），范围仍限定在 valid_indexes；都落空才 None。"""
     identifiers = [str(card.name or "").strip(), *(str(a or "").strip() for a in card.aliases)]
     for index in valid_indexes:
         text = segments[index - 1].text
         for identifier in identifiers:
             if identifier and identifier in text:
-                return index, identifier
+                return index, identifier, False
+    evidence_text = "\n".join(segments[i - 1].text for i in valid_indexes)
+    phrase = trailing_anchor_phrase(identifiers, evidence_text)
+    if not phrase:
+        return None
+    for index in valid_indexes:
+        if phrase in segments[index - 1].text:
+            return index, phrase, True
     return None
 
 
 def _prep_pack_prop_mention_binding(
     label: str, source_wording: str, nominated_card: str, valid_indexes: list[int],
     segments: list[SourceSegment], cards: Sequence[Prop],
-) -> tuple[list[int], Prop | None, str, list[int], str] | None:
+) -> tuple[list[int], Prop | None, str, list[int], str, bool] | None:
     """核验一条道具提及：返回 (segment_indexes, 绑定的卡或 None, provenance.method,
-    anchor_segments, anchor_phrase)；两条判据都不满足时返回 None（整条丢弃，调用方
-    须把丢弃的提及记入可见的 unanchored 出参，见 _prep_pack_build_prop_manifest /
-    _prep_pack_record_unanchored_prop，不静默 continue）。
+    anchor_segments, anchor_phrase, 是否经尾部退让锚定)；两条判据都不满足时返回
+    None（整条丢弃，调用方须记入可见的 unanchored 出参，不静默 continue）。
 
-    字面候选依次试 label、``source_wording``（2026-09-30 新增，见 schemas.
-    _ModelPropMention.source_wording 上方注释与 2026-09-30 派单真实案例「木星星」
-    「缠着细银丝的木簪」）：模型有时给的是概括/规范化标签，原文真实写法要靠
-    source_wording 单独交出。谁先在这条提及自己声明的段落里逐字出现，就取谁作
-    anchor_phrase（method 仍是 "direct"），segment_indexes 窄化到它实际出现的
-    那些段——跟原有 label-only 分支同一收窄纪律，不因为多了一条候选就放宽。
-
-    ``nominated_card``（2026-09-30 见 app.props.card_match 模块 docstring
-    「模型提名、代码核验」一节）原样透传给 ``match_existing_prop_card``。
+    字面候选依次试 label、source_wording（schemas._ModelPropMention.
+    source_wording 上方注释）；都不命中且未绑定既有卡时退让到尾部子串，见
+    ``.trailing_anchor.prop_literal_or_trailing_anchor``（2026-10-01，真实
+    案例"旧笔记本"→"笔记本"）；已绑定卡的退让改在 _prep_pack_prop_card_
+    anchor 内部做（不跟 card_match 自身的单一胜者判据赛跑）。``nominated_
+    card`` 原样透传给 ``match_existing_prop_card``（模型提名、代码核验）。
     """
     # 延迟导入：避免给 app.production.prep_pack（映射台核心链路）加一条模块级
     # 常驻依赖到 app.props 的模型/出图调用链——import app.props.card_match 前
@@ -305,26 +306,23 @@ def _prep_pack_prop_mention_binding(
     # 的既有写法保持一致（同一文件里三个函数都是函数内 import）。
     from app.props.card_match import match_existing_prop_card
 
-    label_indexes = [i for i in valid_indexes if label in segments[i - 1].text]
-    wording_indexes = [
-        i for i in valid_indexes if source_wording and source_wording in segments[i - 1].text
-    ]
-    literal_indexes, literal_phrase = (
-        (label_indexes, label) if label_indexes else (wording_indexes, source_wording)
-    )
     evidence_text = "\n".join(segments[i - 1].text for i in valid_indexes)
     card = match_existing_prop_card(
         label, evidence_text, cards, source_wording=source_wording, nominated_card=nominated_card,
+    )
+    literal_indexes, literal_phrase, trailing = prop_literal_or_trailing_anchor(
+        label, source_wording, valid_indexes, segments, evidence_text, card is not None,
     )
     if not literal_indexes and card is None:
         return None
     segment_indexes = literal_indexes or valid_indexes
     if literal_indexes:
-        return segment_indexes, card, "direct", [segment_indexes[0]], literal_phrase
+        return segment_indexes, card, "direct", [segment_indexes[0]], literal_phrase, trailing
     anchor = _prep_pack_prop_card_anchor(card, valid_indexes, segments)
     anchor_segments = [anchor[0]] if anchor else [segment_indexes[0]]
     anchor_phrase = anchor[1] if anchor else ""
-    return segment_indexes, card, "card_match", anchor_segments, anchor_phrase
+    card_trailing = anchor[2] if anchor else False
+    return segment_indexes, card, "card_match", anchor_segments, anchor_phrase, card_trailing
 
 
 def _prep_pack_record_unanchored_prop(
@@ -382,7 +380,7 @@ def _prep_pack_build_prop_manifest(
         if binding is None:
             _prep_pack_record_unanchored_prop(unanchored, label, source_wording, valid_indexes)
             continue
-        segment_indexes, card, method, anchor_segments, anchor_phrase = binding
+        segment_indexes, card, method, anchor_segments, anchor_phrase, trailing = binding
         canonical_name = card.name if card else None
         key = canonical_name or label
         entry = props.setdefault(key, {
@@ -390,7 +388,9 @@ def _prep_pack_build_prop_manifest(
             "canonical_name": canonical_name,
             "description": str(mention.get("description") or "").strip(),
             "segment_indexes": [],
-            "provenance": _prep_pack_provenance(method, anchor_segments, anchor_phrase),
+            "provenance": _prep_pack_provenance(
+                method, anchor_segments, anchor_phrase, trailing_anchor=trailing,
+            ),
             "plot_significant": bool(mention.get("plot_significant")),
             "plot_significant_quote": str(mention.get("plot_significant_quote") or "").strip(),
             "source_wording": source_wording,

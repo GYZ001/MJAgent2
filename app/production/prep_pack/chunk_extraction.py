@@ -47,6 +47,16 @@ from .schemas import _ChunkResponse
 # _prep_pack_local_text_anchor 的候选序列含 quote，规范名命中不了时 quote 命中即
 # ANCHOR_VERIFIED。所以「按别处的完整写法申报 + quote 填本编号的省略说法原句」这条
 # 路在两侧都合法，不是放宽校验去迁就模型。
+
+# props 判据正句（2.0.9 引入的两条正面条件），单源常量——.prop_recheck 的复核
+# 调用要用同一句话问模型，不在那边另外复制一份措辞（两处用词漂移会导致复核跟
+# 抽取各判各的，见该模块 docstring）。
+_PROP_SEGMENT_CRITERIA = (
+    "①被本段某个角色的身体动作明确操作（拿起、放下、递给、接过、使用、穿戴、开关、"
+    "移动、交接）；②它在本集其他段落的原文里还会再次出现（贯穿性的视觉线索）。只有在"
+    "背景陈设里一笔带过、没有任何角色与它互动、且本集全文只出现这一次的物件才不报"
+)
+
 _ASSET_DECLARATION_RULES = """segment_indexes 判据（硬性，对 characters/scenes/props 都适用）：只申报这个人物/场景/道具
 真正在画面中出场/出现的编号——原文只是提到这个名字、被别的角色回忆/转述/听说、或只是
 背景知识提及，都不算"出场"，不要申报那个编号；反之，只要真的在画面中出场，哪怕只是一句带过，
@@ -169,10 +179,9 @@ async def _extract_chunk(
   场景在本段确实没有可摘录的原文依据就填空字符串，绝不编造", "source_wording": "这个地点
   在 segment_indexes 所指原文里的称呼，从原文逐字复制的一段连续文字（通常比 quote 短，
   例如原文写“两人走在回民街的青石板路上”就填“回民街”）；不改字、不增字、不拼接；这段地点
-  确实没有可摘录的原文称呼就填空字符串，绝不编造"}}；已登记场景名（仅供拼写对齐，同上一条
+  确实没有可摘录的原文称呼就填空字符串，绝不编造；不用人物谱/物件库/场景库里的登记名替代，登记名只填进 suspected_true_name"}}；已登记场景名（仅供拼写对齐，同上一条
   的原则）：{known_scenes}；
-- props：本段画面里真正出场的物品，满足以下任一条就要申报：①被本段某个角色的身体动作明确操作（拿起、放下、递给、接过、使用、穿戴、开关、移动、交接）；②它在本集其他段落的原文里还会再次出现（贯穿性的视觉线索）。只有在背景陈设里一笔带过、没有任何角色与它互动、且
-  本集全文只出现这一次的物件才不报；是否正式建卡由后续判定核验，申报这一步不替它取舍，每个给 {{"label": "道具名称", "description": "这个道具的
+- props：本段画面里真正出场的物品，满足以下任一条就要申报：{_PROP_SEGMENT_CRITERIA}；是否正式建卡由后续判定核验，申报这一步不替它取舍，每个给 {{"label": "道具名称", "description": "这个道具的
   外观/特征简述", "segment_indexes": [该道具实际出现的编号列表],
   "plot_significant": true/false, "plot_significant_quote": "从上面 segment_indexes
   任一编号原文中逐字摘录的一段原文（不超过约40字），要能证明这件物品在这段剧情里被某个
@@ -181,7 +190,7 @@ async def _extract_chunk(
   "source_wording": "这件道具在 segment_indexes 所指原文里的称呼，从原文逐字复制的一段
   连续文字（名词短语，例如原文写“一支缠着细银丝的木簪”就填“缠着细银丝的木簪”或“木簪”；
   原文写“那枚旧旧的木星星”就填“木星星”）；不改字、不增字、不把原文中不相邻的两处文字
-  拼接在一起；确实没有可摘录的原文称呼就填空字符串，绝不编造",
+  拼接在一起；确实没有可摘录的原文称呼就填空字符串，绝不编造；不用人物谱/物件库/场景库里的登记名替代，登记名只填进 known_prop_name",
   "known_prop_name": "这件道具如果就是已登记道具名单中的某一件（同一件实物，不只是同类
   或名字相近的东西），从名单里逐字复制那个名字；原文里这是另一件东西、或名单里没有它，
   填空字符串，绝不硬凑一个名字相近的名单条目"}}；plot_significant=true 当且仅当上面这条
@@ -210,16 +219,21 @@ async def _extract_chunk(
             "chunk_index": chunk_index,
         },
     )
-    # 场景补漏：抽取这一次要同时报三类素材，场景最容易被漏（实测 EP6 段 14 的格局镜
-    # 三次里漏两次）。这里对同一个 chunk 专门再问一次，见 scene_recheck 模块文档。
-    # 延迟导入：只在真正抽取时才需要 scene_recheck，避免包加载期多拉一个子模块；
-    # _call_structured/_render_chunk 已挪到 .model_call/.chunking，scene_recheck
-    # 不再反向依赖本模块，两者不构成循环。
-    from .scene_recheck import attach_scene_recheck
+    # 场景/道具补漏：抽取这一次要同时报三类素材，场景/道具都容易被已登记名单
+    # 牵着走而漏掉整类（场景见 scene_recheck 模块文档；道具见 prop_recheck
+    # 模块文档，2026-10-01 PREP_PACK_VERSION 2.0.10）。这里对同一个 chunk
+    # 各专门再问一次。延迟导入：只在真正抽取时才需要，避免包加载期多拉子
+    # 模块；两个 recheck 模块都不反向依赖本模块，不构成循环。
+    from .prop_recheck import attach_prop_recheck  # 延迟导入理由见上方注释
+    from .scene_recheck import attach_scene_recheck  # 延迟导入理由见上方注释
 
-    return await attach_scene_recheck(
+    response = await attach_scene_recheck(
         response, chunk=chunk, chunk_index=chunk_index, episode_id=episode_id,
         known_scenes=known_scenes, run_id=run_id,
+    )
+    return await attach_prop_recheck(
+        response, chunk=chunk, chunk_index=chunk_index, episode_id=episode_id,
+        known_props=known_props, run_id=run_id,
     )
 
 

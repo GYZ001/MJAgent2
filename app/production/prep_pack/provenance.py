@@ -243,6 +243,7 @@ def _prep_pack_provenance(
     *, forward_chapter_label: str = "", source_episode_no: int | None = None,
     dual_anchor: bool | None = None,
     candidate_verdict_attempted: bool | None = None,
+    trailing_anchor: bool | None = None,
 ) -> dict[str, Any]:
     """统一构造 provenance 结构，避免多处调用各自拼一份字面量字典漂移。
     forward_chapter_label（1.6.0 第28轮）只在 method="resolution_forward"
@@ -269,6 +270,7 @@ def _prep_pack_provenance(
     "都不是/无法确定"或钉证未通过），此前两者坍缩成同一个 method 值，只能
     翻 provider_calls 反推。三者都是纯附加字段，其它 method/情形不带这些
     key，不影响既有消费者（payload 冻结纪律照旧）。
+    trailing_anchor（2.0.10，见 .trailing_anchor 模块）只在 anchor_phrase 经尾部退让找到时为 True，纯附加可观测标记，不放宽自校验。
     label_literal（1.11.0/1.11.1，任务①）已在 2.0.0 撤下：不是因为它变得
     结构性恒真（合成描述性标签仍然合法、仍然常见非逐字，见
     _prep_pack_gate_segment_indexes 上方说明——那道结构闸刻意不做逐字
@@ -284,10 +286,9 @@ def _prep_pack_provenance(
         provenance["forward_chapter_label"] = forward_chapter_label
     if source_episode_no is not None:
         provenance["source_episode_no"] = source_episode_no
-    if dual_anchor is not None:
-        provenance["dual_anchor"] = dual_anchor
-    if candidate_verdict_attempted is not None:
-        provenance["candidate_verdict_attempted"] = candidate_verdict_attempted
+    if dual_anchor is not None: provenance["dual_anchor"] = dual_anchor
+    if candidate_verdict_attempted is not None: provenance["candidate_verdict_attempted"] = candidate_verdict_attempted
+    if trailing_anchor: provenance["trailing_anchor"] = True
     return provenance
 
 

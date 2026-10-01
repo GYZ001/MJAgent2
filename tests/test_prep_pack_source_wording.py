@@ -152,26 +152,26 @@ def test_prop_anchored_via_source_wording_when_label_is_a_paraphrase() -> None:
     assert unanchored == [], "锚定成功的提及不进 unanchored"
 
 
-def test_prop_unanchored_when_source_wording_not_literal_in_paragraph(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """③source_wording 本身也不是原文字面（既不逐字、也没有既有卡可绑）时，
-    这条提及不得静默丢失：不进 props，但要留一条可见记录 + 带固定前缀的
-    日志，供人工核查（CLAUDE.md「空着至少是诚实的，但缺失要有可见信号」）。"""
+def test_prop_rescued_via_trailing_anchor_when_source_wording_not_literal() -> None:
+    """③（2026-10-01 PREP_PACK_VERSION 2.0.10 起不再是这个结果）
+    source_wording「妈妈写的字条」本身不是原文字面，但尾部退让到「字条」
+    （退到 2 字，同 app/production/scene_evidence.py::scene_label_evidence
+    同一口径）在声明段落里逐字命中——这条提及不再判未锚定，而是按退让后的
+    字面重新锚定，provenance 打 trailing_anchor 标记（见
+    tests/test_prep_pack_trailing_anchor.py 的完整覆盖；本文件只钉住
+    source_wording 这条通道本身不受影响——仍然是触发锚定的候选来源）。"""
     segments = index_source_segments("桌上放着一张字条。")
     mention = _mention("妈妈的字条", [1], source_wording="妈妈写的字条")
     unanchored: list[dict] = []
-    with caplog.at_level("WARNING"):
-        props = _prep_pack_build_prop_manifest(
-            [mention], segments, cards=[], unanchored=unanchored,
-        )
-    assert props == [], "两条判据都不满足时不得进入 props 清单"
-    assert unanchored == [{
-        "label": "妈妈的字条", "source_wording": "妈妈写的字条",
-        "segment_indexes": [1], "reason": "source_wording 非原文字面",
-    }]
-    assert "[PREP_PACK_PROP_UNANCHORED]" in caplog.text
-    assert "妈妈的字条" in caplog.text
+    props = _prep_pack_build_prop_manifest(
+        [mention], segments, cards=[], unanchored=unanchored,
+    )
+    assert len(props) == 1
+    entry = props[0]
+    assert entry["provenance"]["method"] == "direct"
+    assert entry["provenance"]["anchor_phrase"] == "字条"
+    assert entry["provenance"]["trailing_anchor"] is True
+    assert unanchored == [], "尾部退让命中后不再进 unanchored"
 
 
 def test_source_wording_stitched_from_nonadjacent_text_is_not_anchored() -> None:

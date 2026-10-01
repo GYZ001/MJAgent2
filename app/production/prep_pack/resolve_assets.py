@@ -50,6 +50,7 @@ from .provenance import (
     _prep_pack_scene_alias_provenance,
 )
 from .scene_degrade import degrade_unresolved_scene
+from .trailing_anchor import scene_anchor_with_trailing_fallback
 from .true_name import (
     _prep_pack_collect_true_name_verification_requests,
     _prep_pack_gather_concurrent,
@@ -709,12 +710,10 @@ async def _resolve_assets(
                 *scene_sibling_quotes.get(canonical_scene_name, [])]
             if canonical_scene_name in newly_added_scene_names:
                 scene_method = "discovery"
-                scene_anchor_segments, scene_anchor_phrase = _prep_pack_local_text_anchor(
-                    segments, scene_quote_cands)
+                scene_anchor_segments, scene_anchor_phrase = _prep_pack_local_text_anchor(segments, scene_quote_cands)
             elif resolved_via_discovery:
                 scene_method = "resolution"
-                scene_anchor_segments, scene_anchor_phrase = _prep_pack_local_text_anchor(
-                    segments, scene_quote_cands)
+                scene_anchor_segments, scene_anchor_phrase = _prep_pack_local_text_anchor(segments, scene_quote_cands)
             elif via_suspected_true_name:
                 # 跟角色侧同一套判定（第29轮，见
                 # _prep_pack_verify_true_name_hypothesis 上方完整
@@ -726,9 +725,7 @@ async def _resolve_assets(
                 # 只该是 anchor_segments 这个"本地段号"，不该连带着把
                 # anchor_phrase 这句话本身也清空），把裁决真正引用的
                 # 章节号写进 provenance。
-                local_segments, local_phrase = _prep_pack_locate_phrase(  # 同角色侧：落库原文里真存在的形态
-                    segments, true_name_pinned_quote,
-                )
+                local_segments, local_phrase = _prep_pack_locate_phrase(segments, true_name_pinned_quote)  # 同角色侧：落库原文里真存在的形态
                 if local_segments:
                     scene_method = "resolution"
                     scene_anchor_segments = local_segments
@@ -755,9 +752,11 @@ async def _resolve_assets(
                 )
             else:
                 scene_method = "direct"
-                scene_anchor_segments, scene_anchor_phrase = (
-                    _prep_pack_local_text_anchor(segments, [name])
-                )
+                scene_anchor_segments, scene_anchor_phrase = _prep_pack_local_text_anchor(segments, [name])
+            # 原文写法尾部退让锚定（2026-10-01，见 .trailing_anchor 模块），不碰 alias/alias_inherited/resolution_forward 的刻意空锚语义
+            scene_anchor_segments, scene_anchor_phrase, scene_trailing_anchor = scene_anchor_with_trailing_fallback(
+                scene_method, scene_anchor_segments, scene_anchor_phrase, segments, mention_segment_indexes,
+                name, str(mention.get("source_wording") or "").strip())
             entry = scenes.setdefault(scene_reference_id or f"scene:{resolved_name}", {
                 "scene_id": f"scene:{resolved_name}",
                 "display_name": resolved_name,
@@ -768,6 +767,7 @@ async def _resolve_assets(
                     forward_chapter_label=scene_forward_chapter_label,
                     source_episode_no=scene_source_episode_no,
                     dual_anchor=(true_name_dual_anchor if via_suspected_true_name else None),
+                    trailing_anchor=scene_trailing_anchor,
                 ),
             })
             entry["segment_indexes"] = sorted(set(entry["segment_indexes"]) | set(mention_segment_indexes))
