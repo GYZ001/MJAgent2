@@ -93,6 +93,26 @@ def test_h3_rule_is_a_positive_statement_covering_every_color_source():
     assert "scene lighting description" in rule
 
 
+def test_seedance_rule_forbids_colorless_makeup_phrases_and_lip_color():
+    """2026-10-01 补丁（「修订本段」验收，用户实测第 35 段）：正文仍写了「近乎素颜的淡妆」
+    ——不带颜色词的妆容说法本身也会被视频模型自行配色、画成色块，与第 5 段「只淡淡扫了
+    一点妆」同一根因。规则要明确连妆容本身（不只是妆容颜色）都不写，唇色单独禁止，精神
+    状态改用发型/衣着/眼神/动作表现。"""
+    rule = skin_blush.SEEDANCE_SKIN_BLUSH_RULE
+    assert "也不写妆容本身" in rule
+    assert "淡妆" in rule and "素颜妆" in rule and "化了妆" in rule
+    assert "唇色也不写" in rule
+    assert "发型" in rule and "衣着" in rule and "精神状态" in rule
+
+
+def test_h3_rule_forbids_colorless_makeup_phrases_and_lip_color():
+    rule = skin_blush.MINIMAX_H3_SKIN_BLUSH_RULE
+    assert "do not write makeup itself" in rule
+    assert "light makeup" in rule and "no-makeup look" in rule
+    assert "lip color is never written either" in rule
+    assert "hairstyle" in rule and "clothing" in rule and "state of mind or body" in rule
+
+
 def test_rule_text_no_longer_prescribes_writing_a_blush_at_all():
     """初版规则示范过「脸颊泛起淡淡的红晕」这类轻量写法本身——2026-10-01 实测这类写法仍
     有相当比例被画成色块，新规则不应再给出任何"该怎么写脸红"的正面范例，只给出不写脸红时

@@ -26,6 +26,15 @@
 承担，不再单独描述这束光落在脸的某个部位、留下一块与环境同色的色调——第 16 段的色块正是
 "场景光线颜色" 被错误落到"脸颊"这个局部造成的，不只是情绪泛红一种触发源。
 
+2026-10-01 补丁（「修订本段」验收，用户实测第 35 段）：星盘只写轮廓、未列入
+``resources.props``，腮红/唇色被本规则剔除且在复核里留痕——都生效了；但正文仍写了
+「近乎素颜的淡妆」，这类不带颜色词的妆容说法（「淡妆」「素颜妆」「化了妆」）本身就会被
+视频模型自行配色、画成色块，与第 5 段「她脸上只淡淡扫了一点妆」同一根因（见上「第五版」
+一段的原始证据）。说明"不写颜色词"还不够——只要正文点出"化没化妆、妆容程度多重"这件事
+本身，模型就会自己决定怎么上色，不需要等正文真的写出颜色词。修法：规则从"不写妆容颜色"
+扩大到"连妆容本身都不写"，唇色单独明确禁止；人物的精神状态（疲惫、精心打扮过）改用
+发型/衣着/眼神/动作表现，不借道妆容措辞。
+
 不改 ``storyboard_dialects.py``（499/500 行，新增逻辑已没有余量）——接线方式照抄
 ``storyboard_shot_mandates.py``「静态、无条件、按 render_format 选方言」的先例：两个模型
 方言各自的文案在阶段二对每一段都无条件拼进 ``dialect_instructions``，不依赖任何提名。保留
@@ -44,33 +53,48 @@
 from __future__ import annotations
 
 SEEDANCE_SKIN_BLUSH_RULE = (
-    "写实画风下，人物脸上不写任何局部颜色：情绪引起的脸颊/耳根泛红、妆容呈现的颜色（腮红、"
-    "唇彩这类）、彩色光线照在脸颊或半边脸上形成的色调、脸色因情绪或体感变成某种颜色，这几类"
-    "统统不写——脸只负责五官形态与肌肉动作本身（嘴角上扬、眉头拧起、眼睛睁大这类不带颜色的"
-    "动作可以写）。害羞、窘迫这类情绪改由眼神（低头躲闪、眼神游移不敢直视）、嘴唇（抿嘴、"
-    "轻咬下唇）、手部动作（绞衣角、摸后颈、攥紧衣袖）、停顿与呼吸（屏住呼吸、呼吸变急促）来"
-    "演，这几项足够传达情绪，不需要再靠脸上的颜色变化。场景光线本身的颜色与冷暖（暖黄烛光、"
-    "偏冷的青灰色调、晨光的暖金色）只写进整段画面/场景的光线描述里（例如「整间屋子被暖黄的"
-    "灯光笼罩」「室内光线转为偏冷的青灰色调」），由整个画面统一承担，不要再单独写这束光落在"
-    "脸上、让脸的某个部位出现一块与环境同色的色调。"
+    "写实画风下，人物脸上不写任何局部颜色，也不写妆容本身：情绪引起的脸颊/耳根泛红、妆容"
+    "呈现的颜色（腮红、唇彩这类）、彩色光线照在脸颊或半边脸上形成的色调、脸色因情绪或体感"
+    "变成某种颜色，这几类统统不写；化没化妆、化了什么程度的妆这类不带颜色词的说法（「淡妆」"
+    "「素颜妆」「化了妆」「近乎素颜的淡妆」）同样不写——视频模型会自己给这些说法配色，照样"
+    "画成色块；唇色也不写，不管是用颜色词写的还是用「涂了口红」这类说法写的。脸只负责五官"
+    "形态与肌肉动作本身（嘴角上扬、眉头拧起、眼睛睁大这类不带颜色的动作可以写）。害羞、"
+    "窘迫这类情绪改由眼神（低头躲闪、眼神游移不敢直视）、嘴唇（抿嘴、轻咬下唇）、手部动作"
+    "（绞衣角、摸后颈、攥紧衣袖）、停顿与呼吸（屏住呼吸、呼吸变急促）来演；人物的精神状态"
+    "（疲惫、精心打扮过）改用发型（刻意盘起的发髻、凌乱的碎发）、衣着（熨帖的正装、皱巴巴的"
+    "居家服）、眼神（眼神疲惫涣散、眼神明亮有神）和动作（放松地靠着、强打精神站直）来表现，"
+    "这几项足够传达情绪与状态，不需要再靠脸上的颜色变化或妆容措辞。场景光线本身的颜色与"
+    "冷暖（暖黄烛光、偏冷的青灰色调、晨光的暖金色）只写进整段画面/场景的光线描述里（例如"
+    "「整间屋子被暖黄的灯光笼罩」「室内光线转为偏冷的青灰色调」），由整个画面统一承担，不要"
+    "再单独写这束光落在脸上、让脸的某个部位出现一块与环境同色的色调。"
 )
 
 MINIMAX_H3_SKIN_BLUSH_RULE = (
     "In a photographic (live-action-style) visual style, do not write any localized color on a "
-    "character's face: an emotion-driven flush on the cheeks or ears, a color applied by makeup "
-    "(blush, lip color), a colored light tint landing on a cheek or one side of the face, or skin "
-    "turning some color from emotion or physical strain -- none of these get written. The face "
+    "character's face, and do not write makeup itself: an emotion-driven flush on the cheeks or "
+    "ears, a color applied by makeup (blush, lip color), a colored light tint landing on a cheek "
+    "or one side of the face, or skin turning some color from emotion or physical strain -- none "
+    "of these get written; phrases about whether makeup was applied or how much, even without "
+    "naming a color (\"light makeup\", \"a bare-faced, no-makeup look\", \"wearing makeup\", "
+    "\"near-bare, barely-there makeup\"), also do not get written -- the video model invents its "
+    "own color for these phrases too and produces the same color-block artifact; lip color is "
+    "never written either, whether named directly or implied (\"wearing lipstick\"). The face "
     "only carries shape and muscle movement (a corner of the mouth lifting, brows knitting, eyes "
     "widening -- movements with no color attached are fine). Play shyness or embarrassment "
     "through the eyes (looking down, gaze darting away, avoiding eye contact), the lips "
     "(pressing them together, a light bite on the lower lip), hand gestures (twisting the hem of "
     "a sleeve, touching the back of the neck, gripping a cuff), a held pause, or breath (holding "
-    "a breath, breathing quickening) -- these are enough to carry the emotion without any color "
-    "on the face. A scene's own light color and warmth (warm candlelight, a cool blue-grey cast, "
-    "warm golden morning light) belongs only in that shot's overall picture/scene lighting "
-    "description (e.g. \"the whole room is bathed in warm amber light\", \"the room's light "
-    "shifts to a cool blue-grey cast\"), carried by the whole frame -- do not also describe that "
-    "light landing on the face and leaving a patch of matching color on some part of it."
+    "a breath, breathing quickening). A character's state of mind or body (exhausted, carefully "
+    "dressed up) is conveyed instead through hairstyle (a deliberately pinned-up bun, loose stray "
+    "strands), clothing (a crisp, pressed outfit vs. rumpled loungewear), the eyes (a tired, "
+    "unfocused gaze vs. bright and alert), and action (slumping against something vs. forcing an "
+    "upright posture) -- these are enough to carry the emotion and state without any color on the "
+    "face or any mention of makeup. A scene's own light color and warmth (warm candlelight, a "
+    "cool blue-grey cast, warm golden morning light) belongs only in that shot's overall "
+    "picture/scene lighting description (e.g. \"the whole room is bathed in warm amber light\", "
+    "\"the room's light shifts to a cool blue-grey cast\"), carried by the whole frame -- do not "
+    "also describe that light landing on the face and leaving a patch of matching color on some "
+    "part of it."
 )
 
 
