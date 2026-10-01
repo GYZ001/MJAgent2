@@ -39,6 +39,17 @@ flashback_figures`` 为空时行为逐字不变（见 ``_cast_lock_sentence``）
 当前定妆照该有的样子——``unmentioned_visible_character_advisories`` 把这个信号
 挂进 ``degraded_capabilities``，只提示、不阻断、不改写（判据从数据推导：直接读
 ``resources.characters``/``prompt_text``，不是关键词黑名单）。
+
+2026-09-30「开放前缀残留」（B 机 provider_calls id=81302，第 1 集第 8/22 段 opus
+原始输出）：模型自写的锁定句前面常带一个场景/时空词（「咖啡馆画面中只有……」
+「当下画面中只有……」），``(?:现实|闪回)?`` 这个可选前缀只认死这两个词，模型
+用别的开放词时，旧判据的 ``.sub("", prompt)`` 只剥掉从「画面中只有」起的部分，
+把前缀词原样留在原处，落库后变成一个孤立的残词行（「咖啡馆」「当下」）。场景/
+时空词是开放集合，枚举不完，改成按**结构**判断：锁定句若是从行首开始写的（它
+前面、同一行内没有任何句末标点），前面的残留文字只能是模型自己加在这句话前面
+的开放前缀，连同整行一起剥掉；锁定句前面、同一行内已经有一句带句末标点的完整
+话（即锁定句是这一行里新起的第二句）时，前面那句是正文内容，保持剥离前的现有
+行为、只剥锁定句本身。见 ``_strip_cast_lock_sentences``。
 """
 from __future__ import annotations
 
@@ -49,8 +60,16 @@ from typing import Any
 #: 不会跨行把无关内容也吃进去。``(?:现实|闪回)?`` 可选前缀兼容 2026-09-29 新增的
 #: 「现实画面中只有……；闪回画面中只有……」复合写法——不加前缀时行为与旧版完全
 #: 相同。只匹配这个精确的收尾短语，不影响「人数锁定（画面中只有……不出现其他
-#: 客人或店员）」这类嵌在别处、收尾用词不同的正常文本。
-_CAST_LOCK_SENTENCE_PATTERN = re.compile(r"\n?(?:现实|闪回)?画面中只有[^\n]*?不出现其他人物或路人。")
+#: 客人或店员）」这类嵌在别处、收尾用词不同的正常文本。2026-09-30 起不再在正则
+#: 里内置前导 ``\n?``——是否连带剥掉前面同一行的内容，由 ``_strip_cast_lock_
+#: sentences`` 按这一行是否已有完整句子（句末标点）独立判断，不是正则能表达的
+#: 结构，见模块 docstring 2026-09-30 条。
+_CAST_LOCK_SENTENCE_PATTERN = re.compile(r"(?:现实|闪回)?画面中只有[^\n]*?不出现其他人物或路人。")
+
+#: 判断「锁定句前面、同一行内是否已经写完一句独立的话」的句末标点——命中就说明
+#: 前面的文字是另一句完整表达，不是锁定句自己的残留前缀，不剥；中文标点三个，
+#: 这是本函数自己定义的句子边界判据，不是对模型自由文本的关键词枚举。
+_SENTENCE_END_RE = re.compile(r"[。！？]")
 
 #: ``unmentioned_visible_character_advisories`` 提取 prompt_text 里 @ 引用的
 #: 完整词——与 storyboard_identity_validation.final_identity_prompt_errors 用
@@ -64,11 +83,12 @@ def ensure_cast_lock_in_prompt(draft: Any) -> list[str]:
     """本段 ``resources.characters`` 里可见角色的实际数量与正名，写成「画面中只有
     @A、@B 共 2 人，不出现其他人物或路人」写进 ``prompt_text`` 末尾；有
     ``resources.flashback_figures`` 时改写成「现实画面中只有……；闪回画面中只有
-    ……」分组锁定（见模块 docstring）。幂等判断按 ``_CAST_LOCK_SENTENCE_PATTERN``
-    这个结构标记识别既有写法（不论格式是否与本次生成的逐字相同）先整体剥离再
-    统一写回唯一一句——见模块 docstring 2026-09-28 幂等判断改版。返回值恒为空
-    列表——这是确定性回填，不是校验，不参与语义重试/失败判定，与
-    ``ensure_travel_direction_in_prompt`` 同一先例。
+    ……」分组锁定（见模块 docstring）。幂等判断靠 ``_strip_cast_lock_sentences``
+    按 ``_CAST_LOCK_SENTENCE_PATTERN`` 这个结构标记识别既有写法（不论格式是否
+    与本次生成的逐字相同，也不论前面是否带着模型自己加的开放前缀词）先整体剥离
+    再统一写回唯一一句——见模块 docstring 2026-09-28/2026-09-30 两条幂等判断
+    改版。返回值恒为空列表——这是确定性回填，不是校验，不参与语义重试/失败
+    判定，与 ``ensure_travel_direction_in_prompt`` 同一先例。
     """
     names = _visible_character_names(draft)
     flashback_labels = _flashback_figure_labels(draft)
@@ -78,12 +98,40 @@ def ensure_cast_lock_in_prompt(draft: Any) -> list[str]:
     if not prompt.strip():
         return []
     lock_sentence = _cast_lock_sentence(names, flashback_labels)
-    deduped = _CAST_LOCK_SENTENCE_PATTERN.sub("", prompt).rstrip()
+    deduped = _strip_cast_lock_sentences(prompt).rstrip()
     normalized = (deduped + "\n" if deduped else "") + lock_sentence
     if normalized == prompt:
         return []
     draft.prompt_text = normalized
     return []
+
+
+def _strip_cast_lock_sentences(prompt: str) -> str:
+    """剥掉 ``prompt`` 里所有符合 ``_CAST_LOCK_SENTENCE_PATTERN`` 收尾结构的锁定句，
+    供 ``ensure_cast_lock_in_prompt`` 的幂等回写与 ``unmentioned_visible_character_
+    advisories`` 的未点名核验共用。
+
+    判据从结构推导，不枚举前缀词（见模块 docstring 2026-09-30 条）：锁定句前面、
+    同一行内没有任何句末标点时，前面的文字只能是模型自己加在这句话前面的开放
+    前缀（场景名、时空词……开放集合，枚举不完），连同整行一起剥掉，顺带吞掉
+    行首那个换行以免留下空行；锁定句前面、同一行内已经有一句带句末标点的完整
+    话时，说明锁定句是这一行里新起的第二句，前面那句是正文内容，只剥锁定句
+    本身，与改版前逐字相同的行为。
+    """
+    pieces: list[str] = []
+    cursor = 0
+    for match in _CAST_LOCK_SENTENCE_PATTERN.finditer(prompt):
+        start = match.start()
+        line_start = prompt.rfind("\n", 0, start) + 1
+        prefix = prompt[line_start:start]
+        if _SENTENCE_END_RE.search(prefix):
+            pieces.append(prompt[cursor:start])
+        else:
+            drop_from = line_start - 1 if line_start > 0 else 0
+            pieces.append(prompt[cursor:drop_from])
+        cursor = match.end()
+    pieces.append(prompt[cursor:])
+    return "".join(pieces)
 
 
 def _visible_character_names(draft: Any) -> list[str]:
@@ -148,7 +196,7 @@ def unmentioned_visible_character_advisories(draft: Any) -> list[str]:
     if not names:
         return []
     prompt = str(getattr(draft, "prompt_text", "") or "")
-    body = _CAST_LOCK_SENTENCE_PATTERN.sub("", prompt)
+    body = _strip_cast_lock_sentences(prompt)
     mentioned = set(_MENTION_TOKEN_RE.findall(body))
     missing = [name for name in names if name not in mentioned and f"画外音（{name}）" not in body]
     if not missing:

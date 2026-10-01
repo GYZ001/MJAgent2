@@ -1,4 +1,23 @@
-"""从台词合同生成唯一声道标签；新分镜用占位符保留模型安排的发声时机。"""
+"""从台词合同生成唯一声道标签；新分镜用占位符保留模型安排的发声时机。
+
+2026-09-30 口型标注去重（B 机 provider_calls id=81314，第 1 集第 20 段 opus 原始
+输出逐字核实）：``……先停顿一拍，再压低声音连贯快速地答：{{speech:U02}}（发声者
+开口，其他可见人物不跟随口型）光影：台灯暖黄光……``——模型在占位符**紧后**自己
+又写了一遍系统本该生成的口型标注，而 ``dialogue[].line`` 里 U02 的原话是干净的
+「没什么，工作上的旧资料。」，不含任何标注；``render_segment_speech`` 展开占位符
+时只替换 ``{{speech:U02}}`` 这四个字本身，模型紧跟着写的那份标注原样留在旁边，
+``rendered_utterance`` 又在展开结果末尾追加一份，两份紧挨着，对应一条台词只该
+有一个。dialect 指令要求模型只写占位符、原话只写进 ``dialogue[].line``，不要
+自己写出口型标注（见 ``storyboard_dialects`` 「系统从同一合同展开中文声道标签、
+原话和口型要求」），但模型不总是照办——跟 ``storyboard_cast_lock`` 的人数锁定句
+同一种失败模式。标注是本函数自己定义的两个固定短语之一（开口/闭口二选一，见
+``_MOUTH_ANNOTATIONS``），不是对模型自由文本的开放式语义判断，与
+``storyboard_music_bed._MUSIC_CLAUSE_RE`` 对「配乐」固定关键字同一先例；改法：
+展开占位符时把占位符本身与它**紧后**若已跟着的同一条系统标注（不论是展开结果
+该有的那条、还是模型写错的另一条）作为同一个替换单元一起消费掉，只留
+``rendered_utterance`` 按 ``delivery_kind`` 生成的那一份——见
+``_TOKEN_WITH_TRAILING_MOUTH_RE``。
+"""
 import logging
 import re
 from typing import Any
@@ -7,6 +26,20 @@ from app import textmatch
 from app.production.storyboard_identity_contract import effective_delivery_kind
 
 SPEECH_TOKEN = re.compile(r"\{\{speech:([A-Za-z0-9_-]+)\}\}")
+
+#: 本函数自己定义、会追加进提示词的两条固定口型标注——开口（spoken_dialogue）
+#: 与闭口（其余声道）二选一，是封闭集合，不是对模型自由文本的关键词猜测。
+_MOUTH_ANNOTATIONS = ("发声者开口，其他可见人物不跟随口型", "画面人物嘴唇闭合无张合动作")
+
+#: 占位符 + 紧跟其后、模型自己写的同一条系统标注（开口或闭口任一种，不论是否与
+#: 这条台词实际的 delivery_kind 匹配）——两者作为一个替换单元一起被
+#: ``render_segment_speech`` 消费掉，换成 ``rendered_utterance`` 按
+#: delivery_kind 生成的唯一一份；模型没有紧跟着写标注时，可选组匹配空串，行为
+#: 与旧版逐字相同。用来识别「模型自写标注」的字符串就是系统自己会生成的那两条
+#: 固定短语，不是另立词表（见模块 docstring 2026-09-30 条）。
+_TOKEN_WITH_TRAILING_MOUTH_RE = re.compile(
+    SPEECH_TOKEN.pattern + "(?:（(?:" + "|".join(re.escape(a) for a in _MOUTH_ANNOTATIONS) + ")）)?"
+)
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +88,7 @@ def rendered_utterance(
     label = {"spoken_dialogue": "画内对白", "offscreen_dialogue": "人物画外对白", "inner_monologue": "内心独白", "narration": "旁白"}[kind]
     if dialect == "minimax_h3_native_fields":
         return _h3_utterance(line, names, speaker=speaker, kind=kind)
-    mouth = "发声者开口，其他可见人物不跟随口型" if kind == "spoken_dialogue" else "画面人物嘴唇闭合无张合动作"
+    mouth = _MOUTH_ANNOTATIONS[0] if kind == "spoken_dialogue" else _MOUTH_ANNOTATIONS[1]
     sentences = re.findall(r".*?(?:[。！？!?]+|[.]+(?=\s|$)|$)", str(line.get("line") or ""), re.S)
     quoted = "".join(f"“{sentence}”" for sentence in sentences if sentence)
     return f"{label}（{speaker}）：{quoted}（{mouth}）"
@@ -94,7 +127,11 @@ def render_segment_speech(segment: dict, *, dialect: str, narrator_voice_charact
     narrator_voice_character`` 字段），这样任何只拿到 ``segment`` 本身、没有 conn/
     project_id 的重渲染再比对（``explicit_prompt_speaker_errors``、台词人工修订）
     都能复现当次生成实际用的旁白音色，不必外部传参、也不会读到项目设置之后被
-    改动的新值。"""
+    改动的新值。2026-09-30 用 ``_TOKEN_WITH_TRAILING_MOUTH_RE`` 代替裸
+    ``SPEECH_TOKEN`` 做替换：模型偶尔在占位符后面紧跟着自己把口型标注也写一遍
+    （见模块 docstring），只替换占位符本身会把这份模型自写的标注原样留在旁边，
+    与紧接着追加的 canonical 标注重复；连同紧邻的同款标注一起替换掉，保证展开
+    结果里每条台词只有一份标注。"""
     template = str(segment.get("speech_template") or segment.get("prompt_text") or "")
     if not SPEECH_TOKEN.search(template):
         return segment
@@ -106,7 +143,7 @@ def render_segment_speech(segment: dict, *, dialect: str, narrator_voice_charact
     segment["speech_template"] = template
     segment["speech_dialect"] = dialect
     segment["narrator_voice_character"] = narrator_voice_character
-    segment["prompt_text"] = SPEECH_TOKEN.sub(lambda m: by_id[m.group(1)], template)
+    segment["prompt_text"] = _TOKEN_WITH_TRAILING_MOUTH_RE.sub(lambda m: by_id[m.group(1)], template)
     return segment
 
 

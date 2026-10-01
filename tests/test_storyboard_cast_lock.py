@@ -94,6 +94,70 @@ def test_empty_prompt_text_is_left_untouched():
     assert draft.prompt_text == ""
 
 
+def test_strips_whole_line_when_model_writes_open_vocabulary_scene_prefix():
+    """2026-09-30 真实回归（B 机 provider_calls id=81302，第 1 集第 8 段 opus 原始输出）：
+    模型自写的锁定句前面带了一个开放词前缀「咖啡馆」（不是 (?:现实|闪回) 认得的两个词之一），
+    旧判据只剥「画面中只有……」这一段，把「咖啡馆」原样留在原处，落库后变成一个孤立残词行。
+    场景词是开放集合枚举不完，改成按结构判断：锁定句从行首开始写（前面同一行没有句末标点）
+    时，连前缀带整行一起剥掉，不留残词。"""
+    draft = _draft(
+        "镜头8：温念独自坐在咖啡馆窗边，看着手机。\n"
+        "咖啡馆画面中只有@温念 一人入镜，回忆画面中没有人物，不出现其他人物或路人。",
+        [_character("bible:温念", "温念")],
+    )
+    assert ensure_cast_lock_in_prompt(draft) == []
+    assert draft.prompt_text == (
+        "镜头8：温念独自坐在咖啡馆窗边，看着手机。\n"
+        "画面中只有@温念共1人，不出现其他人物或路人。"
+    )
+    assert draft.prompt_text.count("咖啡馆") == 1, "残留的开放前缀词「咖啡馆」不该再单独成行"
+
+
+def test_strips_whole_line_for_another_open_vocabulary_prefix():
+    """同一真实回归第 22 段：模型写的前缀是「当下」而不是「咖啡馆」——两个不同的开放词
+    都要被同一条结构判据覆盖，证明修法不是在给前缀列举新词条。"""
+    draft = _draft(
+        "镜头22：两人并肩走在走廊。\n"
+        "当下画面中只有@温念、@顾屿 共2人，不出现其他人物或路人。",
+        [_character("bible:温念", "温念"), _character("bible:顾屿", "顾屿")],
+    )
+    assert ensure_cast_lock_in_prompt(draft) == []
+    assert "当下" not in draft.prompt_text
+    assert draft.prompt_text == (
+        "镜头22：两人并肩走在走廊。\n"
+        "画面中只有@温念、@顾屿共2人，不出现其他人物或路人。"
+    )
+
+
+def test_recognized_real_and_flashback_prefixes_still_strip_whole_line():
+    """既有「现实」「闪回」前缀（_CAST_LOCK_SENTENCE_PATTERN 本就认得的两个词）不受影响：
+    整条复合锁定句同样被整体剥离、重写成最新一句，不是本次修法想动的行为。"""
+    draft = _draft(
+        "镜头16：床沿，六岁的顾屿趴着数数。\n"
+        "现实画面中只有@温念共1人；闪回画面中只有六岁的顾屿，不出现其他人物或路人。",
+        [_character("bible:温念", "温念")],
+    )
+    assert ensure_cast_lock_in_prompt(draft) == []
+    assert draft.prompt_text == (
+        "镜头16：床沿，六岁的顾屿趴着数数。\n"
+        "画面中只有@温念共1人，不出现其他人物或路人。"
+    )
+
+
+def test_lock_sentence_in_middle_of_line_with_prior_complete_sentence_keeps_prefix():
+    """锁定句出现在一行中间、前面同一行已经是一句带句末标点的完整话时，保持剥离前的
+    现有行为不变：只剥锁定句本身，不动前面那句正文——那是真实的镜头描述，不是锁定句
+    自己的残留前缀。"""
+    draft = _draft(
+        "镜头20：两人对视，气氛凝固。现实画面中只有@顾屿、@温念共2人，不出现其他人物或路人。",
+        [_character("bible:顾屿", "顾屿"), _character("bible:温念", "温念")],
+    )
+    assert ensure_cast_lock_in_prompt(draft) == []
+    assert draft.prompt_text == (
+        "镜头20：两人对视，气氛凝固。\n画面中只有@顾屿、@温念共2人，不出现其他人物或路人。"
+    )
+
+
 def test_three_visible_characters_dedupes_and_preserves_order():
     draft = _draft(
         "镜头1：三人对峙。",
