@@ -6,6 +6,8 @@ Split out of app/production/prep_pack.py.
 """
 from __future__ import annotations
 
+import logging
+
 from app.evidence import repository as evidence_repository
 from app.harness import model_gateway
 from app.schemas import Bible
@@ -24,7 +26,10 @@ from .functional_candidates import (
     _prep_pack_functional_candidate_label_segments,
     _prep_pack_functional_candidate_names,
     _prep_pack_functional_candidate_roster,
+    _prep_pack_label_is_counted_group,
 )
+
+log = logging.getLogger(__name__)
 
 
 class _PrepPackFunctionalCandidateVerdict(BaseModel):
@@ -144,6 +149,43 @@ def _prep_pack_functional_candidate_pin_segment(
     return None
 
 
+_UNGROUNDED_LOG_PREFIX = "[PREP_PACK_CANDIDATE_VERDICT_UNGROUNDED][未拦截]"
+
+
+def _prep_pack_candidate_pin_is_grounded(
+    pinned_segment_index: int, event_span_segments: set[int],
+    text: str, label: str, candidate_forms: list[str],
+) -> bool:
+    """钉证二次核验（2.0.17 第二轮，真实案例 proj_ca86b15ab7d7 顾念长安
+    第2集，run_c64b5d58c431）：段号落在卷宗目录内只证明"这是卷宗里真实的
+    一段原文"，证明不了"这段原文真的在说这个标签、并且把它和这位候选联系
+    在一起"——真实事故里模型把候选"温念"钉在她自己出场的第2段（原文是
+    "温念吃小吃连连夸赞比什么都新奇"），但那一段压根没提候选判别要解决
+    的标签"游客"（标签自己申报的段落是第4段，跟钉证命中的第2段毫无关系），
+    supporting_segment_index 落在真实段号集合内这道结构闸对这种自由联想
+    完全无感。
+
+    判据从数据推导，不写词表，两层都要过：
+    ①标签侧——钉证命中的段号必须是这条提及**自己申报**的出场段落之一
+    （``event_span_segments``，即 _prep_pack_functional_candidate_label_
+    segments 的结果，上游 _prep_pack_gate_segment_indexes 已经核验过这个
+    声明本身的结构合法性，这里直接复用，不重新发明）；标签是合成描述性
+    短语、原文从不逐字出现时（真实 EP1"银色长袍女子"），自己申报的段落
+    仍然是唯一站得住脚的"这段在说这个标签"的证据来源——逐字命中原文
+    （``label in text``）作为结构性回退口径一并接受（跟 dossier 自己的
+    A 侧主锚点同一来源：自报段落∪字面命中段落，见 _prep_pack_functional_
+    candidate_dossier 的 primary_indexes）；两者都不占时标签侧不算过关。
+    ②候选侧——那一段原文里还必须逐字出现候选的规范名或任一已登记别名
+    （``candidate_forms``，与候选集本身同一口径，见 _prep_pack_functional_
+    candidate_names——含已登记的代词别名，核验口径不因此另开一套）。
+    ``text`` 取 ``segments`` 里的完整原文，不取卷宗可能截断过的版本，避免
+    截断误伤（截断只影响长段落，不该反过来收紧核验口径）。两层有一层不
+    满足就判未核验通过。"""
+    if pinned_segment_index not in event_span_segments and label not in text:
+        return False
+    return any(form and form in text for form in candidate_forms)
+
+
 async def _prep_pack_functional_candidate_verdict_only(
     conn, *, project_id: str, episode_id: str, episode_no: int,
     label: str, source_text: str, segments: list[SourceSegment], bible: Bible,
@@ -200,6 +242,11 @@ async def _prep_pack_functional_candidate_verdict_only(
     event_span_segments = _prep_pack_functional_candidate_label_segments(
         character_mentions, label,
     )
+    # 带数量的群体称谓（"两名游客"）结构上不可能是某一位候选本人，候选判别
+    # 压根不该尝试——见 _prep_pack_label_is_counted_group 上方大注释完整
+    # 案情，2.0.17。
+    if _prep_pack_label_is_counted_group(label, segments, event_span_segments):
+        return not_attempted
     dossier = _prep_pack_functional_candidate_dossier(
         segments, label, candidate_anchor_texts, event_span_segments,
     )
@@ -217,6 +264,18 @@ async def _prep_pack_functional_candidate_verdict_only(
     if pinned is None:
         return attempted_no_bind
     canonical_name = response.selected_candidate
+    full_text = segments[pinned["segment_index"] - 1].text
+    if not _prep_pack_candidate_pin_is_grounded(
+        pinned["segment_index"], event_span_segments,
+        full_text, label, candidate_anchor_texts[canonical_name],
+    ):
+        log.warning(
+            "%s 候选判别钉证第%s段不是标签「%s」自己申报的出场段落、原文也未"
+            "逐字出现该标签，或候选「%s」的名字/已登记别名没有出现在这段，"
+            "判定未核验通过，不绑定",
+            _UNGROUNDED_LOG_PREFIX, pinned["segment_index"], label, canonical_name,
+        )
+        return attempted_no_bind
     # 不再要求候选已有定妆照：出图解耦到后台后，同一轮映射刚建的卡没有图；
     # 候选集本就取自人物谱，绑定只看在册，图由分镜前资产准备按 bible:{name} 补齐。
     conflicting_name = _prep_pack_cross_episode_alias_conflict(

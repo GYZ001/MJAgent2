@@ -3601,15 +3601,15 @@ def test_functional_extra_candidate_concurrent_completion_order_does_not_affect_
                 # 原文各自的锚点词在任一次调用里都存在；只有"判断标签...”
                 # 这一行的标签本身才是这次调用独有的，用它来区分。
                 if '标签"绿袍男子"' in prompt:
-                    label, candidate = "绿袍男子", "许清"
+                    label, candidate, pin_index = "绿袍男子", "许清", 1
                 elif '标签"白袍老者"' in prompt:
-                    label, candidate = "白袍老者", "上官笑"
+                    label, candidate, pin_index = "白袍老者", "上官笑", 2
                 else:
                     raise AssertionError(f"未识别的候选判别提示词：{prompt[:50]}")
                 await asyncio.sleep(0.02 if label == slow_label else 0.0)
                 call_order.append(label)
                 return prep_pack._PrepPackFunctionalCandidateVerdict(
-                    selected_candidate=candidate, supporting_segment_index=1,
+                    selected_candidate=candidate, supporting_segment_index=pin_index,
                     supporting_quote="",
                 )
             from app.source_paratext import ParatextSpans
@@ -4029,7 +4029,7 @@ def test_unresolved_appearance_label_binds_via_candidate_verdict(monkeypatch):
     即将落 functional_extras 之前，候选判别机制必须介入：本集原文里许清的
     已确认别名"许师姐"字面出现，候选集只有许清一人入选（另一个人物谱角色
     "孟浩"的姓名/别名本集原文里从未出现，不该被拉进候选集，也不该出现在
-    发给模型的候选名单里）；候选判别模型调用选中许清、引用卷宗内的段号，
+    发给模型的候选名单里）；候选判别模型调用选中许清、引用与标签同段落（含「许师姐」字面，满足 2.0.17 第二轮钉证核验）的段号，
     最终必须绑定到许清已有的 portrait_id/identity_id/visual_entity_id，
     但 display_appellation 仍须是本集原文措辞"银色长袍女子"（不提前剧透
     许清这个规范名），且这个标签不能再出现在 functional_extras 里。"""
@@ -4060,7 +4060,7 @@ def test_unresolved_appearance_label_binds_via_candidate_verdict(monkeypatch):
         seen["schema"] = kwargs.get("output_schema")
         return prep_pack._PrepPackFunctionalCandidateVerdict(
             selected_candidate="许清", supporting_segment_index=1,
-            supporting_quote="许师姐武功高强，众人皆知。",
+            supporting_quote="银色长袍女子缓步走出大殿，众人低声说这位正是许师姐。",
         )
 
     monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
@@ -4070,7 +4070,7 @@ def test_unresolved_appearance_label_binds_via_candidate_verdict(monkeypatch):
     ])]
     characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
         conn, events=events,
-        source_text="许师姐武功高强，众人皆知。\n\n银色长袍女子缓步走出大殿，无人认得她的身份。",
+        source_text="银色长袍女子缓步走出大殿，众人低声说这位正是许师姐，武功高强众人皆知。",
     )
 
     assert errors == []
@@ -5361,8 +5361,8 @@ def test_prep_pack_version_is_1_8_0():
     比照 1.4.1/1.9.0 的先例推进版本号第三位，不动 schema 位（coverage_
     ledger.paratext 自身仍是 flat [int] list）。2.0.5 见 chunk_extraction 规则常量上方。
     2.0.6（见 discovery._prep_pack_build_prop_manifest 上方大注释）：道具对照既有卡片绑定，
-    props[] 新增 additive 字段 canonical_name；2.0.7（见 schemas._ModelSceneMention/_ModelPropMention.source_wording 上方注释）：scenes/props 新增 source_wording 字段——均比照 1.2.0 先例推进版本号第三位；2.0.8（见 appellation_resolve.py 模块 docstring"设计变更"一节）：identity 新增 functional 值，unresolved 不再落 functional_extras、改记 asset_manifest.unresolved_appellations，是判定语义变更，比照 1.4.1 先例推进版本号第三位；2.0.9（见 chunk_extraction 提示词 props 字段与新模块 prop_segment_coverage 上方）：props 申报判据从举例式框定改成「被动作操作/本集还会再出现」两条正面陈述，且 manifest 建好后补一轮确定性全文检索——均是 prompt-contract/判定语义变更，不动 schema 位，比照 1.4.1 先例推进版本号第三位；2.0.10（见新模块 .prop_recheck/.trailing_anchor 上方）：新增道具专项复核调用（同 scene_recheck 同一形状补漏），道具/场景 label/source_wording 非原文连续字面时新增尾部退让锚定（口径同 app/production/scene_evidence.py:scene_label_evidence）——均是判定语义变更，不动 schema 位，比照 1.4.1 先例推进版本号第三位；2.0.11（见 chunk_extraction._PROP_SEGMENT_CRITERIA）：正穿在身上的衣物归人物造型、不按道具申报，判定语义变更，同上推进第三位。2.0.12（见 chunk_extraction._ASSET_DECLARATION_RULES 新增「人物在场的持续性」一段）：与既有「场景的持续性」对称——角色一旦在某编号以在场主体身份成立，只要原文没写明他离开，同一场景后续编号即使没有具体描写也计入 segment_indexes，不再因为某段没有他的动作描写就漏报；prompt-contract 变更，会实际改变模型对 characters 的申报范围，判定语义变更，同上推进第三位。2.0.13（见 chunk_extraction._PROP_SEGMENT_CRITERIA/_KNOWN_PROP_NAME_FIELD_RULE、chunking._prep_pack_known_prop_names、prop_segment_coverage.fill_prop_segment_coverage）：顾念长安第2集三类产品缺陷——①已登记道具名单补一段正面陈述（名单只用于对齐写法/提名同一实物，不构成申报理由，正穿着的衣物不因为同名卡而破例）；②已登记道具名单附带每张卡的外观（截断），known_prop_name 字段说明改成按外观/物主核对是否同一实物；③道具段号全文补全的子串检索命中改为候选，新增一次批量文本模型确认调用逐条判断是否同一实物，未确认不并入，调用失败/不完整打可见信号——均是 prompt-contract/判定语义变更，不动 schema 位，比照 1.4.1 先例推进版本号第三位。2.0.14（见 chunk_extraction._KNOWN_PROP_NAME_FIELD_RULE、chunking._prep_pack_prop_prior_appearance_lines）：2.0.13 用 B 沙箱真实数据复测，缺陷②仍未解决——本段原文自己没有外观描述时模型没有依据可比对，仅凭名字对上就直接提名；不扩展 Prop 数据结构，改为 _prep_pack_known_prop_names 把这张卡在更早集数里「此前出场」的原始 description/plot_significant_quote 带给模型做归属核对，新增 episode_id/episode_no 必传参数排除当前集——prompt-contract 变更，不动 schema 位，比照 1.4.1 先例推进版本号第三位。2.0.15（见 app.props.card_match.match_existing_prop_card、chunking._prep_pack_props_with_prior_appearance_evidence）：2.0.14 用 B 沙箱真实数据复测，模型确实用上了「此前出场」证据正确拒绝提名，但 match_existing_prop_card 的常规判据只看字面包含不看模型拒没拒绝，照样把"外套"/"手机"绑给了错误的卡——新增 cards_with_prior_evidence 必传集合，未提名时常规判据命中的候选若模型看过此前出场证据仍未提名则不绑定，打 [PREP_PACK_PROP_LITERAL_MATCH_DECLINED][未拦截]；判定语义变更，不动 schema 位，比照 1.4.1 先例推进版本号第三位。2.0.16（见 chunk_extraction._KNOWN_PROP_NAME_FIELD_RULE）：2.0.15 用 B 沙箱真实数据复测，card_match.py 的收紧已生效但 label 仍是裸词"外套"与已登记卡同名，被 service._prop_mention_skip_reason 的"label 已登记"判据短路跳过，既不绑错也不建卡；修法 known_prop_name 留空时 label 要带归属/可见特征区分，但验证证实不能用"谁的＋东西"（带"的"）写法——normalize_prop_label 会剥掉"谁的"前缀重新撞名，改用不含"的"的紧贴写法；prompt-contract 变更，不动 schema 位，比照 1.4.1 先例推进版本号第三位。"""
-    assert prep_pack.PREP_PACK_VERSION == "2.0.16"
+    props[] 新增 additive 字段 canonical_name；2.0.7（见 schemas._ModelSceneMention/_ModelPropMention.source_wording 上方注释）：scenes/props 新增 source_wording 字段——均比照 1.2.0 先例推进版本号第三位；2.0.8（见 appellation_resolve.py 模块 docstring"设计变更"一节）：identity 新增 functional 值，unresolved 不再落 functional_extras、改记 asset_manifest.unresolved_appellations，是判定语义变更，比照 1.4.1 先例推进版本号第三位；2.0.9（见 chunk_extraction 提示词 props 字段与新模块 prop_segment_coverage 上方）：props 申报判据从举例式框定改成「被动作操作/本集还会再出现」两条正面陈述，且 manifest 建好后补一轮确定性全文检索——均是 prompt-contract/判定语义变更，不动 schema 位，比照 1.4.1 先例推进版本号第三位；2.0.10（见新模块 .prop_recheck/.trailing_anchor 上方）：新增道具专项复核调用（同 scene_recheck 同一形状补漏），道具/场景 label/source_wording 非原文连续字面时新增尾部退让锚定（口径同 app/production/scene_evidence.py:scene_label_evidence）——均是判定语义变更，不动 schema 位，比照 1.4.1 先例推进版本号第三位；2.0.11（见 chunk_extraction._PROP_SEGMENT_CRITERIA）：正穿在身上的衣物归人物造型、不按道具申报，判定语义变更，同上推进第三位。2.0.12（见 chunk_extraction._ASSET_DECLARATION_RULES 新增「人物在场的持续性」一段）：与既有「场景的持续性」对称——角色一旦在某编号以在场主体身份成立，只要原文没写明他离开，同一场景后续编号即使没有具体描写也计入 segment_indexes，不再因为某段没有他的动作描写就漏报；prompt-contract 变更，会实际改变模型对 characters 的申报范围，判定语义变更，同上推进第三位。2.0.13（见 chunk_extraction._PROP_SEGMENT_CRITERIA/_KNOWN_PROP_NAME_FIELD_RULE、chunking._prep_pack_known_prop_names、prop_segment_coverage.fill_prop_segment_coverage）：顾念长安第2集三类产品缺陷——①已登记道具名单补一段正面陈述（名单只用于对齐写法/提名同一实物，不构成申报理由，正穿着的衣物不因为同名卡而破例）；②已登记道具名单附带每张卡的外观（截断），known_prop_name 字段说明改成按外观/物主核对是否同一实物；③道具段号全文补全的子串检索命中改为候选，新增一次批量文本模型确认调用逐条判断是否同一实物，未确认不并入，调用失败/不完整打可见信号——均是 prompt-contract/判定语义变更，不动 schema 位，比照 1.4.1 先例推进版本号第三位。2.0.14（见 chunk_extraction._KNOWN_PROP_NAME_FIELD_RULE、chunking._prep_pack_prop_prior_appearance_lines）：2.0.13 用 B 沙箱真实数据复测，缺陷②仍未解决——本段原文自己没有外观描述时模型没有依据可比对，仅凭名字对上就直接提名；不扩展 Prop 数据结构，改为 _prep_pack_known_prop_names 把这张卡在更早集数里「此前出场」的原始 description/plot_significant_quote 带给模型做归属核对，新增 episode_id/episode_no 必传参数排除当前集——prompt-contract 变更，不动 schema 位，比照 1.4.1 先例推进版本号第三位。2.0.15（见 app.props.card_match.match_existing_prop_card、chunking._prep_pack_props_with_prior_appearance_evidence）：2.0.14 用 B 沙箱真实数据复测，模型确实用上了「此前出场」证据正确拒绝提名，但 match_existing_prop_card 的常规判据只看字面包含不看模型拒没拒绝，照样把"外套"/"手机"绑给了错误的卡——新增 cards_with_prior_evidence 必传集合，未提名时常规判据命中的候选若模型看过此前出场证据仍未提名则不绑定，打 [PREP_PACK_PROP_LITERAL_MATCH_DECLINED][未拦截]；判定语义变更，不动 schema 位，比照 1.4.1 先例推进版本号第三位。2.0.16（见 chunk_extraction._KNOWN_PROP_NAME_FIELD_RULE）：2.0.15 用 B 沙箱真实数据复测，card_match.py 的收紧已生效但 label 仍是裸词"外套"与已登记卡同名，被 service._prop_mention_skip_reason 的"label 已登记"判据短路跳过，既不绑错也不建卡；修法 known_prop_name 留空时 label 要带归属/可见特征区分，但验证证实不能用"谁的＋东西"（带"的"）写法——normalize_prop_label 会剥掉"谁的"前缀重新撞名，改用不含"的"的紧贴写法；prompt-contract 变更，不动 schema 位，比照 1.4.1 先例推进版本号第三位。2.0.17（见 functional_candidates._prep_pack_label_is_counted_group）：2.0.16 生产重跑同一集暴露称谓归属缺陷——"两名游客"被抽取报成 display_name="游客"，候选判别调用拿不相关段落的"像游客"语气当依据把它绑给了温念；修法候选判别前核验标签自己申报段落里是否紧邻数词/不定量词+人物类量词，命中就短路不发起模型调用；判定语义变更，不动 schema 位，比照 1.4.1 先例推进版本号第三位。2.0.17 第二轮（见 functional_candidate_verdict._prep_pack_candidate_pin_is_grounded）：协调方复核指出数量群体短路只挡住这一种形态，真正缺口是钉证只核验段号真实存在、不核验这段真的在说这个标签并把它和候选联系在一起；补法钉证命中段落的完整原文必须同时逐字包含标签本身与候选的名字/已登记别名，缺一不通过，不绑定、不兜底；判定语义变更，不动 schema 位，仍记这一批 2.0.17。"""
+    assert prep_pack.PREP_PACK_VERSION == "2.0.17"
 
 
 # ---------------------------------------------------------------------------

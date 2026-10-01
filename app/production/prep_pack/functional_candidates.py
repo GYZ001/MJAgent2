@@ -96,6 +96,62 @@ def _prep_pack_functional_candidate_label_segments(
     return matched
 
 
+# 带数量的群体称谓不可能是某一位具名角色本人（2.0.17，真实案例
+# proj_ca86b15ab7d7 顾念长安第2集）：抽取调用把原文"两名游客正举着手机在
+# 城门下拍照"报成角色提及 display_name="游客"（模型自己转述时把数量词
+# 丢了），discovery 判定它不是可建卡的新角色、落候选判别，候选判别模型
+# 调用在候选判别卷宗（跨段拼接，覆盖本集远处段落，这是该机制故意的设计，
+# 见 _prep_pack_functional_candidate_dossier 完整说明）里，拿第2段温念吃
+# 小吃"连连夸赞比什么都新奇"这种毫不相关的"像游客"语气当依据，把"游客"
+# 判给了候选温念——supporting_segment_index 钉证只核验"这是卷宗里真实的
+# 段号"，不核验"这段真的在说这个标签"，模型拿着候选名单自由联想就能过关。
+# 本集同一次运行里，叙述向称谓归属（独立的另一条通路，appellation_
+# resolve.py）对同一处原文的判定是 functional（候选之外的另几个具体的
+# 人）——两条通路互相印证了这不该是候选判别的合法输出。
+#
+# 判据从数据推导，不写词表：不检查"游客"这个具体词，检查这个标签**自己
+# 申报的段落**原文里，紧邻这个标签之前是否写着"数词/不定量词+人物类量词"
+# （两名/几位/三个/数名……）——这是汉语数量短语的语法结构，闭集语法单位，
+# 同 app.props.labels._QUANTIFIER_RE"剥的是语法成分不是词表"同一原则。
+# 原文这样写，就是候选名单之外的至少两个人，结构上不可能是某一位候选
+# 本人，候选判别这一步压根不该尝试——不是"模型这次答错了"，是"这类标签
+# 本来就不该拿去问候选判别"，因此在调用模型之前就拦，不浪费一次模型调用、
+# 也不给模型"自由联想"的空间。
+#
+# 两种命中形态都要覆盖（B 沙箱第二次真实重跑同一案例实测两种都出现过）：
+# ①模型转述时把数量词丢了，label="游客"，数量词留在原文里紧邻这次匹配
+# 之前（"两名游客"）；②模型把数量词原样留在了 label 里，label 本身就是
+# "两名游客"——这种情形数量词是 label 的前缀，不在"匹配之前的原文"里，
+# 必须单独核验 label 自身的开头。两条判据缺一个都会漏掉另一种模型措辞。
+_COUNTED_GROUP_QUANTIFIER_CORE = (
+    r"(?:[二两三四五六七八九十百千几数多]|\d{1,3})(?:个|名|位|批|群|众|对|双)"
+)
+_COUNTED_GROUP_LABEL_PREFIX_RE = re.compile(r"^" + _COUNTED_GROUP_QUANTIFIER_CORE)
+_COUNTED_GROUP_CONTEXT_SUFFIX_RE = re.compile(_COUNTED_GROUP_QUANTIFIER_CORE + r"$")
+
+
+def _prep_pack_label_is_counted_group(
+    label: str, segments: list[SourceSegment], event_span_segments: set[int],
+) -> bool:
+    """标签本身是否以数量词开头，或标签自己申报的段落（
+    ``event_span_segments``，即 ``_prep_pack_functional_candidate_label_
+    segments`` 的结果）原文里有一处紧邻写着数量词前缀（见上方大注释两种
+    形态）。后一种只看这个标签自己声称出场的段落，不做全集扫描——跟事件
+    跨度这层既有锚点同一限定范围，不越权替这条提及去别处找证据。"""
+    if not label:
+        return False
+    if _COUNTED_GROUP_LABEL_PREFIX_RE.match(label):
+        return True
+    for index in event_span_segments:
+        if not (1 <= index <= len(segments)):
+            continue
+        text = segments[index - 1].text
+        for match in re.finditer(re.escape(label), text):
+            if _COUNTED_GROUP_CONTEXT_SUFFIX_RE.search(text[:match.start()]):
+                return True
+    return False
+
+
 def _prep_pack_functional_candidate_anchor_pool(
     segments: list[SourceSegment], label: str,
     candidate_anchor_texts: dict[str, list[str]],
