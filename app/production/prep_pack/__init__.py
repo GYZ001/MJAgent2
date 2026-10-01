@@ -83,7 +83,6 @@ from .discovery import (
     _discover_new_scenes,
     _discovery_errored_names,
     _load_project_bible,
-    _prep_pack_build_prop_manifest,
 )
 from .entry import run_episode_prep_pack
 from .functional_candidate_verdict import (
@@ -123,6 +122,7 @@ from .model_call import (
     _run_async_step,
     _run_sync_step,
 )
+from .prop_manifest import _prep_pack_build_prop_manifest
 from .provenance import (
     _PREP_PACK_QUOTATION_MARKS,
     _PREP_PACK_SCENE_METHODS_REQUIRING_ANCHOR,

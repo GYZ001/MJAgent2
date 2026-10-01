@@ -113,6 +113,9 @@ _STEP_PRESENTATIONS: dict[str, WorkflowStepPresentation] = {
     "episode_prep_pack_prop_recheck": WorkflowStepPresentation(
         "道具补漏复核", "针对每个原文分块单独复核被操作/反复出现的道具，只做并集补充，不否定素材发现阶段已申报的道具",
     ),
+    "episode_prep_pack_prop_coverage_confirm": WorkflowStepPresentation(
+        "道具段号补全确认", "全文检索命中道具已核验写法的候选段落后，批量确认候选段落说的是否同一件实物，只把确认一致的段号并入",
+    ),
     "episode_prep_pack_asset_mapping": WorkflowStepPresentation(
         "资产映射", "确定性核对申报出场的角色/场景，解析到已有定妆照/场景参考图",
     ),

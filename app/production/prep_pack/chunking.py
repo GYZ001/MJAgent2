@@ -6,6 +6,10 @@ Split out of app/production/prep_pack.py.
 """
 from __future__ import annotations
 
+import json
+from typing import Sequence
+
+from app.schemas import Prop
 from app.source_excerpt import SourceSegment
 
 from .contracts import _CHUNK_MAX_CHARS
@@ -166,24 +170,180 @@ def _known_scene_names(conn, project_id: str, episode_no: int) -> list[str]:
     return [str(row["scene_name"]) for row in rows]
 
 
-def _prep_pack_known_prop_names(conn, project_id: str) -> list[str]:
-    """已登记道具库的 name+alias 全量名单（仅供拼写对齐提示，话术同
-    ``known_characters``/``known_scenes``——见 ``_extract_chunk`` 提示词）。
+# appearance 预览截断长度（2.0.13，defect 2 完整案情见
+# chunk_extraction._KNOWN_PROP_NAME_FIELD_RULE 上方注释）：appearance_canonical
+# 是三项以上可视觉验证特征拼成的单行锚点串（见 app/schemas/world.py::Prop
+# docstring），真实数据多在 20~60 字（例如"米白色灯芯绒、翻领单排扣、藏青色
+# 罗纹袖口"20 字）；取 80 留出覆盖四到五个特征的余量，同时给出上界——道具库
+# 条目可能有几十张，每条都全文拼进提示词会让"已登记名单"本身膨胀到跟一个
+# chunk 的原文一样长，挤占模型真正要读的正文。
+_KNOWN_PROP_APPEARANCE_PREVIEW_CHARS = 80
+
+
+# 「此前出场」证据（2.0.14，defect② 续修——见 chunk_extraction.
+# _KNOWN_PROP_NAME_FIELD_RULE 完整案情）：appearance_canonical 结构上装不下
+# "这是谁的"（关系型事实，不是可视觉验证特征，本次冻结 Prop 数据结构不扩展
+# 字段）。真实回归（proj_ca86b15ab7d7 顾念长安第2集）证明了单靠外观不够：
+# 第6段原文"顾屿……又顺手把自己的外套搭在她肩上"本身完全没有描述这件外套的
+# 材质/颜色，模型手里没有任何可比对的外观依据，于是仅凭名字对上就直接提名
+# 了第1集登记的「外套」卡（该卡 description 明确是"温念穿的外套，顾屿曾
+# 帮她扣好扣子"——真正物主是温念，不是顾屿）。
+#
+# 不扩展数据结构、不回填任何数据，改为从项目内已有数据推导：这张卡在更早
+# 集数里真实出现过的原始素材映射条目（``episodes.screenplay_json`` 的
+# ``asset_manifest.props``）本来就带着当时的 ``description``/
+# ``plot_significant_quote``，往往直接写明了物主/来源（第1集那条就是）。
+# 把这些历史证据原样附给模型，判断"同一件实物"时就不止有外观可比，还有
+# 物主线索可比对——仍然是"模型提名、代码核验"（card_match.py 的既有判据
+# 不变，只是提名前模型手里的参考信息更完整）。
+_KNOWN_PROP_PRIOR_APPEARANCE_MAX_ENTRIES = 2
+# 每张卡最多带几条「此前出场」：取 2——单条证据可能恰好是背景一笔带过的
+# 弱描述（这张卡在那一集也只是順带出现，见真实数据第1集 plot_significant=
+# false 的「外套」条目），两条给模型多一次交叉核对的机会；不取更多是因为
+# 这里的目的是"给出归属线索"，不是穷举这张卡的全部历史，条目一多反而把
+# 已登记名单拉长，挤占模型真正要读的本集正文（同 _KNOWN_PROP_APPEARANCE_
+# PREVIEW_CHARS 上方"膨胀"顾虑同一道理）。
+_KNOWN_PROP_PRIOR_APPEARANCE_DESC_CHARS = 60
+# 单条「此前出场」截断长度：与 _KNOWN_PROP_APPEARANCE_PREVIEW_CHARS（80）
+# 同一数量级但更短——这里只需要物主/来源这一句话（真实数据"温念穿的外套，
+# 顾屿曾帮她扣好扣子"14 字），不需要完整外观描述，60 字留出单条归属线索
+# 还能带一点上下文的余量。
+
+
+def _prep_pack_other_episode_prop_mentions(
+    conn, project_id: str, episode_id: str, episode_no: int,
+) -> list[tuple[int, dict]]:
+    """项目内严格早于本集（``episode_no`` 更小）、已有 ``screenplay_json`` 的
+    其它集，``asset_manifest.props`` 的全部原始条目，一次性扫描出来供全部
+    道具卡复用（不逐卡重复查询/解析 JSON）。返回 ``(episode_no, entry)``。
+
+    用 ``episode_no<?`` 而不只是 ``id!=?``：「此前出场」按字面就是"更早"，
+    不是"项目内任何其它集"——同一轮批量生产里后续集数的映射可能比本集
+    更晚才跑完，但它们在故事时间线上发生在本集之后，不构成本集可比对的
+    历史证据；``id!=?`` 作为第二道防线一起留着，防止 ``episode_no`` 异常
+    （理论上不该发生，``episodes`` 表对 ``(project_id, episode_no)`` 有
+    UNIQUE 约束）时仍然读进本集自己。"""
+    rows = conn.execute(
+        "SELECT episode_no, screenplay_json FROM episodes WHERE project_id=? "
+        "AND id!=? AND episode_no<? AND screenplay_json IS NOT NULL",
+        (project_id, episode_id, episode_no),
+    ).fetchall()
+    mentions: list[tuple[int, dict]] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["screenplay_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        manifest = payload.get("asset_manifest") or {}
+        for entry in manifest.get("props") or []:
+            if isinstance(entry, dict):
+                mentions.append((int(row["episode_no"]), entry))
+    return mentions
+
+
+def _prep_pack_prop_prior_appearance_lines(
+    mentions: list[tuple[int, dict]], card: Prop,
+) -> list[str]:
+    """``mentions``（``_prep_pack_other_episode_prop_mentions`` 的原样结果）
+    里命中这张卡的条目——``canonical_name`` 等于卡名，或 ``label`` 命中卡名/
+    某个别名——按集号降序取最近 ``_KNOWN_PROP_PRIOR_APPEARANCE_MAX_ENTRIES``
+    条，每条格式化成 ``"第N集 <证据文字>"``（截断见上方常量）。证据文字优先
+    取 ``description``，为空时退回 ``plot_significant_quote``（真实数据里
+    ``plot_significant=false`` 的条目 quote 恒为空串，两者不会同时为空却都
+    有用信息，取非空的那个不是武断二选一）。同一集同一张卡只取第一条命中
+    （同一张卡同一集的归属描述理应一致，不逐条堆叠制造噪音）。"""
+    identifiers = {card.name, *(str(a or "").strip() for a in card.aliases)}
+    hits: dict[int, str] = {}
+    for episode_no, entry in mentions:
+        canonical = str(entry.get("canonical_name") or "").strip()
+        label = str(entry.get("label") or "").strip()
+        if canonical != card.name and label not in identifiers:
+            continue
+        text = (
+            str(entry.get("description") or "").strip()
+            or str(entry.get("plot_significant_quote") or "").strip()
+        )
+        if not text:
+            continue
+        hits.setdefault(episode_no, text)
+    lines: list[str] = []
+    for episode_no in sorted(hits, reverse=True)[:_KNOWN_PROP_PRIOR_APPEARANCE_MAX_ENTRIES]:
+        text = hits[episode_no]
+        if len(text) > _KNOWN_PROP_PRIOR_APPEARANCE_DESC_CHARS:
+            text = text[:_KNOWN_PROP_PRIOR_APPEARANCE_DESC_CHARS] + "…"
+        lines.append(f"第{episode_no}集 {text}")
+    return lines
+
+
+def _prep_pack_props_with_prior_appearance_evidence(
+    conn, project_id: str, episode_id: str, episode_no: int, cards: Sequence[Prop],
+) -> frozenset[str]:
+    """哪些卡在 ``_prep_pack_known_prop_names`` 的展示名单里会带上「此前出场」
+    一段（即 ``_prep_pack_prop_prior_appearance_lines`` 对它返回非空列表）——
+    供 ``app.props.card_match.match_existing_prop_card`` 的常规判据收紧使用
+    （2026-10-01，见该模块 docstring 完整案情：模型手里有归属证据却明确不
+    提名时，字面包含判据不该替模型重新做出相反的判断）。与
+    ``_prep_pack_known_prop_names`` 共用同一次「其它集道具提及」扫描
+    （``_prep_pack_other_episode_prop_mentions``），判据完全一致——不是
+    另算一遍，两处"这张卡有没有此前出场证据"的结论不会分叉。"""
+    mentions = _prep_pack_other_episode_prop_mentions(conn, project_id, episode_id, episode_no)
+    return frozenset(
+        card.name for card in cards
+        if card.name and _prep_pack_prop_prior_appearance_lines(mentions, card)
+    )
+
+
+def _prep_pack_known_prop_names(
+    conn, project_id: str, episode_id: str, episode_no: int,
+) -> list[str]:
+    """已登记道具库的展示名单：每条一行，含这张卡的名称/别名/外观特征
+    （2.0.13 起，此前只有 name+alias 纯名字列表），以及这张卡在更早集数里
+    「此前出场」的归属证据（2.0.14 起）。
+
+    ``episode_id``/``episode_no`` 必传（CLAUDE.md「Ownership Must Be
+    Explicit」：排除当前集这件事不能留可选默认值悄悄漏传）——用于
+    ``_prep_pack_other_episode_prop_mentions`` 排除本集自己，不拿本次正在
+    重算、尚未定稿的结果自证。
+
+    真实案例（顾念长安第2集）：道具库里有一张名字很泛的「外套」卡（画的是
+    温念的米白灯芯绒外套），模型只看到这个名字，无从判断原文里顾屿「自己的
+    外套」是不是同一件实物，于是把两件不同人的外套误提名成同一张卡（见
+    chunk_extraction._KNOWN_PROP_NAME_FIELD_RULE 完整案情）。只给名字/别名
+    不够——模型需要外观信息才能核对"是不是同一件"，这里把每张卡的外观
+    （过长按 ``_KNOWN_PROP_APPEARANCE_PREVIEW_CHARS`` 截断）一并带上；外观
+    信息本身装不下"这是谁的"，不够时再给「此前出场」的历史归属证据（见
+    ``_prep_pack_prop_prior_appearance_lines`` 完整说明）。
 
     道具（``Prop``，见 app/schemas/world.py）没有 ``ep_start``/``ep_end`` 时间
     范围字段，不需要像 ``_known_scene_names`` 那样按集次过滤；也不做
     ``_prep_pack_character_shortlist`` 那种"本集原文里逐字命中才入选"的裁剪——
-    这里只是给模型看的对齐提示，命中判据本身由
-    ``app.props.card_match.match_existing_prop_card`` 在清单构建阶段独立核验，
-    不依赖这份名单是否精确。"""
+    这里只是给模型看的对齐/核对提示，命中判据本身由
+    ``app.props.card_match.match_existing_prop_card`` 在清单构建阶段独立核验
+    （核验按卡的 name/alias 逐字核对，不读这里拼出的展示行——显示格式的变化
+    不影响名字核验，见该模块 docstring），不依赖这份名单是否精确。"""
     bible = _load_project_bible(conn, project_id)
-    names: set[str] = set()
+    mentions = _prep_pack_other_episode_prop_mentions(conn, project_id, episode_id, episode_no)
+    lines: list[str] = []
     for prop in bible.props:
         name = str(prop.name or "").strip()
-        if name:
-            names.add(name)
-        names.update(str(alias or "").strip() for alias in prop.aliases if str(alias or "").strip())
-    return sorted(names)
+        if not name:
+            continue
+        alias_text = "、".join(
+            alias for alias in (str(a or "").strip() for a in prop.aliases) if alias
+        )
+        appearance = str(prop.appearance_canonical or "").strip()
+        if len(appearance) > _KNOWN_PROP_APPEARANCE_PREVIEW_CHARS:
+            appearance = appearance[:_KNOWN_PROP_APPEARANCE_PREVIEW_CHARS] + "…"
+        prior = _prep_pack_prop_prior_appearance_lines(mentions, prop)
+        parts = [f"名称：{name}"]
+        if alias_text:
+            parts.append(f"别名：{alias_text}")
+        if appearance:
+            parts.append(f"外观：{appearance}")
+        if prior:
+            parts.append(f"此前出场：{'；'.join(prior)}")
+        lines.append("｜".join(parts))
+    return sorted(lines)
 
 
 def _prep_pack_chapter_titles(

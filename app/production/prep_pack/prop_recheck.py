@@ -33,7 +33,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app.source_excerpt import SourceSegment
 
-from .chunk_extraction import _PROP_SEGMENT_CRITERIA
+from .chunk_extraction import _KNOWN_PROP_NAME_FIELD_RULE, _PROP_SEGMENT_CRITERIA
 from .chunking import _prep_pack_gate_segment_indexes, _render_chunk
 from .model_call import _call_structured
 from .schemas import _ModelPropMention
@@ -55,8 +55,10 @@ def _prompt(rendered: str, known_props: list[str]) -> str:
 
 判据（硬性，与抽取那次完全一致，不要加宽也不要收紧）：{_PROP_SEGMENT_CRITERIA}
 
-已登记道具名（仅供拼写对齐——如果原文本身就是这样称呼这件道具的，写法要跟登记名
-保持一致；原文没有这样称呼，就不要往上面靠）：{known_props}
+已登记道具名单（每条含名称/别名/外观特征，部分还附这张卡在更早集数里「此前出场」的
+归属证据；外观与此前出场仅供核对「是不是同一件实物」，见下面 known_prop_name 的说明；
+名称/别名仅供拼写对齐——如果原文本身就是这样称呼这件道具的，写法要跟登记名保持一致；
+原文没有这样称呼，就不要往上面靠）：{known_props}
 
 每条给 {{"label": "道具名称", "description": "这个道具的外观/特征简述",
 "segment_indexes": [该道具实际出现的编号列表], "plot_significant": true/false,
@@ -66,9 +68,7 @@ def _prompt(rendered: str, known_props: list[str]) -> str:
 空字符串，绝不编造", "source_wording": "这件道具在 segment_indexes 所指原文里的称呼，
 从原文逐字复制的一段连续文字；不改字、不增字、不拼接；确实没有可摘录的原文称呼就填
 空字符串，绝不编造；不用物件库里的登记名替代，登记名只填进 known_prop_name",
-"known_prop_name": "这件道具如果就是已登记道具名单中的某一件（同一件实物，不只是同类
-或名字相近的东西），从名单里逐字复制那个名字；原文里这是另一件东西、或名单里没有它，
-填空字符串，绝不硬凑一个名字相近的名单条目"}}。
+"known_prop_name": "{_KNOWN_PROP_NAME_FIELD_RULE}"}}。
 
 判断不了就不报，没有新发现就给空列表，不要为了填满而虚构。
 

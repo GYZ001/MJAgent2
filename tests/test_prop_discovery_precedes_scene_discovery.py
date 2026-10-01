@@ -49,7 +49,9 @@ def test_discover_new_props_runs_before_discover_new_scenes(monkeypatch) -> None
     conn = _conn()
     call_order: list[str] = []
 
-    async def fake_discover_new_props(conn_, *, project_id, episode_no, props_payload, source_text):
+    async def fake_discover_new_props(
+        conn_, *, project_id, episode_no, props_payload, source_text, cards_with_prior_evidence=frozenset(),
+    ):
         call_order.append("props")
         return props_payload
 

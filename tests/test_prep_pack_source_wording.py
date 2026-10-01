@@ -34,7 +34,7 @@ import pytest
 from app import scenes
 from app.db import get_conn, now
 from app.production import prep_pack
-from app.production.prep_pack.discovery import _prep_pack_build_prop_manifest
+from app.production.prep_pack.prop_manifest import _prep_pack_build_prop_manifest
 from app.props import judge, service
 from app.schemas import Prop
 from app.source_excerpt import index_source_segments
@@ -283,7 +283,9 @@ async def test_card_match_two_call_sites_agree_on_same_nomination(
     }])
     monkeypatch.setattr(judge.model_gateway, "chat_structured", _explode_chat_structured)
 
-    result = await service.ensure_props_for_labels("p-align", 3, [mention], source_text=source_text)
+    result = await service.ensure_props_for_labels(
+        "p-align", 3, [mention], source_text=source_text, cards_with_prior_evidence=frozenset(),
+    )
 
     assert result == {"added": [], "errors": []}, "不该被当成全新道具重复建卡"
     conn = get_conn()
@@ -337,7 +339,9 @@ def test_literal_card_name_in_evidence_still_matches_without_nomination() -> Non
 
     cards = [_card("行李箱"), _card("旧行李箱三件套")]
     evidence = "她拖着那只旧行李箱，深一脚浅一脚地往前走。"
-    card = match_existing_prop_card("旧行李箱", evidence, cards, source_wording="旧行李箱")
+    card = match_existing_prop_card(
+        "旧行李箱", evidence, cards, source_wording="旧行李箱", cards_with_prior_evidence=frozenset(),
+    )
     assert card is not None and card.name == "行李箱"
 
 
@@ -400,7 +404,9 @@ async def test_production_shaped_crystal_ball_is_not_merged_into_unrelated_card(
         "source_wording": "水晶球", "known_prop_name": "",
     }]
 
-    result = await service.ensure_props_for_labels("p-crystal", 3, mentions, source_text=source_text)
+    result = await service.ensure_props_for_labels(
+        "p-crystal", 3, mentions, source_text=source_text, cards_with_prior_evidence=frozenset(),
+    )
 
     assert [item["name"] for item in result["added"]] == ["水晶球"], "必须新建独立卡，不能被无关的既有卡污染"
     conn = get_conn()

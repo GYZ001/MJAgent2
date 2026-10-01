@@ -69,6 +69,35 @@ service.py 读的是同一个 mention 字典的同一组键——见 app.product
 prep_pack.discovery._prep_pack_prop_mention_binding 与 app.props.service.
 ensure_props_for_labels 各自的调用点），否则两侧又会分叉出"哪边信提名、
 哪边不信"这种新的标准不对齐。
+
+2026-10-01 第三轮修复（``cards_with_prior_evidence``，defect② 第三次续修，
+真实案例 proj_ca86b15ab7d7 顾念长安第2集）：上一轮给模型喂了每张卡在更早
+集数里的「此前出场」归属证据（见 app.production.prep_pack.chunking.
+_prep_pack_known_prop_names），模型也确实用上了——第6段"顾屿……又顺手把
+自己的外套搭在她肩上"这条提及，抽取调用的真实 reasoning 原文是"已登记的
+外套：……此前出场：第1集 温念穿的外套，顾屿曾帮她扣好扣子……这里的自己是
+顾屿……那和已登记的温念的外套不是同一件，所以known_prop_name填空"——模型
+正确判断归属不符，``nominated_card`` 留空。但上面的"常规判据"只看字面包含，
+不看模型有没有看过证据、有没有基于证据明确拒绝——这条提及自己的 ``label``
+恰好是裸词"外套"，与卡名"外套"字面相等，常规判据照样把它判给了同一张卡，
+模型的拒绝被架空，等于没拒绝。同一次真实运行里第4段"两名游客正举着手机在
+城门下拍照"也是同一形状——``label``="手机" 字面撞上了项目里"温念的手机"
+那张卡，被同一条常规判据静默绑定。
+
+修法：``cards_with_prior_evidence``（必传，调用方必须用与「此前出场」名单
+同一份数据源算好——见 ``app.production.prep_pack.chunking.
+_prep_pack_props_with_prior_appearance_evidence``——传一个「有此前出场证据
+的卡名集合」进来，不接受默认值、不由本模块自己反向查询，保持 app.props 不
+依赖 app.production.prep_pack，分层方向不倒转）：``nominated_card`` 为空、
+即将靠常规判据把某条提及判给某张卡时，如果那张卡的名字在
+``cards_with_prior_evidence`` 里——说明模型当时的已登记名单上就带着这张卡
+的归属证据，模型是"看过证据、明确没有提名"，不是"没看过、漏判"——这种情形
+不再用常规判据重新绑定，记 ``[PREP_PACK_PROP_LITERAL_MATCH_DECLINED]
+[未拦截]``，不静默推翻模型基于证据做出的判断（「模型提名、代码核验」的
+对称含义：代码核验只负责否决错误提名，不负责推翻模型已经依据证据做出的
+拒绝）。没有「此前出场」证据的卡（例如这张卡是本集或这是它第一次被记录，
+压根没有历史证据可比对）不受影响，常规判据照常生效——这种情形下模型的
+"没提名"可能只是没留意到名字接近，召回兜底仍然需要。
 """
 from __future__ import annotations
 
@@ -128,22 +157,50 @@ def _resolve_nominated_card(
     return None
 
 
+def _decline_literal_match_with_prior_evidence(
+    label: str, winners: dict[str, Prop], cards_with_prior_evidence: frozenset[str],
+) -> dict[str, Prop]:
+    """未提名时，把 ``winners``（常规判据字面命中的候选）里"模型看过此前
+    出场证据、却明确没有提名"的那些踢出去——见模块 docstring 2026-10-01
+    第三轮修复一节。每条被踢除的都打一条可见信号，不静默吞掉。"""
+    declined = {name for name in winners if name in cards_with_prior_evidence}
+    for name in declined:
+        log.warning(
+            "[PREP_PACK_PROP_LITERAL_MATCH_DECLINED][未拦截] 道具标签「%s」字面"
+            "命中既有卡片「%s」，但模型看过该卡「此前出场」证据后未提名它（判定"
+            "不是同一件实物），不用常规判据推翻这个判断；如确属误判请人工核查并"
+            "手动合并",
+            label, name,
+        )
+    return {name: card for name, card in winners.items() if name not in declined}
+
+
 def match_existing_prop_card(
     label: str, evidence_text: str, cards: Sequence[Prop], *,
     source_wording: str = "", nominated_card: str = "",
+    cards_with_prior_evidence: frozenset[str],
 ) -> Prop | None:
     """``label``（模型这次的道具提及标签）是否应绑定到 ``cards`` 中的某一张。
 
     ``nominated_card`` 非空时先走模型提名核验（见 ``_resolve_nominated_
     card``），核验通过直接返回；核验不过或未提名时，走常规判据——卡片的
     ``name``/某个 ``alias`` 逐字出现在 ``evidence_text`` 里，且与 ``label``
-    存在包含关系（任一方向）。多张卡片同时命中常规判据时结构上无法唯一
-    裁决，记一条可见信号并返回 ``None``——不猜、不按卡片列表顺序挑第一个。
+    存在包含关系（任一方向）。未提名时，常规判据命中的候选若在
+    ``cards_with_prior_evidence`` 里（模型当时看过这张卡的「此前出场」证据、
+    仍然没有提名——见模块 docstring 2026-10-01 第三轮修复一节），先剔除，
+    不让字面包含推翻模型基于证据做出的判断。剩下多张卡片仍同时命中时结构上
+    无法唯一裁决，记一条可见信号并返回 ``None``——不猜、不按卡片列表顺序挑
+    第一个。
 
     ``source_wording`` 只用于提名核验的证据支撑（见上），不参与常规判据的
     包含关系比对——见模块 docstring「已知局限」一节：纯包含关系无法分辨
     "同一件物品的缩略说法"与"恰好包含该词的另一件东西"，2026-09-30 已从
     生产回归中证伪（水晶球 vs 老式水晶球），不再作为独立判据分支。
+
+    ``cards_with_prior_evidence`` 必传、无默认值（CLAUDE.md「Ownership Must
+    Be Explicit」）——两个调用点（discovery.py._prep_pack_prop_mention_
+    binding、service.py.ensure_props_for_labels）都必须显式算好同一份集合
+    再传进来，不得省略。
     """
     label = (label or "").strip()
     source_wording = (source_wording or "").strip()
@@ -162,6 +219,8 @@ def match_existing_prop_card(
             if identifier in label or label in identifier:
                 winners[str(card.name or "").strip()] = card
                 break
+    if not nominated_card:
+        winners = _decline_literal_match_with_prior_evidence(label, winners, cards_with_prior_evidence)
     if len(winners) == 1:
         return next(iter(winners.values()))
     if len(winners) > 1:

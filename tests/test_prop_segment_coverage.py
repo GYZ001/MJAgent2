@@ -3,15 +3,42 @@ fill_prop_segment_coverage``，2026-10-01，三路只读调查第②项）。
 
 真实背景：第 1 集重做分镜 143 条 resources.props 只有 38 条有图——手机在原文
 第 7/16/20/24/54 段反复被温念摸出/放回/编辑/锁屏/响起，但抽取按 chunk 分批
-进行，模型这次调用只报出了其中一段。本模块在 manifest 建好之后做一轮纯确定性
-（零语义、不调模型）的二次检索，把同一件道具在本集其它段落里真实出现的段号
-并进来。
+进行，模型这次调用只报出了其中一段。本模块在 manifest 建好之后做一轮确定性
+全文检索，把同一件道具在本集其它段落里按已核验写法命中的段号找出来。
+
+2.0.13（见 tests/test_prop_segment_coverage_confirm.py 完整案情）：命中段落
+只是候选，是否真的并入 segment_indexes 还要再经一次批量模型确认——这份文件
+只验证确定性检索本身（哪些段落命中、哪些词有检索资格），所以用
+``_run_confirming_all_candidates`` 把确认步骤短路成"全部候选都判定为同一件
+实物"，等价于 2.0.13 之前的直接合并行为；确认步骤自己的判断逻辑（选择性
+确认/未确认不并入/调用失败的可见信号）单独在 test_prop_segment_coverage_
+confirm.py 验证，不在这里重复。
 """
 from __future__ import annotations
 
+import asyncio
+
+import pytest
+
+from app.production.prep_pack import prop_segment_coverage
 from app.production.prep_pack.prop_segment_coverage import fill_prop_segment_coverage
 from app.schemas import Prop
 from app.source_excerpt import SourceSegment
+
+
+def _run_confirming_all_candidates(props_payload, segments, *, cards=()):
+    """跑一次 fill_prop_segment_coverage，短路掉 2.0.13 新增的模型确认调用，
+    让本次出现的全部候选都判定"是同一件实物"——见模块 docstring。"""
+    async def _confirm_all(ids, requests, _segments, *, run_id, episode_id):
+        del run_id, episode_id, _segments
+        return {
+            req_id: set(request["candidate_indexes"])
+            for req_id, request in zip(ids, requests)
+        }
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(prop_segment_coverage, "_confirm_prop_coverage_candidates", _confirm_all)
+        return asyncio.run(fill_prop_segment_coverage(props_payload, segments, cards=cards))
 
 
 def _segments(overrides: dict[int, str], *, last_index: int) -> list[SourceSegment]:
@@ -42,7 +69,7 @@ def test_fills_in_segments_where_the_declared_literal_wording_reappears() -> Non
         "plot_significant": False, "plot_significant_quote": "", "known_prop_name": "",
     }]
 
-    result = fill_prop_segment_coverage(props_payload, segments, cards=())
+    result = _run_confirming_all_candidates(props_payload, segments, cards=())
 
     assert result is props_payload, "原地更新并整体返回同一个列表"
     assert result[0]["segment_indexes"] == [7, 16, 20, 24, 54]
@@ -70,7 +97,7 @@ def test_card_bound_entry_retrieves_by_both_label_and_card_name() -> None:
         "plot_significant": False, "plot_significant_quote": "", "known_prop_name": "行李箱",
     }]
 
-    result = fill_prop_segment_coverage(props_payload, segments, cards=[card])
+    result = _run_confirming_all_candidates(props_payload, segments, cards=[card])
 
     # 第5段靠卡名「行李箱」命中被补进来；第7段的别名「旧皮箱」从未在已核验
     # 段落里命中过，不具备检索资格，不会被当成同一件东西盲目并进来。
@@ -92,7 +119,7 @@ def test_unverified_candidate_words_are_never_used_for_retrieval() -> None:
         "plot_significant": False, "plot_significant_quote": "", "known_prop_name": "",
     }]
 
-    result = fill_prop_segment_coverage(props_payload, segments, cards=())
+    result = _run_confirming_all_candidates(props_payload, segments, cards=())
 
     assert result[0]["segment_indexes"] == [2], "label 没有在第2段原文里逐字出现过，不该补第9段"
 
@@ -111,7 +138,7 @@ def test_short_verified_word_is_not_penalised_for_being_short() -> None:
         "plot_significant": False, "plot_significant_quote": "", "known_prop_name": "",
     }]
 
-    result = fill_prop_segment_coverage(props_payload, segments, cards=())
+    result = _run_confirming_all_candidates(props_payload, segments, cards=())
 
     assert result[0]["segment_indexes"] == [2, 9]
 
@@ -127,6 +154,6 @@ def test_out_of_range_declared_index_is_dropped_not_crashed() -> None:
         "plot_significant": False, "plot_significant_quote": "", "known_prop_name": "",
     }]
 
-    result = fill_prop_segment_coverage(props_payload, segments, cards=())
+    result = _run_confirming_all_candidates(props_payload, segments, cards=())
 
     assert result[0]["segment_indexes"] == [1]

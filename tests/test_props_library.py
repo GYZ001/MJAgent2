@@ -127,7 +127,7 @@ async def test_ensure_props_for_labels_registers_key_prop(monkeypatch: pytest.Mo
     monkeypatch.setattr(service, "generate_prop_reference_image", _fake_generate_image)
     mentions = [{"label": "旧猫包", "description": "旧猫包", "segment_indexes": [2, 9]}]
 
-    result = await service.ensure_props_for_labels("p1", 3, mentions)
+    result = await service.ensure_props_for_labels("p1", 3, mentions, cards_with_prior_evidence=frozenset())
 
     assert result["errors"] == []
     assert [item["name"] for item in result["added"]] == ["旧猫包"]
@@ -145,7 +145,7 @@ async def test_ensure_props_for_labels_skips_background_object(monkeypatch: pyte
     monkeypatch.setattr(judge.model_gateway, "chat_structured", _explode_chat_structured)
     mentions = [{"label": "路人手中的杯子", "description": "一只杯子", "segment_indexes": [4]}]
 
-    result = await service.ensure_props_for_labels("p1", 1, mentions)
+    result = await service.ensure_props_for_labels("p1", 1, mentions, cards_with_prior_evidence=frozenset())
 
     assert result == {"added": [], "errors": []}
 
@@ -160,7 +160,7 @@ async def test_ensure_props_for_labels_skips_already_known(monkeypatch: pytest.M
         {"label": "旧包", "description": "旧包", "segment_indexes": [2, 9]},
     ]
 
-    result = await service.ensure_props_for_labels("p1", 1, mentions)
+    result = await service.ensure_props_for_labels("p1", 1, mentions, cards_with_prior_evidence=frozenset())
 
     assert result == {"added": [], "errors": []}
 
@@ -171,7 +171,7 @@ async def test_ensure_props_for_labels_records_failed_image(monkeypatch: pytest.
     monkeypatch.setattr(service, "generate_prop_reference_image", _failing_generate_image)
     mentions = [{"label": "旧猫包", "description": "旧猫包", "segment_indexes": [2, 9]}]
 
-    result = await service.ensure_props_for_labels("p1", 1, mentions)
+    result = await service.ensure_props_for_labels("p1", 1, mentions, cards_with_prior_evidence=frozenset())
 
     assert [item["has_image"] for item in result["added"]] == [False]
     row = store.prop_reference_for_episode(get_conn(), "p1", "旧猫包", 1)
@@ -182,7 +182,7 @@ async def test_ensure_props_for_labels_records_failed_image(monkeypatch: pytest.
 async def test_ensure_props_for_labels_no_bible_is_advisory_noop() -> None:
     result = await service.ensure_props_for_labels("nope", 1, [
         {"label": "旧猫包", "description": "旧猫包", "segment_indexes": [1, 2]},
-    ])
+    ], cards_with_prior_evidence=frozenset())
     assert result == {"added": [], "errors": []}
 
 
@@ -208,7 +208,7 @@ async def test_ensure_props_for_labels_logs_registry_summary(
     ]
 
     with caplog.at_level("INFO"):
-        result = await service.ensure_props_for_labels("p1", 7, mentions)
+        result = await service.ensure_props_for_labels("p1", 7, mentions, cards_with_prior_evidence=frozenset())
 
     assert result["errors"] == []
     assert [item["name"] for item in result["added"]] == ["黄铜星盘"]
@@ -368,7 +368,7 @@ async def test_ensure_props_for_labels_normalises_quantifier_and_compound_labels
         {"label": "两只野鸡", "description": "两只野鸡", "segment_indexes": [2, 9]},
         {"label": "凝灵丹与半块灵石", "description": "凝灵丹与半块灵石", "segment_indexes": [3, 8]},
     ]
-    result = await service.ensure_props_for_labels("p1", 6, mentions)
+    result = await service.ensure_props_for_labels("p1", 6, mentions, cards_with_prior_evidence=frozenset())
     assert result["errors"] == []
     assert [item["name"] for item in result["added"]] == ["凝灵丹"]
     conn = get_conn()

@@ -21,7 +21,7 @@ tests/test_props_library.py 覆盖）。
 """
 from __future__ import annotations
 
-from app.production.prep_pack.discovery import _prep_pack_build_prop_manifest
+from app.production.prep_pack.prop_manifest import _prep_pack_build_prop_manifest
 from app.source_excerpt import index_source_segments
 
 SOURCE_TEXT = (

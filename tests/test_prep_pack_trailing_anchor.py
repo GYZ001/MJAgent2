@@ -18,7 +18,7 @@ import sqlite3
 import pytest
 
 from app.production import prep_pack
-from app.production.prep_pack.discovery import _prep_pack_build_prop_manifest
+from app.production.prep_pack.prop_manifest import _prep_pack_build_prop_manifest
 from app.production.prep_pack.trailing_anchor import (
     prop_literal_or_trailing_anchor,
     scene_anchor_with_trailing_fallback,
@@ -119,7 +119,7 @@ def test_prop_literal_or_trailing_anchor_no_match_returns_empty() -> None:
 
 
 def test_prop_card_anchor_retreats_to_tail_substring_of_card_name() -> None:
-    from app.production.prep_pack.discovery import _prep_pack_prop_card_anchor
+    from app.production.prep_pack.prop_manifest import _prep_pack_prop_card_anchor
     from app.schemas import Prop
 
     segments = index_source_segments("那只行李箱靠在墙角里好多年了。")
@@ -130,7 +130,7 @@ def test_prop_card_anchor_retreats_to_tail_substring_of_card_name() -> None:
 
 def test_prop_card_anchor_prefers_direct_hit_over_retreat() -> None:
     """card.name 本身整串就命中时不需要退让，trailing 必须是 False。"""
-    from app.production.prep_pack.discovery import _prep_pack_prop_card_anchor
+    from app.production.prep_pack.prop_manifest import _prep_pack_prop_card_anchor
     from app.schemas import Prop
 
     segments = index_source_segments("画面里那只行李箱边角磕碰。")

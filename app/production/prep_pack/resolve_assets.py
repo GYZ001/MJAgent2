@@ -6,9 +6,9 @@ function verbatim (moved, not rewritten) -- it is ~970 lines, so this file
 exceeds the usual 600-line/200-function-line file-shape targets; see the
 package's split report for why further splitting was out of scope here.
 The prop-manifest builder (``_prep_pack_build_prop_manifest``) moved to
-``.discovery`` (2026-09-28, this file's own line-count baseline is already
-pinned at its exact current value -- new logic goes in a module with room,
-see FILE_CONVENTIONS.toml's ratchet note).
+``.prop_manifest`` (2026-10-01, via ``.discovery``; this file's own baseline
+is pinned at its exact current value -- new logic goes in a module with
+room, see FILE_CONVENTIONS.toml's ratchet note).
 """
 from __future__ import annotations
 
@@ -32,15 +32,16 @@ from .asset_lookup import (
     _rebind_titled_owner,
 )
 from .chunk_extraction import _run_async_step
+from .chunking import _prep_pack_props_with_prior_appearance_evidence
 from .discovery import (
     _character_discovery_dispositions,
     _discover_new_characters, _discover_new_props,
     _discover_new_scenes,
     _discovery_errored_names,
     _load_project_bible,
-    _prep_pack_build_prop_manifest,
 )
 from .functional_candidate_verdict import _prep_pack_resolve_functional_extra_candidate
+from .prop_manifest import _prep_pack_build_prop_manifest
 from .prop_segment_coverage import fill_prop_segment_coverage
 from .provenance import (
     _prep_pack_first_evidence_segment,
@@ -788,20 +789,19 @@ async def _resolve_assets(
     # 最后跟第二遍的合并去重。
     true_name_hints_pass1 = true_name_hints
 
-    # 道具发现必须先于场景发现跑（2026-09-28 顺序修复）：assess_new_scene 的
-    # 场景卡/道具卡边界核验（app.production.scene_discovery_assess）要从
-    # bible.props 读出"本次映射已经建卡的道具"，如果道具发现仍留在函数末尾，
-    # 场景卡产出时这批道具还没落库，边界核验永远看不到同一次映射刚建的卡——
-    # 真实事故：「小木星星」在本集内先被道具库登记，却因为原来的调用顺序，
-    # 场景「顾屿家客房」判定时读到的仍是没有它的旧 bible。提前到这里（两遍
-    # 角色/场景解析开始之前）执行，之后任何一次 ensure_scenes_for_labels 重新
-    # 读 bible 都能看到本集已建的道具卡。
-    props_payload = fill_prop_segment_coverage(_prep_pack_build_prop_manifest(
+    # 道具发现必须先于场景发现跑（2026-09-28）：场景卡边界核验要从 bible.props
+    # 读"本次映射已经建卡的道具"，真实事故——「小木星星」先登记却因调用顺序，
+    # 场景「顾屿家客房」判定时读到旧 bible。提前到这里执行，之后任何一次
+    # ensure_scenes_for_labels 重读 bible 都能看到本集已建的道具卡。
+    cards_with_prior_evidence = _prep_pack_props_with_prior_appearance_evidence(
+        conn, project_id, episode_id, episode_no, bible.props)
+    props_payload = await fill_prop_segment_coverage(_prep_pack_build_prop_manifest(
         prop_mentions, segments, cards=bible.props, unanchored=unanchored_prop_mentions,
-    ), segments, cards=bible.props)
+        cards_with_prior_evidence=cards_with_prior_evidence,
+    ), segments, cards=bible.props, run_id=run_id, episode_id=episode_id)
     props_payload = await _discover_new_props(
         conn, project_id=project_id, episode_no=episode_no, source_text=source_text,
-        props_payload=props_payload,
+        props_payload=props_payload, cards_with_prior_evidence=cards_with_prior_evidence,
     )
 
     if unresolved_chars or unresolved_scenes:

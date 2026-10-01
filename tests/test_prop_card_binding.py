@@ -24,7 +24,7 @@ import pytest
 
 from app.db import get_conn, now
 from app.production.prep_pack import chunk_extraction as ce
-from app.production.prep_pack.discovery import _prep_pack_build_prop_manifest
+from app.production.prep_pack.prop_manifest import _prep_pack_build_prop_manifest
 from app.production.prep_pack.provenance_repair import verify_manifest_provenance_with_repair
 from app.production.storyboard_prop_appearance_lock import known_prop_card_appearance_index
 from app.production import storyboard_prop_assets as prop_assets
@@ -43,20 +43,24 @@ def _card(name: str, aliases: list[str] | None = None) -> Prop:
 # ---------------------------------------------------------------------------
 
 def test_match_returns_none_without_cards_or_evidence() -> None:
-    assert match_existing_prop_card("旧行李箱", "随便什么原文", []) is None
-    assert match_existing_prop_card("旧行李箱", "", [_card("行李箱")]) is None
-    assert match_existing_prop_card("", "行李箱在地上", [_card("行李箱")]) is None
+    assert match_existing_prop_card("旧行李箱", "随便什么原文", [], cards_with_prior_evidence=frozenset()) is None
+    assert match_existing_prop_card("旧行李箱", "", [_card("行李箱")], cards_with_prior_evidence=frozenset()) is None
+    assert match_existing_prop_card("", "行李箱在地上", [_card("行李箱")], cards_with_prior_evidence=frozenset()) is None
 
 
 def test_match_binds_via_containment_card_name_is_substring_of_label() -> None:
     card = _card("行李箱", aliases=["水泡坏的行李箱"])
-    matched = match_existing_prop_card("旧行李箱", "她拖着那只旧行李箱走进来。", [card])
+    matched = match_existing_prop_card(
+        "旧行李箱", "她拖着那只旧行李箱走进来。", [card], cards_with_prior_evidence=frozenset(),
+    )
     assert matched is card
 
 
 def test_match_binds_via_containment_label_is_substring_of_card_name() -> None:
     card = _card("小木星星")
-    matched = match_existing_prop_card("木星星", "桌角摆着一枚小木星星，散发微光。", [card])
+    matched = match_existing_prop_card(
+        "木星星", "桌角摆着一枚小木星星，散发微光。", [card], cards_with_prior_evidence=frozenset(),
+    )
     assert matched is card
 
 
@@ -66,6 +70,7 @@ def test_match_declines_when_two_cards_both_qualify_and_logs_signal(caplog: pyte
     with caplog.at_level("WARNING"):
         matched = match_existing_prop_card(
             "凝灵丹与半块灵石", "桌上摆着凝灵丹与半块灵石，两件宝物一同发亮。", cards,
+            cards_with_prior_evidence=frozenset(),
         )
     assert matched is None
     assert "PROP_CARD_MATCH_AMBIGUOUS" in caplog.text
@@ -74,13 +79,17 @@ def test_match_declines_when_two_cards_both_qualify_and_logs_signal(caplog: pyte
 
 def test_match_returns_none_when_no_identifier_hits_evidence() -> None:
     card = _card("行李箱")
-    assert match_existing_prop_card("背包", "她背着一个帆布背包。", [card]) is None
+    assert match_existing_prop_card(
+        "背包", "她背着一个帆布背包。", [card], cards_with_prior_evidence=frozenset(),
+    ) is None
 
 
 def test_match_returns_none_when_evidence_hit_has_no_containment_with_label() -> None:
     """卡片的 name 确实逐字出现在原文里，但与这次的 label 没有包含关系——不绑。"""
     card = _card("行李箱")
-    assert match_existing_prop_card("背包", "地上放着一只行李箱。", [card]) is None
+    assert match_existing_prop_card(
+        "背包", "地上放着一只行李箱。", [card], cards_with_prior_evidence=frozenset(),
+    ) is None
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +239,9 @@ async def test_ensure_props_for_labels_binds_existing_card_instead_of_creating_n
     }]
     source_text = "她拖着那只旧行李箱，深一脚浅一脚地往前走。\n\n箱子轮子卡在石缝里，她费力地拽了几下。"
 
-    result = await service.ensure_props_for_labels("p1", 3, mentions, source_text=source_text)
+    result = await service.ensure_props_for_labels(
+        "p1", 3, mentions, source_text=source_text, cards_with_prior_evidence=frozenset(),
+    )
 
     assert result == {"added": [], "errors": []}
     conn = get_conn()
@@ -247,8 +258,12 @@ async def test_ensure_props_for_labels_alias_registration_is_idempotent(
     mentions = [{"label": "旧行李箱", "description": "旧行李箱", "segment_indexes": [1, 2]}]
     source_text = "她拖着那只旧行李箱，深一脚浅一脚地往前走。\n\n箱子轮子卡在石缝里，她费力地拽了几下。"
 
-    await service.ensure_props_for_labels("p1", 3, mentions, source_text=source_text)
-    await service.ensure_props_for_labels("p1", 4, mentions, source_text=source_text)
+    await service.ensure_props_for_labels(
+        "p1", 3, mentions, source_text=source_text, cards_with_prior_evidence=frozenset(),
+    )
+    await service.ensure_props_for_labels(
+        "p1", 4, mentions, source_text=source_text, cards_with_prior_evidence=frozenset(),
+    )
 
     conn = get_conn()
     bible = json.loads(conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"])
@@ -279,7 +294,9 @@ async def test_ensure_props_for_labels_two_cards_ambiguous_falls_back_to_new_reg
     }]
     source_text = "她摘下那把长剑鞘，随手放在桌上。\n\n剑鞘入手微凉，边缘还留着几道划痕。"
 
-    result = await service.ensure_props_for_labels("p1", 6, mentions, source_text=source_text)
+    result = await service.ensure_props_for_labels(
+        "p1", 6, mentions, source_text=source_text, cards_with_prior_evidence=frozenset(),
+    )
 
     assert [item["name"] for item in result["added"]] == ["长剑鞘"], "不能被随意绑到「剑」或「长剑」任一方"
     conn = get_conn()
@@ -314,7 +331,9 @@ async def test_ensure_props_for_labels_ignores_unrelated_card_mentioned_outside_
     source_text = seg1 + "\n\n" + seg2
     mentions = [{"label": "水晶球", "description": "她取出的水晶球", "segment_indexes": [2]}]
 
-    result = await service.ensure_props_for_labels("p1", 3, mentions, source_text=source_text)
+    result = await service.ensure_props_for_labels(
+        "p1", 3, mentions, source_text=source_text, cards_with_prior_evidence=frozenset(),
+    )
 
     assert [item["name"] for item in result["added"]] == ["水晶球"], "必须新建独立卡，不能被无关段落的既有卡污染"
     conn = get_conn()
@@ -339,7 +358,9 @@ async def test_ensure_props_for_labels_evidence_scope_matches_discovery_for_ambi
     source_text = seg1 + "\n\n" + seg2
     mentions = [{"label": "旧行李箱", "description": "旧行李箱", "segment_indexes": [2]}]
 
-    result = await service.ensure_props_for_labels("p1", 3, mentions, source_text=source_text)
+    result = await service.ensure_props_for_labels(
+        "p1", 3, mentions, source_text=source_text, cards_with_prior_evidence=frozenset(),
+    )
 
     assert result == {"added": [], "errors": []}, "必须绑既有卡「行李箱」，不能因为第1段的无关卡而判歧义新建"
     conn = get_conn()

@@ -156,8 +156,16 @@ def _log_prop_registry_summary(
 
 async def ensure_props_for_labels(
     project_id: str, episode_no: int, mentions: list[dict], *, source_text: str = "",
+    cards_with_prior_evidence: frozenset[str],
 ) -> dict:
     """反应式道具库登记，供映射台（episode_prep_pack）在 props 抽取完成后调用。
+
+    ``cards_with_prior_evidence``（2026-10-01，必传、无默认值——CLAUDE.md
+    「Ownership Must Be Explicit」；本函数是 ``match_existing_prop_card`` 的
+    两个直接调用方之一，见 app.props.card_match 模块 docstring 完整案情）：
+    调用方须用与 ``app.production.prep_pack.chunking._prep_pack_known_prop_
+    names`` 同一份数据源算好（``_prep_pack_props_with_prior_appearance_
+    evidence``）再传进来，原样透传给 ``match_existing_prop_card``。
 
     对每个未登记道具（按 name/alias 逐字比对世界书 ``props``）：先过结构判据
     （``judge.is_key_prop_mention``，不发模型调用），够格才写模型评估
@@ -226,6 +234,7 @@ async def ensure_props_for_labels(
                 card = match_existing_prop_card(
                     base, evidence_text, bible.props,
                     source_wording=source_wording, nominated_card=nominated_card,
+                    cards_with_prior_evidence=cards_with_prior_evidence,
                 )
                 canonical = card.name if card else None
             if canonical is not None:
