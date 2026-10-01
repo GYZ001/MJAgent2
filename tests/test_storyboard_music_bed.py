@@ -32,6 +32,7 @@ from app.production.storyboard_pack import (
     _AiStoryboardSegmentDraft,
     _generate_all_segment_prompts,
 )
+from app.production.storyboard_prop_count import prop_count_dialect_rule
 from app.production.storyboard_prop_visibility import prop_visibility_dialect_rule
 from app.production.storyboard_shot_mandates import shot_mandates_dialect_rule
 from app.source_excerpt import SourceSegment
@@ -262,6 +263,7 @@ async def test_disabled_leaves_dialect_instructions_and_prompt_text_byte_identic
         f"\n{shot_action_beats_rule(max_shots=MAX_SHOTS_PER_SEGMENT)}"
         f"\n{shot_mandates_dialect_rule(_SEEDANCE_FORMAT)}"
         f"\n{prop_visibility_dialect_rule(_SEEDANCE_FORMAT)}"
+        f"\n{prop_count_dialect_rule(_SEEDANCE_FORMAT)}"
     )
     assert captured["dialect_instructions"] == expected_dialect_instructions
     assert result[1].prompt_text == model_prompt_text  # 没有任何确定性回填改写它

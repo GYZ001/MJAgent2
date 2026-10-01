@@ -58,7 +58,7 @@ def _draft(prompt_text: str, *, dialogue: list | None = None, degraded_capabilit
 
 
 # ---------------------------------------------------------------------------
-# 七类真实形状的违规：代码核验应当保留（quote/previous_quote 逐字核验通过）
+# 十类真实形状的违规：代码核验应当保留（quote/previous_quote 逐字核验通过）
 # ---------------------------------------------------------------------------
 
 _REAL_VIOLATION_CASES = [
@@ -84,6 +84,12 @@ _REAL_VIOLATION_CASES = [
         "prop_appearance",
         "镜头1：直接接上一段结尾的同一状态，桌上已经放着那部手机。", "桌上已经放着那部手机",
         "镜头4：她转身离开房间，桌上空无一物。", "桌上空无一物",
+    ),
+    (
+        "prop_duplication",
+        "镜头1：温念拖着那只深卡其色行李箱走在前面，顾屿空手跟在她身侧。镜头4：顾屿手里也拉着"
+        "一只与温念同款的深卡其色行李箱，两人并肩往前走。",
+        "顾屿手里也拉着一只与温念同款的深卡其色行李箱", None, "",
     ),
     (
         "repeated_transition_action",
@@ -199,6 +205,18 @@ def test_review_rules_text_includes_impossible_camera_move_only_when_photographi
     assert "穿过门、窗、墙体、玻璃" in text_on
     assert "之间硬切" in text_on
     assert "impossible_camera_move" not in text_off, "非写实画风项目不应收到这条规则"
+
+
+def test_review_rules_text_includes_prop_duplication_regardless_of_photographic():
+    """2026-10-01（第 1 集修订本段验收后第二轮逐帧复查新增第十类）：道具分身与
+    写实/非写实画风无关，两种画风都应该收到这条规则，判据文本单源指向
+    ``storyboard_prop_count.SEEDANCE_PROP_COUNT_RULE``。"""
+    from app.production.storyboard_prop_count import SEEDANCE_PROP_COUNT_RULE
+
+    text_on = prose_review._review_rules_text(photographic=True, max_shots=4)
+    text_off = prose_review._review_rules_text(photographic=False, max_shots=4)
+    assert "prop_duplication" in text_on and "prop_duplication" in text_off
+    assert SEEDANCE_PROP_COUNT_RULE in text_on and SEEDANCE_PROP_COUNT_RULE in text_off
 
 
 # ---------------------------------------------------------------------------

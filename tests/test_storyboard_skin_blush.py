@@ -28,6 +28,7 @@ from app.production.storyboard_pack import (
     _AiStoryboardSegmentDraft,
     _generate_all_segment_prompts,
 )
+from app.production.storyboard_prop_count import prop_count_dialect_rule
 from app.production.storyboard_prop_visibility import prop_visibility_dialect_rule
 from app.production.storyboard_shot_mandates import shot_mandates_dialect_rule
 from app.schemas import Bible, World
@@ -199,14 +200,16 @@ async def _run_with_bible(monkeypatch, bible: Bible | None):
 async def test_no_bible_leaves_dialect_instructions_byte_identical(monkeypatch):
     """CLAUDE.md「未启用分支必须逐字不变」：没有圣经（画风解析不出）时，
     dialect_instructions 必须与本次改动之前逐字相同——除了 2026-10-01 新增的道具可见性
-    规则（``storyboard_prop_visibility``），它和 shot_mandates 同一先例，无条件拼接、
-    不随开关/画风变化，因此这里也要算进预期基线。"""
+    规则（``storyboard_prop_visibility``）与道具数量规则（``storyboard_prop_count``），
+    它们和 shot_mandates 同一先例，无条件拼接、不随开关/画风变化，因此这里也要算进
+    预期基线。"""
     captured = await _run_with_bible(monkeypatch, bible=None)
     expected_dialect_instructions = (
         f"{SEEDANCE_DIALECT_INSTRUCTIONS}\n{decisive_action_dialect_rule(_SEEDANCE_FORMAT)}"
         f"\n{shot_action_beats_rule(max_shots=MAX_SHOTS_PER_SEGMENT)}"
         f"\n{shot_mandates_dialect_rule(_SEEDANCE_FORMAT)}"
         f"\n{prop_visibility_dialect_rule(_SEEDANCE_FORMAT)}"
+        f"\n{prop_count_dialect_rule(_SEEDANCE_FORMAT)}"
     )
     assert captured["dialect_instructions"] == expected_dialect_instructions
 

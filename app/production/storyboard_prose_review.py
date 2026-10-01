@@ -48,7 +48,17 @@
 仍单源指向 ``storyboard_skin_blush.SEEDANCE_SKIN_BLUSH_RULE``，不需要在这里
 另写一份取值。
 
-## 判据只认九类，取值集合单源
+2026-10-01（修订本段验收后的第二轮逐帧复查，新增第十类）：第 20 段镜头 4 顾屿
+手里凭空多拉了一只与温念那只外观一致的行李箱，第 28 段同一画面里行李箱同时在
+床头柜与床尾各出现一份——与 ``storyboard_cast_lock`` 处理的人物分身同源，但发生
+在道具上。新增 ``prop_duplication``，与 ``storyboard_prop_count`` 模块 docstring
+同批：不像 ``screen_side``/``prop_appearance``/``repeated_transition_action``
+需要对照上一段末镜，这里两份重复描述都在本段 ``prompt_text`` 内部，复核模型通读
+本段正文本身即可判断，不需要 ``previous_quote``；判据文本单源指向
+``storyboard_prop_count.SEEDANCE_PROP_COUNT_RULE``。不按画风分支（道具分身与
+写实/非写实画风无关，不进 ``_PHOTOGRAPHIC_ONLY_KINDS``）。
+
+## 判据只认十类，取值集合单源
 
 ``_KIND_RULES`` 既是喂给复核模型的判据正面陈述，也是代码核验 ``kind`` 合法性的
 唯一依据（``v.kind in _KIND_RULES``）——CLAUDE.md「模型契约两侧必须对齐」：schema
@@ -134,6 +144,7 @@ from app import textmatch
 from app.db import get_setting
 from app.harness import model_gateway
 from app.production import storyboard_action_density as _action_density
+from app.production import storyboard_prop_count as _prop_count
 from app.production import storyboard_skin_blush as _skin_blush
 from app.production.storyboard_continuity_memo import continuity_memo_payload
 from app.production.storyboard_staging_repeat import sub_shots
@@ -149,8 +160,8 @@ _NEEDS_PREVIOUS_QUOTE = {"screen_side", "prop_appearance", "repeated_transition_
 #: 过程、摄影机的物理可达范围），动画/插画风格不受这两条约束。
 _PHOTOGRAPHIC_ONLY_KINDS = {"skin_blush", "impossible_camera_move"}
 
-#: 八类判据的正面陈述，单源用于「喂给模型的提示词」与「核验 kind 合法性」两处
-#: （见模块 docstring「判据只认八类，取值集合单源」）。``{max_actions}`` 由
+#: 十类判据的正面陈述，单源用于「喂给模型的提示词」与「核验 kind 合法性」两处
+#: （见模块 docstring「判据只认十类，取值集合单源」）。``{max_actions}`` 由
 #: ``_review_rules_text`` 用 ``storyboard_action_density.MAX_KEY_ACTIONS_PER_
 #: SHOT`` 填入。
 _KIND_RULES: dict[str, str] = {
@@ -191,6 +202,13 @@ _KIND_RULES: dict[str, str] = {
         "这件道具，就填上一段末镜那句话本身，作为『确实没交代』的证据——必须逐字摘自上面给出的『上一段"
         "末镜文字』，不能自己编）；fix 给出两种正面写法之一：补一个明确的拿取/放置动作，或改成与上一段"
         "末镜一致的初始状态。"
+    ),
+    "prop_duplication": (
+        "prop_duplication（道具分身：同一件道具在本段画面里被画出了不止一份）：判据是——"
+        "{prop_count_rule} 本段正文如果把同一件道具同时写成出现在两个人手里、或画面两个不同"
+        "位置各有一份，而这件道具按原文/全段描述只应该有一件（没有任何地方写明它本来就是成对"
+        "或多件的东西），即违规。quote 填描述第二份重复道具出现的那句原文；fix 给出正面写法："
+        "删掉这句多出来的重复描述，让这件道具只跟着原文交代的那个持有人或位置出现一次。"
     ),
     "repeated_transition_action": (
         "repeated_transition_action（跨段重复的动作转换）：上一段末镜文字已经写明某个人物完成了一次"
@@ -277,7 +295,7 @@ def _previous_shot_text(previous_draft: Any | None) -> str:
 
 
 def _review_rules_text(*, photographic: bool, max_shots: int) -> str:
-    """九类判据的完整正面陈述；``skin_blush``/``impossible_camera_move`` 只在
+    """十类判据的完整正面陈述；``skin_blush``/``impossible_camera_move`` 只在
     写实画风项目出现（见模块 docstring、``_PHOTOGRAPHIC_ONLY_KINDS``），非写实
     项目这两条规则连提示词都不会收到。"""
     kinds = [k for k in _KIND_RULES if k not in _PHOTOGRAPHIC_ONLY_KINDS or photographic]
@@ -286,6 +304,7 @@ def _review_rules_text(*, photographic: bool, max_shots: int) -> str:
             max_actions=_action_density.MAX_KEY_ACTIONS_PER_SHOT, skin_blush_rule=_skin_blush.SEEDANCE_SKIN_BLUSH_RULE,
             key_action_definition=_action_density.key_action_definition(),
             over_limit_remedy=_action_density.over_limit_remedy(max_shots=max_shots),
+            prop_count_rule=_prop_count.SEEDANCE_PROP_COUNT_RULE,
         )
         for i, kind in enumerate(kinds, start=1)
     )
