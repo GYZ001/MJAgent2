@@ -47,7 +47,7 @@ def test_appends_wardrobe_sentence_but_does_not_register_a_prop():
         characters=[_AiCharacterState(identity_id="bible:温念", wardrobe="围着顾屿给的红色围巾")],
         resource_characters=[_visible("bible:温念", "温念")],
     )
-    assert ensure_wardrobe_continuity_in_prompt(draft, prop_factory=_FakeProp) == []
+    assert ensure_wardrobe_continuity_in_prompt(draft) == []
     assert draft.prompt_text.endswith("续接服装：@温念 围着顾屿给的红色围巾。")
     assert draft.resources.props == [], "服装续接不再铸成 props 条目"
 
@@ -71,7 +71,7 @@ def test_does_not_duplicate_when_prompt_already_mentions_wardrobe():
         resource_characters=[_visible("bible:温念", "温念")],
     )
     before = draft.prompt_text
-    assert ensure_wardrobe_continuity_in_prompt(draft, prop_factory=_FakeProp) == []
+    assert ensure_wardrobe_continuity_in_prompt(draft) == []
     assert draft.prompt_text == before
     assert draft.resources.props == [], "不再登记进 resources.props，props 应保持为空"
 
@@ -86,7 +86,7 @@ def test_leaves_pre_existing_props_untouched():
         resource_characters=[_visible("bible:温念", "温念")],
         props=[existing],
     )
-    ensure_wardrobe_continuity_in_prompt(draft, prop_factory=_FakeProp)
+    ensure_wardrobe_continuity_in_prompt(draft)
     assert draft.resources.props == [existing]
 
 
@@ -100,7 +100,7 @@ def test_empty_wardrobe_or_no_display_name_is_skipped():
         resource_characters=[_visible("bible:温念", "温念")],
     )
     before = draft.prompt_text
-    ensure_wardrobe_continuity_in_prompt(draft, prop_factory=_FakeProp)
+    ensure_wardrobe_continuity_in_prompt(draft)
     assert draft.prompt_text == before
     assert draft.resources.props == []
 
@@ -118,7 +118,7 @@ def test_replaces_stale_line_instead_of_duplicating_when_wardrobe_text_drifts():
         characters=[_AiCharacterState(identity_id="bible:温念", wardrobe="米白色开衫（扣子已被顾屿扣好）")],
         resource_characters=[_visible("bible:温念", "温念")],
     )
-    assert ensure_wardrobe_continuity_in_prompt(draft, prop_factory=_FakeProp) == []
+    assert ensure_wardrobe_continuity_in_prompt(draft) == []
     assert draft.prompt_text.count("续接服装：@温念") == 1
     assert draft.prompt_text.endswith("续接服装：@温念 米白色开衫（扣子已被顾屿扣好）。")
 
@@ -151,7 +151,7 @@ def test_replacing_stale_line_does_not_swallow_trailing_sentence_on_same_physica
         characters=[_AiCharacterState(identity_id="bible:温念", wardrobe="米白色开衫（扣子已被顾屿扣好）")],
         resource_characters=[_visible("bible:温念", "温念")],
     )
-    assert ensure_wardrobe_continuity_in_prompt(draft, prop_factory=_FakeProp) == []
+    assert ensure_wardrobe_continuity_in_prompt(draft) == []
     assert "这句话很重要。" in draft.prompt_text
     assert draft.prompt_text.count("续接服装：@温念") == 1
 
@@ -177,7 +177,7 @@ def test_wardrobe_overlapping_appearance_anchor_logs_advisory_not_blank(caplog):
         resource_characters=[_visible("bible:顾屿", "顾屿")],
     )
     with caplog.at_level("WARNING"):
-        ensure_wardrobe_continuity_in_prompt(draft, prop_factory=_FakeProp)
+        ensure_wardrobe_continuity_in_prompt(draft)
     assert "[STORYBOARD_WARDROBE_NOT_CLOTHING][未拦截]" in caplog.text
     assert "续接服装：@顾屿" in draft.prompt_text  # 不静默吞，也不兜底清空
 
@@ -190,7 +190,7 @@ def test_wardrobe_unrelated_to_anchor_does_not_log_advisory(caplog):
         resource_characters=[_visible("bible:温念", "温念")],
     )
     with caplog.at_level("WARNING"):
-        ensure_wardrobe_continuity_in_prompt(draft, prop_factory=_FakeProp)
+        ensure_wardrobe_continuity_in_prompt(draft)
     assert "STORYBOARD_WARDROBE_NOT_CLOTHING" not in caplog.text
 
 
@@ -199,11 +199,11 @@ def test_empty_prompt_or_no_characters_is_left_untouched():
         "", characters=[_AiCharacterState(identity_id="bible:温念", wardrobe="红围巾")],
         resource_characters=[_visible("bible:温念", "温念")],
     )
-    ensure_wardrobe_continuity_in_prompt(empty_prompt, prop_factory=_FakeProp)
+    ensure_wardrobe_continuity_in_prompt(empty_prompt)
     assert empty_prompt.prompt_text == ""
 
     no_characters = _draft("镜头1：空镜。", characters=[], resource_characters=[])
-    ensure_wardrobe_continuity_in_prompt(no_characters, prop_factory=_FakeProp)
+    ensure_wardrobe_continuity_in_prompt(no_characters)
     assert no_characters.prompt_text == "镜头1：空镜。"
 
 
@@ -218,6 +218,6 @@ def test_planned_change_at_segment_start_is_not_overwritten_by_previous_look():
         characters=[_AiCharacterState(identity_id="bible:温念", wardrobe="颈间绕着深灰色围巾")],
         resource_characters=[_visible("bible:温念", "温念")],
     )
-    assert ensure_wardrobe_continuity_in_prompt(draft, prop_factory=_FakeProp) == []
+    assert ensure_wardrobe_continuity_in_prompt(draft) == []
     assert draft.prompt_text.endswith("续接服装：@温念 颈间绕着深灰色围巾。")
     assert "米白色针织开衫" not in draft.prompt_text

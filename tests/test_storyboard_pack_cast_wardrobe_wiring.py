@@ -17,7 +17,7 @@ def _generate_all_segment_prompts_source() -> str:
 def test_cast_lock_and_wardrobe_backfill_are_called_in_validate_callback():
     source = _generate_all_segment_prompts_source()
     assert "_cast_lock.ensure_cast_lock_in_prompt(value)" in source
-    assert "ensure_wardrobe_continuity_in_prompt(value, prop_factory=_AiResourceProp)" in source
+    assert "ensure_wardrobe_continuity_in_prompt(value)" in source
 
 
 def test_shot_mandates_rule_is_concatenated_into_dialect_instructions():
@@ -30,8 +30,8 @@ def test_shot_mandates_rule_is_concatenated_into_dialect_instructions():
 def test_resource_prop_model_still_accepts_label_and_description():
     """``_AiResourceProp``（``_AiSegmentResources.props`` 的元素类型）的 label/
     description 两字段形状保持可序列化。2026-10-01 起
-    ``ensure_wardrobe_continuity_in_prompt`` 不再用 ``prop_factory`` 登记服装
-    条目（参数保留只是调用方签名兼容，函数体内不再调用它）——这条测试不再依赖
+    ``ensure_wardrobe_continuity_in_prompt`` 不再登记服装条目，原先为此传入的
+    ``prop_factory`` 参数已随之退场——这条测试不再依赖
     那条已退场的路径，只独立验证模型本身的序列化形状没有被这次改动意外破坏。"""
     from app.production.storyboard_pack import _AiResourceProp, _AiSegmentResources
 

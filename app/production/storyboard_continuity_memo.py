@@ -421,11 +421,11 @@ def _wardrobe_not_clothing_advisory(name: str, wardrobe: str, anchor: str) -> No
         )
 
 
-def ensure_wardrobe_continuity_in_prompt(draft: Any, *, prop_factory: Any) -> list[str]:
+def ensure_wardrobe_continuity_in_prompt(draft: Any) -> list[str]:
     """服装延续的确定性回填：``continuity_memo.characters[].wardrobe``（规则见
     ``_WARDROBE_FIELD_RULE``）写进提示词末尾，按正名一句一行。2026-10-01 起不再
     登记进 ``resources.props``——它只是记账标签，没有任何下游消费，却天然无图，
-    纯属界面噪音；``prop_factory`` 为调用方签名兼容保留，函数体内不再使用。
+    纯属界面噪音；原先为登记服装而传入的 ``prop_factory`` 参数随之退场。
 
     幂等判断按角色识别既有写法，不按逐字字符串（2026-09-28 改版，真实回归同一角色
     的服装描述被写了两次、只差几个字）：先剥掉该角色此前写入的整行，若剩下的正文
