@@ -148,7 +148,7 @@ max_lines_tests = 500
 "app/production/screenplay_authority.py" = 2502
 "app/production/screenplay_document.py" = 1704
 "app/production/screenplay_repair/llm_field_patch.py" = 593
-"app/production/storyboard_pack.py" = 1847
+"app/production/storyboard_pack.py" = 1682
 # 2.1.0（对白台账/必保台词/受控画外音/镜头数放宽）：方言约束两段指令文本 +
 # _dialect_for_target_video_model 拆到新模块 app.production.storyboard_dialects，
 # 腾出的行数让本文件净减 1 行（2087→2086）——棘轮只降不升，收紧后如实记账。
@@ -500,7 +500,7 @@ max_lines_tests = 500
 "app/production/screenplay_repair/preflight.py" = 154
 "app/production/screenplay_repair/qa.py" = 217
 "app/production/screenplay_repair/revalidate_resume.py" = 328
-"app/production/storyboard_pack.py" = 153
+"app/production/storyboard_pack.py" = 107
 "app/provider_task_clearance.py" = 257  # _provider_task_clearance_evaluation，
     # 从 app/completion_grant.py 按原样搬移（2026-08-30，层号治理，见
     # app/LAYERS.toml 组 5），基线随函数一起转移，不是新增欠账。

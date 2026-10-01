@@ -105,14 +105,21 @@ def _generate_all_segment_prompts_source() -> str:
 
 
 def test_skin_blush_dialect_addendum_is_concatenated_into_dialect_instructions():
-    source = _generate_all_segment_prompts_source()
+    """2026-10-01 换场并行链：dialect_instructions 拼接搬进
+    ``storyboard_segment_chains._task_payload_dialect_instructions``，见该
+    模块 docstring。"""
+    import app.production.storyboard_segment_chains as chains_module
+
+    source = inspect.getsource(chains_module._task_payload_dialect_instructions)
     assert (
-        "_skin_blush.skin_blush_dialect_addendum(profile.render_format, "
-        "photographic=visual_style_is_photographic)"
+        "_skin_blush.skin_blush_dialect_addendum(ctx.profile.render_format, "
+        "photographic=ctx.visual_style_is_photographic)"
     ) in source
 
 
 def test_photographic_flag_comes_from_is_photographic_style_prompt():
+    # visual_style_is_photographic 的计算仍留在 _generate_all_segment_prompts
+    # 的 ctx 组装前置代码里（未随逐段生成循环搬出），见该函数 docstring。
     source = _generate_all_segment_prompts_source()
     assert "visual_style_is_photographic = is_photographic_style_prompt(visual_style)" in source
 

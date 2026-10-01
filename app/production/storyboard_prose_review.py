@@ -405,14 +405,22 @@ async def review_segment_inline(
     return ""
 
 
-def log_review_summary(outcomes: list[dict[str, Any]], *, episode_id: str, enabled: bool) -> None:
+def log_review_summary(
+    outcomes: list[dict[str, Any]], *, episode_id: str, enabled: bool,
+    seam_rewritten: int = 0, seam_remaining: int = 0,
+) -> None:
     """整集逐段生成结束后打一条汇总日志，便于下次对比耗时与重写率（见模块
-    docstring「可观测」）；``enabled=False`` 或 ``outcomes`` 为空时不打印。"""
+    docstring「可观测」）；``enabled=False`` 或 ``outcomes`` 为空时不打印。
+    ``seam_rewritten``/``seam_remaining``（2026-10-01 换场并行链）：接缝复核
+    触发的链首段重写数 / 复核后仍剩余的违规数，默认 0——只有
+    ``app.production.storyboard_segment_chains`` 真正并行出多条链时才非零，
+    1 条链（没有换场）时与本次改动前逐字一致。"""
     if not enabled or not outcomes:
         return
     rewritten = sum(1 for o in outcomes if o["rewritten"])
     remaining = sum(o["remaining"] for o in outcomes)
     _LOGGER.info(
-        "[STORYBOARD_PROSE_REVIEW_SUMMARY] episode=%s segments=%s rewritten=%s remaining_violations=%s",
-        episode_id, len(outcomes), rewritten, remaining,
+        "[STORYBOARD_PROSE_REVIEW_SUMMARY] episode=%s segments=%s rewritten=%s remaining_violations=%s "
+        "seam_rewritten=%s seam_remaining=%s",
+        episode_id, len(outcomes), rewritten, remaining, seam_rewritten, seam_remaining,
     )

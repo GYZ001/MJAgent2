@@ -219,6 +219,7 @@ def _segment_continuity_rules(
     *,
     previous_segment_no: int | None,
     camera_history: list[dict[str, Any]],
+    mid_episode_scene_change: bool = False,
 ) -> list[str]:
     """一镜参考的第一、二层文案（第三层——世界书外观锚点——在
     ``_generate_all_segment_prompts`` 的 shared_rules 里，逐段调用同样适用）。
@@ -226,6 +227,12 @@ def _segment_continuity_rules(
     按 CLAUDE.md「Prompts」一节的要求写：正面陈述而非禁令，说清参考素材从
     哪来，以及确实没有时该怎么写——本集第一段没有上一段、没有镜头语言历史，
     两种情况都直接说清楚，不假装存在一个不存在的参照。
+
+    ``mid_episode_scene_change``（2026-10-01 换场并行链）：换场切分的链首段
+    本地看不到上一段（``previous_segment_no`` 为 None），但它不是本集第一段
+    ——不能复用「没有上一段可参考」这句话，那会误导模型把它当成整部作品的
+    开场处理，见 ``app.production.storyboard_segment_chain_plan``
+    ``_seam_continuity_memo_errors`` 文档引用的同一审查发现。
 
     2.2.0：从 ``storyboard_pack.py`` 搬移到本模块（纯搬移，行为不变），
     为该文件新增的三项结构层改造腾出行数——见本模块 docstring 开头的说明。
@@ -244,6 +251,14 @@ def _segment_continuity_rules(
             "身体动作、挪一个位置、把视线投向新的对象，或与道具发生新的互动，变化要"
             "能在本段原文里找到依据；上一段已经拍过的画面（同一件道具的特写、同一个"
             "方向的全景）最多只回切一次，不能整段照着上一段再拍一遍。"
+        )
+    elif mid_episode_scene_change:
+        rule_1 = (
+            "本段与上一段之间发生了换场，但本段不是本集的开场——剧情在本段之前"
+            "已经推进过一段时间，只是本次生成结构上看不到上一段真实的提示词全文"
+            "（并行生成的限制，不代表上一段不存在）；起幅由你依据本段原文自行"
+            "判断，但要让观众能明确感知这是一次换场（新的场景描述、光影变化，"
+            "或专门的转场镜头交代），不要误当成整部作品从零开始的第一幕来处理。"
         )
     else:
         rule_1 = "本段是本集第一段，没有上一段可参考，起幅由你自行判断，不必与任何前情衔接。"
@@ -326,6 +341,34 @@ EXTRA_ANIMAL_DISTINCT_RULE = (
 )
 
 
+def _continuity_memo_rules_mid_episode_scene_change() -> list[str]:
+    """换场切分的链首段：上一段在本集里真实存在，只是并行生成结构上看不到它的
+    continuity_memo（见 ``app.production.storyboard_segment_chains`` 模块
+    docstring「跨段累加状态的确定性重放」）——不能照搬「本集第一段」文案，那会
+    误导模型把道具/时段当成整部作品的开场重置（独立审查发现，2026-10-01）。
+    在 ``continuity_memo_rules(None)`` 的「第一段」文案基础上只替换会造成误导
+    的措辞，取值判据（原文交代就引用、没交代就自行判断、之后各段默认沿用）
+    保持不变、不重新定义，两份文案的判据部分不会各自漂移。这里引入的近似
+    偏差由合并后的接缝复核用真实上一段数据核验一次补正，见
+    ``app.production.storyboard_segment_chain_plan._seam_continuity_memo_errors``。
+    """
+    rules = continuity_memo_rules(None)
+    rules[0] = rules[0].replace(
+        "本段是本集第一段，没有上一段 continuity_memo 可以沿用：本段原文如果明确写出时段",
+        "本段与上一段之间发生了换场，不是本集开场，只是本次生成结构上看不到上一段"
+        "真实的 continuity_memo：本段原文如果明确写出时段",
+    ).replace(
+        "原文没有写明时段时，由你自行判断一个合理的时段、",
+        "原文没有写明时段时，结合剧情已经推进过一段时间的事实自行判断一个合理的"
+        "时段（不要当成一天的开始）、",
+    )
+    rules[2] = rules[2].replace(
+        "本段是本集第一段，同样没有上一段 props/layout 可以沿用：continuity_memo.props 由",
+        "本段同样看不到上一段真实的 props/layout：continuity_memo.props 由",
+    ) + "本段原文如果暗示某件道具延续前面剧情（例如已经拿在手里、放在某处），按暗示合理推断，不要当成这件道具第一次出现。"
+    return rules
+
+
 def phase2_segment_rules(
     *,
     continuity_rules: list[str],
@@ -337,6 +380,7 @@ def phase2_segment_rules(
     previous_memo: _AiContinuityMemo | None,
     staging_rule: str | None,
     structure: dict | None = None,
+    mid_episode_scene_change: bool = False,
 ) -> list[str]:
     """汇总阶段二 task_payload["rules"] 的全部来源，从
     ``_generate_all_segment_prompts``（已在 155 行 function_lines 棘轮基线上，
@@ -346,7 +390,17 @@ def phase2_segment_rules(
     ``staging_rule``（2.4.1）：容量拆分续段的画面推进陈述，见
     ``app.production.storyboard_staging_repeat.staging_continuation_rule``；不是续段时
     调用方传 None。不留默认值——漏传就是 TypeError，而不是悄悄少一条规则。
+
+    ``mid_episode_scene_change``（2026-10-01）：``previous_memo`` 为 None 时，
+    True 表示这是换场并行链的链首段（上一段真实存在，只是看不到），False
+    表示真正的本集第一段——两者走不同的 continuity_memo 文案，见
+    ``_continuity_memo_rules_mid_episode_scene_change``。
     """
+    memo_rules = (
+        _continuity_memo_rules_mid_episode_scene_change()
+        if previous_memo is None and mid_episode_scene_change
+        else continuity_memo_rules(previous_memo)
+    )
     return [
         *continuity_rules,
         *shared_rules,
@@ -356,6 +410,6 @@ def phase2_segment_rules(
                                      scene_change=bool((structure or {}).get("scene_change"))),
         *structure_rules(structure or {}),  # 换场/同场起幅与作者点名必拍镜头（screenplay_markers）
         EXTRA_ANIMAL_DISTINCT_RULE,
-        *continuity_memo_rules(previous_memo),
+        *memo_rules,
         *([staging_rule] if staging_rule else []),
     ]

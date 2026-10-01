@@ -169,22 +169,35 @@ def test_green_actual_backfill_is_idempotent_on_replay():
 # ---------------------------------------------------------------------------
 
 
-def _generate_all_segment_prompts_source() -> str:
-    import app.production.storyboard_pack as storyboard_pack_module
+def _dialect_instructions_source() -> str:
+    """2026-10-01 换场并行链：dialect_instructions 拼接搬进
+    ``storyboard_segment_chains._task_payload_dialect_instructions``（原在
+    ``_generate_all_segment_prompts`` 的 task_payload 字面量里），见该模块
+    docstring。"""
+    import app.production.storyboard_segment_chains as chains_module
 
-    return inspect.getsource(storyboard_pack_module._generate_all_segment_prompts)
+    return inspect.getsource(chains_module._task_payload_dialect_instructions)
+
+
+def _segment_validate_source() -> str:
+    """2026-10-01 换场并行链：原 validate=lambda 回调搬进
+    ``storyboard_segment_chains._segment_validate``（普通函数，不再是 lambda），
+    见该模块 docstring。"""
+    import app.production.storyboard_segment_chains as chains_module
+
+    return inspect.getsource(chains_module._segment_validate)
 
 
 def test_music_bed_dialect_addendum_is_concatenated_into_dialect_instructions():
-    source = _generate_all_segment_prompts_source()
-    assert "_music_bed.music_bed_dialect_addendum(profile.render_format, enabled=enhance_music_bed)" in source
+    source = _dialect_instructions_source()
+    assert "_music_bed.music_bed_dialect_addendum(ctx.profile.render_format, enabled=ctx.enhance_music_bed)" in source
 
 
 def test_music_bed_backfill_is_called_in_validate_callback():
-    source = _generate_all_segment_prompts_source()
+    source = _segment_validate_source()
     assert (
-        "_music_bed.ensure_no_music_bed_in_prompt(value, render_format=profile.render_format, "
-        "enabled=enhance_music_bed)"
+        "_music_bed.ensure_no_music_bed_in_prompt(value, render_format=ctx.profile.render_format, "
+        "enabled=ctx.enhance_music_bed)"
     ) in source
 
 

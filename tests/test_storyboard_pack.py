@@ -33,6 +33,7 @@ from app.production.storyboard_dialogue_ledger import (
     required_dialogue_missing_errors,
 )
 from app.production.storyboard_narrative_arc import (
+    _segment_continuity_rules,
     beat_sheet_narrative_arc_rules,
     segment_narrative_arc_payload_fields,
     segment_narrative_arc_rules,
@@ -65,7 +66,6 @@ from app.production.storyboard_pack import (
     _paratext_exclusion_rule,
     _paratext_segment_indexes,
     _segment_content_advisories,
-    _segment_continuity_rules,
     _segment_source_block,
     StoryboardPackBudgetError,
     _assemble_adaptation_summary,
