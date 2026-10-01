@@ -5361,8 +5361,8 @@ def test_prep_pack_version_is_1_8_0():
     比照 1.4.1/1.9.0 的先例推进版本号第三位，不动 schema 位（coverage_
     ledger.paratext 自身仍是 flat [int] list）。2.0.5 见 chunk_extraction 规则常量上方。
     2.0.6（见 discovery._prep_pack_build_prop_manifest 上方大注释）：道具对照既有卡片绑定，
-    props[] 新增 additive 字段 canonical_name；2.0.7（见 schemas._ModelSceneMention/_ModelPropMention.source_wording 上方注释）：scenes/props 新增 source_wording 字段——均比照 1.2.0 先例推进版本号第三位；2.0.8（见 appellation_resolve.py 模块 docstring"设计变更"一节）：identity 新增 functional 值，unresolved 不再落 functional_extras、改记 asset_manifest.unresolved_appellations，是判定语义变更，比照 1.4.1 先例推进版本号第三位；2.0.9（见 chunk_extraction 提示词 props 字段与新模块 prop_segment_coverage 上方）：props 申报判据从举例式框定改成「被动作操作/本集还会再出现」两条正面陈述，且 manifest 建好后补一轮确定性全文检索——均是 prompt-contract/判定语义变更，不动 schema 位，比照 1.4.1 先例推进版本号第三位；2.0.10（见新模块 .prop_recheck/.trailing_anchor 上方）：新增道具专项复核调用（同 scene_recheck 同一形状补漏），道具/场景 label/source_wording 非原文连续字面时新增尾部退让锚定（口径同 app/production/scene_evidence.py:scene_label_evidence）——均是判定语义变更，不动 schema 位，比照 1.4.1 先例推进版本号第三位。"""
-    assert prep_pack.PREP_PACK_VERSION == "2.0.10"
+    props[] 新增 additive 字段 canonical_name；2.0.7（见 schemas._ModelSceneMention/_ModelPropMention.source_wording 上方注释）：scenes/props 新增 source_wording 字段——均比照 1.2.0 先例推进版本号第三位；2.0.8（见 appellation_resolve.py 模块 docstring"设计变更"一节）：identity 新增 functional 值，unresolved 不再落 functional_extras、改记 asset_manifest.unresolved_appellations，是判定语义变更，比照 1.4.1 先例推进版本号第三位；2.0.9（见 chunk_extraction 提示词 props 字段与新模块 prop_segment_coverage 上方）：props 申报判据从举例式框定改成「被动作操作/本集还会再出现」两条正面陈述，且 manifest 建好后补一轮确定性全文检索——均是 prompt-contract/判定语义变更，不动 schema 位，比照 1.4.1 先例推进版本号第三位；2.0.10（见新模块 .prop_recheck/.trailing_anchor 上方）：新增道具专项复核调用（同 scene_recheck 同一形状补漏），道具/场景 label/source_wording 非原文连续字面时新增尾部退让锚定（口径同 app/production/scene_evidence.py:scene_label_evidence）——均是判定语义变更，不动 schema 位，比照 1.4.1 先例推进版本号第三位；2.0.11（见 chunk_extraction._PROP_SEGMENT_CRITERIA）：正穿在身上的衣物归人物造型、不按道具申报，判定语义变更，同上推进第三位。"""
+    assert prep_pack.PREP_PACK_VERSION == "2.0.11"
 
 
 # ---------------------------------------------------------------------------

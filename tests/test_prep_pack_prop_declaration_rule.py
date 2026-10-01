@@ -64,7 +64,7 @@ def test_props_rule_states_two_positive_conditions() -> None:
     不是从举例反推。"""
     prompt = _capture_prompt()
     assert "被本段某个角色的身体动作明确操作" in prompt
-    assert "拿起、放下、递给、接过、使用、穿戴、开关、移动、交接" in prompt
+    assert "拿起、放下、递给、接过、使用、开关、移动、交接" in prompt
     assert "在本集其他段落的原文里还会再次出现" in prompt
     assert "贯穿性的视觉线索" in prompt
 
@@ -95,3 +95,13 @@ def test_other_json_field_descriptions_are_untouched() -> None:
     assert "不超过约40字），要能证明这件物品在这段剧情里被某个" in prompt
     assert "角色拿起/递给/接过/放下、被贴身佩戴或收藏、被镜头意味着特写描写" in prompt
     assert '"known_prop_name": "这件道具如果就是已登记道具名单中的某一件' in prompt
+
+
+def test_worn_clothing_belongs_to_character_styling_not_props() -> None:
+    """2026-10-01 顾念长安第 1 集 2.0.10 实测：判据曾把「穿戴」列为操作，开衫/长裙/
+    卫衣/外套这些正穿在身上的衣物被建成了道具卡。正穿着的衣物归人物造型（人物外观与
+    服装续接负责）；脱下、拿在手里、递交或放在某处作为物件出现时，才按道具两条判断。"""
+    prompt = _capture_prompt()
+    assert "穿戴" not in prompt.split("props：", 1)[1].split("每个给", 1)[0]
+    assert "人物身上正穿着的衣物属于人物造型" in prompt
+    assert "衣物被脱下、拿在手里、递交或放在某处、作为一件物件出现时，才按上面两条判断" in prompt
