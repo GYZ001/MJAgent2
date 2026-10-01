@@ -38,6 +38,7 @@ from app.production import storyboard_cast_lock as _cast_lock
 from app.production import storyboard_music_bed as _music_bed
 from app.production import storyboard_prop_appearance_lock as _prop_lock
 from app.production import storyboard_prop_entrance as _prop_entrance
+from app.production import storyboard_prop_visibility as _prop_visibility
 from app.production import storyboard_prose_review as _prose_review
 from app.production import storyboard_revision_notes as _revision_notes
 from app.production import storyboard_shot_mandates as _shot_mandates
@@ -223,6 +224,7 @@ def _task_payload_dialect_instructions(ctx: SegmentChainContext) -> str:
     return (
         f"{ctx.dialect_instructions}\n{_action_beats.decisive_action_dialect_rule(ctx.profile.render_format)}\n"
         f"{_action_density.shot_action_beats_rule(max_shots=ctx.max_shots)}\n{_shot_mandates.shot_mandates_dialect_rule(ctx.profile.render_format)}"
+        f"\n{_prop_visibility.prop_visibility_dialect_rule(ctx.profile.render_format)}"
         f"{_music_bed.music_bed_dialect_addendum(ctx.profile.render_format, enabled=ctx.enhance_music_bed)}"
         f"{_skin_blush.skin_blush_dialect_addendum(ctx.profile.render_format, photographic=ctx.visual_style_is_photographic)}"
     )

@@ -226,11 +226,22 @@ def moments_for_segment(segment_beat_ids: list[str], locks: list[Any]) -> list[A
 
 
 def segment_rule_text(locks_here: list[Any]) -> list[str]:
-    """阶段二 per-segment 正面陈述：本段必须逐字沿用这件道具锁定的外观。"""
+    """阶段二 per-segment 正面陈述：本段画面里这件道具若看得见，必须逐字沿用它锁定的外观。
+
+    2026-10-01（第 1 集第五版真实回归，见 ``app.production.storyboard_prop_visibility``
+    模块 docstring）：``locks_here``（按 beat_id 命中）只说明这件道具这一段"在场"，不说明
+    它这一段画面里"看不看得见"——它完全可能被衣物/容器遮住。旧文案「在本段画面中出现」
+    把"在场"断言成了"可见"，会让模型即使画面写明道具被遮住，也照样把这句要求理解成必须
+    写出完整外观。改成条件句，可见性判据统一指向 ``storyboard_prop_visibility`` 那条
+    无条件追加的通用规则，这里不重复定义判据，只重复提醒"这件道具已经锁定了外观、可见时
+    要用哪一段文字"。
+    """
     return [
-        f"道具「{lock.label}」在本段画面中出现，外观已在全集范围内锁定：{lock.appearance}——"
-        "本段必须逐字沿用这段外观描述（颜色/材质/形状/磨损细节等一个字都不能改），不得因为这不是"
-        "它第一次出场就重新编写、也不得换一套说法"
+        f"道具「{lock.label}」全集范围内的外观已锁定：{lock.appearance}——本段画面里这件道具"
+        "如果看得见（判据见前面的道具可见性规则），必须逐字沿用这段外观描述（颜色/材质/形状/"
+        "磨损细节等一个字都不能改），不得因为这不是它第一次出场就重新编写、也不得换一套说法；"
+        "本段画面里这件道具被遮住、收起或根本不在画面中，则按道具可见性规则处理，不写这段外观、"
+        "也不列入 resources.props"
         for lock in locks_here
     ]
 
@@ -243,15 +254,22 @@ def segment_advisories(locks_here: list[Any], prompt_text: str) -> list[str]:
     ``prompt_text`` 是否真的写成了锁定外观——本函数补上这道对 ``prompt_text`` 本身
     的核对，写法与判据同 ``storyboard_prop_entrance.segment_advisories``：能力边界
     也相同，只能判断锁定的外观描述是否以改写措辞出现，判不出画面是否真的画对，
-    因此只记日志不阻断，不参与语义重试。"""
+    因此只记日志不阻断，不参与语义重试。
+
+    2026-10-01（``storyboard_prop_visibility`` 落地后的已知限制）：外观没出现在
+    ``prompt_text`` 里现在有两种合法原因——模型漏写，或者模型正确识别出这件道具
+    本段被遮住/收起，按道具可见性规则没有写出外观。本函数拿不到"模型当时判定的
+    可见性"这个事实，无法区分这两种原因，提示文案据实说明这一点，不再把"没出现"
+    默认暗示成"漏写"。"""
     advisories: list[str] = []
     for lock in locks_here:
         if not beat_is_shot(f"必现内容：{lock.appearance}", prompt_text):
             advisories.append(
                 "[STORYBOARD_PROP_APPEARANCE_LOCK_NOT_SHOWN][未拦截] 道具"
                 f"「{lock.label}」的外观已在全集范围内锁定为「{lock.appearance}」，但看起来没有"
-                "被写进提示词（只能判断外观描述是否以改写措辞出现，判不出画面是否真的画对），"
-                "请人工核查——可在分镜台编辑本段镜头稿补上"
+                "被写进提示词（只能判断外观描述是否以改写措辞出现，判不出画面是否真的画对；也"
+                "可能是这件道具本段被遮住/收起，按道具可见性规则正确地没有写出外观，不一定是"
+                "遗漏），请人工核查——确认是遗漏的话可在分镜台编辑本段镜头稿补上"
             )
     return advisories
 

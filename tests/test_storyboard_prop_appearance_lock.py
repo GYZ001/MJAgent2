@@ -269,6 +269,19 @@ def test_segment_rule_text_empty_when_no_locks():
     assert segment_rule_text([]) == []
 
 
+def test_segment_rule_text_is_conditioned_on_visibility_not_asserted_as_fact():
+    """2026-10-01（第 1 集第五版真实回归，见 ``storyboard_prop_visibility`` 模块
+    docstring）：旧文案「在本段画面中出现」把 beat_id 命中（只说明"在场"）断言成了
+    "可见"——星盘被卫衣完全遮住那一段同样命中了 beat_id，旧文案因此会让模型误以为
+    即使画面写明道具被遮住，也必须写出完整外观。新文案改成条件句，可见时才要求
+    逐字沿用，看不见时指向道具可见性规则处理，不再断言"在本段画面中出现"是既成事实。"""
+    lines = segment_rule_text([_lock()])
+    assert "在本段画面中出现" not in lines[0]
+    assert "如果看得见" in lines[0]
+    assert "被遮住、收起或根本不在画面中" in lines[0]
+    assert "不写这段外观" in lines[0] and "resources.props" in lines[0]
+
+
 # ---------------------------------------------------------------------------
 # log_missing_appearance_locks：入场计划有提名但没锁定的可见信号
 # ---------------------------------------------------------------------------
