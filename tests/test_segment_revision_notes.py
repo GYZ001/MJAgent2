@@ -15,6 +15,12 @@
   ``wardrobe_plan_full``/``prop_entrances_full`` 两个 additive 字段（不覆盖既有
   的三态统计 key），``storyboard_identity_regenerate._existing_plan`` 从最近一条
   ``storyboard_pack_adaptation`` 产物里把它们找回。
+- 2026-10-01（P0-F 补丁，协调方验收后追加）：``assemble_adaptation_summary`` 同一
+  模式补 ``prop_appearance_locks_full``（P0-F 道具外观全集锁定当时漏了这一个），
+  ``_existing_plan`` 从留档里恢复；留档是本次改动之前生成的老格式（没有这个 key）
+  或根本没有留档时，``_restored_plan_items`` 报 ``prop_appearance_locks_stale=True``，
+  ``regenerate_identity_candidate`` 据此给目标段 ``degraded_capabilities`` 追加一条
+  可见信号，不静默当成"没有锁定"。
 """
 from __future__ import annotations
 
@@ -31,10 +37,12 @@ from app.harness.types import EvidenceArtifact
 from app.main import app
 from app.production.storyboard_beat_causality import assemble_adaptation_summary
 from app.production.storyboard_beat_sheet_schemas import (
-    _AiBeat, _AiBeatSheetDraft, _AiPropEntrance, _AiSegmentPlan, _AiWardrobeState,
+    _AiBeat, _AiBeatSheetDraft, _AiPropAppearanceLock, _AiPropEntrance, _AiSegmentPlan, _AiWardrobeState,
 )
 from app.production.storyboard_identity_contract import stamp_identity_contract
-from app.production.storyboard_identity_regenerate import _existing_plan, regenerate_identity_candidate
+from app.production.storyboard_identity_regenerate import (
+    _STALE_PROP_LOCK_ADVISORY, _existing_plan, _restored_plan_items, regenerate_identity_candidate,
+)
 from app.production.storyboard_revision_notes import segment_rule_text
 from app.production.storyboard_speech_render import render_segment_speech
 from app.schemas import Bible
@@ -87,6 +95,61 @@ def test_adaptation_summary_carries_full_wardrobe_and_prop_lists():
     # 三态统计 key 名字被两个新 key 各自复用了前缀，必须确认没有互相覆盖。
     assert result["wardrobe_plan"] == {"status": "ok", "problem_count": 0}
     assert result["prop_entrances"] == {"status": "ok", "problem_count": 0}
+
+
+def test_adaptation_summary_carries_full_prop_appearance_locks():
+    """2026-10-01 P0-F 补丁：assemble_adaptation_summary 当时漏持久化
+    prop_appearance_locks，用与 wardrobe_plan_full/prop_entrances_full 同一个
+    additive 字段模式补上。"""
+    beat_sheet = [_AiBeat(beat_id="B1", summary="咖啡馆见面", segment_indexes=[1])]
+    segments_plan = [_AiSegmentPlan(segment_no=1, synopsis="x", source_segment_indexes=[1], beat_ids=["B1"])]
+    lock = _AiPropAppearanceLock(label="水壶", appearance="墨绿色铁皮水壶，壶身有一道浅凹痕", beat_ids=["B1"])
+    draft = _AiBeatSheetDraft(beat_sheet=beat_sheet, segments=segments_plan, prop_appearance_locks=[lock])
+    payload = {"asset_manifest": {"characters": []}}
+    result = assemble_adaptation_summary(
+        adaptation_mode="faithful", planned_segment_count=1, beat_draft=draft, dialogue_quotes=[],
+        projected_segment_count=None, drop_review=None,
+        segments=[SourceSegment(segment_id="s1", text="两人在咖啡馆见面。", start_offset=0, end_offset=9)], payload=payload,
+    )
+    assert result["prop_appearance_locks_full"] == [lock.model_dump(mode="json")]
+
+
+# ---------------------------------------------------------------------------
+# _restored_plan_items：prop_appearance_locks_stale 可见信号
+# ---------------------------------------------------------------------------
+
+def test_restored_plan_items_stale_when_no_adaptation_artifact(fixture):
+    conn, _segment, _payload = fixture
+    restored = _restored_plan_items(conn, "ep")
+    assert restored["prop_appearance_locks"] == []
+    assert restored["prop_appearance_locks_stale"] is True
+
+
+def test_restored_plan_items_stale_when_artifact_predates_the_field(fixture):
+    """老格式留档（本次改动之前生成，有 wardrobe_plan_full/prop_entrances_full
+    但没有 prop_appearance_locks_full）：不能把"key 不存在"误判成"模型提名了
+    零条锁定"，必须报 stale。"""
+    conn, _segment, _payload = fixture
+    _write_adaptation_artifact(conn, "ep", {
+        "adaptation_mode": "faithful", "dropped_source_spans": [],
+        "wardrobe_plan_full": [], "prop_entrances_full": [],
+    })
+    restored = _restored_plan_items(conn, "ep")
+    assert restored["prop_appearance_locks"] == []
+    assert restored["prop_appearance_locks_stale"] is True
+
+
+def test_restored_plan_items_not_stale_when_key_present_even_if_empty(fixture):
+    """新格式留档即使模型这次确实一条锁定都没提名（key 存在、值是空列表），也不是
+    stale——"没有锁定"是合法的三态之一，不该被误报。"""
+    conn, _segment, _payload = fixture
+    _write_adaptation_artifact(conn, "ep", {
+        "adaptation_mode": "faithful", "dropped_source_spans": [],
+        "prop_appearance_locks_full": [],
+    })
+    restored = _restored_plan_items(conn, "ep")
+    assert restored["prop_appearance_locks"] == []
+    assert restored["prop_appearance_locks_stale"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +233,97 @@ def test_regenerate_injects_revision_notes_into_target_segment_only(fixture, mon
     assert len(requests) == 1 and requests[0]["segment_no"] == 1
     assert any("同一个杯子既在桌上又在她手里" in rule for rule in requests[0]["rules"])
     assert result["prompt_text"]
+
+
+def test_regenerate_dialect_instructions_include_prop_visibility_rule(fixture, monkeypatch):
+    """必查项（CLAUDE.md 派单，2026-10-01）：「修订本段」单段重生成与整集生成共用同一个
+    ``storyboard_segment_chains._task_payload_dialect_instructions``——新增的道具可见性
+    规则（``storyboard_prop_visibility``，无条件拼接、不依赖任何提名）必须在这条路径上
+    同样出现，不能只在整集生成里生效，否则用户用这条入口修第 1 集第 35/28 段时拿不到
+    同一套规则。"""
+    conn, segment, payload = fixture
+    from app.production import storyboard_pack
+    from app.production.storyboard_prop_visibility import SEEDANCE_PROP_VISIBILITY_RULE
+
+    requests = []
+
+    async def chat(messages, **kwargs):
+        request = json.loads(messages[1]["content"])
+        requests.append(request)
+        draft = storyboard_pack._AiStoryboardSegmentDraft.model_validate(_fake_regenerated_candidate(segment))
+        assert kwargs["validate"](draft) == []
+        return draft
+
+    monkeypatch.setattr(storyboard_pack.model_gateway, "chat_structured", chat)
+    episode = dict(conn.execute("SELECT * FROM episodes WHERE id='ep'").fetchone())
+    asyncio.run(regenerate_identity_candidate(conn, episode=episode, shot_id="s1", payload=payload, bible=_bible()))
+    assert SEEDANCE_PROP_VISIBILITY_RULE in requests[0]["dialect_instructions"]
+
+
+def test_regenerate_injects_prop_appearance_lock_rule_for_target_segment(fixture, monkeypatch):
+    """2026-10-01 P0-F 补丁（协调方验收后追加）：「修订本段」现在能从留档里恢复全集
+    道具外观锁定，目标段（beat_ids=["B1"]）命中的锁定必须出现在 task_payload["rules"]
+    里，与整集生成时的 ``storyboard_prop_appearance_lock.segment_rule_text`` 同一条
+    正面陈述——这正是第 1 集第 5/8/16/17/18/22/28/32/33/34/35 段接下来要用的路径。"""
+    conn, segment, payload = fixture
+    from app.production import storyboard_pack
+
+    _write_adaptation_artifact(conn, "ep", {
+        "adaptation_mode": "faithful", "dropped_source_spans": [],
+        "prop_appearance_locks_full": [
+            {"label": "水壶", "appearance": "墨绿色铁皮水壶，壶身有一道浅凹痕", "beat_ids": ["B1"]},
+        ],
+    })
+    requests = []
+
+    async def chat(messages, **kwargs):
+        request = json.loads(messages[1]["content"])
+        requests.append(request)
+        draft = storyboard_pack._AiStoryboardSegmentDraft.model_validate(_fake_regenerated_candidate(segment))
+        assert kwargs["validate"](draft) == []
+        return draft
+
+    monkeypatch.setattr(storyboard_pack.model_gateway, "chat_structured", chat)
+    episode = dict(conn.execute("SELECT * FROM episodes WHERE id='ep'").fetchone())
+    asyncio.run(regenerate_identity_candidate(conn, episode=episode, shot_id="s1", payload=payload, bible=_bible()))
+    assert any("水壶" in rule and "墨绿色铁皮水壶，壶身有一道浅凹痕" in rule for rule in requests[0]["rules"])
+
+
+def test_regenerate_surfaces_stale_advisory_when_no_adaptation_artifact(fixture, monkeypatch):
+    """没有任何整集生成留档（本集还没有/已失效）：「修订本段」必须让用户看见——
+    目标段 degraded_capabilities 里要带上可见信号，不能默默当成"这件道具没有锁定"。"""
+    conn, segment, payload = fixture
+    from app.production import storyboard_pack
+
+    async def chat(messages, **kwargs):
+        draft = storyboard_pack._AiStoryboardSegmentDraft.model_validate(_fake_regenerated_candidate(segment))
+        assert kwargs["validate"](draft) == []
+        return draft
+
+    monkeypatch.setattr(storyboard_pack.model_gateway, "chat_structured", chat)
+    episode = dict(conn.execute("SELECT * FROM episodes WHERE id='ep'").fetchone())
+    result = asyncio.run(regenerate_identity_candidate(conn, episode=episode, shot_id="s1", payload=payload, bible=_bible()))
+    assert _STALE_PROP_LOCK_ADVISORY in result["degraded_capabilities"]
+
+
+def test_regenerate_no_stale_advisory_when_locks_restored(fixture, monkeypatch):
+    """新格式留档存在（哪怕这次模型确实一条锁定都没提名），不应该报 stale。"""
+    conn, segment, payload = fixture
+    from app.production import storyboard_pack
+
+    _write_adaptation_artifact(conn, "ep", {
+        "adaptation_mode": "faithful", "dropped_source_spans": [], "prop_appearance_locks_full": [],
+    })
+
+    async def chat(messages, **kwargs):
+        draft = storyboard_pack._AiStoryboardSegmentDraft.model_validate(_fake_regenerated_candidate(segment))
+        assert kwargs["validate"](draft) == []
+        return draft
+
+    monkeypatch.setattr(storyboard_pack.model_gateway, "chat_structured", chat)
+    episode = dict(conn.execute("SELECT * FROM episodes WHERE id='ep'").fetchone())
+    result = asyncio.run(regenerate_identity_candidate(conn, episode=episode, shot_id="s1", payload=payload, bible=_bible()))
+    assert _STALE_PROP_LOCK_ADVISORY not in result["degraded_capabilities"]
 
 
 def test_regenerate_with_blank_revision_notes_adds_no_rule(fixture, monkeypatch):

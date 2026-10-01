@@ -351,7 +351,22 @@ def assemble_adaptation_summary(
     ``adaptation_mode``/``dropped_source_spans`` 两个字段，新增字段不影响
     它们，也不占用已有 key 名——``wardrobe_plan``/``prop_entrances`` 两个
     key 已经被上面的三态统计占用，这里必须用不同名字，不能覆盖）；不新开
-    artifact 类型、不建表，复用同一条 ``storyboard_pack_adaptation`` 产物。"""
+    artifact 类型、不建表，复用同一条 ``storyboard_pack_adaptation`` 产物。
+
+    ``prop_appearance_locks_full``（2026-10-01，P0-F 补丁，第 1 集真实回归
+    「修订本段丢锁定」驱动）：``beat_draft.prop_appearance_locks``（P0-F，
+    2026-09-30 才落地，晚于 ``wardrobe_plan_full``/``prop_entrances_full``
+    那批持久化，当时漏了这一个）原始提名的完整列表，同一哲学、同一必要性——
+    全集道具外观锁定是阶段一模型通读全文后的判断（锁哪件道具、锁定在哪些
+    beat_id），不是能从 prep pack manifest/bible 这类静态数据确定性重算出来
+    的东西，``storyboard_identity_regenerate._existing_plan`` 必须有持久化
+    的原始提名才能重建；没有这个字段时，``_generate_all_segment_prompts``
+    里 ``verify_and_lock_appearances(beat_draft.prop_appearance_locks, ...)``
+    传入空列表，等价于全集所有道具外观锁定失效，「修订本段」改出来的道具
+    外观会与整集生成时不一致（跨段漂移）。只对本次改动后新产出的
+    ``storyboard_pack_adaptation`` 留档生效——本次改动之前已生成的留档没有
+    这个 key，``_existing_plan`` 据此可见地警告，不默默当作"没有锁定"处理，
+    见 ``storyboard_identity_regenerate._restored_plan_items`` 文档。"""
     return {
         **_short_drama.adaptation_summary(
             adaptation_mode=adaptation_mode, planned_segment_count=planned_segment_count, segment_count=len(beat_draft.segments),
@@ -366,4 +381,5 @@ def assemble_adaptation_summary(
         "prop_entrances": _prop_entrance.prop_entrance_summary(beat_draft),
         "wardrobe_plan_full": [item.model_dump(mode="json") for item in beat_draft.wardrobe_plan],
         "prop_entrances_full": [item.model_dump(mode="json") for item in beat_draft.prop_entrances],
+        "prop_appearance_locks_full": [item.model_dump(mode="json") for item in beat_draft.prop_appearance_locks],
     }

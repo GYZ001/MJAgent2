@@ -175,9 +175,12 @@ class _AiBeatSheetDraft(BaseModel):
     #: （storyboard_identity_regenerate._existing_plan 重建时不产出这个字段，见该
     #: 模块调用点）——回退行为与改造前完全一致（沿用完整外观锚点）。
     physical_anchors: list[_AiPhysicalAnchor] = Field(default_factory=list)
-    #: 2026-09-30（P0-F）：道具外观全集锁定，默认空列表兼容旧存量 beat_draft
-    #: （同 physical_anchors，storyboard_identity_regenerate._existing_plan 重建
-    #: 时不产出这个字段）——回退行为是各段各自现编外观，与改造前完全一致。
+    #: 2026-09-30（P0-F）：道具外观全集锁定，默认空列表兼容旧存量 beat_draft。
+    #: 2026-10-01 补丁前，``storyboard_identity_regenerate._existing_plan`` 重建
+    #: 时不产出这个字段（持久化当时漏掉了）；补丁后从 ``storyboard_pack_
+    #: adaptation`` 留档的 ``prop_appearance_locks_full`` 找回，留档是本次改动
+    #: 之前生成的老格式时仍然拿不到，见该模块 ``_restored_plan_items`` 的
+    #: ``prop_appearance_locks_stale`` 可见信号。
     prop_appearance_locks: list[_AiPropAppearanceLock] = Field(default_factory=list)
 
 
