@@ -11,6 +11,22 @@
 lookup`` 惰性 import + ImportError 兜底返回 None——道具没有参考图时按"没有
 可用参考图"处理，不阻断分镜/视频生成。测试直接 monkeypatch 本模块的
 ``_prop_reference_lookup`` 验证装配逻辑。
+
+2026-10-01（``resources_order``，第 1 集第 19/20 段真实成片复查）：
+``app.multiview.ref_pack_priority`` 超过参考图张数上限（``max_reference_
+images()``，9 张）时按道具分数+id 取舍，分数对库资产道具恒为 0（没有 QA
+分数），实际落到 ``ref.id``——一串与本段画面无关的随机串，哪件道具被舍弃
+因此是随机的（真实故障：第 20 段 resources.props 列了 8 项，加上人物/场景
+超过 9 张，行李箱参考图被随机丢弃，成片行李箱颜色与卡片不符）。修法：本段
+``resources.props`` 的声明顺序就是模型给出的重要性排序（见
+``app.production.storyboard_prop_visibility`` 新增的排序正面陈述），
+``resolve_segment_prop_manifest_entries`` 原样保留这个顺序、按下标打上
+``resources_order``，``prop_library_anchors`` 透传给锚点字典，一路经
+``app.video_modes.asset_lookup._asset_from_path``/``ReferenceImageAsset.
+resources_order`` 字段带到最终参考图 dict，供 ``ref_pack_priority`` 的
+道具档把它当第一级排序键——超限时优先保留声明顺序靠前的道具，不再看
+与排序无关的随机 id。没有这个字段的旧数据（``resources_order is None``）
+排在有序号的道具之后，组内仍按原有的 ``-quality, id`` 排序，行为不变。
 """
 from __future__ import annotations
 
@@ -40,10 +56,12 @@ def resolve_segment_prop_manifest_entries(
     ``app.multiview.scene_row_for_episode`` 一路的既有用法（``status==
     "ready"`` 且文件真实存在）；查不到/未 ready 时只带 label/description，
     ``ready`` 显式为 False——下游据此判定"这个道具没有可用参考图"，不是
-    留空当成有图。
+    留空当成有图。``resources_order``（2026-10-01）是这条在 ``prop_entries``
+    里的下标（模型声明的重要性顺序，见模块 docstring），原样带出供
+    ``prop_library_anchors`` 透传——不重新排序、不去重，逐字保留输入顺序。
     """
     out: list[dict[str, Any]] = []
-    for entry in prop_entries or []:
+    for index, entry in enumerate(prop_entries or []):
         label = str(entry.get("label") or "").strip()
         row = _prop_reference_lookup(conn, project_id, label, episode_no) if label else None
         ready = False
@@ -57,6 +75,7 @@ def resolve_segment_prop_manifest_entries(
             "description": str(entry.get("description") or ""),
             "ready": ready,
             "image_path": image_path,
+            "resources_order": index,
         })
     return out
 
@@ -65,7 +84,9 @@ def prop_library_anchors(manifest_props: list[dict[str, Any]]) -> list[dict[str,
     """把 ``manifest["props"]``（``resolve_segment_prop_manifest_entries`` 的
     产出）展开成与 ``app.multiview.library_anchor_assets_from_manifest`` 里
     人物/场景锚点同形状的条目，只保留真 ready 且文件存在的道具——同函数对
-    人物/场景的既有判据。
+    人物/场景的既有判据。``resources_order`` 原样透传给锚点字典，供
+    ``app.video_modes.asset_lookup._asset_from_path`` 继续带进
+    ``ReferenceImageAsset``（见模块 docstring）。
     """
     anchors: list[dict[str, Any]] = []
     for prop in manifest_props or []:
@@ -77,5 +98,6 @@ def prop_library_anchors(manifest_props: list[dict[str, Any]]) -> list[dict[str,
             "entity_type": "prop", "entity_name": label,
             "image_path": path, "purposes": ["qa_anchor", "keyframe_seed"],
             "type": "prop", "source": "asset_library",
+            "resources_order": prop.get("resources_order"),
         })
     return anchors

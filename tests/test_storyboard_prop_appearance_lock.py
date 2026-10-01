@@ -270,15 +270,27 @@ def test_segment_rule_text_empty_when_no_locks():
 
 
 def test_segment_rule_text_is_conditioned_on_visibility_not_asserted_as_fact():
-    """2026-10-01（第 1 集第五版真实回归，见 ``storyboard_prop_visibility`` 模块
-    docstring）：旧文案「在本段画面中出现」把 beat_id 命中（只说明"在场"）断言成了
+    """2026-10-01 第一版（第 1 集第五版真实回归，见 ``storyboard_prop_visibility``
+    模块 docstring）：旧文案「在本段画面中出现」把 beat_id 命中（只说明"在场"）断言成了
     "可见"——星盘被卫衣完全遮住那一段同样命中了 beat_id，旧文案因此会让模型误以为
-    即使画面写明道具被遮住，也必须写出完整外观。新文案改成条件句，可见时才要求
-    逐字沿用，看不见时指向道具可见性规则处理，不再断言"在本段画面中出现"是既成事实。"""
+    即使画面写明道具被遮住，也必须写出完整外观。新文案改成条件句，完全可见时才要求
+    逐字沿用，完全不可见时指向道具可见性规则处理，不再断言"在本段画面中出现"是既成事实。"""
     lines = segment_rule_text([_lock()])
     assert "在本段画面中出现" not in lines[0]
-    assert "如果看得见" in lines[0]
-    assert "被遮住、收起或根本不在画面中" in lines[0]
+    assert "完全可见" in lines[0]
+    assert "完全不可见、收起或根本不在画面中" in lines[0]
+
+
+def test_segment_rule_text_has_a_partial_visibility_branch():
+    """2026-10-01 第二版（第 13/17 段真实回归）：第一版"看得见就必须逐字沿用"对只
+    露出一截的部分可见道具/衣物同样会诱发"把被遮住部位款式细节也写出来"的问题——
+    改成三态分流，部分可见时只能摘抄与露出部分对应的颜色/花纹/材质，不得逐字整段
+    照抄被遮住部位的款式细节。"""
+    lines = segment_rule_text([_lock()])
+    assert "只露出一部分、其余被遮住时" in lines[0]
+    assert "只能从这段外观描述里摘抄与露出部分对应的颜色/花纹/材质用词" in lines[0]
+    assert "领口形状、袖子长短、腰身剪裁、内侧标签" in lines[0]
+    assert "不得逐字整段照抄" in lines[0]
     assert "不写这段外观" in lines[0] and "resources.props" in lines[0]
 
 

@@ -1749,10 +1749,9 @@ def _keyframe_sequence_key(ref: dict[str, Any]) -> tuple[float, float, float, st
 
 
 def ref_pack_priority(ref: dict[str, Any]) -> tuple[Any, ...]:
-    """装箱稳定排序：连续帧、剧情帧、场景、人物、道具、风格。P2（道具外观一致性
-    任务）拍板：人物/场景是更高强度的身份/环境真值锚点，道具排在两者之后——
-    超出张数上限时道具最先被舍弃（此前把 prop 排第三是从未接过真实生产者的
-    超前占位，见 app.video_modes.prop_references 落地时一并纠正）。"""
+    """装箱稳定排序：连续帧、剧情帧、场景、人物、道具、风格，道具排在人物/场景之后，
+    超限时最先被舍弃（P2 拍板）；道具档内部再按 resources_order（本段 resources.props
+    的声明顺序）优先，不靠随机 id，完整背景见 app.video_modes.prop_references 模块 docstring。"""
     rtype = str(ref.get("type") or "")
     purposes = set(purpose_list(ref))
     slot = str(ref.get("slot_key") or "")
@@ -1772,7 +1771,8 @@ def ref_pack_priority(ref: dict[str, Any]) -> tuple[Any, ...]:
         tier = 6
     if tier == 1:
         return (tier, *_keyframe_sequence_key(ref))
-    return (tier, -_ref_quality(ref), str(ref.get("id") or ""))
+    order = ref.get("resources_order")
+    return (tier, order if order is not None else float("inf"), -_ref_quality(ref), str(ref.get("id") or ""))
 
 
 def pack_references_by_purpose(

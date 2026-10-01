@@ -123,6 +123,11 @@ class ReferenceImageAsset:
     keyframe_total: int | None = None
     keyframe_time_ratio: float | None = None
     keyframe_target_desc: str | None = None
+    # 2026-10-01：道具档在本段 resources.props 里的声明下标（见
+    # app.video_modes.prop_references 模块 docstring），供
+    # app.multiview.ref_pack_priority 超限裁剪时按声明顺序取舍，不靠随机 id。
+    # 只对 entity_type == "prop" 有意义；其余类型恒为 None。
+    resources_order: int | None = None
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)

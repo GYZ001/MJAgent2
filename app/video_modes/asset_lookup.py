@@ -33,7 +33,8 @@ def _asset_from_path(*, path: str, ref_type: str, source: str, shot_id: str | No
                      library_revision_id: str | None = None, library_view_id: str | None = None,
                      view_role: str | None = None, purposes: list[str] | None = None,
                      required: bool = False, slot_key: str | None = None,
-                     costume_mode: str | None = None) -> ReferenceImageAsset:
+                     costume_mode: str | None = None,
+                     resources_order: int | None = None) -> ReferenceImageAsset:
     return ReferenceImageAsset(
         id=new_id("ref"),
         url=hiagent.data_url_from_file(path),
@@ -55,6 +56,7 @@ def _asset_from_path(*, path: str, ref_type: str, source: str, shot_id: str | No
         required=required,
         slot_key=slot_key,
         costume_mode=costume_mode,
+        resources_order=resources_order,
     )
 
 

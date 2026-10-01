@@ -92,13 +92,17 @@ async def assemble_continuity_tail(
         asset.keyframe_total = ref.get("keyframe_total")
         asset.keyframe_time_ratio = ref.get("keyframe_time_ratio")
         asset.keyframe_target_desc = ref.get("keyframe_target_desc")
+        # 2026-10-01：道具装箱顺序信号（见 app.video_modes.prop_references
+        # 模块 docstring）——两处 ReferenceImageAsset 构造分支都没有现成参数
+        # 透传它，必须和上面其它"旁路字段"一样显式从原始 ref 读回来，否则
+        # 尾帧到达后的重装配会把它静默重置成 None，ref_pack_priority 超限
+        # 裁剪又退回看随机 id。
+        asset.resources_order = ref.get("resources_order")
 
         # 静态参考图可能在等待上一镜尾帧期间被人工废弃，QA 淘汰图也会
         # 保留 video_input 用途供审计。两者都只能留在废弃画廊，不能参与
         # 连续性重装配，否则后续门禁可能把高分旧候选重新标成 selected。
-        stale_video_candidate = (
-            PURPOSE_VIDEO_INPUT in asset.purposes and not asset.selectedForSeedance
-        )
+        stale_video_candidate = PURPOSE_VIDEO_INPUT in asset.purposes and not asset.selectedForSeedance
         structural_reject = _reference_runtime_blocking(asset)
         if asset.deleted or structural_reject or stale_video_candidate:
             asset.selectedForSeedance = False

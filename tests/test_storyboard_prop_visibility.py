@@ -3,6 +3,16 @@
 外观并送了参考图；第 28 段背景里可见的已登记行李箱没有列进 resources.props，模型因此
 现编了另一个外观）。
 
+第二版（同一集第 13/17 段复查）：二分可见/不可见规则对「只露出一截」的分层衣物/道具
+（扣好的外套盖住大半的开衫/长裙）仍会诱发同一问题——判"可见"就逐字抄全部标准外观
+（含被遮住部位的款式细节），模型据此把外套画成敞开。改成三态：完全可见/部分可见/
+完全不可见，部分可见只写露出部分的颜色/花纹/材质，不抄被遮住部位的款式细节。
+
+第三版（第 19/20 段复查）：resources.props 超过参考图张数上限时，``ref_pack_priority``
+此前按随机 id 取舍道具，补了一句正面陈述要求模型按显眼程度/跨段一致性重要程度给
+resources.props 排序（机制侧的 resources_order 透传见 ``app.video_modes.prop_
+references``/``app.multiview`` 测试）。
+
 结构照抄 ``tests/test_storyboard_shot_mandates.py``：按 render_format 选文案，静态、
 无条件、不按画风分支；再加一组接线守卫确认确实被拼进 ``dialect_instructions``。
 """
@@ -52,12 +62,49 @@ def test_seedance_rule_forbids_writing_appearance_for_hidden_props():
     assert "顶出一个圆形" in SEEDANCE_PROP_VISIBILITY_RULE  # 只写观众能看到的痕迹，不写被遮住的东西本身
 
 
-def test_h3_rule_covers_both_directions():
-    assert "actually visible" in MINIMAX_H3_PROP_VISIBILITY_RULE
+def test_seedance_rule_covers_partial_visibility_without_copying_hidden_details():
+    """真实故障：第 13 段「外套5颗扣子全部扣好」仍逐字抄全被盖住的开衫/长裙标准外观
+    （含领口形状、腰身剪裁这类只有完全可见才看得到的细节），模型据此把外套画成敞开。
+    规则要明确：部分可见时列资源、但只抄露出部分的颜色/花纹/材质，不抄被遮住部位的
+    款式细节，哪怕标准外观文案整段都在。"""
+    assert "部分可见" in SEEDANCE_PROP_VISIBILITY_RULE
+    assert "扣好的外套下摆以下露出的" in SEEDANCE_PROP_VISIBILITY_RULE
+    assert "列进本段 resources.props" in SEEDANCE_PROP_VISIBILITY_RULE
+    assert "不写被遮住部分的款式与细节" in SEEDANCE_PROP_VISIBILITY_RULE
+    assert "领口形状、袖子长短、腰身剪裁、内侧标签" in SEEDANCE_PROP_VISIBILITY_RULE
+    assert "不逐字整段抄" in SEEDANCE_PROP_VISIBILITY_RULE
+
+
+def test_seedance_rule_requires_ordering_resources_props_by_prominence():
+    """真实故障：第 20 段 resources.props 列了 8 项超过参考图上限，``ref_pack_
+    priority`` 按随机 id 丢弃了行李箱。规则要求模型按显眼程度/跨段一致性给
+    resources.props 排序，越重要越靠前，因为排后面的会先被舍弃。"""
+    assert "resources.props 的列出顺序也有意义" in SEEDANCE_PROP_VISIBILITY_RULE
+    assert "从高到低排列" in SEEDANCE_PROP_VISIBILITY_RULE
+    assert "排在后面的道具会最先被舍弃" in SEEDANCE_PROP_VISIBILITY_RULE
+    assert "不按道具名字或类型排序" in SEEDANCE_PROP_VISIBILITY_RULE
+
+
+def test_h3_rule_covers_all_three_visibility_states():
+    assert "Fully visible" in MINIMAX_H3_PROP_VISIBILITY_RULE
+    assert "Partially visible" in MINIMAX_H3_PROP_VISIBILITY_RULE
+    assert "Not visible at all" in MINIMAX_H3_PROP_VISIBILITY_RULE
     assert "only appears in the background" in MINIMAX_H3_PROP_VISIBILITY_RULE
     assert "resources.props" in MINIMAX_H3_PROP_VISIBILITY_RULE
     assert "fully covered by clothing" in MINIMAX_H3_PROP_VISIBILITY_RULE
     assert "even if the asset library has a standard-appearance card" in MINIMAX_H3_PROP_VISIBILITY_RULE
+
+
+def test_h3_rule_partial_visibility_forbids_covered_portion_details():
+    assert "a dress hem peeking out below a buttoned coat" in MINIMAX_H3_PROP_VISIBILITY_RULE
+    assert "do not write the covered portion's cut or detail" in MINIMAX_H3_PROP_VISIBILITY_RULE
+    assert "never the full paragraph verbatim" in MINIMAX_H3_PROP_VISIBILITY_RULE
+
+
+def test_h3_rule_requires_ordering_resources_props_by_prominence():
+    assert "The order items appear in resources.props matters too" in MINIMAX_H3_PROP_VISIBILITY_RULE
+    assert "a hard cap" in MINIMAX_H3_PROP_VISIBILITY_RULE
+    assert "never by name or type" in MINIMAX_H3_PROP_VISIBILITY_RULE
 
 
 def test_rule_is_not_gated_by_photographic_style():

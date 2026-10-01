@@ -14,7 +14,7 @@ def segment_output_contract(source_indexes: list[int], *, min_shots: int, max_sh
             "已确认角色的 identity_id、群演 visual_entity_id 或未收录主体的原文称谓）与 source_segment_index"
             f"（这句话对应原文的哪一段，必须在 {source_indexes} 范围内）"
         ),
-        "resources": "本段实际用到的人物/场景/道具，角色 identity_id 与场景 scene_id 取自 relevant_assets，未收录群演的 identity_id 保留原文称谓；素材库没有对应图的（scene_reference_id 或 portrait_id 为空）如实留空，不得编造；闪回/回忆里外观明显不同年龄或形态的人物写进 flashback_figures（label+description），不要列入 characters、不要用 @；props 只收本段画面里实际看得见的道具（包括只在背景出现、没有人物与它互动的），判据与取舍见下面的道具可见性规则——被遮住/收起/不在画面里的道具不列进 props",
+        "resources": "本段实际用到的人物/场景/道具，角色 identity_id 与场景 scene_id 取自 relevant_assets，未收录群演的 identity_id 保留原文称谓；素材库没有对应图的（scene_reference_id 或 portrait_id 为空）如实留空，不得编造；闪回/回忆里外观明显不同年龄或形态的人物写进 flashback_figures（label+description），不要列入 characters、不要用 @；props 只收本段画面里实际看得见的道具（包括只在背景出现、没有人物与它互动的），判据与取舍见下面的道具可见性规则——被遮住/收起/不在画面里的道具不列进 props；props 列出顺序按本段画面里的显眼程度与跨段外观一致性的重要程度从高到低排，参考图张数有上限，排在后面的最先被舍弃，不按道具名字或类型排",
         "degraded_capabilities": "本段因模型能力缺失而做的降级处理清单（例如开口人数超过模型上限时把次要发言改为画外音）；没有降级则留空数组，不得留空字符串占位",
         "camera_digest": "本段实际选用的开场景别（opening_shot_size）、开场运镜（opening_camera_move），以及本段与上一段之间的转场类型（transition_from_previous，本集第一段留空）；只用于给接下来几段做参考，不进入分镜产出契约",
         "camera_repetition_rationale": "只在本段开场确实沿用了 recent_camera_language 里出现过的机位时才写理由；没有重复就留空，不得编造理由",

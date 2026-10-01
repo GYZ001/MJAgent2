@@ -55,8 +55,19 @@ def select_library_references(
     }
     kind_rank = {"character": 0, "scene": 1, "prop": 2}
 
-    def _rank(asset: ReferenceImageAsset) -> tuple[int, int, str]:
+    def _rank(asset: ReferenceImageAsset) -> tuple[int, float | int, str]:
+        # 2026-10-01：道具档第一键改用 resources_order（本段 resources.props 的
+        # 声明顺序），不靠 path 字典序——同一道闸的真实故障（第 20 段 2 人物 +
+        # 场景 + 8 道具已超 9 张上限，这一道比 app.multiview.ref_pack_priority
+        # 更早截断）；role_priority 对道具恒为占位默认值 9（道具没有 view_role），
+        # 换成 order_key 不丢既有信息。没有 resources_order 的旧数据排最后，
+        # 组内仍按原有 path or id 排序，行为逐字不变，见
+        # app.video_modes.prop_references 模块 docstring。
         kind = str(asset.entity_type or asset.type)
+        if kind == "prop":
+            order = asset.resources_order
+            order_key = order if order is not None else float("inf")
+            return (kind_rank.get(kind, 9), order_key, asset.path or asset.id)
         return (kind_rank.get(kind, 9), role_priority.get(str(asset.view_role or ""), 9), asset.path or asset.id)
 
     ordered = sorted(assets, key=_rank)
@@ -183,6 +194,7 @@ async def _build_library_reference_assets(
                 library_view_id=anchor.get("library_view_id"),
                 view_role=anchor.get("view_role"),
                 purposes=[PURPOSE_QA_ANCHOR],
+                resources_order=anchor.get("resources_order"),
             ))
         except OSError:
             continue
@@ -204,8 +216,7 @@ async def _build_library_reference_assets(
         ))
     assets = [
         asset for asset in _dedupe_assets(assets)
-        if (asset.entity_type or asset.type) in {"character", "scene", "prop"}
-        and asset.source == "asset_library"
+        if (asset.entity_type or asset.type) in {"character", "scene", "prop"} and asset.source == "asset_library"
     ]
 
     selected = select_library_references(assets, identity_names, max_reference_images())
