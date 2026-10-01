@@ -41,6 +41,7 @@ from .discovery import (
     _prep_pack_build_prop_manifest,
 )
 from .functional_candidate_verdict import _prep_pack_resolve_functional_extra_candidate
+from .prop_segment_coverage import fill_prop_segment_coverage
 from .provenance import (
     _prep_pack_first_evidence_segment,
     _prep_pack_local_text_anchor, _prep_pack_locate_phrase,
@@ -54,7 +55,6 @@ from .true_name import (
     _prep_pack_gather_concurrent,
     _prep_pack_verify_true_name_hypothesis,
 )
-
 async def _resolve_assets(
     conn, *, project_id: str, episode_id: str, episode_no: int,
     source_text: str,
@@ -796,9 +796,9 @@ async def _resolve_assets(
     # 场景「顾屿家客房」判定时读到的仍是没有它的旧 bible。提前到这里（两遍
     # 角色/场景解析开始之前）执行，之后任何一次 ensure_scenes_for_labels 重新
     # 读 bible 都能看到本集已建的道具卡。
-    props_payload = _prep_pack_build_prop_manifest(
+    props_payload = fill_prop_segment_coverage(_prep_pack_build_prop_manifest(
         prop_mentions, segments, cards=bible.props, unanchored=unanchored_prop_mentions,
-    )
+    ), segments, cards=bible.props)
     props_payload = await _discover_new_props(
         conn, project_id=project_id, episode_no=episode_no, source_text=source_text,
         props_payload=props_payload,

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 
 from app.bible_store import mutate_bible_json
@@ -18,6 +19,8 @@ from .image import generate_prop_reference_image, prop_ref_prompt
 from .labels import normalize_prop_label
 from .judge import assess_prop_appearance, is_key_prop_mention
 from .store import ensure_schema, latest_prop_reference_status, upsert_prop_reference
+
+log = logging.getLogger(__name__)
 
 
 def _load_bible(conn: sqlite3.Connection, project_id: str) -> Bible | None:
@@ -122,6 +125,35 @@ async def _register_one_prop(
     return {"name": label, "has_image": bool(image_path)}
 
 
+def _prop_mention_skip_reason(
+    label: str, known: set[str], mention: dict, source_text: str,
+) -> str | None:
+    """这条申报候选在进入归一/绑卡流程前被跳过的原因，供 ``_log_prop_registry_
+    summary`` 的可观测性聚合；返回 ``None`` 表示应当继续处理，不跳过。"""
+    if not label:
+        return "缺少 label"
+    if label in known:
+        return "已在世界书登记（name/alias 逐字比对命中）"
+    if not is_key_prop_mention(mention, source_text=source_text):
+        return "未过结构判据 judge.is_key_prop_mention"
+    return None
+
+
+def _log_prop_registry_summary(
+    candidate_count: int, added: list[dict], bound_existing: int, skip_reasons: dict[str, int],
+) -> None:
+    """``[PREP_PACK_PROP_REGISTRY_SUMMARY]`` 固定前缀集计日志（2026-10-01，用户
+    反馈"分镜台道具大多没图"三路只读调查第④项新增可观测性）：本集 ``ensure_
+    props_for_labels`` 一次调用处理了多少候选、新建了多少张卡、归并进了多少张
+    既有卡、因何种原因在判定阶段被跳过——不设任何数量上限、不拦截任何候选，
+    纯观测，供人工核查申报候选为什么没有变成可用道具卡。"""
+    log.info(
+        "[PREP_PACK_PROP_REGISTRY_SUMMARY] 候选=%s 新建卡=%s 归到既有卡=%s "
+        "未过判定跳过=%s 跳过原因分布=%s",
+        candidate_count, len(added), bound_existing, sum(skip_reasons.values()), skip_reasons,
+    )
+
+
 async def ensure_props_for_labels(
     project_id: str, episode_no: int, mentions: list[dict], *, source_text: str = "",
 ) -> dict:
@@ -172,11 +204,13 @@ async def ensure_props_for_labels(
     segments = index_source_segments(source_text) if source_text else []
     added: list[dict] = []
     errors: list[str] = []
+    bound_existing = 0
+    skip_reasons: dict[str, int] = {}
     for mention in mentions:
         label = str(mention.get("label") or "").strip()
-        if not label or label in known:
-            continue
-        if not is_key_prop_mention(mention, source_text=source_text):
+        reason = _prop_mention_skip_reason(label, known, mention, source_text)
+        if reason:
+            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
             continue
         evidence_text = evidence_text_for_segments(segments, mention.get("segment_indexes") or [])
         # source_wording/known_prop_name（2026-09-30）：跟 discovery.py 那侧传同一个
@@ -196,6 +230,7 @@ async def ensure_props_for_labels(
                 canonical = card.name if card else None
             if canonical is not None:
                 _bind_known_base(conn, project_id, label, base, canonical, known)
+                bound_existing += 1
                 continue
             try:
                 result = await _register_one_prop(
@@ -209,6 +244,7 @@ async def ensure_props_for_labels(
                 known.add(base)
                 if base != label and _append_prop_alias(conn, project_id, base, label):
                     known.add(label)
+    _log_prop_registry_summary(len(mentions), added, bound_existing, skip_reasons)
     return {"added": added, "errors": errors}
 
 

@@ -186,6 +186,40 @@ async def test_ensure_props_for_labels_no_bible_is_advisory_noop() -> None:
     assert result == {"added": [], "errors": []}
 
 
+async def test_ensure_props_for_labels_logs_registry_summary(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``[PREP_PACK_PROP_REGISTRY_SUMMARY]`` 固定前缀集计日志（2026-10-01，
+    用户反馈"分镜台道具大多没图"调查新增可观测性）：候选数、新建卡数、归到
+    既有卡数、未过判定跳过数都要如实反映，不设上限、不拦截任何候选。四条
+    mention 分别落四个不同分支：已登记（跳过）、未过结构判据（跳过）、
+    归一后绑定既有卡「野鸡」（归到既有卡）、全新道具「黄铜星盘」（新建卡）。"""
+    _seed_project("p1", props_list=[
+        {"name": "旧猫包", "appearance_canonical": "已登记的锚点", "aliases": []},
+        {"name": "野鸡", "appearance_canonical": "已登记的野鸡锚点", "aliases": []},
+    ])
+    monkeypatch.setattr(judge.model_gateway, "chat_structured", _fake_chat_structured)
+    monkeypatch.setattr(service, "generate_prop_reference_image", _fake_generate_image)
+    mentions = [
+        {"label": "旧猫包", "description": "旧猫包", "segment_indexes": [2, 9]},
+        {"label": "路人手中的杯子", "description": "一只杯子", "segment_indexes": [4]},
+        {"label": "两只野鸡", "description": "两只野鸡", "segment_indexes": [2, 9]},
+        {"label": "黄铜星盘", "description": "一只旧星盘", "segment_indexes": [1, 2]},
+    ]
+
+    with caplog.at_level("INFO"):
+        result = await service.ensure_props_for_labels("p1", 7, mentions)
+
+    assert result["errors"] == []
+    assert [item["name"] for item in result["added"]] == ["黄铜星盘"]
+    summary = [r.message for r in caplog.records if "[PREP_PACK_PROP_REGISTRY_SUMMARY]" in r.message]
+    assert len(summary) == 1, "每次调用只应该落一条集计日志"
+    assert "候选=4" in summary[0]
+    assert "新建卡=1" in summary[0]
+    assert "归到既有卡=1" in summary[0]
+    assert "未过判定跳过=2" in summary[0]
+
+
 # ---------------------------------------------------------------------------
 # API：列表 + 重生成
 # ---------------------------------------------------------------------------

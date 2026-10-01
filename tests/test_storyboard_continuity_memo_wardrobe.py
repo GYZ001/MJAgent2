@@ -36,9 +36,12 @@ def _visible(identity_id: str, display_name: str) -> SimpleNamespace:
     return SimpleNamespace(identity_id=identity_id, display_name=display_name, visibility="visible")
 
 
-def test_appends_wardrobe_sentence_and_registers_prop_when_missing():
+def test_appends_wardrobe_sentence_but_does_not_register_a_prop():
     """红：修复前的旧行为是只记日志、什么都不回填——用手写的旧版本函数证明视频模型
-    读不到围巾状态；绿：新函数把 wardrobe 写进提示词并登记进 resources.props。"""
+    读不到围巾状态；绿：新函数把 wardrobe 写进提示词的「续接服装：」行。2026-10-01
+    起不再登记进 resources.props——那只是记账标签，没有任何下游消费，却天然无图，
+    纯属分镜台界面「道具」分组里的噪音（见 ensure_wardrobe_continuity_in_prompt
+    docstring）。"""
     draft = _draft(
         "镜头1：温念低头看信。",
         characters=[_AiCharacterState(identity_id="bible:温念", wardrobe="围着顾屿给的红色围巾")],
@@ -46,12 +49,10 @@ def test_appends_wardrobe_sentence_and_registers_prop_when_missing():
     )
     assert ensure_wardrobe_continuity_in_prompt(draft, prop_factory=_FakeProp) == []
     assert draft.prompt_text.endswith("续接服装：@温念 围着顾屿给的红色围巾。")
-    assert len(draft.resources.props) == 1
-    assert draft.resources.props[0].label == "温念的服装"
-    assert draft.resources.props[0].description == "围着顾屿给的红色围巾"
+    assert draft.resources.props == [], "服装续接不再铸成 props 条目"
 
     def _old_log_only_wardrobe(_draft) -> None:
-        """修复前的旧行为：wardrobe 只在 log 级别提示，从不回填提示词或 resources.props。"""
+        """修复前的旧行为：wardrobe 只在 log 级别提示，从不回填提示词。"""
         return None
 
     red_draft = _draft(
@@ -60,7 +61,7 @@ def test_appends_wardrobe_sentence_and_registers_prop_when_missing():
         resource_characters=[_visible("bible:温念", "温念")],
     )
     _old_log_only_wardrobe(red_draft)
-    assert "围巾" not in red_draft.prompt_text and red_draft.resources.props == [], "旧行为确实不回填——红态验证成立"
+    assert "围巾" not in red_draft.prompt_text, "旧行为确实不回填提示词——红态验证成立"
 
 
 def test_does_not_duplicate_when_prompt_already_mentions_wardrobe():
@@ -72,18 +73,21 @@ def test_does_not_duplicate_when_prompt_already_mentions_wardrobe():
     before = draft.prompt_text
     assert ensure_wardrobe_continuity_in_prompt(draft, prop_factory=_FakeProp) == []
     assert draft.prompt_text == before
-    assert len(draft.resources.props) == 1, "提示词已提到但 resources.props 里仍要补登记"
+    assert draft.resources.props == [], "不再登记进 resources.props，props 应保持为空"
 
 
-def test_does_not_duplicate_prop_entry_when_already_registered():
+def test_leaves_pre_existing_props_untouched():
+    """``resources.props`` 若已有调用方自己登记的、跟服装无关的其它道具条目，
+    2026-10-01 起本函数完全不碰这个列表——既不新增也不去重，原样保留。"""
+    existing = _FakeProp("温念的红围巾", "围着顾屿给的红色围巾")
     draft = _draft(
         "镜头1：温念低头看信。",
         characters=[_AiCharacterState(identity_id="bible:温念", wardrobe="围着顾屿给的红色围巾")],
         resource_characters=[_visible("bible:温念", "温念")],
-        props=[_FakeProp("温念的红围巾", "围着顾屿给的红色围巾")],
+        props=[existing],
     )
     ensure_wardrobe_continuity_in_prompt(draft, prop_factory=_FakeProp)
-    assert len(draft.resources.props) == 1
+    assert draft.resources.props == [existing]
 
 
 def test_empty_wardrobe_or_no_display_name_is_skipped():

@@ -27,13 +27,15 @@ def test_shot_mandates_rule_is_concatenated_into_dialect_instructions():
     assert "_action_beats.decisive_action_dialect_rule(profile.render_format)" in source
 
 
-def test_wardrobe_backfill_reuses_the_same_prop_model_as_resources_props():
-    """``prop_factory`` 必须是 ``_AiStoryboardSegmentDraft.resources.props`` 同一个元素
-    类型（``_AiResourceProp``），否则回填进去的条目在 ``model_dump(mode="json")`` 时
-    会序列化错误——这条断言把「用了正确的类」钉死，不依赖运行一次真实生成。"""
+def test_resource_prop_model_still_accepts_label_and_description():
+    """``_AiResourceProp``（``_AiSegmentResources.props`` 的元素类型）的 label/
+    description 两字段形状保持可序列化。2026-10-01 起
+    ``ensure_wardrobe_continuity_in_prompt`` 不再用 ``prop_factory`` 登记服装
+    条目（参数保留只是调用方签名兼容，函数体内不再调用它）——这条测试不再依赖
+    那条已退场的路径，只独立验证模型本身的序列化形状没有被这次改动意外破坏。"""
     from app.production.storyboard_pack import _AiResourceProp, _AiSegmentResources
 
     resources = _AiSegmentResources()
-    prop = _AiResourceProp(label="温念的服装", description="红色围巾")
+    prop = _AiResourceProp(label="旧行李箱", description="棕色帆布旅行箱")
     resources.props.append(prop)
-    assert resources.model_dump(mode="json")["props"] == [{"label": "温念的服装", "description": "红色围巾"}]
+    assert resources.model_dump(mode="json")["props"] == [{"label": "旧行李箱", "description": "棕色帆布旅行箱"}]
