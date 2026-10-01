@@ -8,19 +8,17 @@
 ``storyboard_travel_direction``），新增判据放不进去；见 CLAUDE.md「装不下时
 先想怎么拆，不要先想加基线」。
 
-两类缺陷、共同根因都是 CLAUDE.md「闸门放行分支必须是产品里的可见信号」：
+两类缺陷（②已退场，见下）、共同根因都是 CLAUDE.md「闸门放行分支必须是产品里的可见信号」：
 
 ① ``storyboard_continuity_memo.layout_change_advisories`` 此前只在
    ``continuity_memo_errors`` 里 ``log.warning``，从不进
    ``degraded_capabilities``——第 26 段相对 23-25 段左右站位整体翻转、
    ``layout_change_source_quote`` 为空，本来命中了这条判据却没人看得到。
-② 道具 ``location`` 跨段变化此前完全没有判据——行李箱第 12→13 段从
-   「床尾旁」变成「床头一侧墙边」，期间没有任何人碰它。比照 layout 同一
-   形状新增 ``prop_location_change_advisories``：道具位置不像 layout 那样
-   有专门的变化依据引文字段，「没有给出变化依据」在当前契约下因此恒成立
-   ——只要同名道具的 location 从上一段非空值变成不同值就记一条；不阻断，
-   移动道具多数时候是剧情里合理发生的动作，强行拦截会把正常收尾一并打死
-   （理由同 ``_prop_form_errors`` 文档「道具去哪了」的取舍）。
+② （已退场，2026-10-01 同日）道具 ``location`` 跨段变化告警：位置是自由文本，
+   模型每段换一种说法（「床尾旁」「床尾旁的地板上」「床尾一侧」），逐字比对几乎
+   每段都命中——第 1 集第五轮 35 段触发 874 条，真问题（行李箱无人触碰却换了
+   位置）被淹没，界面上只会教人无视这类提示。纯字符串判据表达不了「位置真的变了」，
+   在有结构化位置字段之前不做；道具挪位交给正文复核的 prop_appearance 判据与成片复查。
 
 两条判据的输出形状照抄 ``storyboard_action_density.segment_advisories``：
 返回已经打好 ``[TAG][未拦截]`` 前缀的字符串列表，调用方
@@ -38,33 +36,15 @@ from app.production.storyboard_continuity_memo import _AiContinuityMemo, layout_
 from app.production.storyboard_segment_ranges import segment_source_payload
 
 
-def prop_location_change_advisories(
-    memo: _AiContinuityMemo, previous_memo: _AiContinuityMemo | None,
-) -> list[str]:
-    """道具位置（location）跨段变化的告警（不阻断），见模块 docstring②。"""
-    if previous_memo is None:
-        return []
-    previous_locations = {p.name: p.location for p in previous_memo.props if p.location.strip()}
-    return [
-        f"[STORYBOARD_CONTINUITY_MEMO_PROP_LOCATION][未拦截] continuity_memo.props"
-        f"『{prop.name}』的位置（location）从上一段的『{previous_locations[prop.name]}』变成了"
-        f"本段的『{prop.location}』，但本段没有可核验的变化依据，请人工核对是谁移动了它"
-        for prop in memo.props
-        if previous_locations.get(prop.name)
-        and prop.location.strip()
-        and prop.location != previous_locations[prop.name]
-    ]
-
-
 def continuity_memo_location_advisories(
     memo: _AiContinuityMemo, previous_memo: _AiContinuityMemo | None, segment_source_text: str,
 ) -> list[str]:
-    """layout 与道具位置两条告警的合并出口，供 ``_segment_content_advisories``
-    一次性拼进 ``degraded_capabilities``，见模块 docstring①②。"""
+    """layout 跨段变化告警的出口，供 ``_segment_content_advisories`` 拼进
+    ``degraded_capabilities``，见模块 docstring①。"""
     return [
         f"[STORYBOARD_CONTINUITY_MEMO_LAYOUT][未拦截] {advisory}"
         for advisory in layout_change_advisories(memo, previous_memo, segment_source_text)
-    ] + prop_location_change_advisories(memo, previous_memo)
+    ]
 
 
 def segment_continuity_location_advisories(

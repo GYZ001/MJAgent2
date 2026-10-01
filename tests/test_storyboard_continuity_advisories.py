@@ -1,6 +1,6 @@
 """app.production.storyboard_continuity_advisories：连贯性备忘里「检测到了却只
-写日志」的两类缺陷补产物信号——layout 跨段变化（此前只 log.warning，看不见）+
-道具位置（location）跨段变化（此前完全不检查）。
+写日志」的 layout 跨段变化补产物信号（此前只 log.warning，看不见）；道具位置
+（location）跨段变化告警同日上线又退场（自由文本逐字比对，第 1 集 35 段 874 条噪音）。
 
 真实案例（《顾念长安》第 1 集第三轮分镜，经多代理核查确认，
 ``/tmp/mjtest/ep1_redo/segments_r3.json``）：第 26 段相对 23-25 段左右站位整体
@@ -16,7 +16,6 @@ from types import SimpleNamespace
 import app.production.storyboard_continuity_advisories as advisories_mod
 from app.production.storyboard_continuity_advisories import (
     continuity_memo_location_advisories,
-    prop_location_change_advisories,
     segment_continuity_location_advisories,
 )
 from app.production.storyboard_continuity_memo import _AiContinuityMemo, _AiPropState
@@ -27,47 +26,20 @@ def _memo(*, layout: str = "", props: list[_AiPropState] | None = None) -> _AiCo
 
 
 # ---------------------------------------------------------------------------
-# prop_location_change_advisories：道具位置跨段变化（此前完全不检查）
+# 道具位置跨段变化告警已退场（自由文本逐字比对，第 1 集 35 段触发 874 条）
 # ---------------------------------------------------------------------------
 
-def test_prop_location_change_without_evidence_is_advised():
-    """真实案例：行李箱第 12→13 段 location 从「床尾旁」变成「床头一侧墙边」，
-    期间没有任何人碰它——当前契约没有专门的变化依据字段，恒记一条告警。"""
+def test_prop_location_rewording_no_longer_produces_advisories():
+    """退场回归：同一件道具换个说法写位置（真实形状「床尾旁」→「床尾旁的地板上」）
+    不得再产生任何告警——旧判据在这种措辞变化上恒命中，把真问题淹没在噪音里。"""
     previous = _memo(props=[_AiPropState(name="行李箱", location="床尾旁")])
-    memo = _memo(props=[_AiPropState(name="行李箱", location="床头一侧墙边")])
-    advisories = prop_location_change_advisories(memo, previous)
-    assert len(advisories) == 1
-    assert "[STORYBOARD_CONTINUITY_MEMO_PROP_LOCATION][未拦截]" in advisories[0]
-    assert "行李箱" in advisories[0] and "床尾旁" in advisories[0] and "床头一侧墙边" in advisories[0]
-
-
-def test_prop_location_unchanged_is_silent():
-    previous = _memo(props=[_AiPropState(name="行李箱", location="床尾旁")])
-    memo = _memo(props=[_AiPropState(name="行李箱", location="床尾旁")])
-    assert prop_location_change_advisories(memo, previous) == []
-
-
-def test_prop_location_without_previous_memo_is_silent():
-    memo = _memo(props=[_AiPropState(name="行李箱", location="床头一侧墙边")])
-    assert prop_location_change_advisories(memo, None) == []
-
-
-def test_prop_location_newly_recorded_without_previous_value_is_silent():
-    """上一段这件道具根本没有记录位置（首次出现）——不是"变化"，不告警。"""
-    previous = _memo(props=[_AiPropState(name="行李箱", location="")])
-    memo = _memo(props=[_AiPropState(name="行李箱", location="床头一侧墙边")])
-    assert prop_location_change_advisories(memo, previous) == []
-
-
-def test_prop_location_different_name_is_silent():
-    """不同名字的道具互不比对——名字就是比对键。"""
-    previous = _memo(props=[_AiPropState(name="行李箱", location="床尾旁")])
-    memo = _memo(props=[_AiPropState(name="背包", location="床头一侧墙边")])
-    assert prop_location_change_advisories(memo, previous) == []
+    memo = _memo(props=[_AiPropState(name="行李箱", location="床尾旁的地板上")])
+    assert continuity_memo_location_advisories(memo, previous, "") == []
+    assert not hasattr(advisories_mod, "prop_location_change_advisories")
 
 
 # ---------------------------------------------------------------------------
-# continuity_memo_location_advisories：layout + 道具位置两条合并出口
+# continuity_memo_location_advisories：layout 跨段变化告警出口
 # ---------------------------------------------------------------------------
 
 def test_layout_change_without_quote_is_advised_with_tag():
@@ -80,13 +52,12 @@ def test_layout_change_without_quote_is_advised_with_tag():
     assert any("没有给出" in a for a in advisories)
 
 
-def test_combines_layout_and_prop_location_advisories():
+def test_only_layout_advisory_is_emitted():
     previous = _memo(layout="甲在左，乙在右", props=[_AiPropState(name="行李箱", location="床尾旁")])
     memo = _memo(layout="甲在右，乙在左", props=[_AiPropState(name="行李箱", location="床头一侧墙边")])
     advisories = continuity_memo_location_advisories(memo, previous, "原文没有写任何移动")
-    assert len(advisories) == 2
-    assert any("[STORYBOARD_CONTINUITY_MEMO_LAYOUT]" in a for a in advisories)
-    assert any("[STORYBOARD_CONTINUITY_MEMO_PROP_LOCATION]" in a for a in advisories)
+    assert len(advisories) == 1
+    assert "[STORYBOARD_CONTINUITY_MEMO_LAYOUT]" in advisories[0]
 
 
 def test_no_previous_memo_produces_no_advisories():
