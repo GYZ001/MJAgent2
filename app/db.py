@@ -15,6 +15,7 @@ import weakref
 from app.config import DATA_DIR, DB_PATH, DEFAULT_SETTINGS
 from app.observability import lock_pressure
 from app.observability.provider_call_payload import compact_exact_request, compact_provider_payload
+from app.observability.retention import prune_observability_logs as _prune_observability_logs  # 2026-10-01 拆出：自引用外键让启动连续失败，见该模块 docstring
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -2458,24 +2459,6 @@ def _repair_invalid_provider_metadata(conn: sqlite3.Connection) -> None:
             "UPDATE provider_calls SET meta=? WHERE id=?",
             (json.dumps(summary, ensure_ascii=False, sort_keys=True), row["id"]),
         )
-
-
-def _prune_observability_logs(conn: sqlite3.Connection) -> None:
-    """Bound diagnostic tables so routine monitoring cannot grow the DB forever."""
-    def retention_days(key: str, fallback: int) -> int:
-        row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-        try:
-            return max(1, int(row["value"] if row else fallback))
-        except (TypeError, ValueError):
-            return fallback
-
-    stamp = time.time()
-    calls_cutoff = stamp - retention_days("provider_call_retention_days", 30) * 86400
-    errors_cutoff = stamp - retention_days("error_log_retention_days", 30) * 86400
-    conn.execute(
-        "DELETE FROM provider_calls WHERE ts < ? AND status != 'RUNNING'", (calls_cutoff,)
-    )
-    conn.execute("DELETE FROM error_logs WHERE ts < ?", (errors_cutoff,))
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:

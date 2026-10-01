@@ -109,6 +109,7 @@ allowed_exceptions = []
 "app.observability.machine_watermark" = 2  # 2026-09-05：/proc 水位采样，只依赖 app.db/app.config；准入点在 L3-L5
 "app.observability.lock_pressure" = 2  # 2026-09-06：写锁争用计数，纯标准库；machine_watermark(2)/write_lock_holders(2) 使用
 "app.observability.provider_call_payload" = 1  # 2026-09-06：落库前载荷压缩，纯标准库；app.db(2)/app.seedance(3) 使用
+"app.observability.retention" = 1  # 2026-10-01：启动时观测表保留期清理（从 app.db 拆出），纯标准库+调用方传入的连接；app.db(2) 使用
 "app.observability.metrics_registry" = 1  # 2026-09-12 新增（EP-06）：Prometheus 指标的进程内存原语，
                                            # 纯标准库，零 app.* 依赖——这样 app.observability.lock_pressure（L2）
                                            # 才能在不产生新上行边的前提下调用它记写锁等待，app.db 不需要碰

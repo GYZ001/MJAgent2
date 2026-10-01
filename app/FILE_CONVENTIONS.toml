@@ -76,7 +76,7 @@ max_lines_tests = 500
 # 解而上调基线的情况不是同一性质，不违反棘轮"只降不升"守的是设计质量维度。
 # 2026-09-02 +38：新增 series_tasks / series_queue_state 两张表 + 三条索引
 # （连播任务台改造，见 docs/series_task_console_plan.md），同一账本性质。
-"app/db.py" = 3573
+"app/db.py" = 3556
 "app/delivery.py" = 1460
 "app/domain/__init__.py" = 1090
 "app/domain/bible_ops/precheck.py" = 517
