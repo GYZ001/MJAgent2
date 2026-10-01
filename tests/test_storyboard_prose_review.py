@@ -1,10 +1,17 @@
 """分镜台「分镜正文复核」（``app.production.storyboard_prose_review``）。
 
-真人短剧《顾念长安》第 1 集多代理逐段核查成立的七类真实缺陷（单镜动作过载、写实
-画风脸红措辞、无台词的持续说话、跨段左右站位翻转、道具凭空出现、单镜大跨度时间
-跳跃、否定句写动作）各用一条真实形状的句子覆盖代码核验；再覆盖「模型提名、代码
-核验」的丢弃路径、按升序定向重写、重写仍违规写 degraded_capabilities、重写抛异常
-保留原稿、开关关闭逐字不变。
+真人短剧《顾念长安》第 1 集多代理逐段核查成立的八类真实缺陷（单镜动作过载、写实
+画风脸红措辞、无台词的持续说话、跨段左右站位翻转、道具凭空出现、跨段重复的动作
+转换、单镜大跨度时间跳跃、否定句写动作）各用一条真实形状的句子覆盖代码核验；再
+覆盖「模型提名、代码核验」的丢弃路径、按升序定向重写、重写仍违规写
+degraded_capabilities、重写抛异常保留原稿、开关关闭逐字不变。
+
+2026-10-01 新增 ``repeated_transition_action``（第 1 集重做第二轮分镜独立核查，
+``/tmp/mjtest/ep1_redo/segments_r2.json`` 第 30/31 段）：上一段末镜已写温念转身
+背对镜头望向窗户，硬切到下一段开场又写她顺着视线回过头、肩膀侧转——同一个转身
+在剪辑点两侧被演了两次，``screen_side`` 只管左右站位管不到这种重复；同一批次还
+把 ``time_jump`` 的 fix 文案从「硬切或叠化」改成只建议硬切——``storyboard_
+dialects`` 贯穿全片「镜头之间硬切」的全局规则下叠化不是段内可选项。
 
 monkeypatch 策略：``storyboard_prose_review`` 是普通 Python 包内模块（不是
 ``app/stages``/``app/portraits`` 那类 ``exec()`` 聚合外观），``_generate_all_
@@ -68,6 +75,12 @@ _REAL_VIOLATION_CASES = [
         "镜头4：她转身离开房间，桌上空无一物。", "桌上空无一物",
     ),
     (
+        "repeated_transition_action",
+        "镜头1：她顺着对面的视线缓缓回过头，肩膀随之侧转，望向顾屿。",
+        "她顺着对面的视线缓缓回过头，肩膀随之侧转",
+        "镜头4：温念转身，背对镜头，望向窗户。", "温念转身，背对镜头，望向窗户",
+    ),
+    (
         "time_jump",
         "镜头4：镜头从深夜接水的水龙头缓缓横摇到天亮时分她已沉沉睡去的床头。",
         "镜头从深夜接水的水龙头缓缓横摇到天亮时分她已沉沉睡去的床头", None, "",
@@ -122,6 +135,29 @@ def test_prop_appearance_with_unverifiable_previous_quote_is_discarded():
     assert verified == []
 
 
+def test_repeated_transition_action_without_previous_draft_is_discarded():
+    """本集第一段没有上一段可比对时，这类违规结构上不可能成立，与 screen_side/
+    prop_appearance 同一取舍。"""
+    draft = _draft("镜头1：她顺着对面的视线回过头。")
+    violation = prose_review.ProseViolation(
+        kind="repeated_transition_action", quote="她顺着对面的视线回过头",
+        previous_quote="温念转身，背对镜头", fix="x",
+    )
+    verified = prose_review._verified_violations([violation], segment_no=1, draft=draft, previous_draft=None)
+    assert verified == []
+
+
+def test_repeated_transition_action_with_unverifiable_previous_quote_is_discarded():
+    draft = _draft("镜头1：她顺着对面的视线回过头。")
+    previous = _draft("镜头4：温念站在窗边。")
+    violation = prose_review.ProseViolation(
+        kind="repeated_transition_action", quote="她顺着对面的视线回过头",
+        previous_quote="编造的上一段原文", fix="x",
+    )
+    verified = prose_review._verified_violations([violation], segment_no=2, draft=draft, previous_draft=previous)
+    assert verified == []
+
+
 # ---------------------------------------------------------------------------
 # 判据文本：action_density 复用常量、skin_blush 只在写实画风出现
 # ---------------------------------------------------------------------------
@@ -136,6 +172,8 @@ def test_review_rules_text_includes_skin_blush_only_when_photographic():
     assert key_action_definition() in text_on
     assert over_limit_remedy(max_shots=4) in text_on
     assert "口型说明" in text_on, "系统写入的口型说明不算否定句违规"
+    assert "repeated_transition_action" in text_on
+    assert "叠化" not in text_on, "段内只用硬切，time_jump 的 fix 不得再建议叠化（与全局硬切规则冲突）"
 
 
 # ---------------------------------------------------------------------------

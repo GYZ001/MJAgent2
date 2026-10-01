@@ -13,7 +13,16 @@
 仍有问题就写进 ``degraded_capabilities`` 不阻断整集（CLAUDE.md「修补器与校验器
 死锁」：后处理同样不得把整集卡死）。
 
-## 判据只认七类，取值集合单源
+2026-10-01（第 1 集重做第二轮分镜 ``/tmp/mjtest/ep1_redo/segments_r2.json``
+独立核查新增第八类）：第 30 段末镜已写温念转身背对镜头望向窗户，硬切到第 31
+段开场又写她顺着视线回过头、肩膀侧转——同一个转身在剪辑点两侧被演了两次。
+``screen_side`` 只管左右站位，不管「上一段末镜已完成的转身/起身/坐下/回头等
+状态转换在本段开场又重新演一遍」，故新增 ``repeated_transition_action``。
+同一次核查还发现 ``time_jump`` 原判据的 fix 建议「用硬切或叠化交代时间过去」，
+与 ``storyboard_dialects`` 贯穿全片的「镜头之间硬切」全局规则冲突——叠化不是
+段内可选项，fix 文案已改为只建议硬切。
+
+## 判据只认八类，取值集合单源
 
 ``_KIND_RULES`` 既是喂给复核模型的判据正面陈述，也是代码核验 ``kind`` 合法性的
 唯一依据（``v.kind in _KIND_RULES``）——CLAUDE.md「模型契约两侧必须对齐」：schema
@@ -37,9 +46,10 @@ SHOT``，不另立常量；``skin_blush`` 的判据文本直接引用
 每条 violation 的 ``quote`` 必须能在本段 ``prompt_text`` 里逐字核验到
 （``textmatch.condense`` 容忍标点/空白差异，与 ``storyboard_beat_causality``/
 ``storyboard_beat_foreshadowing`` 的 ``evidence_quote`` 核验同一口径，不是语义
-匹配）；``screen_side``/``prop_appearance`` 两类额外要求 ``previous_quote`` 逐字
-出现在上一段 ``prompt_text`` 里（本集第一段没有上一段时，这两类违规结构上不可能
-成立，直接丢弃）。核验不过的条目单独丢弃，不拖累同一段其余已核验违规，打印
+匹配）；``screen_side``/``prop_appearance``/``repeated_transition_action`` 三类
+额外要求 ``previous_quote`` 逐字出现在上一段 ``prompt_text`` 里（本集第一段没有
+上一段时，这三类违规结构上不可能成立，直接丢弃）。核验不过的条目单独丢弃，不
+拖累同一段其余已核验违规，打印
 ``[STORYBOARD_PROSE_REVIEW_UNVERIFIED]`` 前缀日志——可见，不静默。
 
 ## 定向重写与死锁规避
@@ -49,7 +59,8 @@ SHOT``，不另立常量；``skin_blush`` 的判据文本直接引用
 ``revision_notes`` 参数，与 ``storyboard_identity_regenerate.regenerate_identity_
 candidate`` 用户点「修订本段」同一条通道，但不走那个路由——避免嵌套循环）。
 每段最多重写一次；重写成功后立即再复核该段与紧邻下一段（下一段的跨段判据
-``screen_side``/``prop_appearance`` 依赖它），结果覆盖式更新「待处理违规」表：
+``screen_side``/``prop_appearance``/``repeated_transition_action`` 依赖它），
+结果覆盖式更新「待处理违规」表：
 如果那个邻段本来就排在后面等自己的处理轮次，就把结果留给它自己那一轮（可能
 因此被跳过重写，也可能带着刷新后的违规正常重写）；如果邻段不在待处理表里
 （首轮复核没发现问题，是这次重写才牵连出来的），就没有下一轮会处理它了，
@@ -102,11 +113,11 @@ PROSE_REVIEW_SETTING_KEY = "storyboard_prose_review_enabled"
 _REVIEW_CONCURRENCY = 3
 #: 复核调用只需要返回一份不长的违规清单，不是整段 prompt_text。
 _REVIEW_ANSWER_TOKENS = 1800
-#: 要求 previous_quote 必须逐字核验到的两类——本段开场状态与上一段末镜矛盾。
-_NEEDS_PREVIOUS_QUOTE = {"screen_side", "prop_appearance"}
+#: 要求 previous_quote 必须逐字核验到的三类——本段开场状态与上一段末镜矛盾。
+_NEEDS_PREVIOUS_QUOTE = {"screen_side", "prop_appearance", "repeated_transition_action"}
 
-#: 七类判据的正面陈述，单源用于「喂给模型的提示词」与「核验 kind 合法性」两处
-#: （见模块 docstring「判据只认七类，取值集合单源」）。``{max_actions}`` 由
+#: 八类判据的正面陈述，单源用于「喂给模型的提示词」与「核验 kind 合法性」两处
+#: （见模块 docstring「判据只认八类，取值集合单源」）。``{max_actions}`` 由
 #: ``_review_rules_text`` 用 ``storyboard_action_density.MAX_KEY_ACTIONS_PER_
 #: SHOT`` 填入。
 _KIND_RULES: dict[str, str] = {
@@ -144,16 +155,26 @@ _KIND_RULES: dict[str, str] = {
         "末镜文字』，不能自己编）；fix 给出两种正面写法之一：补一个明确的拿取/放置动作，或改成与上一段"
         "末镜一致的初始状态。"
     ),
+    "repeated_transition_action": (
+        "repeated_transition_action（跨段重复的动作转换）：上一段末镜文字已经写明某个人物完成了一次"
+        "姿态或朝向的转换（例如转身、回头、起身、坐下这类从一个姿态/朝向变为另一个姿态/朝向的过程），"
+        "本段开场又把同一个人物的同一个转换过程重新演了一遍——即违规，观众会在剪辑点两侧看到同一个"
+        "动作发生两次。quote 填本段开场重新描述这次转换过程的原文；previous_quote 必须填上一段末镜里"
+        "写到同一人物完成同样转换的原文（上面已给出『上一段末镜文字』，从那句话里逐字摘取）；fix：删去"
+        "本段开场重新演这个转换过程的描述，改成直接从转换完成后的姿态或朝向起幅。"
+    ),
     "time_jump": (
         "time_jump（单镜大跨度时间跳跃）：一个不间断的镜头运动里跨越了明显的一段时间（例如从深夜写到"
-        "天亮、从白天写到夜晚），镜头描述里却没有任何硬切或叠化把这段时间过去交代清楚——即违规。quote"
-        "填这一镜里描述大跨度时间推移的原文；fix 建议把它拆成两个镜头，之间用硬切或叠化交代时间过去。"
+        "天亮、从白天写到夜晚），镜头描述里却没有用硬切把这段时间过去交代清楚——即违规。quote 填这一镜"
+        "里描述大跨度时间推移的原文；fix 建议把它拆成两个镜头，之间硬切——下一镜起幅直接呈现时间过去"
+        "之后的光线与环境（例如窗外天已亮），与本项目镜头之间统一硬切的规则一致。"
     ),
     "negated_action": (
         "negated_action（用否定句写人物动作）：镜头描述里用否定句描写人物正在做的动作或穿着状态（例如"
         "『没有……』『不再……』『没有再……』），即违规——视频生成模型会忽略否定句，画出来的反而是被"
         "否定的那个动作。系统统一追加的全局约束行（prompt_text 末尾以『约束——』开头的那一行）、人数"
-        "锁定句（『画面中只有……不出现其他人物或路人。』）以及台词占位符或台词后面括号里的口型说明"
+        "锁定句（这一段末尾那句以『本段』开头、以『不出现其他人物或路人。』收尾的出场名单句，存量分镜"
+        "里可能是旧版『画面中只有……不出现其他人物或路人。』）以及台词占位符或台词后面括号里的口型说明"
         "（例如『画面人物嘴唇闭合无张合动作』『发声者开口，其他可见人物不跟随口型』）都不算，它们是"
         "系统统一写入的固定说明，不是对人物动作的描写。quote 填这句否定句原文；fix 给出对应的正面写法：直接描述人物实际在做什么/"
         "穿什么，不提被否定的那个动作。"
@@ -211,7 +232,8 @@ def _dialogue_placeholders(dialogue: list[Any]) -> list[dict[str, str]]:
 def _previous_shot_text(previous_draft: Any | None) -> str:
     """上一段末镜文字：``sub_shots`` 按『镜头N：』切出子镜列表，取最后一条；没有
     上一段或解析不出子镜时返回空串——复核模型据此知道这是本集第一段或上一段
-    没有可比对的镜头文字，不强行比对 screen_side/prop_appearance。"""
+    没有可比对的镜头文字，不强行比对 screen_side/prop_appearance/
+    repeated_transition_action。"""
     if previous_draft is None:
         return ""
     shots = sub_shots(previous_draft.prompt_text)
@@ -219,7 +241,7 @@ def _previous_shot_text(previous_draft: Any | None) -> str:
 
 
 def _review_rules_text(*, photographic: bool, max_shots: int) -> str:
-    """七类判据的完整正面陈述；``skin_blush`` 只在写实画风项目出现（见模块
+    """八类判据的完整正面陈述；``skin_blush`` 只在写实画风项目出现（见模块
     docstring），非写实项目这条规则连提示词都不会收到。"""
     kinds = [k for k in _KIND_RULES if k != "skin_blush" or photographic]
     numbered = "\n".join(
@@ -234,8 +256,8 @@ def _review_rules_text(*, photographic: bool, max_shots: int) -> str:
         "逐条核对下面这一段分镜正文（prompt_text）有没有出现以下几类问题；每一类都只在你能在正文里"
         "找到逐字证据时才报告，找不到就不要报告这一类，宁可少报不要编造。每条违规给出 kind（取值只能是"
         f"下面编号对应的英文名）、shot_label（这一镜的标签，例如『镜头2』）、quote（出问题的原文片段，"
-        "必须逐字照抄 prompt_text 里的文字）、fix（怎么改）；screen_side 与 prop_appearance 两类还要给"
-        f"previous_quote（逐字照抄『上一段末镜文字』里的对应原文）。\n{numbered}"
+        "必须逐字照抄 prompt_text 里的文字）、fix（怎么改）；screen_side、prop_appearance 与"
+        f"repeated_transition_action 三类还要给 previous_quote（逐字照抄『上一段末镜文字』里的对应原文）。\n{numbered}"
     )
 
 
@@ -248,8 +270,9 @@ def _verified_violations(
     raw: list[ProseViolation], *, segment_no: int, draft: Any, previous_draft: Any | None,
 ) -> list[ProseViolation]:
     """模型提名、代码核验：kind 必须在 ``_KIND_RULES`` 里，quote 必须逐字核验到
-    本段 prompt_text；screen_side/prop_appearance 额外要求 previous_quote 逐字
-    核验到上一段 prompt_text（没有上一段时这两类结构上不可能成立）。核验不过的
+    本段 prompt_text；screen_side/prop_appearance/repeated_transition_action
+    额外要求 previous_quote 逐字核验到上一段 prompt_text（没有上一段时这三类
+    结构上不可能成立）。核验不过的
     条目单独丢弃，不拖累同段其余已核验违规，可见日志见模块 docstring。"""
     verified: list[ProseViolation] = []
     for v in raw:

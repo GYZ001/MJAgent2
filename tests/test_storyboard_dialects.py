@@ -192,6 +192,24 @@ def test_h3_group_headcount_cap_is_four_with_split_instruction():
     assert "split it into multiple shots" in H3_FLAT or "stagger the characters" in H3_FLAT
 
 
+def test_seedance_group_rule_defers_headcount_lock_to_system_not_per_shot_example():
+    """2026-10-01 真实回归（第 1 集重做第二轮分镜独立核查）：旧版例句「画面中只有
+    两名绿袍修士，不出现其他人物」被视频模型逐帧误读成「每一镜都要凑够这个人数」，
+    第 14 段单人反打特写因此被要求塞进 2 人。改法：群像在镜头描述里正向写这一镜的
+    人数与身份，全段完整名单与总人数由系统在段尾统一锁定，不要求模型每镜重复锁定。"""
+    assert "正向写出这一镜有几个人" in SEEDANCE_FLAT
+    assert "系统段尾统一锁定" in SEEDANCE_FLAT
+    assert "画面中只有两名绿袍修士，不出现其他人物" not in SEEDANCE_FLAT
+
+
+def test_seedance_constraint_line_forbids_expanding_headcount_lock_into_sentence():
+    """约束行只写「人数锁定」这个短词本身，不展开成带名单的句子——否则模型自写的
+    展开句会被 storyboard_prose_review 的 negated_action 判据误当成对人物动作的
+    否定描写（展开句总是以『不出现……』收尾）。"""
+    assert "不展开成带人名/人数的句子" in SEEDANCE_FLAT
+    assert "人数锁定由系统段尾统一写入" in SEEDANCE_FLAT
+
+
 def test_seedance_high_speed_shot_requires_force_effects():
     """只写「谁在哪」会生成没有速度感的漂浮合影，必须写受力特征。"""
     assert "受力后的具体特征" in SEEDANCE_FLAT

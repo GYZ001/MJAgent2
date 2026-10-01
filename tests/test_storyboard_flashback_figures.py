@@ -107,11 +107,16 @@ def _draft(prompt_text: str, characters: list[SimpleNamespace], flashback_figure
     )
 
 
-def test_no_flashback_figures_keeps_lock_sentence_byte_identical():
-    """回归护栏：没有闪回人物时，本次改造前后的锁定句必须逐字相同。"""
+def test_no_flashback_figures_still_names_the_full_segment_cast():
+    """2026-10-01 名单语义改写：旧句「画面中只有……共N人」被视频模型逐帧误读成
+    「每个镜头都要有N人」（见 app.production.storyboard_cast_lock 模块 docstring
+    2026-10-01 条）；无闪回人物时改写成「本段画面出场人物共N人：……」，「共N人」
+    明确是全段名单人数，不是单镜人数。"""
     draft = _draft("镜头1：温念坐在桌边，顾屿走近。", [_character("bible:温念", "温念"), _character("bible:顾屿", "顾屿")])
     assert cast_lock.ensure_cast_lock_in_prompt(draft) == []
-    assert draft.prompt_text.endswith("画面中只有@温念、@顾屿共2人，不出现其他人物或路人。")
+    assert draft.prompt_text.endswith(
+        "本段画面出场人物共2人：@温念、@顾屿；每个镜头只画出该镜头文字写到的人，不出现其他人物或路人。"
+    )
 
 
 def test_flashback_figures_split_lock_sentence_into_real_and_flashback_groups():
@@ -121,31 +126,41 @@ def test_flashback_figures_split_lock_sentence_into_real_and_flashback_groups():
         [_figure("六岁的顾屿")],
     )
     assert cast_lock.ensure_cast_lock_in_prompt(draft) == []
-    assert draft.prompt_text.endswith("现实画面中只有@温念共1人；闪回画面中只有六岁的顾屿，不出现其他人物或路人。")
+    assert draft.prompt_text.endswith(
+        "本段现实画面出场人物共1人：@温念；闪回画面出场人物：六岁的顾屿；"
+        "每个镜头只画出该镜头文字写到的人，不出现其他人物或路人。"
+    )
     assert "@顾屿" not in draft.prompt_text, "闪回人物没有当前定妆照，不能绑 @"
 
 
 def test_flashback_only_segment_omits_empty_real_cast_clause():
-    """整段都是闪回、没有现实同框角色时，不写「现实画面中只有…共0人」这种空话。"""
+    """整段都是闪回、没有现实同框角色时，不写「现实画面出场人物共0人」这种空话。"""
     draft = _draft("镜头1：闪回，六岁的顾屿趴在床沿数数。", [], [_figure("六岁的顾屿")])
     assert cast_lock.ensure_cast_lock_in_prompt(draft) == []
-    assert draft.prompt_text.endswith("闪回画面中只有六岁的顾屿，不出现其他人物或路人。")
-    assert "现实画面中只有" not in draft.prompt_text
+    assert draft.prompt_text.endswith(
+        "本段闪回画面出场人物：六岁的顾屿；每个镜头只画出该镜头文字写到的人，不出现其他人物或路人。"
+    )
+    assert "现实画面出场人物" not in draft.prompt_text
 
 
 def test_switching_from_plain_to_flashback_format_replaces_old_line_not_duplicates():
-    """幂等剥离必须认识旧格式（无「现实/闪回」前缀）与新复合格式两种写法。"""
+    """幂等剥离必须认识旧格式（无「现实/闪回」前缀、旧收尾「画面中只有」）与新复合
+    格式两种写法。"""
     draft = _draft(
         "镜头1：温念望着窗外出神。\n画面中只有@温念共1人，不出现其他人物或路人。",
         [_character("bible:温念", "温念")],
         [_figure("六岁的顾屿")],
     )
     cast_lock.ensure_cast_lock_in_prompt(draft)
-    # 复合句本身含两个「只有」（现实/闪回各一个）是预期形状，不是重复追加；
+    # 复合句本身含两个「出场人物」（现实/闪回各一个）是预期形状，不是重复追加；
     # 真正要守住的是旧格式的那句没有被原样保留（未被剥离）。
-    assert draft.prompt_text.count("现实画面中只有") == 1
-    assert draft.prompt_text.count("闪回画面中只有") == 1
-    assert draft.prompt_text.endswith("现实画面中只有@温念共1人；闪回画面中只有六岁的顾屿，不出现其他人物或路人。")
+    assert draft.prompt_text.count("现实画面出场人物") == 1
+    assert draft.prompt_text.count("闪回画面出场人物") == 1
+    assert "画面中只有" not in draft.prompt_text
+    assert draft.prompt_text.endswith(
+        "本段现实画面出场人物共1人：@温念；闪回画面出场人物：六岁的顾屿；"
+        "每个镜头只画出该镜头文字写到的人，不出现其他人物或路人。"
+    )
 
 
 def _advisory_draft(prompt_text: str, characters: list[SimpleNamespace]) -> SimpleNamespace:
