@@ -34,7 +34,7 @@ import base64
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, Callable
 
 from app import hiagent
 from app.db import get_conn, get_setting
@@ -55,6 +55,15 @@ _UNLIMITED_SUBJECT_KINDS = frozenset({"crowd"})
 #: 两个抽样帧都命中同一条问题才可信，与 subtitle_gate「未判定不拦」同一容错取舍
 #: 的数量版——字幕闸门是二值问题没有「连续性」维度，这里判据是计数，必须显式设阈。
 MIN_CONSECUTIVE_FRAMES = 2
+
+#: 疑点加密复核窗口（2026-10-01 实测 ver_153e163b0c1d：两镜叠化约 0.95 秒，稀疏
+#: 抽样≈1.5 秒一帧只命中第 6 帧，相邻第 5/7 帧各自正常，连续性判据拿不到第二帧
+#: 佐证）。首轮任一帧单帧命中（见 ``_frame_is_suspect``）即围绕该帧时间点加密
+#: 复核，详见 ``.character_count_dense_recheck``。半径 0.75 秒=实测异常时长
+#: 外加稀疏抽样自身 FRAME_INTERVAL_S/2 的系统误差；间隔 0.25 秒使 ±0.75 秒窗口
+#: （最多 7 帧）能稳定拿到 ≥2 个落在异常区间内的帧。
+DENSE_WINDOW_RADIUS_S = 0.75
+DENSE_FRAME_INTERVAL_S = 0.25
 
 
 def enabled() -> bool:
@@ -308,10 +317,10 @@ def _consecutive_run(indices: list[int]) -> list[int]:
     return []
 
 
-def _frame_evidence(frame: dict[str, Any]) -> dict[str, Any]:
+def _frame_evidence(frame: dict[str, Any], seconds: float) -> dict[str, Any]:
     return {
         "index": frame["index"],
-        "seconds": round((frame["index"] - 1) * subtitle_gate.FRAME_INTERVAL_S, 1),
+        "seconds": round(seconds, 2),
         "headcount": _frame_headcount(frame),
         "figures": frame["figures"],
     }
@@ -319,11 +328,15 @@ def _frame_evidence(frame: dict[str, Any]) -> dict[str, Any]:
 
 def evaluate_headcount_and_duplication(
     parsed: dict[str, Any], *, allowed_headcount: int | None, roster_names: list[str],
+    seconds_for_index: Callable[[int], float] | None = None,
 ) -> dict[str, Any]:
     """从逐帧人形清单判定人数超额/角色重复。两条都要求连续
     ``MIN_CONSECUTIVE_FRAMES`` 帧命中才成立；``allowed_headcount`` 为 ``None``
     时人数超额不参与判定（只由调用方把不可判定原因写进最终 verdict）。
+    ``seconds_for_index`` 把帧序号换算成真实秒数，默认按稀疏抽样间隔；加密复核
+    传入自己的换算（见 ``.character_count_dense_recheck``），连续阈值不变。
     """
+    to_seconds = seconds_for_index or (lambda idx: (idx - 1) * subtitle_gate.FRAME_INTERVAL_S)
     frames = sorted(parsed["frames"], key=lambda f: f["index"])
     result: dict[str, Any] = {
         "headcount_exceeded": False, "headcount_evidence": [],
@@ -334,7 +347,7 @@ def evaluate_headcount_and_duplication(
         run = _consecutive_run(over)
         if run:
             result["headcount_exceeded"] = True
-            result["headcount_evidence"] = [_frame_evidence(f) for f in frames if f["index"] in run]
+            result["headcount_evidence"] = [_frame_evidence(f, to_seconds(f["index"])) for f in frames if f["index"] in run]
     names = set(roster_names)
     for name in roster_names:
         hits = sorted(f["index"] for f in frames if name in _frame_duplicated_names(f, names))
@@ -343,9 +356,29 @@ def evaluate_headcount_and_duplication(
             result["character_duplicated"] = True
             result["duplicated_characters"].append({
                 "name": name,
-                "frames": [_frame_evidence(f) for f in frames if f["index"] in run],
+                "frames": [_frame_evidence(f, to_seconds(f["index"])) for f in frames if f["index"] in run],
             })
     return result
+
+
+def _frame_is_suspect(frame: dict[str, Any], *, allowed_headcount: int | None, roster_names: set[str]) -> bool:
+    """单帧命中 headcount 超员或同一具名角色重复，不要求连续——加密复核的触发
+    判据，与上面「连续才成立」互补，不是替代：共用同一组单帧原始判据。"""
+    if allowed_headcount is not None and _frame_headcount(frame) > allowed_headcount:
+        return True
+    return bool(_frame_duplicated_names(frame, roster_names))
+
+
+def suspect_window(
+    frames: list[dict[str, Any]], *, allowed_headcount: int | None, roster_names: list[str],
+) -> tuple[float, float] | None:
+    """疑点帧的时间窗（多个疑点取并集后的最小闭区间），没有疑点返回 ``None``。"""
+    names = set(roster_names)
+    suspects = [f for f in frames if _frame_is_suspect(f, allowed_headcount=allowed_headcount, roster_names=names)]
+    if not suspects:
+        return None
+    seconds = [(f["index"] - 1) * subtitle_gate.FRAME_INTERVAL_S for f in suspects]
+    return (max(0.0, min(seconds) - DENSE_WINDOW_RADIUS_S), max(seconds) + DENSE_WINDOW_RADIUS_S)
 
 
 # ---------------------------------------------------------------------------
@@ -443,5 +476,15 @@ async def evaluate_version(job: Any, version: Any, dest: str) -> dict[str, Any] 
         verdict = _unchecked_verdict("VLM 调用失败", version_id, exc)
     else:
         verdict = _judge_parsed_verdict(version_id, parsed, roster_info, roster_names)
+        if not (verdict.get("headcount_exceeded") or verdict.get("character_duplicated")):
+            window = suspect_window(
+                parsed["frames"], allowed_headcount=roster_info["allowed_headcount"], roster_names=roster_names,
+            )
+            if window is not None:
+                # .character_count_dense_recheck 模块级反向导入本模块（复用判据，
+                # 不复刻），本模块模块级引入它会立刻循环；延后到疑点命中（非干净
+                # 视频的常态路径）才 import，此时本模块早已加载完毕，不会循环。
+                from .character_count_dense_recheck import run_dense_recheck
+                verdict = await run_dense_recheck(verdict, window, roster_info["roster"], dest, call_meta)
     write_verdict(version_id, verdict)
     return verdict
