@@ -31,7 +31,13 @@ from typing import Any
 
 from app.portraits.card_owner import resolve_card_owner
 from app.portraits.current_ref import current_portrait_ref
+from app.video_modes.character_look_garments import match_garment_props, resolve_garment_refs
 from app.video_modes.character_look_views_store import get_look_view
+
+# 造型照提示词/种子图合同版本——生成（character_looks_ensure）与扫描（本文件
+# look_input_fingerprint 的过期判定）共用同一个常量，升版即可让存量指纹全部
+# 失效、强制重出。v2（2026-10-02）：种子图新增服装单品参考图，提示词随之改写。
+LOOK_PROMPT_VERSION = "v2"
 
 
 def normalize_look_key_text(wardrobe_text: str) -> str:
@@ -47,6 +53,30 @@ def normalize_look_key_text(wardrobe_text: str) -> str:
 def look_key_for_wardrobe(wardrobe_text: str) -> str:
     normalized = normalize_look_key_text(wardrobe_text)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def look_input_fingerprint(
+    *, front_full_image_path: str, wardrobe_text: str, visual_style: str,
+    garment_refs: list[tuple[str, str]] | None = None,
+) -> str:
+    """造型照「这张图该长什么样」的期望指纹——生成（``character_looks_ensure.
+    claim_or_get``）与扫描（``look_view_status`` 的过期判定）必须调用同一份
+    计算，任何一边各算一份都会在两边不一致时谁都不信谁（CLAUDE.md「指纹单一
+    来源」）。``garment_refs`` 是本段命中的服装道具 ``(name, prop_reference_
+    id)`` 有序列表：换了参考图（道具卡重新登记拿到新 id，见 ``app.props.
+    store`` 覆盖式登记）或命中的道具集合变了，指纹都要跟着变，否则旧造型照
+    会被当成仍然正确而永远不重出。"""
+    material = json.dumps(
+        {
+            "front_full_image_path": front_full_image_path,
+            "wardrobe_text": normalize_look_key_text(wardrobe_text),
+            "visual_style": visual_style,
+            "garment_refs": [list(pair) for pair in (garment_refs or [])],
+            "version": LOOK_PROMPT_VERSION,
+        },
+        ensure_ascii=False, sort_keys=True,
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
 
 
 def identity_id_core(identity_id: str) -> str:
@@ -94,6 +124,19 @@ def ready_look_view(conn: Any, portrait_id: str, look_key: str) -> dict[str, Any
     """供 ``app.multiview._storyboard_pack_asset_dependencies`` 装配期只读查询：
     ``conn`` 必填、不留默认值——调用方身处自己的事务连接里，道理与
     ``app.portraits.current_ref.current_portrait_ref`` 的 ``conn`` 形参说明相同。
+
+    这个装配函数实际有两处调用路径，不算指纹的前提（「生成入口闸门已经在入队
+    前把 stale 刷新过」）只对其中一处成立：① 真正的生成装配
+    （``app.multiview.resolve_shot_asset_dependencies`` → ``app.media_exec.*``/
+    ``app.video_plan.generate``）——这条路径发生在 ``pending_character_looks_
+    gate`` 已经拦过一轮之后，stale 已被刷新；② 分镜台阶段二收尾的
+    ``app.production.storyboard_segment_chain_plan._final_advisory_pass``——这
+    条路径发生在段落草稿刚写完、视频生成闸门还没跑到的时候，看到的可能是
+    上一次（旧版本/旧单品图）生成的 ready 图而不自知过期。后果有限：
+    ``_final_advisory_pass`` 只用这个结果拼 ``degraded_capabilities`` 里的
+    advisory 文案，不会把过期图片真的喂给供应商（真正喂图发生在①），但如果
+    未来有人往这条路径上挂真实生成用途，必须先接上 ``look_view_status`` 的
+    指纹比对，不能照抄这里「只读不算指纹」的前提。
     """
     view = get_look_view(conn, portrait_id, look_key)
     if not view or view.get("status") != "ready":
@@ -104,21 +147,33 @@ def ready_look_view(conn: Any, portrait_id: str, look_key: str) -> dict[str, Any
     return view
 
 
-def look_view_status(conn: Any, portrait_id: str, look_key: str) -> dict[str, Any]:
+def look_view_status(conn: Any, portrait_id: str, look_key: str, expected_fingerprint: str) -> dict[str, Any]:
     """归一化造型照当前状态，供整集扫描/GET 状态接口展示。``ready`` 要求文件仍在
     磁盘上，否则按「相当于没生成过」处理（``missing``）——调用方
     （``character_looks_ensure.ensure_character_looks``）会把 ``missing`` 当缺口
     重新生成，与 ``ready_look_view`` 对装配期的从严判据一致，只是这里额外区分
-    ``running``/``failed`` 两态用于界面展示。"""
+    ``running``/``failed``/``stale`` 三态用于界面展示与补齐调度。
+
+    ``expected_fingerprint``（必填，不留默认值——CLAUDE.md「可选参数是缺陷的
+    温床」）：行上 ``input_fingerprint`` 与它不一致的 ready 行报 ``stale``——
+    画风/种子图/单品图/提示词版本变了，旧图不再代表"这张图该长什么样"，必须
+    重出，而不是被当成仍然正确（此前的缺陷：本函数只看 status=='ready'+文件
+    存在，永远不会因指纹变化而重新生成）。装配期只读选图
+    （``ready_look_view``）不调用本函数、不算指纹——真正喂图给供应商那条装配
+    路径依赖生成入口闸门已经在入队前把 stale 刷新过，重出失败时自然退回定妆
+    照；但 ``ready_look_view`` 还有分镜台 advisory 文案那条装配路径不经过闸
+    门，细节与影响范围见 ``ready_look_view`` 自己的文档。"""
     view = get_look_view(conn, portrait_id, look_key)
     if not view:
         return {"status": "missing", "image_path": None, "error": None}
     status = view.get("status")
     if status == "ready":
         path = view.get("image_path")
-        if path and Path(path).is_file():
-            return {"status": "ready", "image_path": path, "error": None}
-        return {"status": "missing", "image_path": None, "error": None}
+        if not path or not Path(path).is_file():
+            return {"status": "missing", "image_path": None, "error": None}
+        if view.get("input_fingerprint") != expected_fingerprint:
+            return {"status": "stale", "image_path": path, "error": None}
+        return {"status": "ready", "image_path": path, "error": None}
     if status in ("running", "failed"):
         return {"status": status, "image_path": None, "error": view.get("error")}
     return {"status": "missing", "image_path": None, "error": None}
@@ -219,13 +274,21 @@ def _resolve_one_character_look_need(
     if not wardrobe:
         return None
     key = look_key_for_wardrobe(wardrobe)
-    state = look_view_status(conn, current["portrait_id"], key)
+    bible_props = [{"name": p.name, "aliases": p.aliases} for p in bible.props]
+    garment_names = match_garment_props(wardrobe, bible_props)
+    garment_refs = resolve_garment_refs(conn, project_id, episode_no, garment_names)
+    visual_style = bible.world.visual_style_canonical
+    expected_fingerprint = look_input_fingerprint(
+        front_full_image_path=current["image_path"], wardrobe_text=wardrobe, visual_style=visual_style,
+        garment_refs=[(g["name"], g["prop_reference_id"]) for g in garment_refs],
+    )
+    state = look_view_status(conn, current["portrait_id"], key, expected_fingerprint)
     appearance, portrait_prompt = character_portrait_anchor(bible, str(owner))
     return {
         "shot_id": shot_id, "shot_no": shot_no, "identity_id": identity_id, "character_name": name,
         "portrait_id": current["portrait_id"], "front_full_image_path": current["image_path"],
         "appearance": appearance, "portrait_prompt": portrait_prompt,
-        "wardrobe_text": wardrobe, "look_key": key,
+        "wardrobe_text": wardrobe, "look_key": key, "garment_refs": garment_refs,
         "status": state["status"], "image_path": state["image_path"], "error": state["error"],
     }
 

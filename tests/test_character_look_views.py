@@ -212,6 +212,111 @@ def test_scan_episode_character_look_needs_skips_default_wardrobe(conn, tmp_path
     ) == []
 
 
+def test_scan_episode_character_look_needs_reports_stale_when_fingerprint_mismatches(conn, tmp_path):
+    """指纹不同的 ready 行必须报 stale，不能被当成仍然正确——这是本次改造要修
+    的现存缺陷（此前 look_view_status 只看 status=='ready'+文件存在，永远不会
+    因为种子图/画风/单品图/提示词版本变化而重新生成）。"""
+    front_path = _touch(tmp_path, "front.jpg")
+    _seed_portrait(conn, image_path=front_path)
+    look_path = _touch(tmp_path, "look.jpg")
+    key = clv.look_key_for_wardrobe("米白色针织开衫")
+    conn.execute(
+        "INSERT INTO character_look_views(id, project_id, portrait_id, look_key, wardrobe_text, "
+        "image_path, prompt, status, input_fingerprint, created_at, updated_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        ("look_1", "proj_1", "port_1", key, "米白色针织开衫", look_path, "p", "ready",
+         "fp_from_before_the_seed_image_or_version_changed", 1.0, 1.0),
+    )
+    conn.commit()
+    bible = _bible_with("温念")
+    payload = {
+        "resources": {"characters": [{
+            "identity_id": "bible:温念", "display_name": "温念",
+            "wardrobe_matches_default": "no", "visibility": "visible",
+        }]},
+        "continuity_memo": {"characters": [{"identity_id": "bible:温念", "wardrobe": "米白色针织开衫"}]},
+    }
+    row = {
+        "id": "shot_1", "shot_no": 1,
+        "shot_contract_json": json.dumps({"storyboard_pack_segment": payload}),
+    }
+    items = clv.scan_episode_character_look_needs(
+        conn=conn, bible=bible, project_id="proj_1", episode_no=1, shot_rows=[row],
+    )
+    assert len(items) == 1
+    assert items[0]["status"] == "stale"
+
+
+def test_scan_episode_character_look_needs_reports_ready_when_fingerprint_matches(conn, tmp_path):
+    """反向对照：指纹算对了就是 ready，不应该误判成 stale。"""
+    front_path = _touch(tmp_path, "front.jpg")
+    _seed_portrait(conn, image_path=front_path)
+    look_path = _touch(tmp_path, "look.jpg")
+    key = clv.look_key_for_wardrobe("米白色针织开衫")
+    fingerprint = clv.look_input_fingerprint(
+        front_full_image_path=front_path, wardrobe_text="米白色针织开衫",
+        visual_style="国风写实", garment_refs=[],
+    )
+    conn.execute(
+        "INSERT INTO character_look_views(id, project_id, portrait_id, look_key, wardrobe_text, "
+        "image_path, prompt, status, input_fingerprint, created_at, updated_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        ("look_1", "proj_1", "port_1", key, "米白色针织开衫", look_path, "p", "ready", fingerprint, 1.0, 1.0),
+    )
+    conn.commit()
+    bible = _bible_with("温念")
+    payload = {
+        "resources": {"characters": [{
+            "identity_id": "bible:温念", "display_name": "温念",
+            "wardrobe_matches_default": "no", "visibility": "visible",
+        }]},
+        "continuity_memo": {"characters": [{"identity_id": "bible:温念", "wardrobe": "米白色针织开衫"}]},
+    }
+    row = {
+        "id": "shot_1", "shot_no": 1,
+        "shot_contract_json": json.dumps({"storyboard_pack_segment": payload}),
+    }
+    items = clv.scan_episode_character_look_needs(
+        conn=conn, bible=bible, project_id="proj_1", episode_no=1, shot_rows=[row],
+    )
+    assert len(items) == 1
+    assert items[0]["status"] == "ready"
+
+
+# ---------- look_input_fingerprint ----------
+
+def test_look_input_fingerprint_changes_with_garment_refs():
+    """换了命中的单品参考图（名字或 prop_reference_id 任一变化）都要算出新
+    指纹，否则道具卡重新登记拿到新图后旧造型照不会被判过期。"""
+    base = clv.look_input_fingerprint(
+        front_full_image_path="/tmp/front.jpg", wardrobe_text="w", visual_style="国风写实", garment_refs=[],
+    )
+    with_one_garment = clv.look_input_fingerprint(
+        front_full_image_path="/tmp/front.jpg", wardrobe_text="w", visual_style="国风写实",
+        garment_refs=[("外套", "prop_rev_1")],
+    )
+    with_new_prop_revision = clv.look_input_fingerprint(
+        front_full_image_path="/tmp/front.jpg", wardrobe_text="w", visual_style="国风写实",
+        garment_refs=[("外套", "prop_rev_2")],
+    )
+    assert base != with_one_garment
+    assert with_one_garment != with_new_prop_revision
+
+
+def test_look_input_fingerprint_order_sensitive():
+    """单品顺序变化也要算出不同指纹——顺序决定了提示词里"第 2 张/第 3 张"分别
+    对应哪件单品，顺序错了画面与文案就对不上。"""
+    a = clv.look_input_fingerprint(
+        front_full_image_path="/tmp/front.jpg", wardrobe_text="w", visual_style="国风写实",
+        garment_refs=[("外套", "r1"), ("围巾", "r2")],
+    )
+    b = clv.look_input_fingerprint(
+        front_full_image_path="/tmp/front.jpg", wardrobe_text="w", visual_style="国风写实",
+        garment_refs=[("围巾", "r2"), ("外套", "r1")],
+    )
+    assert a != b
+
+
 def test_scan_episode_character_look_needs_skips_voice_only():
     bible = _bible_with("温念")
     payload = {"resources": {"characters": [{

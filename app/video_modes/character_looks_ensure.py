@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import sqlite3
 from pathlib import Path
@@ -64,7 +63,8 @@ from app.refs import (
     production_appearance_anchor,
 )
 from app.video_modes.character_look_views import (
-    normalize_look_key_text,
+    LOOK_PROMPT_VERSION,
+    look_input_fingerprint,
     scan_episode_character_look_needs,
 )
 from app.video_modes.character_look_views_store import (
@@ -78,26 +78,44 @@ from app.video_modes.character_look_views_store import (
 log = logging.getLogger(__name__)
 
 _RUNNING_STALE_S = 600.0  # 10 分钟：单张图生成远不需要这么久，超时视为僵死可重新抢占
-_LOOK_PROMPT_VERSION = "v1"
 _MAX_CONCURRENT_LOOKS = 3
 _BACKGROUND_ENSURE_TASKS: set[asyncio.Task[None]] = set()
 
 
+def _garment_reference_clause(wardrobe: str, garment_names: list[str]) -> str:
+    """种子图第 2 张起依次是服装单品参考图时的对应关系正面陈述（见派单：脸
+    与单品各信各的来源图，不让模型靠猜）；``garment_names`` 为空时保持改造
+    前的提示词语义（种子图只有定妆照一张，服装全按 wardrobe 文字描述）。"""
+    if not garment_names:
+        return (
+            "本视角的构图合同优先于前文关于默认定妆照服装、配饰的任何描述——参考图中出现的原有服装、配饰与颜色一律不得"
+            f"带入本视角画面，本段实际穿着以下列描述为准：{wardrobe}。"
+        )
+    listed = "、".join(garment_names)
+    return (
+        f"本次共 {1 + len(garment_names)} 张参考图，按顺序各自的作用互不相同："
+        "第 1 张参考图是本人——脸、发型、体型以它为准，它身上原有的服装、配饰与颜色一律不得带入本视角画面；"
+        f"第 2 张起依次是本段服装单品参考图：{listed}——这些单品的款式、颜色、材质、扣子、袖口、口袋等细节以对应"
+        f"单品图为准，按下列描述穿在本人身上：{wardrobe}。"
+    )
+
+
 def character_look_prompt(
     visual_style: str, appearance: str, portrait_prompt: str | None, wardrobe_text: str,
+    garment_names: list[str] | None = None,
 ) -> str:
     raw_source = portrait_override_appearance_anchor(appearance, portrait_prompt) or production_appearance_anchor(appearance)
     source = normalize_prompt_text(
         raw_source.replace(f"{_PORTRAIT_CLOTHING_CONTRACT}。", "").replace(_PORTRAIT_CLOTHING_CONTRACT, ""),
     )
     wardrobe = normalize_prompt_text(wardrobe_text).strip()
+    reference_clause = _garment_reference_clause(wardrobe, garment_names or [])
     return (
         f"{character_visual_style_lock(visual_style)}。"
         f"角色外观真值锚点：{source}。"
         "外观补充与全局画风是两个独立合同；冲突时全局画风优先，不得按外观文案关键词删除或重写内容。"
         "生成同一角色本段造型照：正面全身立绘入画，全身完整可见，中性站姿，双臂自然，头部与面部在画面中占比较小；"
-        "本视角的构图合同优先于前文关于默认定妆照服装、配饰的任何描述——参考图中出现的原有服装、配饰与颜色一律不得"
-        f"带入本视角画面，本段实际穿着以下列描述为准：{wardrobe}。"
+        f"{reference_clause}"
         "纯浅色背景，单角色，不得出现第二个人物。"
         "同一角色、只改变本段服装，不改变脸部、发型、体型这类稳定身份；结果必须满足结构化资产 QA。"
     )
@@ -110,23 +128,13 @@ def _look_image_path(project_id: str, portrait_id: str, look_key: str) -> str:
 
 
 def _look_operation_id(portrait_id: str, look_key: str, fingerprint: str) -> str:
-    """指纹必须并进 material：定妆照换图/画风变了会算出新指纹，这里不带上它的话，
-    ``reuse_successful_operation`` 会按旧 operation_id 把过期的旧图原样复用回来。"""
-    material = f"{portrait_id}:{look_key}:{fingerprint}:{_LOOK_PROMPT_VERSION}"
+    """指纹必须并进 material：定妆照换图/画风/单品参考图变了会算出新指纹，这里
+    不带上它的话，``reuse_successful_operation`` 会按旧 operation_id 把过期的
+    旧图原样复用回来。``fingerprint`` 本身已经把 ``LOOK_PROMPT_VERSION`` 并进
+    去了（见 ``character_look_views.look_input_fingerprint``），这里再带一次
+    版本号是双重保险，不是必需但无害。"""
+    material = f"{portrait_id}:{look_key}:{fingerprint}:{LOOK_PROMPT_VERSION}"
     return "op_character_look_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
-
-
-def _look_input_fingerprint(*, front_full_image_path: str, wardrobe_text: str, visual_style: str) -> str:
-    material = json.dumps(
-        {
-            "front_full_image_path": front_full_image_path,
-            "wardrobe_text": normalize_look_key_text(wardrobe_text),
-            "visual_style": visual_style,
-            "version": _LOOK_PROMPT_VERSION,
-        },
-        ensure_ascii=False, sort_keys=True,
-    )
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
 
 
 async def _save_look_image_item(item: dict, dest: str) -> None:
@@ -201,11 +209,24 @@ async def _mark_failed(*, row_id: str, error: str) -> None:
     await db.run_write_transaction(_operation)
 
 
+def _look_seed_inputs(front_path: str, garment_refs: list[dict[str, Any]]) -> list[str]:
+    """种子图顺序固定：[全身定妆照, 单品1, 单品2, ...]——与
+    ``_garment_reference_clause`` 里"第 1 张/第 2 张起"的文字描述必须一一对应，
+    两边任何一边改了顺序另一边也要跟着改。单品图路径在 ``resolve_garment_
+    refs`` 查出时已校验落盘存在，这里不重复判断——真丢了直接让
+    ``data_url_from_file`` 报错，按外层既有的"生成失败"口径处理，不静默跳过。"""
+    return [hiagent.data_url_from_file(front_path)] + [
+        hiagent.data_url_from_file(ref["image_path"]) for ref in garment_refs
+    ]
+
+
 async def _generate_one_look(*, project_id: str, visual_style: str, spec: dict[str, Any]) -> None:
     portrait_id, key, wardrobe = spec["portrait_id"], spec["look_key"], spec["wardrobe_text"]
     front_path = spec["front_full_image_path"]
-    fingerprint = _look_input_fingerprint(
+    garment_refs: list[dict[str, Any]] = spec.get("garment_refs") or []
+    fingerprint = look_input_fingerprint(
         front_full_image_path=front_path, wardrobe_text=wardrobe, visual_style=visual_style,
+        garment_refs=[(ref["name"], ref["prop_reference_id"]) for ref in garment_refs],
     )
     row, should_generate = await claim_or_get(
         project_id=project_id, portrait_id=portrait_id, look_key=key,
@@ -217,9 +238,10 @@ async def _generate_one_look(*, project_id: str, visual_style: str, spec: dict[s
         # 没有种子图出来的脸必然不是同一个人——宁可失败也不猜。
         await _mark_failed(row_id=row["id"], error="定妆照全身图缺失，无法生成造型照；先到人物谱补齐定妆照")
         return
-    prompt = character_look_prompt(visual_style, spec["appearance"], spec["portrait_prompt"], wardrobe)
+    garment_names = [ref["name"] for ref in garment_refs]
+    prompt = character_look_prompt(visual_style, spec["appearance"], spec["portrait_prompt"], wardrobe, garment_names)
     try:
-        seed = [hiagent.data_url_from_file(front_path)]
+        seed = _look_seed_inputs(front_path, garment_refs)
         path = _look_image_path(project_id, portrait_id, key)
         item = await hiagent.generate_image(
             prompt, size=config.REF_IMAGE_SIZE, image_inputs=seed,
@@ -248,10 +270,18 @@ def load_target_shot_rows(conn: Any, episode_id: str, shot_ids: list[str] | None
 
 
 def summarize_look_items(items: list[dict[str, Any]]) -> dict[str, int]:
+    """``stale``（指纹已过期的旧 ready 图，见 ``character_look_views.look_view_
+    status``）计入 ``missing`` 桶——对界面来说它和"还没生成"是同一件事：都需
+    要排队重出，前端类型不新增一档。"""
     summary = {"ready": 0, "generating": 0, "failed": 0, "missing": 0}
     for item in items:
         status = item.get("status")
-        key = "generating" if status == "running" else status
+        if status == "running":
+            key = "generating"
+        elif status == "stale":
+            key = "missing"
+        else:
+            key = status
         if key in summary:
             summary[key] += 1
     return summary
@@ -294,7 +324,9 @@ async def ensure_character_looks(
             (item["portrait_id"], item["look_key"]): item
             # running 也进候选：是否真的重做交给 claim_or_get——未超时的跳过，超时僵死的（进程重启
             # 时正在生成）才回收；只挑 missing/failed 会让僵死 running 永远没人收，闸门永久拦截。
-            for item in items if item["status"] in ("missing", "failed", "running")
+            # stale（指纹已过期的旧 ready 图）同样进候选——claim_or_get 会因为新旧指纹不等而重做，
+            # 不进候选的话过期造型照永远不会被重新生成（见 character_look_views.look_view_status）。
+            for item in items if item["status"] in ("missing", "failed", "running", "stale")
         }
         if tasks:
             semaphore = asyncio.Semaphore(_MAX_CONCURRENT_LOOKS)
@@ -364,11 +396,12 @@ async def pending_character_looks_gate(
     project_id: str, episode_id: str, shot_ids: list[str] | None = None,
 ) -> str | None:
     """生成入口闸门（P0）：只读扫描目标段（``shot_ids`` 为 ``None`` 时整集）的
-    造型照需求，``missing``/``running`` 计为待补。有待补时返回一条中文提示供
-    调用方 409 拦截；``shot_ids`` 非空时按"本段"措辞，否则按"本集"。含
-    ``missing`` 时顺带后台启动一次补齐（``running`` 已经有别的调用在生成，不必
-    再触发）。``failed`` 不拦——照常生成，选图会退回定妆照并留可见提示。项目
-    没有 bible、或扫不到任何需求时放行（返回 ``None``）。
+    造型照需求，``missing``/``running``/``stale``（指纹已过期的旧 ready 图，见
+    ``character_look_views.look_view_status``）计为待补。有待补时返回一条中文
+    提示供调用方 409 拦截；``shot_ids`` 非空时按"本段"措辞，否则按"本集"。
+    含 ``missing``/``stale`` 时顺带后台启动一次补齐（``running`` 已经有别的
+    调用在生成，不必再触发）。``failed`` 不拦——照常生成，选图会退回定妆照并
+    留可见提示。项目没有 bible、或扫不到任何需求时放行（返回 ``None``）。
     """
     conn = get_conn()
     episode_row = conn.execute("SELECT episode_no FROM episodes WHERE id=?", (episode_id,)).fetchone()
@@ -382,7 +415,7 @@ async def pending_character_looks_gate(
         conn=conn, bible=bible, project_id=project_id,
         episode_no=int(episode_row["episode_no"]), shot_rows=rows,
     )
-    pending = [item for item in items if item["status"] in ("missing", "running")]
+    pending = [item for item in items if item["status"] in ("missing", "running", "stale")]
     if not pending:
         return None
     # 含 running 也启动：僵死的 running（进程重启时正在生成）只有 ensure 的 claim_or_get 能回收，未超时的会被它跳过

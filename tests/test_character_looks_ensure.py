@@ -23,7 +23,7 @@ from app import db as db_mod
 from app import hiagent
 from app.db import get_conn
 from app.video_modes import character_looks_ensure as ensure_mod
-from app.video_modes.character_look_views import look_key_for_wardrobe
+from app.video_modes.character_look_views import look_input_fingerprint, look_key_for_wardrobe
 from app.video_modes.character_look_views_store import ensure_tables_on_connection
 
 
@@ -372,10 +372,16 @@ def test_pending_character_looks_gate_ready_passes_through(tmp_path, monkeypatch
     look_key = look_key_for_wardrobe("米白色针织开衫")
     look_path = tmp_path / "look_ready.jpg"
     look_path.write_bytes(b"fake")
+    # 指纹必须是真实算出来的那份（与 _seed_episode_with_look_need 里的
+    # front.jpg/wardrobe/visual_style/空单品列表一致），否则会被判 stale。
+    fingerprint = look_input_fingerprint(
+        front_full_image_path=str(tmp_path / "front.jpg"), wardrobe_text="米白色针织开衫",
+        visual_style="国风写实", garment_refs=[],
+    )
     _seed_look_row(
         id="look_ready", project_id=project_id, portrait_id="port_ensure_1", look_key=look_key,
         wardrobe_text="米白色针织开衫", image_path=str(look_path), prompt="p", status="ready",
-        input_fingerprint="fp", created_at=1.0, updated_at=1.0,
+        input_fingerprint=fingerprint, created_at=1.0, updated_at=1.0,
     )
     launched = []
     monkeypatch.setattr(ensure_mod, "launch_background_ensure", lambda **kw: launched.append(kw))
@@ -384,6 +390,70 @@ def test_pending_character_looks_gate_ready_passes_through(tmp_path, monkeypatch
 
     assert message is None
     assert launched == []
+
+
+# ---------- stale（指纹过期）：扫描报 stale、ensure 重出、闸门待补 ----------
+
+def test_ensure_regenerates_stale_ready_look(tmp_path, monkeypatch):
+    """定妆照/画风/单品参考图/提示词版本变了，旧 ready 行的指纹对不上——不能
+    一直复用过期产物，ensure 必须重新调用 generate_image。"""
+    project_id, episode_id = _seed_episode_with_look_need(tmp_path)
+    look_key = look_key_for_wardrobe("米白色针织开衫")
+    look_path = tmp_path / "look_stale.jpg"
+    look_path.write_bytes(b"fake")
+    _seed_look_row(
+        id="look_stale_fp", project_id=project_id, portrait_id="port_ensure_1", look_key=look_key,
+        wardrobe_text="米白色针织开衫", image_path=str(look_path), prompt="p", status="ready",
+        input_fingerprint="fp_from_an_older_version", created_at=1.0, updated_at=1.0,
+    )
+    calls = _count_generate_calls(monkeypatch)
+
+    result = asyncio.run(ensure_mod.ensure_character_looks(project_id=project_id, episode_id=episode_id))
+
+    assert calls["count"] == 1
+    assert result["items"][0]["status"] == "ready"
+
+
+def test_pending_character_looks_gate_stale_blocks_and_launches_ensure(tmp_path, monkeypatch):
+    project_id, episode_id = _seed_episode_with_look_need(tmp_path)
+    look_key = look_key_for_wardrobe("米白色针织开衫")
+    look_path = tmp_path / "look_stale.jpg"
+    look_path.write_bytes(b"fake")
+    _seed_look_row(
+        id="look_stale_gate", project_id=project_id, portrait_id="port_ensure_1", look_key=look_key,
+        wardrobe_text="米白色针织开衫", image_path=str(look_path), prompt="p", status="ready",
+        input_fingerprint="fp_from_an_older_version", created_at=1.0, updated_at=1.0,
+    )
+    launched = []
+    monkeypatch.setattr(ensure_mod, "launch_background_ensure", lambda **kw: launched.append(kw))
+
+    message = asyncio.run(ensure_mod.pending_character_looks_gate(project_id, episode_id, None))
+
+    assert message is not None
+    assert len(launched) == 1
+
+
+def test_summarize_look_items_counts_stale_as_missing():
+    items = [{"status": "stale"}, {"status": "ready"}, {"status": "stale"}]
+    assert ensure_mod.summarize_look_items(items) == {"ready": 1, "generating": 0, "failed": 0, "missing": 2}
+
+
+# ---------- 版本号升级使旧指纹失效 ----------
+
+def test_look_prompt_version_bump_changes_fingerprint(monkeypatch):
+    """``LOOK_PROMPT_VERSION`` 并进了指纹计算的 material 里：单纯升版（即便
+    定妆照/wardrobe/画风/单品全不变）也必须算出不同指纹，否则存量第 1 集那
+    7 张旧造型照永远不会因为"种子图新增单品图"这个改动被重出。"""
+    from app.video_modes import character_look_views as clv_mod
+
+    fp_v2 = look_input_fingerprint(
+        front_full_image_path="/tmp/front.jpg", wardrobe_text="w", visual_style="国风", garment_refs=[],
+    )
+    monkeypatch.setattr(clv_mod, "LOOK_PROMPT_VERSION", "v0_pretend_old")
+    fp_v0 = look_input_fingerprint(
+        front_full_image_path="/tmp/front.jpg", wardrobe_text="w", visual_style="国风", garment_refs=[],
+    )
+    assert fp_v2 != fp_v0
 
 
 def test_pending_character_looks_gate_failed_passes_through(tmp_path):
