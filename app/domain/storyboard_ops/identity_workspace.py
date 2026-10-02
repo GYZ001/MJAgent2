@@ -85,8 +85,20 @@ def _source_requirements(conn, episode: dict, payload: dict, segment: dict) -> l
 def prepare_identity_candidate(conn, *, shot_id: str, candidate: dict) -> dict:
     row, episode, payload, original = load_identity_workspace(conn, shot_id)
     result = deepcopy(original)
-    # 修改范围固定，客户端不能顺带更改时长、镜头号、来源范围或整集规划。
-    for key in ("dialogue", "resources", "speech_template", "prompt_text"):
+    # 修改范围固定，客户端不能顺带更改时长、镜头号、来源范围或整集规划——这些
+    # 字段不在下面的名单里，始终来自 ``original``。名单里的字段是「模型重写
+    # 这一段」会产出、且确实落库的全部正文内容（对齐 StoryboardPackSegment）：
+    # 2026-10-01 真实回归（ep_a3c61162b4ce EP1 段28，「修订本段」重写出 8 件
+    # 道具，合同落库仍是旧的 3 件）根因是这里曾经只认 4 个键，且对
+    # resources.scenes/props 额外强制钉回 original——2026-09-08 这个工作区
+    # 最初只为编辑发声/可见性设计（人工改一两个字段，不该让人顺手把场景/
+    # 道具换掉），但 2026-09-29（feat 8d12d946）「修订本段」全段模型重写上线
+    # 后，这道钉子变成了丢数据：下游参考图装配（app.video_modes.prop_references.
+    # resolve_segment_prop_manifest_entries 读 resources.props）拿不到新道具，
+    # 正文写了、参考图没送，模型凭空画。continuity_memo/degraded_capabilities
+    # 同一根因一并补上——两者都不参与 identity_contract_fingerprint（见该函数
+    # 字段集合），改它们不会让存量视频复用键变化。
+    for key in ("dialogue", "resources", "speech_template", "prompt_text", "continuity_memo", "degraded_capabilities"):
         if key in candidate:
             result[key] = deepcopy(candidate[key])
     errors = identity_schema_errors(result)
@@ -95,8 +107,6 @@ def prepare_identity_candidate(conn, *, shot_id: str, candidate: dict) -> dict:
     if errors:
         raise ValueError("；".join(errors))
     result["speech_dialect"] = "minimax_h3_native_fields" if original.get("target_model") == "minimax_h3" else "seedance_compact_director_brief"
-    result["resources"]["scenes"] = (original.get("resources") or {}).get("scenes") or []
-    result["resources"]["props"] = (original.get("resources") or {}).get("props") or []
     result["required_dialogue"] = _source_requirements(conn, episode, payload, original)
     result["degraded_capabilities"] = [n for n in result.get("degraded_capabilities") or [] if "STORYBOARD_IDENTITY_" not in n]
     result = canonical_segment_identities(result, payload)

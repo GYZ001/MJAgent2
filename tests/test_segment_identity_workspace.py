@@ -20,6 +20,7 @@ from app.production.storyboard_identity_regenerate import regenerate_identity_ca
 from app.production.storyboard_pack import _AiStoryboardSegmentDraft
 from app.production.storyboard_speech_render import render_segment_speech
 from app.schemas import Bible
+from app.video_modes.prop_references import resolve_segment_prop_manifest_entries
 from tests.conftest import SessionTestClient
 
 
@@ -80,6 +81,37 @@ def test_preview_is_read_only_and_apply_retains_history_and_sibling(fixture):
     assert [(v["id"],v["status"]) for v in versions] == [("v1","stale"),("v2","succeeded")]
     assert all(path.read_bytes() == b"original-video-must-survive" for path in paths)
     assert read_independent("SELECT status FROM artifacts WHERE id=?",(result["artifact_id"],))[0]["status"] == "approved"
+
+
+def test_apply_adopts_candidate_resources_props_scenes_not_pinned_to_original(fixture):
+    """真实回归 ep_a3c61162b4ce EP1 段28：「修订本段」重写出 8 件道具（含「水泡坏的
+    行李箱」），apply 返回 200 后合同 resources.props 仍是旧的 3 件——根因是
+    ``prepare_identity_candidate`` 曾把 resources.scenes/props 强制钉回 original，
+    丢弃候选里分镜模型重写的内容；continuity_memo/degraded_capabilities 同一根因。
+    候选刻意不触碰 characters/dialogue，排除人物可见性变化带来的定妆照告警噪音。"""
+    conn, segment, _, _ = fixture
+    candidate = deepcopy(segment)
+    candidate["resources"]["props"] = [
+        {"label": "水泡坏的行李箱", "description": "香槟金铝框行李箱，边角泡水发黑"},
+        {"label": "小木星星", "description": "沿用既有道具"},
+    ]
+    candidate["resources"]["scenes"] = [{"scene_id": "scene:出租屋", "scene_reference_id": None, "description": "分镜模型新增的场景"}]
+    candidate["continuity_memo"] = {"time_of_day": "夜晚"}
+    candidate["degraded_capabilities"] = ["[STORYBOARD_PROP_APPEARANCE_LOCK_STALE_ADAPTATION][未拦截] 测试占位告警"]
+
+    prepared = workspace.prepare_identity_candidate(conn, shot_id="s1", candidate=candidate)
+    assert prepared["resources"]["props"] == candidate["resources"]["props"]
+    assert prepared["resources"]["scenes"] == candidate["resources"]["scenes"]
+    assert prepared["continuity_memo"] == {"time_of_day": "夜晚"}
+    assert prepared["degraded_capabilities"] == candidate["degraded_capabilities"]
+
+    workspace.save_identity_candidate(conn, shot_id="s1", baseline=identity_contract_fingerprint(segment), candidate=candidate)
+    stored = json.loads(read_independent("SELECT shot_contract_json FROM shots WHERE id='s1'")[0]["shot_contract_json"])["storyboard_pack_segment"]
+    assert stored["resources"]["props"] == candidate["resources"]["props"]
+    assert stored["continuity_memo"] == {"time_of_day": "夜晚"}
+
+    manifest_entries = resolve_segment_prop_manifest_entries(stored["resources"]["props"], conn=conn, project_id="p", episode_no=5)
+    assert [entry["label"] for entry in manifest_entries] == ["水泡坏的行李箱", "小木星星"]
 
 
 def test_failed_artifact_write_rolls_back_everything(fixture, monkeypatch):
