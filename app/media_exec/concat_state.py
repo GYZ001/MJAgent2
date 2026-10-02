@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 from app import task_registry
+from app.db import now
 
 TASK_KIND = "concat"
 _last_error: dict[str, str] = {}
+_last_error_at: dict[str, float] = {}
 
 
 def in_progress(episode_id: str) -> bool:
@@ -19,14 +21,20 @@ def in_progress(episode_id: str) -> bool:
 
 def record_error(episode_id: str, message: str) -> None:
     _last_error[episode_id] = str(message or "合成失败")[:600]
+    _last_error_at[episode_id] = now()
 
 
 def clear_error(episode_id: str) -> None:
     _last_error.pop(episode_id, None)
+    _last_error_at.pop(episode_id, None)
 
 
 def last_error(episode_id: str) -> str | None:
     return _last_error.get(episode_id)
 
 
-__all__ = ["TASK_KIND", "clear_error", "in_progress", "last_error", "record_error"]
+def last_error_at(episode_id: str) -> float | None:
+    return _last_error_at.get(episode_id)
+
+
+__all__ = ["TASK_KIND", "clear_error", "in_progress", "last_error", "last_error_at", "record_error"]

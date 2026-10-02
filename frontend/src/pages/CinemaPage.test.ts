@@ -179,3 +179,24 @@ describe('成片台——已有 ep 时后台轮询刷新失败不得被吞', () 
     expect(source).toMatch(/<StaleRefreshBanner error=\{error\} onRetry=\{\(\) => void refreshEpisode\(\)\} objectName="成片台" \/>/)
   })
 })
+
+// 2026-10-01 生产事故：concatenate() 同步报错（如合片幂等键已冻结旧的分镜发布
+// 权威/已采纳视频清单，后端返回 409）时，catch 分支此前没有清掉持久化的幂等
+// 键——下一次点击复用同一个已经注定冲突的键，界面看起来像"点了合成也没用"。
+// 同前一段同样的理由：本页无组件渲染测试基建，用源码静态扫描守住 catch 分支
+// 必须在报错提示之前清键，不回归。
+describe('成片台——合成同步报错必须清掉持久化幂等键', () => {
+  it('catch 分支里 removeItem 排在 toast 之前，且作用在同一个 concat 键上', () => {
+    const start = source.indexOf('const concatenate = async () => {')
+    const end = source.indexOf('\n  }\n', start)
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    const body = source.slice(start, end)
+    const catchStart = body.indexOf('} catch (e) {')
+    expect(catchStart).toBeGreaterThan(-1)
+    const catchBody = body.slice(catchStart)
+    expect(catchBody).toMatch(/localStorage\.removeItem\(deliveryOperationStorageKey\(`concat:\$\{ep\.id\}`\)\)/)
+    expect(catchBody.indexOf('localStorage.removeItem'))
+      .toBeLessThan(catchBody.indexOf('toast((e as Error).message, true)'))
+  })
+})

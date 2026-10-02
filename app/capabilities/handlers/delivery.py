@@ -25,10 +25,21 @@ async def _concatenate_background(worker, args, *, request_fingerprint: str, cla
         concat_state.clear_error(args.episode_id)
     except Exception as exc:  # noqa: BLE001 后台任务没有调用方接异常：释放 receipt、记下原因供成片台展示
         worker.release_concat_operation(
-            idempotency_key=args.idempotency_key or "", request_fingerprint=request_fingerprint, claim_token=claim_token,
+            idempotency_key=args.idempotency_key or "", request_fingerprint=request_fingerprint,
+            claim_token=claim_token, reason=str(exc),
         )
         concat_state.record_error(args.episode_id, str(exc))
         _LOGGER.warning("[CONCAT][后台失败] 集 %s：%s", args.episode_id, exc)
+
+
+# 2026-10-01 生产事故根因：下面两处 accepted() 曾经只在 data 里写
+# "concat_in_progress"，没有写 Command Bus 识别"仍在途、不是终态"所用的
+# "idempotency_in_progress"（见 app/capabilities/bus.py::_is_domain_operation_in_progress，
+# app/capabilities/handlers/video.py 四处都正确带了这个键）。两个键名不一致导致
+# 这条"合成已受理"的响应被当成终态缓存进 24 小时的 command_idempotency 表——
+# 用户同一个幂等键的后续点击全部被这条缓存直接拦截重放，处理器、
+# claim_concat_operation、concatenate_episode 都不会再被调用，"点了合成也没用"。
+_BACKGROUND_STARTED_DATA = {"concat_in_progress": True, "idempotency_in_progress": True}
 
 
 def _spawn_background(worker, args, *, request_fingerprint: str, claim_token: str, **operation) -> CommandResult:
@@ -39,7 +50,7 @@ def _spawn_background(worker, args, *, request_fingerprint: str, claim_token: st
     task_registry.spawn(concat_state.TASK_KIND, args.episode_id, _concatenate_background(
         worker, args, request_fingerprint=request_fingerprint, claim_token=claim_token, **operation,
     ))
-    return accepted("成片合成已在后台开始，完成后成片台自动刷新", data={"concat_in_progress": True},
+    return accepted("成片合成已在后台开始，完成后成片台自动刷新", data=dict(_BACKGROUND_STARTED_DATA),
                     resource_uris=[f"manju://episodes/{args.episode_id}/delivery"])
 
 
@@ -49,7 +60,7 @@ async def concatenate(args: I.DeliveryConcatenateInput) -> CommandResult:
     from app.media_exec import concat_state
 
     if concat_state.in_progress(args.episode_id):
-        return accepted("本集成片正在后台合成中", data={"concat_in_progress": True},
+        return accepted("本集成片正在后台合成中", data=dict(_BACKGROUND_STARTED_DATA),
                         resource_uris=[f"manju://episodes/{args.episode_id}/delivery"])
 
     request_fingerprint = canonical_command_request_fingerprint(
@@ -110,15 +121,38 @@ async def concatenate(args: I.DeliveryConcatenateInput) -> CommandResult:
                      operation_release_authority=release_authority, operation_video_delivery_manifest=video_delivery_manifest)
     if getattr(args, "background", False):  # 旧调用方仍传 EpisodeScopedInput
         return _spawn_background(worker, args, request_fingerprint=request_fingerprint, claim_token=claim_token, **operation)
-    outcome = await call_guarded(_concatenate_in_thread, worker, args, **operation)
+    try:
+        outcome = await call_guarded(_concatenate_in_thread, worker, args, **operation)
+    except Exception as exc:
+        # call_guarded 只兜 HTTPException/ArtifactNeedsRebuildError/ValueError/KeyError，
+        # ffmpeg/ASR 常见的 RuntimeError/OSError/subprocess 异常会原样穿透到这里。不先释放
+        # claim_concat_operation 已置的 running 租约（2 小时）就重新抛出，会复现
+        # 2026-10-01 生产事故同一类故障："点了合成也没用"——receipt 卡在运行中直到租约超时。
+        # asyncio.CancelledError 是 BaseException，不会落进这个 except，按需求不在本次处理范围内。
+        _release_after_sync_exception(worker, args, exc, request_fingerprint=request_fingerprint, claim_token=claim_token)
+        raise
     if isinstance(outcome, CommandResult):
-        worker.release_concat_operation(
-            idempotency_key=args.idempotency_key or "",
-            request_fingerprint=request_fingerprint,
-            claim_token=claim_token,
-        )
+        _release_after_sync_failure(worker, args, outcome, request_fingerprint=request_fingerprint, claim_token=claim_token)
         return outcome
     return succeeded("本集已按镜号顺序拼接成片", data=outcome, resource_uris=[f"manju://episodes/{args.episode_id}/delivery"])
+
+
+def _release_after_sync_failure(worker, args, outcome: CommandResult, *, request_fingerprint: str, claim_token: str) -> None:
+    worker.release_concat_operation(
+        idempotency_key=args.idempotency_key or "", request_fingerprint=request_fingerprint,
+        claim_token=claim_token, reason=outcome.summary,
+    )
+
+
+def _release_after_sync_exception(worker, args, exc: Exception, *, request_fingerprint: str, claim_token: str) -> None:
+    reason = f"{type(exc).__name__}: {exc}"
+    try:
+        worker.release_concat_operation(
+            idempotency_key=args.idempotency_key or "", request_fingerprint=request_fingerprint,
+            claim_token=claim_token, reason=reason,
+        )
+    except Exception:  # noqa: BLE001 释放本身失败只能记日志，不能掩盖原异常（原异常由调用方 raise）
+        _LOGGER.exception("[CONCAT][同步失败释放异常] 集 %s 释放 receipt 失败，原异常：%s", args.episode_id, exc)
 
 
 async def check(args: I.EpisodeScopedInput) -> CommandResult:

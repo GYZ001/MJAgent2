@@ -19,7 +19,7 @@ from app.media_pipeline.delivery_encode import (
     low_priority, encode_timeout_s, probe_resolution, probe_video_codec, uniform_resolution,
 )
 from app.media_urls import build_media_url
-from app.media_exec import concat_auto_adopt, concat_state  # noqa: E402 —— 与 subtitle_episode 同组
+from app.media_exec import concat_auto_adopt, concat_receipt_status, concat_state  # noqa: E402 —— 与 subtitle_episode 同组
 from app.media_exec import concat_draft
 from app.media_exec.concat_draft import _piece_video_args, _run_concat_demuxer  # 见 concat_draft 模块 docstring
 from app.project_settings import ai_label_enabled, canvas_size, resolve_aspect_ratio
@@ -187,8 +187,8 @@ def claim_concat_operation(
             raise ConcatOperationInProgress("相同合片操作正在执行")
         updated = conn.execute(
             """UPDATE concat_operation_receipts
-                  SET claim_token=?,lease_expires_at=?,updated_at=?
-                WHERE operation_key=? AND status='running' AND lease_expires_at<=?""",
+                  SET claim_token=?,status='running',lease_expires_at=?,updated_at=?
+                WHERE operation_key=? AND status IN ('running','failed') AND lease_expires_at<=?""",
             (
                 owner,
                 stamp + _CONCAT_OPERATION_LEASE_S,
@@ -232,23 +232,20 @@ def claim_concat_operation(
 
 
 def release_concat_operation(
-    *, idempotency_key: str, request_fingerprint: str, claim_token: str,
+    *, idempotency_key: str, request_fingerprint: str, claim_token: str, reason: str,
 ) -> None:
-    """Expire a failed owner while preserving its frozen source snapshot."""
+    """落成终态 ``failed``（不停在 ``running``）：``reason`` 必传（Ownership），写进
+    ``result_json`` 供人工/mix-status 读取；冻结的授权/清单快照原样保留供下次同键
+    判漂移。``claim_concat_operation`` 的 CAS 允许从 ``failed`` 重新认领，不会锁死。"""
     conn = get_conn()
     _ensure_concat_operation_receipts(conn)
+    result_json = json.dumps({"error": str(reason)[:2000], "guidance": "请重新点击合成重试"}, ensure_ascii=False)
     conn.execute(
         """UPDATE concat_operation_receipts
-              SET lease_expires_at=0,updated_at=?
+              SET status='failed',lease_expires_at=0,result_json=?,updated_at=?
             WHERE operation_key=? AND command=? AND request_fingerprint=?
               AND claim_token=? AND status='running'""",
-        (
-            now(),
-            _concat_operation_key(idempotency_key),
-            _CONCAT_COMMAND,
-            request_fingerprint,
-            claim_token,
-        ),
+        (result_json, now(), _concat_operation_key(idempotency_key), _CONCAT_COMMAND, request_fingerprint, claim_token),
     )
     conn.commit()
 
@@ -919,6 +916,7 @@ def episode_mix_status(episode_id: str) -> dict:
         "final_edit_report": subtitle_episode.trim_report_for_projection(final_edit_report),
         "subtitle_srt_url": subtitle_episode.srt_sidecar_url(final_path, final_edit_report),
         "concat_in_progress": concat_state.in_progress(episode_id), "concat_last_error": concat_state.last_error(episode_id),
+        "concat_last_error_at": concat_state.last_error_at(episode_id), "concat_receipt": concat_receipt_status.latest_receipt_outcome(conn, episode_id),
         "shots": out,
     }
 

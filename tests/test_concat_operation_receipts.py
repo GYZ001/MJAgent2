@@ -175,6 +175,7 @@ def test_concat_claim_freezes_authority_and_manifest_across_restart(monkeypatch)
         idempotency_key="frozen-concat",
         request_fingerprint="same-request",
         claim_token=owner,
+        reason="合片发布前已采纳视频发生漂移",
     )
 
     with pytest.raises(worker.ConcatOperationConflict, match="冻结"):
@@ -186,10 +187,50 @@ def test_concat_claim_freezes_authority_and_manifest_across_restart(monkeypatch)
             video_delivery_manifest={"manifest_hash": "new"},
         )
     row = conn.execute(
-        "SELECT release_authority_json,video_manifest_json FROM concat_operation_receipts"
+        "SELECT release_authority_json,video_manifest_json,status FROM concat_operation_receipts"
     ).fetchone()
     assert json.loads(row["release_authority_json"]) == {"release": "old"}
     assert json.loads(row["video_manifest_json"]) == {"manifest_hash": "old"}
+    # 失败落终态而不是停在 running：既是产品可见信号，也证明被 in_flight_on_b.py
+    # 的部署检查和下一次重放都能正确识别成"已中断"而不是"在途"。
+    assert row["status"] == "failed"
+
+
+def test_claim_concat_operation_reclaims_failed_receipt_with_matching_snapshot(monkeypatch) -> None:
+    """失败不是死局：同一幂等键在没有新漂移时必须能正常重新认领并重试。"""
+    conn = _memory_database()
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    release_authority = {"release": "stable"}
+    manifest = {"manifest_hash": "stable"}
+    owner, replay = worker.claim_concat_operation(
+        idempotency_key="retry-concat",
+        request_fingerprint="same-request",
+        episode_id="e",
+        release_authority=release_authority,
+        video_delivery_manifest=manifest,
+    )
+    assert owner and replay is None
+    worker.release_concat_operation(
+        idempotency_key="retry-concat",
+        request_fingerprint="same-request",
+        claim_token=owner,
+        reason="ffmpeg 合成失败",
+    )
+    assert conn.execute(
+        "SELECT status FROM concat_operation_receipts"
+    ).fetchone()["status"] == "failed"
+
+    owner2, replay2 = worker.claim_concat_operation(
+        idempotency_key="retry-concat",
+        request_fingerprint="same-request",
+        episode_id="e",
+        release_authority=release_authority,
+        video_delivery_manifest=manifest,
+    )
+    assert owner2 and owner2 != owner and replay2 is None
+    assert conn.execute(
+        "SELECT status FROM concat_operation_receipts"
+    ).fetchone()["status"] == "running"
 
 
 @pytest.mark.parametrize(
@@ -341,3 +382,32 @@ def test_concat_startup_recovery_fences_only_when_explicit(
         video_delivery_manifest={"manifest_hash": "one"},
     )
     assert replacement and replacement != owner and replay is None
+
+
+def test_stuck_failed_receipt_with_zero_lease_is_not_in_flight(tmp_path) -> None:
+    """2026-10-01 生产事故存量：一条 status='failed'（或历史上 status='running'）、
+    lease_expires_at=0 的 receipt 必须被部署前置检查识别成"已中断"而不是"在途"，
+    不得拦住 B 的重启/部署。"""
+    import importlib
+
+    in_flight_on_b = importlib.import_module("scripts.deploy.in_flight_on_b")
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    conn = sqlite3.connect(data_dir / "manju.db")
+    conn.executescript(db.SCHEMA)
+    conn.execute(
+        """INSERT INTO concat_operation_receipts(
+               operation_key,command,request_fingerprint,episode_id,status,
+               claim_token,lease_expires_at,created_at,updated_at
+           ) VALUES('k','delivery.concatenate','fp','e','failed','owner',0,0,0)"""
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch_repo = in_flight_on_b.REPO
+    try:
+        in_flight_on_b.REPO = str(tmp_path)
+        assert in_flight_on_b.main() == 0
+    finally:
+        in_flight_on_b.REPO = monkeypatch_repo

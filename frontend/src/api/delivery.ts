@@ -59,6 +59,14 @@ export interface MixStatus {
   concat_in_progress?: boolean;
   /** 最近一次后台合成的失败原因；成功后清空。 */
   concat_last_error?: string | null;
+  /** concat_last_error 记录时的服务端时间戳（秒）；成功后随之清空。 */
+  concat_last_error_at?: number | null;
+  /**
+   * 最近一次合片 receipt 的持久化终态（succeeded/failed/running），读数据库
+   * concat_operation_receipts，不读进程内存——后端重启也不会丢。没发起过合成
+   * 时为 null。见 cinema/concatWatch.ts 的 2026-10-01 收尾判据说明。
+   */
+  concat_receipt?: { status: string; error: string | null } | null;
   shots: MixShot[];
 }
 

@@ -63,6 +63,10 @@ def test_background_mode_returns_accepted_and_finishes_later(monkeypatch) -> Non
     async def run():
         result = await delivery_handler.concatenate(I.DeliveryConcatenateInput(episode_id="e2", idempotency_key="k2", background=True))
         assert result.status == CommandStatus.ACCEPTED and result.data["concat_in_progress"] is True
+        # 2026-10-01 根因：这个键缺失导致 Command Bus 把"刚受理、还在后台跑"误判
+        # 成终态结果缓存 24 小时，用户后续点击全部被缓存拦截重放，处理器再也
+        # 不会被调用（见 app/capabilities/bus.py::_is_domain_operation_in_progress）。
+        assert result.data["idempotency_in_progress"] is True
         assert concat_state.in_progress("e2") is True
         from app import task_registry
         await task_registry.get(concat_state.TASK_KIND, "e2")
@@ -85,7 +89,34 @@ def test_background_failure_releases_claim_and_records_error(monkeypatch) -> Non
     asyncio.run(run())
     assert concat_state.in_progress("e3") is False
     assert "ffmpeg 合成失败" in (concat_state.last_error("e3") or "")
+    assert concat_state.last_error_at("e3") is not None, "mix-status 展示失败时间需要这个时间戳"
     assert fake.released and fake.released[0]["claim_token"] == "claim-1"
+    assert fake.released[0]["reason"] == "ffmpeg 合成失败", "release_concat_operation 必须带上失败原因才能落成终态 receipt"
+
+
+def test_synchronous_runtime_error_releases_claim_before_reraising(monkeypatch) -> None:
+    """2026-10-01 生产事故同一类故障：call_guarded 只兜 HTTPException/ArtifactNeedsRebuildError/
+    ValueError/KeyError，ffmpeg/ASR 常见的 RuntimeError 会穿透到 concatenate() 里。若不先释放
+    claim_concat_operation 已置的 running 租约就重新抛出，这条 receipt 会卡在运行中最长 2 小时。"""
+    class _RuntimeFailWorker(_FakeWorker):
+        def concatenate_episode(self, episode_id: str, **operation) -> dict:
+            raise RuntimeError("ffmpeg 进程被信号杀死")
+
+    fake = _RuntimeFailWorker(); _patch(monkeypatch, fake)
+
+    async def run():
+        await delivery_handler.concatenate(I.DeliveryConcatenateInput(episode_id="e5", idempotency_key="k5"))
+
+    try:
+        asyncio.run(run())
+        raised = None
+    except RuntimeError as exc:
+        raised = exc
+
+    assert raised is not None and "ffmpeg 进程被信号杀死" in str(raised), "RuntimeError 必须原样重新抛出，不能被吞掉或改写成别的返回"
+    assert len(fake.released) == 1, "必须释放 claim_concat_operation 一次，否则 receipt 卡在 running 最长 2 小时租约"
+    assert fake.released[0]["claim_token"] == "claim-1"
+    assert "RuntimeError" in fake.released[0]["reason"] and "ffmpeg 进程被信号杀死" in fake.released[0]["reason"]
 
 
 def test_low_priority_helper_never_raises() -> None:
@@ -93,3 +124,44 @@ def test_low_priority_helper_never_raises() -> None:
 
     low_priority()
     assert ENCODE_THREADS >= 2
+
+
+def test_repeat_click_after_background_start_reaches_handler_again(monkeypatch) -> None:
+    """2026-10-01 生产事故回归：浏览器路由把 background=True 透传给 delivery.concatenate，
+    Command Bus 层会把 ACCEPTED 结果缓存 24 小时（``idempotency_key`` 相同即命中）。
+    之前 ``_spawn_background``/``in_progress`` 两处 accepted() 都没打
+    ``idempotency_in_progress`` 标记，导致缓存把"刚受理"当终态存下——用户同一个
+    幂等键的第二次点击被直接拦在 Command Bus，``claim_concat_operation`` 再也不会
+    被调用，日志里连一行 CONCAT 记录都没有。这里走真实 Command Bus（含幂等缓存层），
+    断言第二次提交仍然会真正重新认领，不是被缓存悄悄吞掉。"""
+    from app.capabilities.bus import get_command_bus
+    from app.media_exec import concat_state
+    from app import task_registry
+
+    fake = _FakeWorker(fail=True)
+    _patch(monkeypatch, fake)
+    claim_calls: list[dict] = []
+    original_claim = fake.claim_concat_operation
+
+    def counting_claim(**kwargs):
+        claim_calls.append(kwargs)
+        return original_claim(**kwargs)
+
+    fake.claim_concat_operation = counting_claim
+    from tests.conftest import patch_worker_everywhere
+    patch_worker_everywhere(monkeypatch, "claim_concat_operation", counting_claim)
+
+    bus = get_command_bus()
+    body = {"episode_id": "e4", "background": True, "idempotency_key": "concat:e4:same-key"}
+
+    async def run():
+        first = await bus.execute_async("delivery.concatenate", dict(body))
+        assert first.status == CommandStatus.ACCEPTED
+        await task_registry.get(concat_state.TASK_KIND, "e4")
+        assert concat_state.in_progress("e4") is False
+        second = await bus.execute_async("delivery.concatenate", dict(body))
+        return second
+
+    second = asyncio.run(run())
+    assert len(claim_calls) == 2, "第二次提交必须重新到达 claim_concat_operation，不能被幂等缓存直接拦截"
+    assert second.status == CommandStatus.ACCEPTED

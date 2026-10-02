@@ -189,9 +189,18 @@ export default function CinemaPage() {
   useEffect(() => {
     if (polledMix) setMix(previous => reconcileMixStatus(previous, polledMix))
   }, [polledMix])
-  useConcatWatch(polledMix, mixBusy, { setMixBusy, onFinished: error => {
-    setMixBusy(false); mixTimer.clear(); localStorage.removeItem(deliveryOperationStorageKey(`concat:${episodeId}`))
-    toast(error ? `成片合成失败：${error}` : '成片合成完成，已刷新', Boolean(error)); refreshDelivery()
+  useConcatWatch(polledMix, mixBusy, deliveryOperationStorageKey(`concat:${episodeId}`), { setMixBusy, onFinished: outcome => {
+    setMixBusy(false); mixTimer.clear()
+    if (outcome.unknown) {
+      // 持久化 receipt 还停在 running、本进程又没有在跑的任务：多半是上一轮合成期间
+      // 服务端重启腰斩了任务。不清幂等键——后端已允许同一个键重新认领重试
+      // （见 concatWatch.ts 2026-10-01 复查说明），不撒谎报"完成"，也不锁死按钮。
+      toast('无法确认上一次合成是否已完成（服务端可能曾经重启）；请核对成片时间，需要的话重新点击合成', true)
+    } else {
+      localStorage.removeItem(deliveryOperationStorageKey(`concat:${episodeId}`))
+      toast(outcome.error ? `成片合成失败：${outcome.error}` : '成片合成完成，已刷新', Boolean(outcome.error))
+    }
+    refreshDelivery()
   } })
 
   useEffect(() => {
@@ -356,6 +365,10 @@ export default function CinemaPage() {
       refreshMix()
       refreshDelivery()
     } catch (e) {
+      // 同步报错（如幂等键已冻结旧的分镜发布权威/已采纳视频清单）必须清掉持久化键，
+      // 否则这个键永远卡在"冻结了一份注定对不上的旧快照"上，往后每次点击都会撞见
+      // 同一个 409，界面看起来像"点了也没用"（2026-10-01 生产事故）。
+      localStorage.removeItem(deliveryOperationStorageKey(`concat:${ep.id}`))
       toast((e as Error).message, true)
       mixTimer.clear()
     } finally {
