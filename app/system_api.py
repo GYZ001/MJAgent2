@@ -2024,16 +2024,6 @@ def put_settings(body: dict):
         normalized.setdefault("model_text_provider", normalized["model_route"])
         normalized.setdefault("model_vlm_provider", normalized["model_route"])
     if any(key.startswith("model_") or "_model_" in key for key in normalized):
-        try:
-            saved_credentials = json.loads(current.get("model_credentials") or "{}")
-        except (TypeError, json.JSONDecodeError):
-            saved_credentials = {}
-        provider_keys = {
-            "hiagent": bool(config.HIAGENT_API_KEY), "openrouter": bool(config.OPENROUTER_API_KEY),
-            "bailian": bool(config.BAILIAN_API_KEY), "deepseek": bool(config.DEEPSEEK_API_KEY),
-            "zhipu": bool(config.ZHIPU_API_KEY),
-            "minimax_h3": bool(config.MINIMAX_H3_BASE_URL and config.MINIMAX_H3_API_KEY),
-        }
         for kind in ("text", "vlm", "video", "image", "voice"):
             provider_field = f"model_{kind}_provider"
             if provider_field not in normalized and not any(key.endswith(f"_model_{kind}") for key in normalized):
@@ -2050,12 +2040,12 @@ def put_settings(body: dict):
                                and kind in item.get("kinds", [])), None)
             if not target:
                 raise HTTPException(422, detail={"field": provider_field, "message": "目标模型不存在或不支持该能力"})
-            configured = bool(
-                target.get("api_key")
-                or (saved_credentials.get(target.get("id"), {}) if isinstance(saved_credentials, dict) else {}).get("api_key")
-                or provider_keys.get(provider)
-            )
-            if not configured:
+            # 与 _public_model(item)["key_configured"] 同一判据（加密凭据表 +
+            # 按网关归族的环境变量兜底），不再自抄一份——旧三个来源全是死源：
+            # 内联 api_key 迁移后恒空、settings.model_credentials 迁移后恒为
+            # "{}"、provider_keys 按 provider 字面量查环境变量对 "custom:*"
+            # 永远命不中，导致任何自定义模型都无法切成默认职责。
+            if not _public_model(target).get("key_configured"):
                 raise HTTPException(422, detail={"field": provider_field, "message": "目标模型连接尚未配置并通过测试"})
     current_version = int(current.get("_monitor_config_version") or 0)
     if expected_version is not None and int(expected_version) != current_version:
