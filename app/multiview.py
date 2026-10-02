@@ -19,6 +19,7 @@ from app.portraits.card_owner import resolve_card_owner
 from app.portraits.current_ref import current_portrait_ref
 from app.project_settings import canvas_phrase, resolve_aspect_ratio
 from app.refs import (
+    _PORTRAIT_CLOTHING_CONTRACT,
     _safe_name,
     character_visual_style_lock,
     effective_portrait_prompt,
@@ -47,11 +48,11 @@ SCENE_REQUIRED_VIEWS = ("establishing", "reverse_angle")
 SCENE_OPTIONAL_VIEWS = ("action_zone",)
 
 # 每条视角的构图合同：是否要求全身入画，以及写进提示词的构图要求。face_closeup
-# 显式写清「头肩」与「不露服装」——不能指望模型从「近景」二字自己推出细节。
+# 显式写清「头部与脖颈上段」与「不露服装」；2026-10-01 实测旧措辞「仅余极少量衣领边缘」给了模型许可，顾屿/温念头像照已带出完整衣领与纽扣（face_closeup 以全身照为种子图生图，服装会被图生图带过来）——改为不留余地的正面陈述，并在 character_view_prompt 里为 face_closeup 单独豁免服装合同、加种子图身份/服装分离说明。
 CHARACTER_VIEW_FRAMING: dict[str, tuple[bool, str]] = {
     "front_full": (True, "正面全身立绘，中性姿态，双臂自然，全身完整可见"),
     "back_full": (True, "背面全身，展示服装背面与发型背部轮廓"),
-    "face_closeup": (False, "头肩特写，正面肖像，仅肩部以上入画，五官与发型完整清晰，肩线以下的服装款式与颜色一律不得入画或仅余极少量衣领边缘"),
+    "face_closeup": (False, "头肩特写头像照：画面只包含头部与脖颈上段，正面肖像，五官与发型完整清晰；画面下边缘止于下巴下方的颈部，不得向下延伸到锁骨或肩膀；画面中不得出现任何衣领、翻领、纽扣、肩线或其他服装痕迹，颈部以下直接过渡为纯色背景；若受生成能力限制难以完全避免，宁可只保留一小段与肤色一致、不带任何领型、纽扣、图案或颜色特征的素色颈部影像，也不得呈现原服装的样式"),
 }
 _DEFAULT_VIEW_FRAMING = (True, "全身立绘")
 
@@ -204,14 +205,22 @@ def character_view_prompt(
 ) -> str:
     framing = CHARACTER_VIEW_FRAMING.get(view_role, _DEFAULT_VIEW_FRAMING)[1]
     raw_source = portrait_override_appearance_anchor(appearance, portrait_prompt) or production_appearance_anchor(appearance)
-    source = raw_source if costume_mode == "neutral" else ensure_portrait_clothing_contract(raw_source)
+    if costume_mode == "neutral":
+        source = raw_source
+    elif view_role == "face_closeup":
+        # 不能只是"不叠加"：portrait_prompt 常是 effective_portrait_prompt() 的全身
+        # 定妆照合同全文，服装句已字面烘焙进 raw_source，必须真正剥离而非跳过追加。
+        source = normalize_prompt_text(raw_source.replace(f"{_PORTRAIT_CLOTHING_CONTRACT}。", "").replace(_PORTRAIT_CLOTHING_CONTRACT, ""))
+    else:
+        source = ensure_portrait_clothing_contract(raw_source)
+    face_closeup_override = ("本视角的构图合同优先于前文关于全身定妆照、全身完整可见、服装着装与可见配饰的任何描述——那些描述服务于全身类视角，本视角一律不适用。若生成时提供了同一角色全身定妆照作为参考图，该参考图只用于保持面部与发型身份一致，参考图中出现的服装、衣领、纽扣与颜色一律不得带入本视角画面。" if view_role == "face_closeup" else "")
     return (
         f"{character_visual_style_lock(visual_style)}。"
         f"角色外观真值锚点：{source}。"
         "外观补充与全局画风是两个独立合同；冲突时全局画风优先，"
         "不得按外观文案关键词删除或重写内容。"
         f"生成同一角色多视角定妆照（{VIEW_ROLE_LABELS.get(view_role, view_role)}）。"
-        f"{framing}。纯浅米色背景，单角色。"
+        f"{framing}。{face_closeup_override}纯浅米色背景，单角色。"
         "本条视角与构图要求覆盖源提示词中的视角、姿态和景别要求，但不得覆盖全局画风。"
         "同一角色、只改变观察角度，不改变稳定身份合同；结果必须满足结构化资产 QA。"
     )

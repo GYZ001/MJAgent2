@@ -169,9 +169,27 @@ def test_multiview_prompt_keeps_latest_edit_without_keyword_filtering() -> None:
     assert "视角与构图要求覆盖源提示词" in prompt
 
 
-def test_multiview_prompt_baked_default_keeps_clothing_contract() -> None:
-    prompt = character_view_prompt("画风", "外观锚点", "face_closeup", "已合成的最终定妆提示词")
+def test_multiview_prompt_front_full_baked_default_keeps_clothing_contract() -> None:
+    """front_full 仍是全身定妆照，baked 默认模式必须保留常规着装合同。"""
+    prompt = character_view_prompt("画风", "外观锚点", "front_full", "已合成的最终定妆提示词")
     assert "常规角色定妆照着装" in prompt
+
+
+def test_multiview_prompt_face_closeup_drops_clothing_contract_even_when_baked() -> None:
+    """头像照不得叠加常规着装合同——该合同要求"重点呈现...外层服装和可见配饰"，
+    与头像照"不出现任何服装"的构图合同直接矛盾。实测顾屿/温念头像照因此带出了
+    种子图（正面全身照）里的衬衫衣领与针织领口（2026-10-01 第四轮逐帧复查）。
+
+    用真实的 ``effective_portrait_prompt()`` 产出物（而非不含合同文案的占位串）
+    作为 ``portrait_prompt`` 实参——生产调用（``ensure_character_multiview_pack``/
+    ``regenerate_character_view``）传入的正是这个函数的输出，其中已经字面烘焙了
+    "常规角色定妆照着装"整句。占位串测不出"合同文本是否真的被剥离"，只测得出
+    "没有被二次追加"，两者在生产路径上是两回事（2026-10-01 复核）。
+    """
+    baked = effective_portrait_prompt("画风", "外观锚点", None)
+    assert "常规角色定妆照着装" in baked  # 前提：确认这份"真实生产输入"里确实带着合同文本
+    prompt = character_view_prompt("画风", "外观锚点", "face_closeup", baked)
+    assert "常规角色定妆照着装" not in prompt
 
 
 def test_multiview_prompt_neutral_costume_mode_drops_clothing_contract() -> None:
@@ -182,6 +200,31 @@ def test_multiview_prompt_neutral_costume_mode_drops_clothing_contract() -> None
     )
     assert "常规角色定妆照着装" not in prompt
     assert "已合成的中性定妆提示词" in prompt
+
+
+def test_multiview_prompt_face_closeup_framing_forbids_any_collar() -> None:
+    """face_closeup 构图合同必须是不留余地的正面陈述：只到脖颈上段，不出现衣领、
+    翻领、纽扣、肩线；生成能力不够时宁可露一小段素色颈部也不得带出原服装样式。"""
+    prompt = character_view_prompt("画风", "外观锚点", "face_closeup")
+    assert "下边缘止于下巴下方的颈部" in prompt
+    assert "不得向下延伸到锁骨或肩膀" in prompt
+    assert "不得出现任何衣领、翻领、纽扣、肩线或其他服装痕迹" in prompt
+    assert "也不得呈现原服装的样式" in prompt
+
+
+def test_multiview_prompt_face_closeup_overrides_seed_costume_and_full_body_text() -> None:
+    """face_closeup 的种子图是同一角色的全身定妆照（仍穿着原服装）：提示词必须
+    显式声明参考图服装不得带入本视角，并声明优先于前文全身构图/服装描述。"""
+    prompt = character_view_prompt("画风", "外观锚点", "face_closeup", "已合成的最终定妆提示词")
+    assert "本视角的构图合同优先于前文关于全身定妆照" in prompt
+    assert "参考图中出现的服装、衣领、纽扣与颜色一律不得带入本视角画面" in prompt
+
+
+def test_multiview_prompt_front_full_has_no_face_closeup_override_text() -> None:
+    """全身类视角不应被头像照的种子图/全身文本优先级覆盖声明污染——那条声明
+    只对 face_closeup 有意义。"""
+    prompt = character_view_prompt("画风", "外观锚点", "front_full", "已合成的最终定妆提示词")
+    assert "本视角的构图合同优先于前文关于全身定妆照" not in prompt
 
 
 def test_episode_bible_uses_persisted_appearance_not_prompt_word_extraction(monkeypatch) -> None:
