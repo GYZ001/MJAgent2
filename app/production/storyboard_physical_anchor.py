@@ -136,9 +136,17 @@ def apply_physical_anchor_overrides(payload: dict[str, Any], overrides: dict[str
     阶段二 ``storyboard_pack._segment_relevant_assets`` 切片到的、``storyboard_dialects``
     「锚点必须逐字沿用」规则读到的都是这份体貌专用文本，不再连带默认服装/默认表情。没有
     命中 overrides 的人物（没有申报，或申报未通过核验）原样保留完整锚点。
+
+    覆盖前把即将被替换掉的完整锚点（含服装）快照进 ``appearance_at_beat_sheet``——这是
+    阶段一 ``storyboard_wardrobe_plan`` 模型提名 wardrobe_plan 时实际看到的那份原文，
+    本函数覆盖之后 ``appearance`` 本身就不再含服装信息了。``storyboard_wardrobe_plan.
+    _character_appearance_by_identity`` 判断「全集服装表第一条记录是否真的从锚点逐字
+    抄来」时必须读这份快照、不能读覆盖后的 ``appearance``，否则任何触发了本函数覆盖的
+    人物都会被误判成「锚点里查不到服装」（见该模块 docstring 的时序说明）。
     """
     manifest = payload.get("asset_manifest") or {}
     for character in manifest.get("characters") or []:
         identity_id = str(character.get("identity_id") or "")
         if identity_id in overrides:
+            character["appearance_at_beat_sheet"] = character.get("appearance")
             character["appearance"] = overrides[identity_id]

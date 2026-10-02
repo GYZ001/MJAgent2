@@ -4,6 +4,11 @@
 ``_generate_all_segment_prompts`` 发给模型的 task_payload。与
 ``tests/test_storyboard_beat_foreshadowing.py`` 同构（CLAUDE.md「派单必带
 架构约束」——照抄已验证过的伏笔测试骨架）。
+
+2026-10-01 补充「人物谱默认造型」误用修复的回归（真实案例 proj_ca86b15ab7d7
+《顾念长安》EP1，顾屿/温念两种形状，见 ``app.production.storyboard_wardrobe_plan``
+模块 docstring）：default_flags 只有在服装表"第一条记录"确实是外观锚点逐字
+产物时才可能为 True，锚点没写服装、模型按情境虚构的首条记录永远是 False。
 """
 from __future__ import annotations
 
@@ -17,6 +22,7 @@ from app.production.storyboard_beat_sheet_schemas import (
 from app.production.storyboard_wardrobe_plan import (
     WardrobePlanState,
     build_wardrobe_state,
+    default_look_grounded_identity_ids,
     known_identity_ids,
     segment_rule_text,
     wardrobe_plan_beat_sheet_rules,
@@ -29,6 +35,26 @@ _PAYLOAD = {
         "characters": [
             {"identity_id": "bible:c1", "display_name": "温念", "aliases": [], "segment_indexes": [1, 2]},
             {"identity_id": "bible:c2", "display_name": "顾屿", "aliases": [], "segment_indexes": [1, 2]},
+        ],
+    },
+}
+
+#: 2026-10-01：温念/顾屿两种真实形状（proj_ca86b15ab7d7《顾念长安》EP1）——
+#: 温念的外观锚点写明了服装，顾屿的外观锚点只有体貌特征、没有任何服装信息。
+_PAYLOAD_WITH_APPEARANCE = {
+    "asset_manifest": {
+        "characters": [
+            {
+                "identity_id": "bible:c1", "display_name": "温念", "aliases": [], "segment_indexes": [1, 2],
+                "appearance": (
+                    "二十四岁的年轻女性，中等身高，乌黑顺直的长发垂到胸前，"
+                    "穿米白色宽松针织开衫，内搭浅蓝色细碎花棉质长裙，米白色平底单鞋，神情温柔。"
+                ),
+            },
+            {
+                "identity_id": "bible:c2", "display_name": "顾屿", "aliases": [], "segment_indexes": [1, 2],
+                "appearance": "二十余岁青年男性，身形高挑，留乌黑短发。",
+            },
         ],
     },
 }
@@ -126,11 +152,17 @@ def test_build_wardrobe_state_keeps_valid_entries_silently():
 # ---------------------------------------------------------------------------
 
 def test_advance_reports_start_snapshot_and_change_for_first_segment():
-    plan_state = WardrobePlanState([_state(identity_id="bible:c1", beat_id="B1", wardrobe="米白色针织开衫")])
+    """直接构造 WardrobePlanState 时，grounded_identity_ids 必须显式声明
+    "这个人物的首条记录确有外观锚点依据"——这里只测 advance() 的推进机制
+    本身，默认造型判据的红绿见下方「default_flags：锚点逐字核验」一节。"""
+    plan_state = WardrobePlanState(
+        [_state(identity_id="bible:c1", beat_id="B1", wardrobe="米白色针织开衫")],
+        grounded_identity_ids={"bible:c1"},
+    )
     start, changes, defaults = plan_state.advance(["B1"])
     assert start == {}  # 本段之前还没有任何着装记录
     assert len(changes) == 1 and changes[0].wardrobe == "米白色针织开衫"
-    assert defaults == {"bible:c1": True}  # 首次出场=默认造型
+    assert defaults == {"bible:c1": True}  # 首次出场且有锚点依据=默认造型
 
 
 def test_advance_carries_look_forward_into_next_segment_start():
@@ -272,9 +304,20 @@ async def test_generate_all_segment_prompts_injects_wardrobe_rule_text(monkeypat
 # ---------------------------------------------------------------------------
 
 def test_advance_default_flags_true_on_first_claim():
-    plan_state = WardrobePlanState([_state(identity_id="bible:c1", beat_id="B1")])
+    plan_state = WardrobePlanState(
+        [_state(identity_id="bible:c1", beat_id="B1")], grounded_identity_ids={"bible:c1"},
+    )
     _, _, defaults = plan_state.advance(["B1"])
     assert defaults == {"bible:c1": True}
+
+
+def test_advance_default_flags_false_when_not_grounded():
+    """未传 grounded_identity_ids（或该人物不在其中）：即便是服装表第一条、
+    即便是本段第一次认领，也不能当成已知默认造型——2026-10-01 顾屿反例，
+    见模块 docstring。"""
+    plan_state = WardrobePlanState([_state(identity_id="bible:c1", beat_id="B1")])
+    _, _, defaults = plan_state.advance(["B1"])
+    assert defaults == {"bible:c1": False}
 
 
 def test_advance_default_flags_false_after_later_change():
@@ -319,3 +362,96 @@ def test_segment_rule_text_silent_when_no_plan_entry_for_relevant_character():
     时，不追加 yes/no 规则——交给模型自判或填 unsure，不兜底。"""
     lines = segment_rule_text({}, [], {}, _PAYLOAD, _PAYLOAD["asset_manifest"]["characters"])
     assert lines == []
+
+
+# ---------------------------------------------------------------------------
+# default_flags：只有「第一条记录确有外观锚点依据」才可能为 True
+# （2026-10-01，真实回归 proj_ca86b15ab7d7《顾念长安》EP1，温念/顾屿两种形状）
+# ---------------------------------------------------------------------------
+
+def test_default_look_grounded_identity_ids_true_for_verbatim_match():
+    """温念形状：外观锚点写明服装，服装表第一条文字是锚点里服装描述的连续
+    子串——判定为"有已知默认造型依据"。"""
+    states = [_state(identity_id="bible:c1", beat_id="B1", wardrobe="米白色宽松针织开衫，内搭浅蓝色细碎花棉质长裙")]
+    assert default_look_grounded_identity_ids(states, _PAYLOAD_WITH_APPEARANCE) == {"bible:c1"}
+
+
+def test_default_look_grounded_identity_ids_empty_when_anchor_has_no_wardrobe():
+    """顾屿形状：外观锚点只有体貌特征，没有任何服装信息——服装表第一条
+    （无论写的是什么）都判定为"没有已知默认造型依据"。"""
+    states = [_state(identity_id="bible:c2", beat_id="B1", wardrobe="深灰色大衣，系着藏青色围巾")]
+    assert default_look_grounded_identity_ids(states, _PAYLOAD_WITH_APPEARANCE) == set()
+
+
+def test_default_look_grounded_identity_ids_empty_when_first_record_not_verbatim():
+    """锚点写了服装，但服装表第一条文字不是从锚点逐字抄来的（模型自己又编了
+    一套、哪怕语义相近）——同样判定为"没有已知默认造型依据"，不用关键词/
+    服装词表降级匹配。"""
+    states = [_state(identity_id="bible:c1", beat_id="B1", wardrobe="深蓝色西装外套")]
+    assert default_look_grounded_identity_ids(states, _PAYLOAD_WITH_APPEARANCE) == set()
+
+
+def test_build_wardrobe_state_default_true_for_grounded_first_record():
+    """温念形状端到端：build_wardrobe_state 算出的 grounded 集合接到
+    WardrobePlanState 之后，首次出场那一段 default_flags 为 True。"""
+    states = [_state(identity_id="bible:c1", beat_id="B1", wardrobe="米白色宽松针织开衫，内搭浅蓝色细碎花棉质长裙")]
+    wardrobe_state = build_wardrobe_state(states, _PAYLOAD_WITH_APPEARANCE, {"B1", "B2"})
+    _, _, defaults = wardrobe_state.advance(["B1"])
+    assert defaults == {"bible:c1": True}
+
+
+def test_build_wardrobe_state_default_false_after_grounded_character_changes():
+    """温念形状换装之后：default_flags 变回 False（已不是锚点默认造型）。"""
+    states = [
+        _state(identity_id="bible:c1", beat_id="B1", wardrobe="米白色宽松针织开衫，内搭浅蓝色细碎花棉质长裙"),
+        _state(identity_id="bible:c1", beat_id="B2", wardrobe="颈间绕着深灰色围巾", change_reason="顾屿把围巾解下来绕在她脖子上"),
+    ]
+    wardrobe_state = build_wardrobe_state(states, _PAYLOAD_WITH_APPEARANCE, {"B1", "B2"})
+    wardrobe_state.advance(["B1"])
+    _, _, defaults = wardrobe_state.advance(["B2"])
+    assert defaults == {"bible:c1": False}
+
+
+def test_build_wardrobe_state_default_false_for_fabricated_first_record():
+    """顾屿形状端到端：外观锚点没有任何服装信息，服装表第一条是模型按情境
+    虚构的装扮——任何段 default_flags 都是 False，不止首次出场那一段。"""
+    states = [_state(identity_id="bible:c2", beat_id="B1", wardrobe="深灰色大衣，系着藏青色围巾")]
+    wardrobe_state = build_wardrobe_state(states, _PAYLOAD_WITH_APPEARANCE, {"B1", "B2"})
+    _, _, defaults_b1 = wardrobe_state.advance(["B1"])
+    assert defaults_b1 == {"bible:c2": False}
+
+
+def test_build_wardrobe_state_default_false_for_mismatched_first_record():
+    """第一条记录与外观锚点不一致（模型没有逐字抄）：即使锚点写了服装，也
+    不能被判定成已知默认造型。"""
+    states = [_state(identity_id="bible:c1", beat_id="B1", wardrobe="深蓝色西装外套")]
+    wardrobe_state = build_wardrobe_state(states, _PAYLOAD_WITH_APPEARANCE, {"B1", "B2"})
+    _, _, defaults = wardrobe_state.advance(["B1"])
+    assert defaults == {"bible:c1": False}
+
+
+def test_default_look_grounded_prefers_beat_sheet_snapshot_over_live_appearance():
+    """storyboard_physical_anchor.apply_physical_anchor_overrides 覆盖
+    appearance（剥离服装，见该模块 2026-10-01 docstring 新增段）之后，
+    appearance_at_beat_sheet 快照仍让"服装表第一条确有锚点依据"这件事可核验
+    ——不会因为 appearance 字段这一刻已经不含服装就误判成"锚点没写服装"
+    （这正是 2026-10-01 修复时发现的、仅用 appearance 字段会自我推翻的时序
+    陷阱，见 storyboard_wardrobe_plan 模块 docstring）。"""
+    payload = {
+        "asset_manifest": {
+            "characters": [
+                {
+                    "identity_id": "bible:c1", "display_name": "温念", "aliases": [], "segment_indexes": [1],
+                    "appearance": "二十四岁的年轻女性，中等身高，乌黑顺直的长发垂到胸前。",
+                    "appearance_at_beat_sheet": (
+                        "二十四岁的年轻女性，中等身高，乌黑顺直的长发垂到胸前，"
+                        "穿米白色宽松针织开衫，内搭浅蓝色细碎花棉质长裙。"
+                    ),
+                },
+            ],
+        },
+    }
+    states = [_state(identity_id="bible:c1", beat_id="B1", wardrobe="米白色宽松针织开衫，内搭浅蓝色细碎花棉质长裙")]
+    wardrobe_state = build_wardrobe_state(states, payload, {"B1"})
+    _, _, defaults = wardrobe_state.advance(["B1"])
+    assert defaults == {"bible:c1": True}

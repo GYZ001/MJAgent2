@@ -32,6 +32,29 @@ P0-C）结构同构：阶段一模型在 ``_AiBeatSheetDraft.wardrobe_plan``
 看到这个数字（同一份判据复用，不重复实现）——CLAUDE.md「不得兜底填充」：
 剔除之后就是"这个人物这段没有计划外的着装信息"，不会拿一个编造的默认值
 顶替。
+
+2026-10-01「人物谱默认造型」误用修复（真实回归 proj_ca86b15ab7d7《顾念长安》
+EP1，视频台把这段全集服装表拿去决定定妆照送全身照还是头像照之后发现）：
+``WardrobePlanState`` 此前把每个人物在 ``wardrobe_plan`` 里的"第一条记录"
+无条件当成"人物谱定妆照默认造型"，这个假设只在"阶段一规则第一条——锚点
+写了服装就逐字沿用锚点"真的被遵守时才成立。顾屿的人物谱外观锚点只有
+「二十余岁青年男性，身形高挑，留乌黑短发」，没有任何服装信息；阶段一规则
+在锚点没写服装时明确要求模型"按原文对这个人物当下情境的描写给出一套合理
+装扮"——这是正当行为，不是模型犯错，但产出的"大衣+深灰围巾"纯属按情境
+虚构，不是任何人验证过的"默认造型"。旧逻辑把这条虚构记录当成默认造型，
+会让视频台把灰衬衫定妆照（出图模型自己补的、与这件虚构大衣毫无关系）当
+"默认造型吻合"全身照一起送进生成，灰衬衫因此混进了成片画面。温念的锚点
+写明了服装（米白色针织开衫……），她的第一条记录确实逐字取自锚点，判定
+本就是对的。
+
+修法：default_flags 只对"第一条记录的着装文字确实是外观锚点的逐字（连续
+子串，不是关键词/服装词表）产物"的人物给 True 的机会，见
+``default_look_grounded_identity_ids``/``_wardrobe_grounded_in_appearance``。
+比对用的锚点文本优先取 ``storyboard_physical_anchor.apply_physical_anchor_
+overrides`` 覆盖前留下的快照（``appearance_at_beat_sheet``）——那个函数会
+把 ``appearance`` 本身覆盖成剥离了服装的体貌专用文本，是阶段一模型实际
+看到的原文，不是阶段二此刻能读到的字段；没有这份快照时（未触发覆盖、或
+旧调用点尚未产出）``appearance`` 本身就还是阶段一看到的原文，直接用。
 """
 from __future__ import annotations
 
@@ -79,6 +102,51 @@ def known_identity_ids(payload: dict[str, Any]) -> set[str]:
     }
 
 
+def _character_appearance_by_identity(payload: dict[str, Any]) -> dict[str, str]:
+    """本集 asset_manifest.characters 的 identity_id -> 阶段一模型实际看到的外观
+    锚点全文——优先取 ``storyboard_physical_anchor.apply_physical_anchor_overrides``
+    覆盖前留下的快照（``appearance_at_beat_sheet``，该人物的锚点已被覆盖成剥离了
+    服装的体貌专用文本），没有这份快照时（未触发覆盖，或旧调用点未产出）
+    ``appearance`` 本身就还是阶段一看到的原文，直接用（见模块 docstring 2026-10-01
+    一节的时序说明）。"""
+    manifest = payload.get("asset_manifest") or {}
+    return {
+        str(c.get("identity_id") or ""): str(c.get("appearance_at_beat_sheet") or c.get("appearance") or "")
+        for c in manifest.get("characters") or []
+        if c.get("identity_id")
+    }
+
+
+def _wardrobe_grounded_in_appearance(wardrobe: str, appearance_anchor: str) -> bool:
+    """全集服装表某人物"第一条记录"的着装文字，是否真的是阶段一规则第一条
+    （"锚点写了服装就逐字沿用锚点里的服装描述"）从该人物外观锚点里抄出来的——
+    而不是锚点没写服装时"按原文情境给出一套合理装扮"的虚构结果（真实回归：
+    proj_ca86b15ab7d7《顾念长安》EP1，顾屿的外观锚点只有体貌特征，服装表第
+    一条却是模型按情境编的大衣+围巾，被旧逻辑当成人物谱定妆照默认造型误用，
+    见模块 docstring）。判据：去空白后 ``wardrobe`` 是 ``appearance_anchor``
+    的连续子串——"逐字沿用"是整段抄写，不是东拼西凑，用连续子串而不是跳字
+    子序列；不用关键词/服装词表（CLAUDE.md「禁止黑白名单」），服装描述的
+    用词本就是开放集合，枚举不完。"""
+    candidate = "".join(wardrobe.split())
+    source = "".join(appearance_anchor.split())
+    return bool(candidate) and candidate in source
+
+
+def default_look_grounded_identity_ids(states: list[Any], payload: dict[str, Any]) -> set[str]:
+    """全集服装表里，"第一条记录"（按声明顺序，与 ``WardrobePlanState`` 选
+    "第一条"的口径一致）着装文字确实是外观锚点逐字产物的人物 identity_id
+    集合——只有这些人物才有"已知的人物谱定妆照默认造型"，供 ``WardrobePlanState``
+    过滤 ``wardrobe_matches_default`` 的 True 分支。"""
+    anchors = _character_appearance_by_identity(payload)
+    first_by_identity: dict[str, Any] = {}
+    for state in states:
+        first_by_identity.setdefault(state.identity_id, state)
+    return {
+        identity_id for identity_id, state in first_by_identity.items()
+        if _wardrobe_grounded_in_appearance(state.wardrobe, anchors.get(identity_id, ""))
+    }
+
+
 def _split_valid_wardrobe_states(
     states: list[Any], identity_ids: set[str], beat_ids: set[str],
 ) -> tuple[list[Any], list[Any]]:
@@ -112,17 +180,21 @@ class WardrobePlanState:
     不只是"本段有没有新变化"。
     """
 
-    def __init__(self, states: list[Any]) -> None:
+    def __init__(self, states: list[Any], grounded_identity_ids: set[str] | None = None) -> None:
         self._plan = list(states)
         self._claimed: set[int] = set()
         self._current_look: dict[str, Any] = {}
-        # 每个人物在全集服装表里的第一条记录（= 人物谱定妆照默认造型）。按对象
-        # 恒等比较（不是内容比较）判断"当前着装是不是这一条"，供 advance() 算
-        # wardrobe_matches_default 的 yes/no 用——同一份数据只算一次，不在每段
-        # 重新扫描 self._plan。
+        # 每个人物在全集服装表里的第一条记录（= 人物谱定妆照默认造型）——但只有
+        # 这条记录经 default_look_grounded_identity_ids 核验过、确实是外观锚点
+        # 逐字产物的人物才记录（2026-10-01 顾屿反例，见模块 docstring）：锚点没写
+        # 服装、模型按情境自行编造的首条记录不算"已知默认造型"，这个人物在
+        # advance() 里永远拿不到 True，不在 grounded_identity_ids 里的人物不记录
+        # 任何"第一条"，之后任何一次认领都按对象恒等比较落空（False）。
+        grounded = grounded_identity_ids or set()
         self._first_state_by_identity: dict[str, Any] = {}
         for state in self._plan:
-            self._first_state_by_identity.setdefault(state.identity_id, state)
+            if state.identity_id in grounded:
+                self._first_state_by_identity.setdefault(state.identity_id, state)
 
     def advance(self, segment_beat_ids: list[str]) -> tuple[dict[str, Any], list[Any], dict[str, bool]]:
         """返回 (本段开场时的着装快照, 本段新认领的变化列表, 本段结束时每个
@@ -149,10 +221,11 @@ class WardrobePlanState:
 def build_wardrobe_state(states: list[Any], payload: dict[str, Any], known_beat_ids: set[str]) -> WardrobePlanState:
     """核验 + 构造：剔除未知 identity_id/beat_id 的条目（记日志，见模块
     docstring「与 causality/foreshadowing 的一处刻意不同」），用剩下的合法
-    条目构造推进器。"""
+    条目算出"哪些人物的首条记录有已知默认造型依据"（2026-10-01，见
+    ``default_look_grounded_identity_ids``），一并交给推进器。"""
     valid, invalid = _split_valid_wardrobe_states(states, known_identity_ids(payload), known_beat_ids)
     _log_dropped(invalid)
-    return WardrobePlanState(valid)
+    return WardrobePlanState(valid, default_look_grounded_identity_ids(valid, payload))
 
 
 def segment_rule_text(
