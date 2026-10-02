@@ -156,7 +156,7 @@ def test_multiview_prompt_keeps_latest_edit_without_keyword_filtering() -> None:
     prompt = character_view_prompt(
         "旧画风",
         "旧外观锚点",
-        "three_quarter",
+        "face_closeup",
         "用户最新定妆提示词：银发少女，红色机甲，赛博写实风",
     )
 
@@ -164,13 +164,13 @@ def test_multiview_prompt_keeps_latest_edit_without_keyword_filtering() -> None:
     assert "旧外观锚点" not in prompt
     assert "红色机甲" in prompt
     assert "赛博写实风" in prompt
-    assert "3/4" in prompt
+    assert "头肩特写" in prompt
     assert "画风最高优先级" in prompt
     assert "视角与构图要求覆盖源提示词" in prompt
 
 
 def test_multiview_prompt_baked_default_keeps_clothing_contract() -> None:
-    prompt = character_view_prompt("画风", "外观锚点", "three_quarter", "已合成的最终定妆提示词")
+    prompt = character_view_prompt("画风", "外观锚点", "face_closeup", "已合成的最终定妆提示词")
     assert "常规角色定妆照着装" in prompt
 
 
@@ -178,7 +178,7 @@ def test_multiview_prompt_neutral_costume_mode_drops_clothing_contract() -> None
     """app.portraits.neutral_identity 采纳后，多视角包侧视角不得再叠加常规
     着装合同——appearance/portrait_prompt 已是最终中性定妆照全文。"""
     prompt = character_view_prompt(
-        "画风", "体貌锚点", "three_quarter", "已合成的中性定妆提示词", "neutral",
+        "画风", "体貌锚点", "face_closeup", "已合成的中性定妆提示词", "neutral",
     )
     assert "常规角色定妆照着装" not in prompt
     assert "已合成的中性定妆提示词" in prompt

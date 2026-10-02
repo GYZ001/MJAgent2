@@ -30,7 +30,11 @@ import ReplaceCharacterPortraitControl from '../components/bible/ReplaceCharacte
 import VoiceChip from '../components/voice/VoiceChip'; import CharacterVoicePanel from '../components/voice/CharacterVoicePanel'; import VoiceRosterActions from '../components/voice/VoiceRosterActions'
 import "../styles/BiblePage.css";
 
-const REQUIRED_CHARACTER_VIEWS = ['front_full', 'three_quarter', 'profile'] as const
+// 生产可用性判据：只要正面全身照在就不判「暂不可用」。与后端
+// app.multiview.CHARACTER_PRODUCTION_REQUIRED_VIEWS 同一口径——两张都要的
+// 生成完整性判据（CHARACTER_REQUIRED_VIEWS）只用于生成/重做本身，不能直接
+// 搬到这里，否则存量角色（还没补出头像照）会在部署当天全部显示「暂不可用」。
+const REQUIRED_CHARACTER_VIEWS = ['front_full'] as const
 
 function trackBible(name: string, projectId: string, dimensions: Record<string, string | number | boolean> = {}) {
   void api.reportMonitorEvent(name, dimensions, projectId).catch(() => undefined)
@@ -88,7 +92,7 @@ export function portraitAvailability(character: Character, fitting: boolean): Po
       .map(view => view.view_role),
   )
   if (REQUIRED_CHARACTER_VIEWS.some(role => !readyViewRoles.has(role))) return 'failed'
-  // VLM 图片质检已下线：三视角文件齐全（技术产物存在）即视为通过，不再依赖质检分数。
+  // VLM 图片质检已下线：生产必需视角文件齐全（技术产物存在）即视为通过，不再依赖质检分数。
   return status === 'ready' ? 'passed' : 'unverified'
 }
 
@@ -1330,7 +1334,7 @@ function PortraitBlock({ projectId, character: c, disabled, onChanged, regenerat
           <div className="f-misc" style={{ background: 'rgba(91,114,83,0.06)', borderLeft: '3px solid var(--moss)', padding: '6px 10px', borderRadius: '0 6px 6px 0', fontSize: 12.5 }}>
             {c.portrait_prompt_effective}
           </div>
-          <p className="hint">后续正面、3/4 面和侧面定妆均以这里保存的最新提示词为准。</p>
+          <p className="hint">后续正面全身照与头像照均以这里保存的最新提示词为准。</p>
           <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
             <button className="btn small" disabled={disabled || saving}
               aria-label={baseDisabledReason ? `修改定妆提示词，暂不可用：${baseDisabledReason}` : '修改定妆提示词'}
@@ -1406,13 +1410,11 @@ function portraitVersionLabel(portrait: Portrait): string {
 
 const VIEW_ROLE_LABELS: Record<string, string> = {
   front_full: '正面全身',
-  three_quarter: '3/4 面',
-  profile: '侧面',
   back_full: '背面全身',
-  face_closeup: '面部特写',
+  face_closeup: '头像照',
 }
 
-const PRIMARY_PORTRAIT_VIEW_ROLES = ['front_full', 'three_quarter', 'profile']
+const PRIMARY_PORTRAIT_VIEW_ROLES = ['front_full', 'face_closeup']
 
 export function currentPortraitViews(character: Character): PortraitView[] {
   const portrait = currentPortrait(character)

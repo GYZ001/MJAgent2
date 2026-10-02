@@ -265,11 +265,8 @@ def test_regenerate_character_view_rolls_back_pending_write_on_error(
     _seed_project(conn, "proj_char2")
     front_path = tmp_path / "front.jpg"
     front_path.write_bytes(b"front-bytes")
-    profile_path = tmp_path / "profile.jpg"
-    profile_path.write_bytes(b"profile-bytes")
     _seed_portrait(conn, project_id="proj_char2", portrait_id="portrait_2", image_path=str(front_path))
     _seed_portrait_view(conn, portrait_id="portrait_2", view_role="front_full", image_path=str(front_path))
-    _seed_portrait_view(conn, portrait_id="portrait_2", view_role="profile", image_path=str(profile_path))
     monkeypatch.setattr(multiview, "_generate_image", _fake_generate_image)
     _boom_after_real_write(monkeypatch, "_upsert_character_view")
 
@@ -277,12 +274,12 @@ def test_regenerate_character_view_rolls_back_pending_write_on_error(
         task_conn = db.get_conn()
         with pytest.raises(RuntimeError, match="boom-after-upsert"):
             await multiview.regenerate_character_view(
-                project_id="proj_char2", portrait_id="portrait_2", view_role="three_quarter",
+                project_id="proj_char2", portrait_id="portrait_2", view_role="face_closeup",
             )
         assert task_conn.in_transaction is False
         count = task_conn.execute(
             "SELECT COUNT(*) FROM character_portrait_views "
-            "WHERE portrait_id='portrait_2' AND view_role='three_quarter'",
+            "WHERE portrait_id='portrait_2' AND view_role='face_closeup'",
         ).fetchone()[0]
         assert count == 0
 

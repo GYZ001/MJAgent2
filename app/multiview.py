@@ -37,31 +37,28 @@ from app.visual_styles import is_photographic_style_prompt
 
 # ---------- 视角角色常量 ----------
 
-CHARACTER_REQUIRED_VIEWS = ("front_full", "three_quarter", "profile")
-CHARACTER_OPTIONAL_VIEWS = ("back_full", "face_closeup")
+# 2026-10-01：只生成正面全身照+正面头像照，不再生成三视角（实测视频生成送给
+# 模型的人物图全部是 front_full）。REQUIRED=生成完整性（两张都要）；
+# PRODUCTION_REQUIRED=生产可用性（只要 front_full，避免存量角色被判 409）。
+CHARACTER_REQUIRED_VIEWS = ("front_full", "face_closeup")
+CHARACTER_OPTIONAL_VIEWS = ("back_full",)
+CHARACTER_PRODUCTION_REQUIRED_VIEWS = ("front_full",)
 SCENE_REQUIRED_VIEWS = ("establishing", "reverse_angle")
 SCENE_OPTIONAL_VIEWS = ("action_zone",)
 
-# 每条视角的构图合同：是否要求全身入画，以及写进提示词的构图要求。
-# 生成提示词和 QA 判据必须读同一份。真实故障：profile 的提示词要「标准左侧面
-# 半身」，而 portrait_policy 无条件把 full_body_visible=False 判成硬失败——按半身
-# 要求画出来的图因此必然挂。四个项目 21 个角色实测 9 条硬失败全部落在 profile 上，
-# front_full 一条没有；只有模型没听话、多画了全身的那几张才侥幸通过。
+# 每条视角的构图合同：是否要求全身入画，以及写进提示词的构图要求。face_closeup
+# 显式写清「头肩」与「不露服装」——不能指望模型从「近景」二字自己推出细节。
 CHARACTER_VIEW_FRAMING: dict[str, tuple[bool, str]] = {
     "front_full": (True, "正面全身立绘，中性姿态，双臂自然，全身完整可见"),
-    "three_quarter": (False, "3/4 侧面半身或全身，清晰展示五官深度与发型轮廓"),
-    "profile": (False, "标准左侧面半身，清晰展示鼻梁、下颌、耳部与侧面发型"),
     "back_full": (True, "背面全身，展示服装背面与发型背部轮廓"),
-    "face_closeup": (False, "面部近景特写，五官清晰，发型完整入画"),
+    "face_closeup": (False, "头肩特写，正面肖像，仅肩部以上入画，五官与发型完整清晰，肩线以下的服装款式与颜色一律不得入画或仅余极少量衣领边缘"),
 }
 _DEFAULT_VIEW_FRAMING = (True, "全身立绘")
 
 VIEW_ROLE_LABELS = {
     "front_full": "正面全身",
-    "three_quarter": "3/4 面",
-    "profile": "侧面",
     "back_full": "背面全身",
-    "face_closeup": "面部特写",
+    "face_closeup": "头像照",
     "establishing": "建立",
     "reverse_angle": "反打",
     "action_zone": "动作区",
@@ -478,6 +475,8 @@ def _storyboard_pack_asset_dependencies(
     def _display_name(identity_or_scene_id: str) -> str:
         return str(identity_or_scene_id).split(":", 1)[-1] if identity_or_scene_id else ""
 
+    from app.video_modes.character_look_selection import pick_character_reference_view  # 函数内导入：app.video_modes 包初始化反向依赖本模块，模块级会成环（同款先例见 manifest_revisions_match）
+
     characters_out: list[dict[str, Any]] = []
     for entry in resources.get("characters") or []:
         identity_id = str(entry.get("identity_id") or "")
@@ -493,13 +492,14 @@ def _storyboard_pack_asset_dependencies(
         portrait_id = current["portrait_id"] if current else None
         image_path = current["image_path"] if current else ""
         usable = current is not None
-        selected_view = {
-            "id": portrait_id,
-            "view_role": "front_full",
-            "image_path": image_path,
-            "input_fingerprint": portrait_id,
-            "purposes": [PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, PURPOSE_VIDEO_INPUT],
-        } if usable else None
+        ready_views = list_portrait_views(portrait_id, conn=conn) if portrait_id else []
+        ready_views = [v for v in ready_views if v.get("status") == "ready" and v.get("image_path")]
+        selected_view = pick_character_reference_view(
+            wardrobe_matches_default=str(entry.get("wardrobe_matches_default") or ""),
+            portrait_id=portrait_id, front_full_image_path=image_path, ready_views=ready_views,
+        ) if usable else None
+        if selected_view is not None:
+            selected_view["purposes"] = [PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, PURPOSE_VIDEO_INPUT]
         characters_out.append({
             "name": name,
             "identity_id": identity_id,
@@ -508,9 +508,9 @@ def _storyboard_pack_asset_dependencies(
             "asset_required": has_card,
             "look_revision_id": portrait_id,
             "pack_status": PACK_STATUS_READY if usable else None,
-            "selected_view_ids": [portrait_id] if selected_view else [],
+            "selected_view_ids": [selected_view["id"]] if selected_view else [],
             "selected_views": [selected_view] if selected_view else [],
-            "available_view_roles": ["front_full"] if selected_view else [],
+            "available_view_roles": [selected_view["view_role"]] if selected_view else [],
             "missing_required": [] if (selected_view or not has_card) else ["front_full"],
         })
 
@@ -664,9 +664,7 @@ def resolve_shot_asset_dependencies(
         if len(selected) > 1:
             identity_role_priority = {
                 "front_full": 0,
-                "three_quarter": 1,
                 "face_closeup": 2,
-                "profile": 3,
             }
             selected = [min(
                 selected,
@@ -697,7 +695,8 @@ def resolve_shot_asset_dependencies(
                 for v in selected
             ],
             "available_view_roles": available,
-            "missing_required": missing_required_views(all_views, CHARACTER_REQUIRED_VIEWS),
+            # 生产可用性判据：只要 front_full，避免存量角色因缺 face_closeup 被 409。
+            "missing_required": missing_required_views(all_views, CHARACTER_PRODUCTION_REQUIRED_VIEWS),
         })
 
     scene_out = None
@@ -950,6 +949,7 @@ def library_anchor_assets_from_manifest(manifest: dict[str, Any]) -> list[dict[s
                 "view_role": view.get("view_role"), "image_path": path,
                 "purposes": list(view.get("purposes") or [PURPOSE_QA_ANCHOR, PURPOSE_KEYFRAME_SEED]),
                 "type": "character", "source": "asset_library",
+                "costume_mode": view.get("costume_mode"),  # None=锁服装；"neutral"=只锁长相，服装以本段文字为准
             })
     scenes = [manifest.get("scene") or {}, *(manifest.get("additional_scenes") or [])]
     for scene in scenes:
@@ -984,9 +984,7 @@ def keyframe_seed_paths(manifest: dict[str, Any]) -> list[str]:
     ]
     role_priority = {
         "front_full": 0,
-        "three_quarter": 1,
         "face_closeup": 2,
-        "profile": 3,
     }
     character_paths: list[str] = []
     complete_character_coverage = bool(characters)
@@ -1633,7 +1631,7 @@ async def complete_legacy_character_pack(
         return None
     pack_status = row["pack_status"] if "pack_status" in row.keys() else None
     views = list_portrait_views(row["id"])
-    missing = missing_required_views(views, CHARACTER_REQUIRED_VIEWS)
+    missing = missing_required_views(views, CHARACTER_PRODUCTION_REQUIRED_VIEWS)  # 只要 front_full，避免误判缺 face_closeup
     if pack_status == PACK_STATUS_READY and not missing:
         return {"status": "ready", "portrait_id": row["id"]}
     return await ensure_character_multiview_pack(
@@ -2075,7 +2073,9 @@ async def regenerate_character_view(
         candidate_views = [candidate if v.get("view_role") == view_role else v for v in existing.values()]
         if view_role not in existing:
             candidate_views.append(candidate)
-        missing = missing_required_views(candidate_views, CHARACTER_REQUIRED_VIEWS)
+        # 生产可用性判据：只要 front_full，避免存量角色重做其它视角时因缺
+        # face_closeup 被误判失败、丢弃刚生成的候选。
+        missing = missing_required_views(candidate_views, CHARACTER_PRODUCTION_REQUIRED_VIEWS)
         if missing:
             _discard_rejected_candidate(path)
             return {

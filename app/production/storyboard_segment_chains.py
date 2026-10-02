@@ -111,7 +111,7 @@ class ChainState:
 @dataclass
 class _Moments:
     turns_here: list[Any]; signals_here: list[Any]; voice_here: list[Any]
-    wardrobe_advance: tuple[Any, Any]; prop_entrances_here: list[Any]
+    wardrobe_advance: tuple[Any, Any, Any]; prop_entrances_here: list[Any]
 
 
 @dataclass

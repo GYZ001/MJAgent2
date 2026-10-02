@@ -127,7 +127,7 @@ export default function CharacterQaPanel({
                     </div>
                     <p className="hint">
                       {isSingleImage
-                        ? '阶段：正面单图候选，尚未进入三视角整包'
+                        ? '阶段：正面单图候选，尚未进入两视角整包'
                         : `适用范围：${(candidate.ep_start ?? 0) <= 0
                           ? '历史初始版本（曾适用第 1 集起）'
                           : `第 ${candidate.ep_start} 集起${candidate.ep_end != null ? ` 至第 ${candidate.ep_end} 集` : '至今'}`}`}
@@ -172,7 +172,7 @@ export default function CharacterQaPanel({
             })}
           </div>
         )}
-        <p className="hint">采用规则：三视角文件齐全并可读取后即可采用，由人工挑选决定；技术失败不会替换下游正在使用的版本。</p>
+        <p className="hint">采用规则：两视角文件齐全并可读取后即可采用，由人工挑选决定；技术失败不会替换下游正在使用的版本。</p>
         <div className="dialog-actions">
           <button type="button" className="btn primary" onClick={onClose}>关闭</button>
         </div>

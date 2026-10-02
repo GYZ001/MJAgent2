@@ -232,10 +232,23 @@ def _start_refs_generation(
 
 def _character_pack_incomplete(conn, project_id: str, name: str) -> bool:
     """单个角色「当前采用包」是否残缺：无当前采用包、pack_status 非 ready，
-    或必需视角未齐全。判据与 compute_refs_precheck 的 resume 分支同
+    或生产必需视角未齐全。判据与 compute_refs_precheck 的 resume 分支同
     口径，抽成共享实现供 _incomplete_portrait_eligible_names 复用，不重写
-    第二份相似判据。"""
-    from app.multiview import CHARACTER_REQUIRED_VIEWS
+    第二份相似判据。
+
+    这里用 CHARACTER_PRODUCTION_REQUIRED_VIEWS（只要 front_full）而不是
+    CHARACTER_REQUIRED_VIEWS（front_full+face_closeup）：本函数驱动
+    refs_status 的 ready/warning 判定，也是 POST /refs 不指定角色时的默认
+    补图范围来源（见 _refs_task）。2026-10-01 定妆照双视角改造前生成的存量
+    角色只有旧三视角、没有 face_closeup——若按 CHARACTER_REQUIRED_VIEWS 判
+    定，全部存量角色会被判「不完整」，而 start_background_portraits 在每
+    次映射任务收尾的 finally 里无条件对整个项目跑一次
+    resume=True 的补图（_start_refs_generation(project_id, None,
+    resume=True)），会对这些存量角色发起真实的 face_closeup 付费出图，且
+    把 refs_status 判成 warning——两者都违反「存量项目已有的定妆包不得被
+    任何闸门判不可用」。face_closeup 的补齐只保留显式单视角重做入口
+    （POST .../views/face_closeup/regenerate），不挂在这条自动路径上。"""
+    from app.multiview import CHARACTER_PRODUCTION_REQUIRED_VIEWS
 
     current = conn.execute(
         "SELECT id, pack_status FROM character_portraits "
@@ -252,7 +265,7 @@ def _character_pack_incomplete(conn, project_id: str, name: str) -> bool:
         ).fetchall()
         if row["status"] == "ready" and row["image_path"]
     }
-    return any(role not in ready_roles for role in CHARACTER_REQUIRED_VIEWS)
+    return any(role not in ready_roles for role in CHARACTER_PRODUCTION_REQUIRED_VIEWS)
 
 def _incomplete_portrait_eligible_names(conn, project_id: str) -> list[str]:
     """双重身份：既是 refs_status='ready' 的产物判据，也是 POST

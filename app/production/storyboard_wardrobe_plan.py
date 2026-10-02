@@ -116,10 +116,20 @@ class WardrobePlanState:
         self._plan = list(states)
         self._claimed: set[int] = set()
         self._current_look: dict[str, Any] = {}
+        # 每个人物在全集服装表里的第一条记录（= 人物谱定妆照默认造型）。按对象
+        # 恒等比较（不是内容比较）判断"当前着装是不是这一条"，供 advance() 算
+        # wardrobe_matches_default 的 yes/no 用——同一份数据只算一次，不在每段
+        # 重新扫描 self._plan。
+        self._first_state_by_identity: dict[str, Any] = {}
+        for state in self._plan:
+            self._first_state_by_identity.setdefault(state.identity_id, state)
 
-    def advance(self, segment_beat_ids: list[str]) -> tuple[dict[str, Any], list[Any]]:
-        """返回 (本段开场时的着装快照, 本段新认领的变化列表)；后者按
-        ``wardrobe_plan`` 声明顺序保留，调用方据此更新提示词规则。"""
+    def advance(self, segment_beat_ids: list[str]) -> tuple[dict[str, Any], list[Any], dict[str, bool]]:
+        """返回 (本段开场时的着装快照, 本段新认领的变化列表, 本段结束时每个
+        人物"当前是否默认造型"的判定)；第二项按 ``wardrobe_plan`` 声明顺序
+        保留，调用方据此更新提示词规则。第三项只覆盖"已经在全集服装表里出现
+        过至少一条记录"的人物——从未出现过的人物不在这份字典里，调用方需要
+        按"没有依据"处理，不得当成 False。"""
         start_snapshot = dict(self._current_look)
         changes_here: list[Any] = []
         for index, state in enumerate(self._plan):
@@ -129,7 +139,11 @@ class WardrobePlanState:
                 self._claimed.add(index)
                 changes_here.append(state)
                 self._current_look[state.identity_id] = state
-        return start_snapshot, changes_here
+        default_flags = {
+            identity_id: state is self._first_state_by_identity.get(identity_id)
+            for identity_id, state in self._current_look.items()
+        }
+        return start_snapshot, changes_here, default_flags
 
 
 def build_wardrobe_state(states: list[Any], payload: dict[str, Any], known_beat_ids: set[str]) -> WardrobePlanState:
@@ -142,12 +156,17 @@ def build_wardrobe_state(states: list[Any], payload: dict[str, Any], known_beat_
 
 
 def segment_rule_text(
-    look_start: dict[str, Any], changes_here: list[Any], payload: dict[str, Any], relevant_characters: list[dict[str, Any]],
+    look_start: dict[str, Any], changes_here: list[Any], default_flags: dict[str, bool],
+    payload: dict[str, Any], relevant_characters: list[dict[str, Any]],
 ) -> list[str]:
     """阶段二 per-segment 正面陈述：本段开场着装（全集服装表规划、且与本段
-    相关的人物）+ 本段内着装变化（附原因）。只报告与本段有关的人物（见
-    ``relevant_characters``，与其余 per-segment 规则同一份 relevant_assets
-    数据），不把全集所有人物的着装都塞进每一段的提示词。"""
+    相关的人物）+ 本段内着装变化（附原因）+ 预先算好的 wardrobe_matches_default
+    取值（模型只需转抄，不需要自己判断本段是否默认造型，见
+    ``app.schemas.segment_identity.SegmentCharacter``）。只报告与本段有关的
+    人物（见 ``relevant_characters``，与其余 per-segment 规则同一份
+    relevant_assets 数据），不把全集所有人物的着装都塞进每一段的提示词。
+    ``default_flags`` 没有覆盖到的人物（没有在全集服装表里出现过任何记录）
+    不追加 yes/no 规则，交给模型按通用定义自行判断或填 unsure——不兜底。"""
     names = {c.get("identity_id"): c.get("display_name") for c in known_character_identities(payload)}
     relevant_ids = {c.get("identity_id") for c in relevant_characters}
     lines: list[str] = []
@@ -169,6 +188,18 @@ def segment_rule_text(
             f"本段内着装变化：@{name} 从「{previous_desc}」变为「{state.wardrobe}」"
             f"（原因：{state.change_reason}）——continuity_memo.characters[].wardrobe 要体现"
             "这次变化后的样子，本段画面也要有相应的动作或过程，不能只在下一段凭空换装。"
+        )
+    default_names = [names[iid] for iid in relevant_ids if names.get(iid) and default_flags.get(iid) is True]
+    changed_names = [names[iid] for iid in relevant_ids if names.get(iid) and default_flags.get(iid) is False]
+    if default_names:
+        lines.append(
+            "根据全集服装表，本段下列人物穿着与人物谱定妆照默认造型完全一致，"
+            f"resources.characters 对应条目的 wardrobe_matches_default 必须填 yes：{'、'.join(default_names)}。"
+        )
+    if changed_names:
+        lines.append(
+            "根据全集服装表，本段下列人物穿着与默认造型不同，"
+            f"resources.characters 对应条目的 wardrobe_matches_default 必须填 no：{'、'.join(changed_names)}。"
         )
     return lines
 

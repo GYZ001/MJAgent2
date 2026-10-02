@@ -27,6 +27,12 @@ class SegmentCharacter(BaseModel):
     display_name: str = ""
     visibility: Literal["visible", "voice_only", "unknown"] = "unknown"
     subject_kind: Literal["character", "extra", "crowd", "unknown"] = "unknown"
+    #: 本段这个人物的穿着是否就是人物谱定妆照默认造型（取值定义见
+    #: app.production.storyboard_identity_generation.IDENTITY_GENERATION_RULES）。
+    #: 资产解析（app.video_modes.character_look_selection）据此在全身照/头像照
+    #: 之间选图：yes 送全身照（服装也要锁定），no/unsure 送头像照（只锁长相，
+    #: 服装以本段文字为准）——缺省/旧数据落在 unsure，保守不兜底。
+    wardrobe_matches_default: Literal["yes", "no", "unsure"] = "unsure"
 
 
 class FlashbackFigure(BaseModel):

@@ -314,7 +314,7 @@ def compute_refs_precheck(
     view_role: str | None = None,
 ) -> dict:
     """人物定妆/单视角范围预检（只读）。"""
-    from app.multiview import CHARACTER_REQUIRED_VIEWS
+    from app.multiview import CHARACTER_PRODUCTION_REQUIRED_VIEWS as _PROD_VIEWS, CHARACTER_REQUIRED_VIEWS
 
     p = _project_or_404(project_id)
     if not p.get("bible_json"):
@@ -377,7 +377,7 @@ def compute_refs_precheck(
                 v["view_role"] for v in view_rows
                 if v["status"] == "ready" and v["image_path"]
             }
-            need = [r for r in CHARACTER_REQUIRED_VIEWS if r not in have]
+            need = [r for r in _PROD_VIEWS if r not in have]  # 口径同 _character_pack_incomplete：只判生产必需视角
             if need:
                 image_count += len(need)
                 missing_roles.append({
@@ -421,7 +421,7 @@ def compute_refs_precheck(
         "old_asset_policy": (
             "已落盘且可读取的视角保留；技术失败不替换当前采用包"
             if resume else
-            "使用最新角色设定与全局画风生成；新包三视角文件齐全并可读取后替换旧包，质量评分只作提示"
+            "使用最新角色设定与全局画风生成；新包两视角文件齐全并可读取后替换旧包，质量评分只作提示"
         ),
         "idempotency_hint": "同一 quote_id 重复确认不会扩大范围；服务端仍做最终校验",
         "stop_policy": "可停止；已开始步骤不可撤回，已完成成品保留",

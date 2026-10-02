@@ -96,7 +96,7 @@ def _conn_with_bible(names: list[str]) -> sqlite3.Connection:
 def test_ready_character_with_all_views_is_not_incomplete() -> None:
     conn = _conn_with_bible(["甲一"])
     _insert_portrait(conn, "p1", "甲一", ep_start=5, ep_end=None, pack_status="ready")
-    _insert_views(conn, "p1", ["front_full", "three_quarter", "profile"])
+    _insert_views(conn, "p1", ["front_full", "face_closeup"])
     conn.commit()
 
     assert _incomplete_portrait_eligible_names(conn, "proj_test") == []
@@ -110,13 +110,33 @@ def test_failed_pack_status_is_incomplete() -> None:
     assert _incomplete_portrait_eligible_names(conn, "proj_test") == ["乙二"]
 
 
-def test_missing_required_view_is_incomplete() -> None:
+def test_missing_production_required_view_is_incomplete() -> None:
+    """判据是生产可用性（CHARACTER_PRODUCTION_REQUIRED_VIEWS，只要
+    front_full），不是结构完整性（CHARACTER_REQUIRED_VIEWS，front_full+
+    face_closeup）——front_full 本身缺失才是真缺口，光有 face_closeup 顶不
+    上（回归：这条判据被 _refs_task 收尾时无条件扫描，也是 complete_legacy_
+    character_pack / compute_refs_precheck resume 分支共享的同一口径）。"""
     conn = _conn_with_bible(["丙三"])
     _insert_portrait(conn, "p1", "丙三", ep_start=7, ep_end=None, pack_status="ready")
-    _insert_views(conn, "p1", ["front_full", "three_quarter"])  # profile 缺失
+    _insert_views(conn, "p1", ["face_closeup"])  # front_full 缺失
     conn.commit()
 
     assert _incomplete_portrait_eligible_names(conn, "proj_test") == ["丙三"]
+
+
+def test_legacy_front_full_only_pack_is_not_incomplete() -> None:
+    """2026-10-01 定妆照双视角改造前生成的存量角色只有旧三视角（或单独
+    front_full），从未补过 face_closeup——这是生产里 100% 存量角色的真实
+    落库形态。这类角色必须判定为「完整」：不能被 refs_status 判 warning，
+    也不能被 POST /refs 不带 characters 时的默认补图范围圈入，否则部署当天
+    会对全部存量角色发起一次真实付费出图（face_closeup 的补齐只保留显式
+    单视角重做入口）。"""
+    conn = _conn_with_bible(["庚七"])
+    _insert_portrait(conn, "p1", "庚七", ep_start=1, ep_end=None, pack_status="ready")
+    _insert_views(conn, "p1", ["front_full", "three_quarter", "profile"])
+    conn.commit()
+
+    assert _incomplete_portrait_eligible_names(conn, "proj_test") == []
 
 
 def test_only_obsolete_negative_ep_start_slot_counts_as_incomplete() -> None:
@@ -136,7 +156,7 @@ def test_no_current_open_row_is_incomplete() -> None:
     视为缺口——没有「当前实际会用的那张」。"""
     conn = _conn_with_bible(["戊五"])
     _insert_portrait(conn, "p1", "戊五", ep_start=1, ep_end=4, pack_status="ready")
-    _insert_views(conn, "p1", ["front_full", "three_quarter", "profile"])
+    _insert_views(conn, "p1", ["front_full", "face_closeup"])
     conn.commit()
 
     assert _incomplete_portrait_eligible_names(conn, "proj_test") == ["戊五"]
@@ -146,7 +166,7 @@ def test_scopes_to_project() -> None:
     """另一个项目的完整定妆包不能跨项目冒充「本项目已有图」。"""
     conn = _conn_with_bible(["己六"])
     _insert_portrait(conn, "p1", "己六", ep_start=1, ep_end=None, pack_status="ready")
-    _insert_views(conn, "p1", ["front_full", "three_quarter", "profile"])
+    _insert_views(conn, "p1", ["front_full", "face_closeup"])
     conn.execute("UPDATE character_portraits SET project_id='proj_other' WHERE id='p1'")
     conn.commit()
 
@@ -156,7 +176,7 @@ def test_scopes_to_project() -> None:
 def test_mixed_eligible_characters_only_incomplete_ones_returned() -> None:
     conn = _conn_with_bible(["已就绪", "待补图"])
     _insert_portrait(conn, "ready1", "已就绪", ep_start=2, ep_end=None, pack_status="ready")
-    _insert_views(conn, "ready1", ["front_full", "three_quarter", "profile"])
+    _insert_views(conn, "ready1", ["front_full", "face_closeup"])
     _insert_portrait(conn, "gap1", "待补图", ep_start=6, ep_end=None, pack_status="generating")
     conn.commit()
 
@@ -167,7 +187,7 @@ def test_all_characters_ready_means_no_incomplete_names() -> None:
     conn = _conn_with_bible(["甲一", "乙二"])
     for pid, name in (("p1", "甲一"), ("p2", "乙二")):
         _insert_portrait(conn, pid, name, ep_start=1, ep_end=None, pack_status="ready")
-        _insert_views(conn, pid, ["front_full", "three_quarter", "profile"])
+        _insert_views(conn, pid, ["front_full", "face_closeup"])
     conn.commit()
 
     assert _incomplete_portrait_eligible_names(conn, "proj_test") == []
@@ -179,7 +199,7 @@ def test_never_established_character_counts_as_incomplete() -> None:
     「已建卡角色」口径看不见它们，但产物判据必须能看见。"""
     conn = _conn_with_bible(["甲一", "乙二", "丙三", "丁四", "戊五"])
     _insert_portrait(conn, "p1", "甲一", ep_start=1, ep_end=None, pack_status="ready")
-    _insert_views(conn, "p1", ["front_full", "three_quarter", "profile"])
+    _insert_views(conn, "p1", ["front_full", "face_closeup"])
     conn.commit()
 
     assert _incomplete_portrait_eligible_names(conn, "proj_test") == [
@@ -188,9 +208,9 @@ def test_never_established_character_counts_as_incomplete() -> None:
 
 
 def test_established_but_incomplete_pack_counts_as_incomplete() -> None:
+    """pack_status=ready 但一张视角图都没有落盘——front_full 缺失，真缺口。"""
     conn = _conn_with_bible(["甲一"])
     _insert_portrait(conn, "p1", "甲一", ep_start=1, ep_end=None, pack_status="ready")
-    _insert_views(conn, "p1", ["front_full", "three_quarter"])  # profile 缺失
     conn.commit()
 
     assert _incomplete_portrait_eligible_names(conn, "proj_test") == ["甲一"]

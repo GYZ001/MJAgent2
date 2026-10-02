@@ -64,7 +64,7 @@ def _patch_successful_character_generation(monkeypatch) -> None:
     )
 
 
-def test_initial_character_generation_publishes_complete_three_view_pack(
+def test_initial_character_generation_publishes_complete_two_view_pack(
     asset_db, monkeypatch,
 ) -> None:
     conn, _ = asset_db
@@ -84,7 +84,7 @@ def test_initial_character_generation_publishes_complete_three_view_pack(
         (portrait["id"],),
     ).fetchall()
     assert {row["view_role"] for row in view_rows} == {
-        "front_full", "three_quarter", "profile",
+        "front_full", "face_closeup",
     }
     assert all(row["status"] == "ready" and Path(row["image_path"]).is_file() for row in view_rows)
     bible = json.loads(conn.execute(
@@ -95,7 +95,7 @@ def test_initial_character_generation_publishes_complete_three_view_pack(
     visible = detail["bible"]["characters"][0]["portraits"][0]
     assert visible["pack_status"] == "ready"
     assert {view["view_role"] for view in visible["views"]} == {
-        "front_full", "three_quarter", "profile",
+        "front_full", "face_closeup",
     }
     assert all(view["image_url"] for view in visible["views"])
 
@@ -866,6 +866,9 @@ def test_pending_reverse_view_is_promoted_without_regeneration(asset_db, monkeyp
 def test_pending_character_side_view_is_reused_without_regeneration(
     asset_db, monkeypatch,
 ) -> None:
+    """face_closeup（qa_pending，指纹不变）被晋升复用，不重新生成；同一次调用
+    里缺失的可选视角（back_full，bootstrap 不请求、从未存在过）才真正触发
+    生成——两条路径互不干扰同时验证。"""
     conn, _ = asset_db
     bible = _seed_bible_project(conn)
     _patch_successful_character_generation(monkeypatch)
@@ -874,19 +877,9 @@ def test_pending_character_side_view_is_reused_without_regeneration(
         "SELECT * FROM character_portraits WHERE project_id='proj_bootstrap' "
         "AND character_name='Hero' AND ep_start=1",
     ).fetchone()
-    profile = conn.execute(
-        "SELECT image_path FROM character_portrait_views "
-        "WHERE portrait_id=? AND view_role='profile'",
-        (portrait["id"],),
-    ).fetchone()
-    Path(profile["image_path"]).unlink(missing_ok=True)
-    conn.execute(
-        "DELETE FROM character_portrait_views WHERE portrait_id=? AND view_role='profile'",
-        (portrait["id"],),
-    )
     conn.execute(
         "UPDATE character_portrait_views SET status='qa_pending',qa_json=NULL "
-        "WHERE portrait_id=? AND view_role='three_quarter'",
+        "WHERE portrait_id=? AND view_role='face_closeup'",
         (portrait["id"],),
     )
     conn.execute(
@@ -895,7 +888,7 @@ def test_pending_character_side_view_is_reused_without_regeneration(
     )
     conn.commit()
     generated_roles = []
-    encoded = base64.b64encode(b"replacement-profile").decode("ascii")
+    encoded = base64.b64encode(b"replacement-back").decode("ascii")
 
     async def generate_only_missing(*_args, **kwargs):
         generated_roles.append(kwargs["call_meta"]["view_role"])
@@ -911,10 +904,11 @@ def test_pending_character_side_view_is_reused_without_regeneration(
         visual_style=bible.world.visual_style_canonical,
         portrait_prompt=portrait["prompt"],
         ep_start=1,
+        optional_views=["back_full"],
     ))
 
     assert result["status"] == "ready"
-    assert generated_roles == ["profile"]
+    assert generated_roles == ["back_full"]
     statuses = {
         row["view_role"]: row["status"]
         for row in conn.execute(
@@ -924,8 +918,8 @@ def test_pending_character_side_view_is_reused_without_regeneration(
     }
     assert statuses == {
         "front_full": "ready",
-        "three_quarter": "ready",
-        "profile": "ready",
+        "face_closeup": "ready",
+        "back_full": "ready",
     }
 
 

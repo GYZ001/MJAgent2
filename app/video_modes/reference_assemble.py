@@ -50,7 +50,7 @@ def select_library_references(
     ``ordered`` 里只有一个 scene 资产，行为与改动前逐条相同。
     """
     role_priority = {
-        "front_full": 0, "three_quarter": 1, "profile": 2, "side_full": 2,
+        "front_full": 0,
         "action_zone": 0, "establishing": 1, "reverse_angle": 2,
     }
     kind_rank = {"character": 0, "scene": 1, "prop": 2}
@@ -195,17 +195,18 @@ async def _build_library_reference_assets(
                 view_role=anchor.get("view_role"),
                 purposes=[PURPOSE_QA_ANCHOR],
                 resources_order=anchor.get("resources_order"),
+                # costume_mode 此前只接到了单图回退分支（asset_lookup.character_
+                # reference_assets），没接进这条 2.x 分镜包主通路——不传会让按段
+                # 选图（character_look_selection）的「只锁长相」文案形同虚设。
+                costume_mode=anchor.get("costume_mode"),
             ))
         except OSError:
             continue
 
     if not any(asset.entity_type == "character" for asset in assets):
         assets.extend(character_reference_assets(
-            bible,
-            identity_names,
-            limit=max(1, len(identity_names)),
-            project_id=project_id,
-            episode_no=episode_no, shot=shot,
+            bible, identity_names, limit=max(1, len(identity_names)),
+            project_id=project_id, episode_no=episode_no, shot=shot,
         ))
     if not any(asset.entity_type == "scene" for asset in assets):
         assets.extend(scene_reference_assets(

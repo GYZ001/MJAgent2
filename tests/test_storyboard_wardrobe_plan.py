@@ -101,7 +101,7 @@ def test_build_wardrobe_state_drops_unknown_identity_and_logs(caplog):
         wardrobe_state = build_wardrobe_state(states, _PAYLOAD, {"B1", "B2"})
     assert "bible:ghost" in caplog.text
     assert "已从着装推进中剔除" in caplog.text
-    start, changes = wardrobe_state.advance(["B1"])
+    start, changes, _defaults = wardrobe_state.advance(["B1"])
     assert [c.identity_id for c in changes] == ["bible:c1"]
 
 
@@ -110,14 +110,14 @@ def test_build_wardrobe_state_drops_unknown_beat_id_and_logs(caplog):
     with caplog.at_level("WARNING"):
         wardrobe_state = build_wardrobe_state(states, _PAYLOAD, {"B1", "B2"})
     assert "B_GHOST" in caplog.text
-    start, changes = wardrobe_state.advance(["B1", "B2"])
+    start, changes, _defaults = wardrobe_state.advance(["B1", "B2"])
     assert changes == []
 
 
 def test_build_wardrobe_state_keeps_valid_entries_silently():
     states = [_state()]
     wardrobe_state = build_wardrobe_state(states, _PAYLOAD, {"B1", "B2"})
-    start, changes = wardrobe_state.advance(["B1"])
+    start, changes, _defaults = wardrobe_state.advance(["B1"])
     assert len(changes) == 1
 
 
@@ -127,15 +127,16 @@ def test_build_wardrobe_state_keeps_valid_entries_silently():
 
 def test_advance_reports_start_snapshot_and_change_for_first_segment():
     plan_state = WardrobePlanState([_state(identity_id="bible:c1", beat_id="B1", wardrobe="米白色针织开衫")])
-    start, changes = plan_state.advance(["B1"])
+    start, changes, defaults = plan_state.advance(["B1"])
     assert start == {}  # 本段之前还没有任何着装记录
     assert len(changes) == 1 and changes[0].wardrobe == "米白色针织开衫"
+    assert defaults == {"bible:c1": True}  # 首次出场=默认造型
 
 
 def test_advance_carries_look_forward_into_next_segment_start():
     plan_state = WardrobePlanState([_state(identity_id="bible:c1", beat_id="B1", wardrobe="米白色针织开衫")])
     plan_state.advance(["B1"])
-    start, changes = plan_state.advance(["B2"])
+    start, changes, _defaults = plan_state.advance(["B2"])
     assert start["bible:c1"].wardrobe == "米白色针织开衫"
     assert changes == []
 
@@ -146,24 +147,25 @@ def test_advance_reports_in_segment_change_and_updates_current_look():
         _state(identity_id="bible:c1", beat_id="B2", wardrobe="颈间绕着深灰色围巾", change_reason="顾屿把围巾解下来绕在她脖子上"),
     ])
     plan_state.advance(["B1"])
-    start, changes = plan_state.advance(["B2"])
+    start, changes, defaults = plan_state.advance(["B2"])
     assert start["bible:c1"].wardrobe == "米白色针织开衫"
     assert len(changes) == 1 and changes[0].wardrobe == "颈间绕着深灰色围巾"
-    next_start, _ = plan_state.advance(["B3"])
+    assert defaults == {"bible:c1": False}  # 已换装，不再是默认造型
+    next_start, _, _ = plan_state.advance(["B3"])
     assert next_start["bible:c1"].wardrobe == "颈间绕着深灰色围巾"
 
 
 def test_advance_claims_a_change_only_once_across_split_segments():
     plan_state = WardrobePlanState([_state(beat_id="B1")])
     plan_state.advance(["B1"])
-    _, second_claim = plan_state.advance(["B1"])
+    _, second_claim, _defaults = plan_state.advance(["B1"])
     assert second_claim == []
 
 
 def test_character_not_in_plan_produces_no_start_entry():
     """未在计划里出现过的人物：开场快照里没有它，advance 不发明任何默认值。"""
     plan_state = WardrobePlanState([_state(identity_id="bible:c1", beat_id="B1")])
-    start, _ = plan_state.advance(["B1"])
+    start, _, _defaults = plan_state.advance(["B1"])
     assert "bible:c2" not in start
 
 
@@ -173,7 +175,7 @@ def test_character_not_in_plan_produces_no_start_entry():
 
 def test_segment_rule_text_contains_planned_look():
     look_start = {"bible:c1": _state(identity_id="bible:c1", wardrobe="米白色针织开衫")}
-    lines = segment_rule_text(look_start, [], _PAYLOAD, _PAYLOAD["asset_manifest"]["characters"])
+    lines = segment_rule_text(look_start, [], {}, _PAYLOAD, _PAYLOAD["asset_manifest"]["characters"])
     assert len(lines) == 1
     assert "@温念" in lines[0] and "米白色针织开衫" in lines[0]
     assert "全集服装表" in lines[0]
@@ -181,7 +183,7 @@ def test_segment_rule_text_contains_planned_look():
 
 def test_segment_rule_text_contains_change_and_reason():
     change = _state(identity_id="bible:c1", beat_id="B2", wardrobe="颈间绕着深灰色围巾", change_reason="顾屿把围巾解下来绕在她脖子上")
-    lines = segment_rule_text({}, [change], _PAYLOAD, _PAYLOAD["asset_manifest"]["characters"])
+    lines = segment_rule_text({}, [change], {}, _PAYLOAD, _PAYLOAD["asset_manifest"]["characters"])
     assert len(lines) == 1
     assert "@温念" in lines[0]
     assert "颈间绕着深灰色围巾" in lines[0]
@@ -192,12 +194,12 @@ def test_segment_rule_text_skips_character_not_relevant_to_this_segment():
     """开场快照里有这个人物，但本段 relevant_assets.characters 不包含
     她——不把与本段无关的人物塞进提示词，也不做任何兜底替换。"""
     look_start = {"bible:c1": _state(identity_id="bible:c1")}
-    lines = segment_rule_text(look_start, [], _PAYLOAD, [])
+    lines = segment_rule_text(look_start, [], {}, _PAYLOAD, [])
     assert lines == []
 
 
 def test_segment_rule_text_empty_when_nothing_to_report():
-    assert segment_rule_text({}, [], _PAYLOAD, _PAYLOAD["asset_manifest"]["characters"]) == []
+    assert segment_rule_text({}, [], {}, _PAYLOAD, _PAYLOAD["asset_manifest"]["characters"]) == []
 
 
 # ---------------------------------------------------------------------------
@@ -263,3 +265,57 @@ async def test_generate_all_segment_prompts_injects_wardrobe_rule_text(monkeypat
     assert "本段着装（全集服装表）" in rules_seg1 and "米白色针织开衫" in rules_seg1
     assert "本段内着装变化" in rules_seg2 and "颈间绕着深灰色围巾" in rules_seg2
     assert "顾屿把围巾解下来绕在她脖子上" in rules_seg2
+
+
+# ---------------------------------------------------------------------------
+# advance()：default_flags——当前认领的记录是否为该人物第一条（= 默认造型）
+# ---------------------------------------------------------------------------
+
+def test_advance_default_flags_true_on_first_claim():
+    plan_state = WardrobePlanState([_state(identity_id="bible:c1", beat_id="B1")])
+    _, _, defaults = plan_state.advance(["B1"])
+    assert defaults == {"bible:c1": True}
+
+
+def test_advance_default_flags_false_after_later_change():
+    plan_state = WardrobePlanState([
+        _state(identity_id="bible:c1", beat_id="B1", wardrobe="米白色针织开衫"),
+        _state(identity_id="bible:c1", beat_id="B2", wardrobe="颈间绕着深灰色围巾"),
+    ])
+    plan_state.advance(["B1"])
+    _, _, defaults = plan_state.advance(["B2"])
+    assert defaults == {"bible:c1": False}
+
+
+def test_advance_default_flags_omits_identity_with_no_plan_entry():
+    """未在计划里出现过的人物：default_flags 里没有它，不得当成 False。"""
+    plan_state = WardrobePlanState([_state(identity_id="bible:c1", beat_id="B1")])
+    _, _, defaults = plan_state.advance(["B1"])
+    assert "bible:c2" not in defaults
+
+
+# ---------------------------------------------------------------------------
+# segment_rule_text：wardrobe_matches_default 的 yes/no 正面陈述
+# ---------------------------------------------------------------------------
+
+def test_segment_rule_text_tells_model_yes_for_default_look():
+    lines = segment_rule_text(
+        {}, [], {"bible:c1": True}, _PAYLOAD, _PAYLOAD["asset_manifest"]["characters"],
+    )
+    joined = "".join(lines)
+    assert "wardrobe_matches_default 必须填 yes" in joined and "温念" in joined
+
+
+def test_segment_rule_text_tells_model_no_for_changed_look():
+    lines = segment_rule_text(
+        {}, [], {"bible:c1": False}, _PAYLOAD, _PAYLOAD["asset_manifest"]["characters"],
+    )
+    joined = "".join(lines)
+    assert "wardrobe_matches_default 必须填 no" in joined and "温念" in joined
+
+
+def test_segment_rule_text_silent_when_no_plan_entry_for_relevant_character():
+    """relevant_characters 里的人物不在 default_flags 里（没有任何服装表记录）
+    时，不追加 yes/no 规则——交给模型自判或填 unsure，不兜底。"""
+    lines = segment_rule_text({}, [], {}, _PAYLOAD, _PAYLOAD["asset_manifest"]["characters"])
+    assert lines == []

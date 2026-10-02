@@ -77,8 +77,7 @@ describe('人物定妆素材可用性', () => {
         image_url: '/front.jpg',
         views: [
           { view_role: 'front_full', status: 'ready', image_url: '/front.jpg' },
-          { view_role: 'three_quarter', status: 'ready', image_url: '/three-quarter.jpg' },
-          { view_role: 'profile', status: 'ready', image_url: '/profile.jpg' },
+          { view_role: 'face_closeup', status: 'ready', image_url: '/closeup.jpg' },
         ],
       }],
     } as Character
@@ -103,8 +102,7 @@ describe('人物定妆素材可用性', () => {
         image_url: '/front.jpg',
         views: [
           { view_role: 'front_full', status: 'ready', image_url: '/front.jpg' },
-          { view_role: 'three_quarter', status: 'ready', image_url: '/three-quarter.jpg' },
-          { view_role: 'profile', status: 'ready', image_url: '/profile.jpg' },
+          { view_role: 'face_closeup', status: 'ready', image_url: '/closeup.jpg' },
         ],
         group_qa: { overall: 0.9, status: 'passed', issues: [], hard_failures: [] },
       }],
@@ -174,7 +172,7 @@ describe('人物谱冲突字段文案', () => {
 })
 
 describe('人物定妆主画廊', () => {
-  it('多套历史定妆各有三视角时只展示当前版三张', () => {
+  it('多套历史定妆各有两视角时只展示当前版两张', () => {
     const withPortraitHistory = {
       name: '甲二儿',
       portraits: [
@@ -182,7 +180,7 @@ describe('人物定妆主画廊', () => {
           id: 'history-1',
           ep_start: 1,
           ep_end: 3,
-          views: ['profile', 'front_full', 'three_quarter'].map(role => ({
+          views: ['face_closeup', 'front_full'].map(role => ({
             id: `history-1-${role}`,
             view_role: role,
             image_url: `/history-1-${role}.jpg`,
@@ -192,7 +190,7 @@ describe('人物定妆主画廊', () => {
           id: 'current',
           ep_start: 7,
           ep_end: null,
-          views: ['profile', 'front_full', 'three_quarter'].map(role => ({
+          views: ['face_closeup', 'front_full'].map(role => ({
             id: `current-${role}`,
             view_role: role,
             image_url: `/current-${role}.jpg`,
@@ -202,7 +200,7 @@ describe('人物定妆主画廊', () => {
           id: 'history-2',
           ep_start: 4,
           ep_end: 6,
-          views: ['front_full', 'three_quarter', 'profile'].map(role => ({
+          views: ['front_full', 'face_closeup'].map(role => ({
             id: `history-2-${role}`,
             view_role: role,
             image_url: `/history-2-${role}.jpg`,
@@ -214,12 +212,11 @@ describe('人物定妆主画廊', () => {
     expect(currentPortrait(withPortraitHistory)?.id).toBe('current')
     expect(currentPortraitViews(withPortraitHistory).map(view => view.id)).toEqual([
       'current-front_full',
-      'current-three_quarter',
-      'current-profile',
+      'current-face_closeup',
     ])
   })
 
-  it('重复和扩展视角混入时仍只展示当前版三个主视角', () => {
+  it('重复和已退场的旧三视角混入时仍只展示当前版两个主视角', () => {
     const withDuplicateViews = {
       name: '甲二儿',
       portraits: [{
@@ -230,6 +227,8 @@ describe('人物定妆主画廊', () => {
           { id: 'front', view_role: 'front_full', image_url: '/front.jpg' },
           { id: 'front-duplicate', view_role: 'front_full', image_url: '/front-2.jpg' },
           { id: 'back', view_role: 'back_full', image_url: '/back.jpg' },
+          // three_quarter/profile 已退场（定妆照双视角改造），旧数据仍可能
+          // 残留这类历史视角行，画廊必须不再展示它们。
           { id: 'profile', view_role: 'profile', image_url: '/profile.jpg' },
           { id: 'closeup', view_role: 'face_closeup', image_url: '/closeup.jpg' },
           { id: 'three-quarter', view_role: 'three_quarter', image_url: '/three-quarter.jpg' },
@@ -239,8 +238,7 @@ describe('人物定妆主画廊', () => {
 
     expect(currentPortraitViews(withDuplicateViews).map(view => view.id)).toEqual([
       'front',
-      'three-quarter',
-      'profile',
+      'closeup',
     ])
   })
 

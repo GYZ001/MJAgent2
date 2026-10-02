@@ -284,7 +284,7 @@ async def refs_gaps(project_id: str):
 @router.get("/projects/{project_id}/refs/progress")
 async def refs_progress(project_id: str):
     """定妆细粒度进度：完成/当前/缺失/失败分项。"""
-    from app.multiview import CHARACTER_REQUIRED_VIEWS
+    from app.multiview import CHARACTER_PRODUCTION_REQUIRED_VIEWS, CHARACTER_REQUIRED_VIEWS
 
     p = _project_or_404(project_id)
     effective_refs_status = "running" if _refs_generation_busy(project_id) else p.get("refs_status")
@@ -332,7 +332,12 @@ async def refs_progress(project_id: str):
             (row["id"],),
         ).fetchall()
         have = {v["view_role"] for v in views if v["status"] == "ready"}
-        need = [r for r in CHARACTER_REQUIRED_VIEWS if r not in have]
+        # ready/missing 判定用生产可用性口径（只要 front_full），不用结构
+        # 完整性口径（front_full+face_closeup）——与 _character_pack_incomplete
+        # /complete_legacy_character_pack/compute_refs_precheck 的 resume 分支
+        # 同一个判据，否则全部只有旧三视角、没有 face_closeup 的存量角色会被
+        # 这个面板判成「缺失」整行标红，与实际「能正常生产」矛盾。
+        need = [r for r in CHARACTER_PRODUCTION_REQUIRED_VIEWS if r not in have]
         pack = row["pack_status"] or "unknown"
         if pack == "ready" and not need:
             ready += 1

@@ -259,7 +259,7 @@ def test_refs_precheck_counts_images(monkeypatch) -> None:
     ).fetchone()))
     quote = bible_ops.compute_refs_precheck("proj_test")
     assert quote["character_count"] == 1
-    assert quote["image_count"] == 3
+    assert quote["image_count"] == 2
     # compute_refs_precheck 是未签发的原始范围指纹，quote_id 只有经
     # _issue_scope_quote 落库才产生（见 test_bible_generate_requires_confirm
     # 与 test_payment_quote_expires_and_consumed_quote_replays）。
@@ -270,7 +270,7 @@ def test_refs_precheck_counts_images(monkeypatch) -> None:
         "characters": None,
         "resume": False,
         "view_role": None,
-        "image_count": 3,
+        "image_count": 2,
         "bible_version": 1,
     })
 
@@ -322,7 +322,7 @@ def test_refs_precheck_filters_characters(monkeypatch) -> None:
     assert filtered["character_count"] == 1
     assert filtered["scope"][0]["character"] == "丙老"
     assert filtered["characters"] == ["丙老"]
-    assert filtered["image_count"] == 3
+    assert filtered["image_count"] == 2
 
 
 def test_payment_quote_expires_and_consumed_quote_replays(monkeypatch) -> None:
@@ -423,7 +423,7 @@ def test_adopt_portrait_candidate_accepts_missing_views_as_warning(monkeypatch, 
         )
         assert result["adopted"] is True
         assert result["gate_retry_exhausted"] is True
-        assert "missing_required_view=three_quarter" in result["soft_warnings"]
+        assert "missing_required_view=face_closeup" in result["soft_warnings"]
 
     asyncio.run(_run())
 
@@ -439,7 +439,7 @@ def _ready_pack(conn: sqlite3.Connection, portrait_id: str, name: str) -> None:
             None, 1, None, "ready", None, None, 1.0,
         ),
     )
-    for role in ("front_full", "three_quarter", "profile"):
+    for role in ("front_full", "face_closeup"):
         conn.execute(
             "INSERT INTO character_portrait_views(id,portrait_id,view_role,image_path,status,created_at) "
             "VALUES(?,?,?,?,'ready',1)",
