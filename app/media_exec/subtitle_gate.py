@@ -12,6 +12,11 @@
 标定（2026-09-14，B 现网 text/vlm 路由）：已知阳性（第 1 集镜 13 烧进画面的「仙人」）
 与三张阴性帧 4/4 判对，阳性帧连位置都报对（画面下方、嘴部）；360 宽抽帧足够。
 
+均匀稀疏抽样覆盖不到片尾与短台词窗口（2026-10-01 第四轮逐帧复查实测：某段最后约
+0.6 秒的台词字幕整段落在抽样间隙里，见 ``app.media_exec.subtitle_dialogue_window``
+模块文档）——``detect_subtitle_overlay`` 因此在稀疏帧之外，再按本段音轨的有声区间
+与片尾补抽一批加密帧，与稀疏帧合并后同一次 VLM 调用判定，不另造第二轮判据。
+
 取舍：抽帧或 VLM 调用失败**放行**并打 ``[VIDEO_SUBTITLE_GATE][未判定]``——文本调用
 不计费但会挂，模型不可用不该把整条视频流水线卡死；与 continuity_memo 布局引文降级为
 告警同一取舍。视觉质检 2026-08-29 整体退场的理由是「评分可靠性为 0」；这里不评分，
@@ -31,6 +36,7 @@ from typing import Any
 
 from app import hiagent, textmatch
 from app.db import get_conn, get_setting
+from app.media_exec import subtitle_dialogue_window
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -155,12 +161,16 @@ async def detect_subtitle_overlay(video_path: str, *, call_meta: dict[str, Any])
     frames = await asyncio.to_thread(sample_frames, video_path)
     if not frames:
         raise ValueError("抽不出任何帧")
+    dense_frames, dense_trace = await asyncio.to_thread(subtitle_dialogue_window.dense_dialogue_frames, video_path)
+    frames = [*frames, *dense_frames]
     raw = await hiagent.chat(
-        build_messages(frames), temperature=0, max_tokens=1200,
+        build_messages(frames), temperature=0, max_tokens=2000,
         call_meta={"kind": "vlm_subtitle_gate", **call_meta},
         response_format={"type": "json_object"},
     )
-    return parse_verdict(raw, len(frames))
+    verdict = parse_verdict(raw, len(frames))
+    verdict["dialogue_dense_sampling"] = dense_trace
+    return verdict
 
 
 def write_verdict(version_id: str, verdict: dict[str, Any]) -> None:
