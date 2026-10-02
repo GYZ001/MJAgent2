@@ -1334,7 +1334,7 @@ function PortraitBlock({ projectId, character: c, disabled, onChanged, regenerat
           <div className="f-misc" style={{ background: 'rgba(91,114,83,0.06)', borderLeft: '3px solid var(--moss)', padding: '6px 10px', borderRadius: '0 6px 6px 0', fontSize: 12.5 }}>
             {c.portrait_prompt_effective}
           </div>
-          <p className="hint">后续正面全身照与头像九宫格均以这里保存的最新提示词为准。</p>
+          <p className="hint">后续正面全身照与头像照均以这里保存的最新提示词为准。</p>
           <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
             <button className="btn small" disabled={disabled || saving}
               aria-label={baseDisabledReason ? `修改定妆提示词，暂不可用：${baseDisabledReason}` : '修改定妆提示词'}
@@ -1411,7 +1411,7 @@ function portraitVersionLabel(portrait: Portrait): string {
 const VIEW_ROLE_LABELS: Record<string, string> = {
   front_full: '正面全身',
   back_full: '背面全身',
-  face_closeup: '头像九宫格',
+  face_closeup: '头像照',
 }
 
 const PRIMARY_PORTRAIT_VIEW_ROLES = ['front_full', 'face_closeup']

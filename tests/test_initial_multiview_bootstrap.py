@@ -10,6 +10,7 @@ import pytest
 
 from app import api, config, db, hiagent, multiview, portraits, refs, scenes
 from app.domain import bible_ops
+from app.portraits import character_side_view
 from app.schemas import Bible, Character, Scene, World
 from tests.conftest import patch_portraits_everywhere
 from tests.conftest import patch_api_everywhere
@@ -54,8 +55,13 @@ def _patch_successful_character_generation(monkeypatch) -> None:
     async def fake_image(*_args, **_kwargs):
         return {"b64_json": encoded}
 
+    async def fake_crop(source_path, *, dest_path, call_meta):
+        Path(dest_path).write_bytes(b"test-image-crop")
+        return {"provenance_preserved": False, "head_box": [0.3, 0.1, 0.7, 0.4], "source_path": source_path}
+
     monkeypatch.setattr(refs.hiagent, "generate_image", fake_image)
     monkeypatch.setattr(multiview, "_generate_image", fake_image)
+    monkeypatch.setattr(character_side_view, "crop_headshot_from_portrait", fake_crop)  # 独立绑定，见 test_face_closeup_pack_headshot_crop.py
     monkeypatch.setattr(multiview, "character_multiview_enabled", lambda: True)
     monkeypatch.setattr(
         refs,

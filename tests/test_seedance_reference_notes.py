@@ -284,38 +284,37 @@ def test_character_purpose_note_baked_wording_unchanged_without_costume_mode():
     assert "服装和表情以本段文字为准" not in result
 
 
-def test_character_purpose_note_switches_to_headshot_grid_wording_for_face_closeup():
-    """2026-10-02：costume_mode="neutral" 且 view_role="face_closeup"（头像
-    九宫格）必须换成九宫格专属说明，不能沿用"长相、发型与体型"那句中性全身
-    照文案——否则视频模型会把九格头像误读成九个不同的人，或把网格画进输出。"""
+def test_character_purpose_note_switches_to_headshot_crop_wording_for_face_closeup():
+    """2026-10-02：costume_mode="neutral" 且 view_role="face_closeup"（定妆照
+    头部裁切）必须换成头像裁切专属说明，不能沿用"长相、发型与体型"那句中性全身
+    照文案——那句暗示送的是全身照，裁切图只有头颈。"""
     prompt = "镜头1：@温念 端着茶杯站在窗边。"
     refs = [{**_character_ref("温念"), "costume_mode": "neutral", "view_role": "face_closeup"}]
 
     result = build_seedance_reference_prompt_notes(prompt, refs, aspect_ratio="9:16")
 
-    assert "头像九宫格参考" in result
-    assert "都是温念一人在不同角度下的头部照片，并非九个不同的人" in result
-    assert "不得出现网格线、分隔线或多个人像" in result
-    assert "不得把这张九宫格原样画进输出画面" in result
+    assert "角色温念的头像参考（定妆照头部裁切）" in result
+    assert "只用来锁定长相与发型" in result
+    assert "服装以正文与服装道具参考为准" in result
     assert "只用来锁定长相、发型与体型，服装和表情以本段文字为准" not in result
 
 
-def test_character_purpose_note_headshot_grid_no_name_variant():
+def test_character_purpose_note_headshot_crop_no_name_variant():
     """没有具名角色（related 为空）时走 no_name 变体，不带占位符残留。"""
     refs = [{"type": "character", "costume_mode": "neutral", "view_role": "face_closeup"}]
 
     result = build_seedance_reference_prompt_notes("镜头1：固定镜头。", refs, aspect_ratio="9:16")
 
-    assert "头像九宫格参考：图中 3×3 共九格头像是同一位角色在不同角度下的头部照片" in result
+    assert "头像参考（定妆照头部裁切），只用来锁定长相与发型" in result
     assert "{who}" not in result
 
 
-def test_character_purpose_note_neutral_front_full_unaffected_by_headshot_grid_branch():
-    """中性身份 front_full（view_role 非 face_closeup）与九宫格共用
+def test_character_purpose_note_neutral_front_full_unaffected_by_headshot_crop_branch():
+    """中性身份 front_full（view_role 非 face_closeup）与头像裁切共用
     costume_mode=="neutral"，但图片内容不同，不能被新分支误接管。"""
     refs = [{**_character_ref("温念"), "costume_mode": "neutral", "view_role": "front_full"}]
 
     result = build_seedance_reference_prompt_notes("镜头1：@温念 站立。", refs, aspect_ratio="9:16")
 
     assert "图片1：角色温念的人物参考，只用来锁定长相、发型与体型，服装和表情以本段文字为准" in result
-    assert "头像九宫格" not in result
+    assert "头像参考（定妆照头部裁切）" not in result

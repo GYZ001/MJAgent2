@@ -16,7 +16,9 @@ from app.atomic_io import atomic_write_bytes
 from app.db import get_conn, get_setting, new_id, now
 from app.evidence.txn_guard import rollback_uncommitted_on_error
 from app.portraits.card_owner import resolve_card_owner
+from app.portraits.character_side_view import produce_character_side_view_image
 from app.portraits.current_ref import current_portrait_ref
+from app.portraits.headshot_crop import HEADSHOT_CROP_DESCRIPTOR, crop_headshot_from_portrait
 from app.project_settings import canvas_phrase, resolve_aspect_ratio
 from app.refs import (
     _PORTRAIT_CLOTHING_CONTRACT,
@@ -49,20 +51,18 @@ SCENE_OPTIONAL_VIEWS = ("action_zone",)
 
 # 每条视角的构图合同：是否要求全身入画，以及写进提示词的构图要求。face_closeup
 # 显式写清「头部与脖颈上段」与「不露服装」；2026-10-01 实测旧措辞「仅余极少量衣领边缘」给了模型许可，顾屿/温念头像照已带出完整衣领与纽扣（face_closeup 以全身照为种子图生图，服装会被图生图带过来）——改为不留余地的正面陈述，并在 character_view_prompt 里为 face_closeup 单独豁免服装合同、加种子图身份/服装分离说明。
-# 2026-10-02：单张大头近景 face_closeup 被 Seedance 判定真人隐私疑似（InputImageSensitiveContentDetected.PrivacyInformation）拒收，全身照此前 142 次都能过，脸小是关键差异，改为同一角色 3×3 头像九宫格；画幅沿用既有 REF_IMAGE_SIZE（9:16，见 app.config 注释：定妆照"不要求与输出画幅一致"），省掉给两条生成路径都接新 size 参数的改动面。
+# 2026-10-02：face_closeup 这条构图合同只在旧测试/存量审计里还有意义，生产路径已改为 app.portraits.headshot_crop 纯像素裁切（图生图人物头像一律被 Seedance 判真人隐私拒收，裁切天然不触发）。
 CHARACTER_VIEW_FRAMING: dict[str, tuple[bool, str]] = {
     "front_full": (True, "正面全身立绘，中性姿态，双臂自然，全身完整可见"),
     "back_full": (True, "背面全身，展示服装背面与发型背部轮廓"),
-    "face_closeup": (False,
-        "头像九宫格：整张画面是一张 3×3 共九格的网格图，由九张同一角色的头肩特写排列组成；九格大小相等、横竖对齐，格与格之间用一条细而浅色的分隔线隔开；九格背景统一为同一种纯浅米色，不得出现渐变、材质或图案差异；九格依次（从左到右、从上到下）是：①正面平视，②左四分之三侧面平视，③右四分之三侧面平视，④左侧面（接近90度侧脸）平视，⑤右侧面（接近90度侧脸）平视，⑥正面、镜头略低于视线的微仰角度（下巴略抬），⑦正面、镜头略高于视线的微俯角度（视线略向下），⑧左四分之三侧面的微仰角度，⑨右四分之三侧面的微俯角度；"
-        "九格必须是同一个人、同一张脸、同一发型、同一发色，不得出现任何差异，整张图里只允许这一位角色出现九次，不得混入任何其他人物；每一格的表情都保持中性、放松、不说话、不做夸张表情；每一格的画面范围只到头部与脖颈上段，下边缘止于下巴下方的颈部，不得向下延伸到锁骨或肩膀；画面中不得出现任何衣领、翻领、纽扣、肩线或其他服装痕迹，颈部以下直接过渡为背景色；若受生成能力限制难以完全避免，宁可只保留一小段与肤色一致、不带任何领型、纽扣、图案或颜色特征的素色颈部影像，也不得呈现原服装的样式；整张图中不得出现任何文字、编号、坐标标签、水印或 logo"),
+    "face_closeup": (False, "头肩特写头像照：画面只包含头部与脖颈上段，正面肖像，五官与发型完整清晰；画面下边缘止于下巴下方的颈部，不得向下延伸到锁骨或肩膀；画面中不得出现任何衣领、翻领、纽扣、肩线或其他服装痕迹，颈部以下直接过渡为纯色背景；若受生成能力限制难以完全避免，宁可只保留一小段与肤色一致、不带任何领型、纽扣、图案或颜色特征的素色颈部影像，也不得呈现原服装的样式"),
 }
 _DEFAULT_VIEW_FRAMING = (True, "全身立绘")
 
 VIEW_ROLE_LABELS = {
     "front_full": "正面全身",
     "back_full": "背面全身",
-    "face_closeup": "头像九宫格",
+    "face_closeup": "头像照",
     "establishing": "建立",
     "reverse_angle": "反打",
     "action_zone": "动作区",
@@ -216,7 +216,7 @@ def character_view_prompt(
         source = normalize_prompt_text(raw_source.replace(f"{_PORTRAIT_CLOTHING_CONTRACT}。", "").replace(_PORTRAIT_CLOTHING_CONTRACT, ""))
     else:
         source = ensure_portrait_clothing_contract(raw_source)
-    face_closeup_override = ("本视角的构图合同优先于前文关于全身定妆照、全身完整可见、服装着装与可见配饰的任何描述——那些描述服务于全身类视角，本视角一律不适用。若生成时提供了同一角色全身定妆照作为参考图，该参考图只用于保持九宫格内每一格共同的面部与发型身份一致，参考图中出现的服装、衣领、纽扣与颜色一律不得带入本视角画面的任何一格。" if view_role == "face_closeup" else "")
+    face_closeup_override = ("本视角的构图合同优先于前文关于全身定妆照、全身完整可见、服装着装与可见配饰的任何描述——那些描述服务于全身类视角，本视角一律不适用。若生成时提供了同一角色全身定妆照作为参考图，该参考图只用于保持面部与发型身份一致，参考图中出现的服装、衣领、纽扣与颜色一律不得带入本视角画面。" if view_role == "face_closeup" else "")
     return (
         f"{character_visual_style_lock(visual_style)}。"
         f"角色外观真值锚点：{source}。"
@@ -1302,13 +1302,11 @@ async def ensure_character_multiview_pack(
             conn.commit()
             return {"status": "failed", "portrait_id": portrait_id, "failed_view": "front_full"}
 
-        front_seed = []
-        if front.get("image_path") and Path(front["image_path"]).exists():
-            front_seed = [hiagent.data_url_from_file(front["image_path"])]
-
         async def _gen_side(view_role: str) -> dict[str, Any]:
-            prompt = character_view_prompt(
-                visual_style, appearance, view_role, effective_prompt, costume_mode,
+            # face_closeup 改走裁切（app.portraits.headshot_crop），prompt 退化成版本号。
+            prompt = (
+                HEADSHOT_CROP_DESCRIPTOR if view_role == "face_closeup" else
+                character_view_prompt(visual_style, appearance, view_role, effective_prompt, costume_mode)
             )
             base = base_views.get(view_role) or {}
             fp = view_input_fingerprint(
@@ -1337,32 +1335,18 @@ async def ensure_character_multiview_pack(
                     )
                     conn.commit()
                 return {"view_role": view_role, "status": "ready", "id": cur["id"], "reused": True}
-            seeds = list(front_seed)
-            if base.get("image_path") and Path(base["image_path"]).exists():
-                seeds.append(hiagent.data_url_from_file(base["image_path"]))
             path = _view_path(project_id, "character", character_name, view_role, ep_start)
-            item = await _generate_image(
-                prompt, seed_inputs=seeds or None,
-                call_meta={
-                    "asset_kind": "character_view",
-                    "view_role": view_role,
-                    "character_name": character_name,
-                        "operation_id": view_generation_operation_id(
-                            asset_kind="character_view",
-                            view_role=view_role,
-                            prompt=prompt,
-                            seed_inputs=seeds,
-                            fallback_identity=f"{portrait_id}:{fp}",
-                        ),
-                    "reuse_successful_operation": True,
-                },
+            qa = await produce_character_side_view_image(
+                view_role, prompt, path=path, front_image_path=front.get("image_path"),
+                base_image_path=base.get("image_path"), character_name=character_name,
+                portrait_id=portrait_id, fp=fp, generate_image=_generate_image,
+                save_image_item=_save_image_item, operation_id=view_generation_operation_id,
             )
-            await _save_image_item(item, path)
             # 技术产物存在即 ready：图片已成功落盘，不再等待 VLM 评审。
             view_id = _upsert_character_view(
                 conn, portrait_id=portrait_id, view_role=view_role,
                 framing="half_or_full" if view_role != "face_closeup" else "closeup",
-                image_path=path, prompt=prompt, qa=None, artifact_id=None,
+                image_path=path, prompt=prompt, qa=qa, artifact_id=None,
                 base_view_id=base.get("id"), status="ready", fingerprint=fp,
             )
             conn.commit()
@@ -2048,19 +2032,35 @@ async def regenerate_character_view(
         seeds = []
         if view_role != "front_full" and front.get("image_path") and Path(front["image_path"]).exists():
             seeds.append(hiagent.data_url_from_file(front["image_path"]))
-        prompt = character_view_prompt(style, appearance, view_role, latest_prompt)
+        # face_closeup 重做改成从 front_full 裁切（app.portraits.headshot_crop）。
+        prompt = (
+            HEADSHOT_CROP_DESCRIPTOR if view_role == "face_closeup" else
+            character_view_prompt(style, appearance, view_role, latest_prompt)
+        )
         path = _view_path(project_id, "character", row["character_name"], view_role, row["ep_start"])
         fp = view_input_fingerprint(
             view_role=view_role, prompt=prompt, anchor_text=latest_prompt,
             parent_revision_id=portrait_id,
             seed_hint=f"{front.get('image_path') or ''}|redo:{Path(path).name}",
         )
-        item = await _generate_image(
-            prompt, seed_inputs=seeds or None,
-            call_meta={"asset_kind": "character_view_redo", "view_role": view_role,
-                       "character_name": row["character_name"]},
-        )
-        await _save_image_item(item, path)
+        qa: dict[str, Any] | None = None
+        if view_role == "face_closeup":
+            if not front.get("image_path") or not Path(front["image_path"]).exists():
+                raise hiagent.ProviderError("头像照需要先有可用的全身定妆照（front_full）才能裁切")
+            qa = await crop_headshot_from_portrait(
+                front["image_path"], dest_path=path,
+                call_meta={
+                    "asset_kind": "character_view_headshot_crop_redo",
+                    "character_name": row["character_name"],
+                },
+            )
+        else:
+            item = await _generate_image(
+                prompt, seed_inputs=seeds or None,
+                call_meta={"asset_kind": "character_view_redo", "view_role": view_role,
+                           "character_name": row["character_name"]},
+            )
+            await _save_image_item(item, path)
         # 技术产物存在即可用：VLM 图片质检已下线，图片成功落盘即可替换旧视角。
         if not Path(path).exists():
             return {"status": "failed", "view_role": view_role, "preserved_previous": True}
@@ -2086,7 +2086,7 @@ async def regenerate_character_view(
         view_id = _upsert_character_view(
             conn, portrait_id=portrait_id, view_role=view_role,
             framing="closeup" if view_role == "face_closeup" else ("full_body" if view_role.endswith("full") else "half_or_full"),
-            image_path=path, prompt=prompt, qa=None, artifact_id=None,
+            image_path=path, prompt=prompt, qa=qa, artifact_id=None,
             base_view_id=(existing.get(view_role) or {}).get("id"),
             status="ready", fingerprint=fp,
         )

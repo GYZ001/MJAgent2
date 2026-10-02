@@ -153,7 +153,7 @@ def _portrait_artifact_candidate_payload(conn, row) -> dict:
         "created_at": row["created_at"] if "created_at" in row.keys() else None,
         "adoptable": False,
         "blocked_reason": (
-            "该图只完成了正面单图阶段，尚未形成正面全身照+头像九宫格两视角包；"
+            "该图只完成了正面单图阶段，尚未形成正面全身照+头像照两视角包；"
             "可用于人工复核和重新生成，但不能直接标记为生产可用定妆包。"
         ),
     }

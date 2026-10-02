@@ -349,10 +349,10 @@ def compute_refs_precheck(
     missing_roles: list[dict] = []
     image_count = 0
     if view_role:
-        image_count = 1
-        missing_roles.append({
-            "character": character, "view_role": view_role, "reason": "单视角重做",
-        })
+        # face_closeup 改从 front_full 纯像素裁切，不调用生图模型，如实报 0。
+        image_count = 0 if view_role == "face_closeup" else 1
+        reason = "头像照由定妆照裁切，不消耗生图" if view_role == "face_closeup" else "单视角重做"
+        missing_roles.append({"character": character, "view_role": view_role, "reason": reason})
     elif resume:
         for c in bible_characters:
             name = c.get("name")

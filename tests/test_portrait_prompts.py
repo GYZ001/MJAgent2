@@ -227,22 +227,13 @@ def test_multiview_prompt_front_full_has_no_face_closeup_override_text() -> None
     assert "本视角的构图合同优先于前文关于全身定妆照" not in prompt
 
 
-def test_multiview_prompt_face_closeup_is_nine_grid_of_same_person() -> None:
-    """2026-10-02：Seedance 对单张大头近景触发真人隐私误判拒收，face_closeup
-    改为同一角色的 3×3 头像九宫格——提示词必须是完整正面陈述：九格同一个人、
-    九个具体角度、统一浅米色背景加细分隔线、禁止网格线/编号画进画面本身。"""
+def test_multiview_prompt_face_closeup_is_not_a_grid() -> None:
+    """2026-10-02：face_closeup 不再走生图模型（改为从 front_full 纯像素裁切，
+    见 app.portraits.headshot_crop），character_view_prompt 这条构图合同只服务
+    旧测试/存量审计，不应再出现已经退场的九宫格措辞。"""
     prompt = character_view_prompt("画风", "外观锚点", "face_closeup")
-    assert "3×3" in prompt and "九宫格" in prompt
-    assert "九格必须是同一个人、同一张脸、同一发型、同一发色" in prompt
-    assert "只允许这一位角色出现九次，不得混入任何其他人物" in prompt
-    for angle in ("正面平视", "左四分之三侧面平视", "右四分之三侧面平视",
-                  "左侧面（接近90度侧脸）平视", "右侧面（接近90度侧脸）平视",
-                  "微仰角度", "微俯角度"):
-        assert angle in prompt
-    assert "细而浅色的分隔线" in prompt
-    assert "纯浅米色" in prompt
-    assert "不得出现任何文字、编号、坐标标签、水印或 logo" in prompt
-    assert "表情都保持中性、放松、不说话、不做夸张表情" in prompt
+    assert "九宫格" not in prompt
+    assert "3×3" not in prompt
 
 
 def test_episode_bible_uses_persisted_appearance_not_prompt_word_extraction(monkeypatch) -> None:

@@ -23,20 +23,13 @@ from .reference_prompt import reference_generation_prompt
 
 
 
-# 2026-10-02：face_closeup 视角改成同一角色的 3×3 头像九宫格后，首尾帧模式
-# （app.media_exec.input_first_frame_last._prepare_first_last_mode_inputs，
-# 经 app.multiview.keyframe_seed_paths 选出的单张"强身份图"仍可能正是这张
-# 九宫格）会把它当种子图喂给这条路径的静态边界帧生成；没有这条说明，模型
-# 可能把九格误读成九个人，或把网格原样画进输出帧——生产近 1800 条计划样本
-# 目前 0 条走这条模式（全部 REFERENCE_IMAGE_MODE），但 capability_verified
-# 为真时这条路径仍会被选中，属于未触发而非已退场。
+# 2026-10-02：face_closeup 视角改成从全身定妆照纯像素裁切（app.portraits.
+# headshot_crop），不再是生图模型产物；原有的"每张图是一个独立具名身份"条款
+# 对裁切出来的头像照依然成立，不需要额外说明。
 _SEED_USAGE_NOTE = (
     " Reference images lock identity, outfit, style, and environment only—not pose, framing, camera, or physical "
     "height. Each character image is one separate named identity; never merge, swap, omit, or duplicate identities. "
-    "If a supplied character image is itself a 3x3 grid of nine small headshots, all nine panels show that same "
-    "one identity from different angles, not nine different people; use the grid only to lock that one person's "
-    "face and hairstyle, and never draw any grid lines, panel dividers, captions, or multiple separate faces into "
-    "the generated frame. Ignore crop-size differences and follow the mandatory action/geometry contract."
+    "Ignore crop-size differences and follow the mandatory action/geometry contract."
 )
 
 

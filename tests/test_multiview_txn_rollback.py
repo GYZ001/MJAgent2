@@ -99,6 +99,19 @@ async def _fake_generate_image(*_args: Any, **_kwargs: Any) -> dict[str, str]:
     return {"b64_json": ENCODED_IMAGE}
 
 
+async def _fake_crop_headshot(source_path: str, *, dest_path: str, call_meta: dict) -> dict[str, Any]:
+    """regenerate_character_view 的 face_closeup 分支直接调用 multiview.
+    crop_headshot_from_portrait（不经过 app.portraits.character_side_view），
+    打桩必须打在这个绑定上，不是 headshot_crop 模块自己的。"""
+    from pathlib import Path as _Path
+    _Path(dest_path).write_bytes(b"cropped-bytes")
+    return {
+        "provenance_preserved": False, "head_box": [0.3, 0.1, 0.7, 0.4],
+        "clothing_top_y": 0.42, "crop_box_px": [0, 0, 100, 120],
+        "output_size": [768, 921], "source_path": source_path,
+    }
+
+
 async def _fake_draft_note(**_kwargs: Any) -> str:
     return ""
 
@@ -268,6 +281,7 @@ def test_regenerate_character_view_rolls_back_pending_write_on_error(
     _seed_portrait(conn, project_id="proj_char2", portrait_id="portrait_2", image_path=str(front_path))
     _seed_portrait_view(conn, portrait_id="portrait_2", view_role="front_full", image_path=str(front_path))
     monkeypatch.setattr(multiview, "_generate_image", _fake_generate_image)
+    monkeypatch.setattr(multiview, "crop_headshot_from_portrait", _fake_crop_headshot)
     _boom_after_real_write(monkeypatch, "_upsert_character_view")
 
     async def _run() -> None:
