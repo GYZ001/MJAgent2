@@ -100,7 +100,7 @@ def test_known_prop_name_rule_keeps_source_wording_literal_unchanged() -> None:
 def test_recheck_prompt_includes_the_same_disambiguation_rule_via_single_source() -> None:
     """复核提示词通过同一个 ``_KNOWN_PROP_NAME_FIELD_RULE`` 常量带上这段规则
     ——字符串级相等，不是两处各写一份措辞。"""
-    prompt = prop_recheck._prompt("（原文）", [])
+    prompt = prop_recheck._prompt("（原文）", [], [])
     assert ce._KNOWN_PROP_NAME_FIELD_RULE in prompt
 
 

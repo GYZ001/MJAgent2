@@ -118,6 +118,6 @@ def test_recheck_prompt_carries_the_same_statement_verbatim() -> None:
     不在 prop_recheck.py 里另外复制一份措辞（结构性保证：两处字符串级相等，
     同 test_prep_pack_prop_recheck.py::test_prompt_uses_the_same_criteria_
     sentence_as_extraction）。"""
-    prompt = prop_recheck._prompt("（原文）", ["大衣", "浅灰色卫衣"])
+    prompt = prop_recheck._prompt("（原文）", ["大衣", "浅灰色卫衣"], [])
     assert "已登记道具名单只做两件事" in prompt
     assert ce._PROP_SEGMENT_CRITERIA in prompt

@@ -353,7 +353,7 @@ def test_extraction_prompt_includes_the_rule_verbatim() -> None:
 def test_recheck_prompt_includes_the_same_rule_via_single_source() -> None:
     """复核提示词通过同一个 ``_KNOWN_PROP_NAME_FIELD_RULE`` 常量带上这段
     说明——字符串级相等，不是两处各写一份措辞。"""
-    prompt = prop_recheck._prompt("（原文）", ["名称：外套｜外观：米白色灯芯绒"])
+    prompt = prop_recheck._prompt("（原文）", ["名称：外套｜外观：米白色灯芯绒"], [])
     assert ce._KNOWN_PROP_NAME_FIELD_RULE in prompt
 
 
