@@ -43,12 +43,17 @@ def test_resolve_segment_prop_manifest_entries_ready_with_existing_file(monkeypa
     image.write_bytes(b"jpeg")
     monkeypatch.setattr(
         prop_references, "_prop_reference_lookup",
-        lambda conn, project_id, name, episode_no: {"status": "ready", "image_path": str(image)},
+        lambda conn, project_id, name, episode_no: {
+            "id": "prop_cat_bag_rev1", "status": "ready", "image_path": str(image),
+        },
     )
     out = resolve_segment_prop_manifest_entries(
         [{"label": "旧猫包", "description": "破猫包"}], conn=object(), project_id="proj-1", episode_no=3,
     )
-    assert out == [{"label": "旧猫包", "description": "破猫包", "ready": True, "image_path": str(image), "resources_order": 0}]
+    assert out == [{
+        "label": "旧猫包", "description": "破猫包", "ready": True, "image_path": str(image),
+        "resources_order": 0, "prop_revision_id": "prop_cat_bag_rev1",
+    }]
 
 
 def test_resolve_segment_prop_manifest_entries_not_ready_when_no_row(monkeypatch) -> None:
@@ -56,7 +61,10 @@ def test_resolve_segment_prop_manifest_entries_not_ready_when_no_row(monkeypatch
     out = resolve_segment_prop_manifest_entries(
         [{"label": "旧猫包", "description": "破猫包"}], conn=object(), project_id="proj-1", episode_no=3,
     )
-    assert out == [{"label": "旧猫包", "description": "破猫包", "ready": False, "image_path": "", "resources_order": 0}]
+    assert out == [{
+        "label": "旧猫包", "description": "破猫包", "ready": False, "image_path": "",
+        "resources_order": 0, "prop_revision_id": None,
+    }]
 
 
 def test_resolve_segment_prop_manifest_entries_stamps_order_by_input_position(monkeypatch) -> None:
@@ -75,7 +83,9 @@ def test_resolve_segment_prop_manifest_entries_stamps_order_by_input_position(mo
 def test_resolve_segment_prop_manifest_entries_not_ready_when_file_missing(monkeypatch) -> None:
     monkeypatch.setattr(
         prop_references, "_prop_reference_lookup",
-        lambda conn, project_id, name, episode_no: {"status": "ready", "image_path": "/nonexistent.jpg"},
+        lambda conn, project_id, name, episode_no: {
+            "id": "prop_cat_bag_rev1", "status": "ready", "image_path": "/nonexistent.jpg",
+        },
     )
     out = resolve_segment_prop_manifest_entries(
         [{"label": "旧猫包"}], conn=object(), project_id="proj-1", episode_no=3,
@@ -121,7 +131,8 @@ def test_storyboard_pack_asset_dependencies_props_flow_into_library_anchors(monk
     monkeypatch.setattr(
         prop_references, "_prop_reference_lookup",
         lambda c, project_id, name, episode_no: (
-            {"status": "ready", "image_path": str(image)} if name == "旧猫包" else None
+            {"id": "prop_cat_bag_rev1", "status": "ready", "image_path": str(image)}
+            if name == "旧猫包" else None
         ),
     )
     segment = {"resources": {"characters": [], "scenes": [], "props": [

@@ -801,17 +801,16 @@ def _manifest_scenes_asset_required(manifest: dict[str, Any] | None) -> dict[str
 
 
 def manifest_revisions_match(frozen: dict[str, Any] | None, current: dict[str, Any] | None) -> bool:
+    from app.video_modes.prop_references import manifest_props_signature  # 函数内导入：同本文件另两处 prop_references 用法，多视角模块导入期不依赖视频模式包
     return (
         manifest_asset_revision_ids(frozen) == manifest_asset_revision_ids(current)
         and manifest_asset_view_fingerprints(frozen) == manifest_asset_view_fingerprints(current)
-        and {
+        and {str(ch.get("name") or ""): bool(ch.get("asset_required", True))
+             for ch in ((frozen or {}).get("characters") or [])} == {
             str(ch.get("name") or ""): bool(ch.get("asset_required", True))
-            for ch in ((frozen or {}).get("characters") or [])
-        } == {
-            str(ch.get("name") or ""): bool(ch.get("asset_required", True))
-            for ch in ((current or {}).get("characters") or [])
-        }
+            for ch in ((current or {}).get("characters") or [])}
         and _manifest_scenes_asset_required(frozen) == _manifest_scenes_asset_required(current)
+        and manifest_props_signature(frozen) == manifest_props_signature(current)
     )
 
 

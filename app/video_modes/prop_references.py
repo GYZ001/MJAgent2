@@ -59,6 +59,13 @@ def resolve_segment_prop_manifest_entries(
     留空当成有图。``resources_order``（2026-10-01）是这条在 ``prop_entries``
     里的下标（模型声明的重要性顺序，见模块 docstring），原样带出供
     ``prop_library_anchors`` 透传——不重新排序、不去重，逐字保留输入顺序。
+
+    ``prop_revision_id``（2026-10-01，第 1 集第 22 段真实故障追加）是命中行的
+    ``prop_references.id``——``app.props.store.upsert_prop_reference`` 每次都是
+    先删后插（见其 docstring「覆盖式」），同一道具重新登记外观卡必然拿到新
+    id，供 ``app.multiview.manifest_revisions_match`` 据此判定冻结参考图清单
+    是否因为外观卡换图而过期；没查到行（``row`` 为 None）时为 None，与
+    ``ready=False`` 同义。
     """
     out: list[dict[str, Any]] = []
     for index, entry in enumerate(prop_entries or []):
@@ -76,8 +83,27 @@ def resolve_segment_prop_manifest_entries(
             "ready": ready,
             "image_path": image_path,
             "resources_order": index,
+            "prop_revision_id": str(row["id"]) if row else None,
         })
     return out
+
+
+def manifest_props_signature(manifest: dict[str, Any] | None) -> dict[str, tuple[Any, Any, bool]]:
+    """按 label 提取道具条目的选取/版本签名，供
+    ``app.multiview.manifest_revisions_match`` 判定冻结参考图清单是否过期。
+
+    ``prop_revision_id`` 换了说明外观卡被重新登记过（旧图已不是当前外观）；
+    ``resources_order`` 换了说明超限裁剪/选取顺序会不同；``ready`` 换了说明
+    "有没有可用参考图"这件事本身变了。三者任一不同，旧冻结清单在道具这一维
+    度上就不再代表当前状态（2026-10-01，第 1 集第 22 段真实故障，见
+    ``app.multiview.manifest_revisions_match`` 调用处的完整背景）。"""
+    return {
+        str(prop.get("label") or ""): (
+            prop.get("prop_revision_id"), prop.get("resources_order"), bool(prop.get("ready")),
+        )
+        for prop in (manifest or {}).get("props") or []
+        if isinstance(prop, dict) and prop.get("label")
+    }
 
 
 def prop_library_anchors(manifest_props: list[dict[str, Any]]) -> list[dict[str, Any]]:
