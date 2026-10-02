@@ -25,6 +25,7 @@ from fastapi import HTTPException
 
 from app import task_registry
 from app.db import get_conn
+from app.video_modes.character_looks_ensure import ensure_character_looks
 
 log = logging.getLogger(__name__)
 
@@ -300,8 +301,6 @@ async def _ensure_character_looks_before_dispatch(episode_id: str) -> None:
     ).fetchone()
     if not row:
         return
-    from app.video_modes.character_looks_ensure import ensure_character_looks
-
     try:
         await ensure_character_looks(project_id=str(row["project_id"]), episode_id=episode_id)
     except Exception:  # noqa: BLE001 - 造型照补齐失败不得阻断连播视频生成

@@ -29,6 +29,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from app.portraits.card_owner import resolve_card_owner
+from app.portraits.current_ref import current_portrait_ref
 from app.video_modes.character_look_views_store import get_look_view
 
 
@@ -198,9 +200,6 @@ def _resolve_one_character_look_need(
     ``app.multiview._storyboard_pack_asset_dependencies`` 的可见性/卡归属判据
     （``resolve_card_owner``/``subject_kind``）同一套，避免两处判据漂移。
     """
-    from app.portraits.card_owner import resolve_card_owner  # 延迟导入：避免 video_modes 包初始化期对 app.portraits 产生不必要的模块级耦合面
-    from app.portraits.current_ref import current_portrait_ref
-
     identity_id = str(entry.get("identity_id") or "")
     if not identity_id or entry.get("visibility") == "voice_only" or identity_id == "旁白":
         return None

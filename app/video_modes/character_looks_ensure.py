@@ -56,6 +56,13 @@ from app import config, db, hiagent
 from app.atomic_io import atomic_write_bytes
 from app.db import get_conn, new_id, now
 from app.evidence.txn_guard import rollback_uncommitted_on_error
+from app.refs import (
+    _PORTRAIT_CLOTHING_CONTRACT,
+    character_visual_style_lock,
+    normalize_prompt_text,
+    portrait_override_appearance_anchor,
+    production_appearance_anchor,
+)
 from app.video_modes.character_look_views import (
     normalize_look_key_text,
     scan_episode_character_look_needs,
@@ -79,14 +86,6 @@ _BACKGROUND_ENSURE_TASKS: set[asyncio.Task[None]] = set()
 def character_look_prompt(
     visual_style: str, appearance: str, portrait_prompt: str | None, wardrobe_text: str,
 ) -> str:
-    from app.refs import (
-        _PORTRAIT_CLOTHING_CONTRACT,
-        character_visual_style_lock,
-        normalize_prompt_text,
-        portrait_override_appearance_anchor,
-        production_appearance_anchor,
-    )
-
     raw_source = portrait_override_appearance_anchor(appearance, portrait_prompt) or production_appearance_anchor(appearance)
     source = normalize_prompt_text(
         raw_source.replace(f"{_PORTRAIT_CLOTHING_CONTRACT}。", "").replace(_PORTRAIT_CLOTHING_CONTRACT, ""),
