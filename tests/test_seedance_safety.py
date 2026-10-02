@@ -71,10 +71,14 @@ REAL_PRIVACY_RAW_BODY = (
 
 
 def test_input_image_privacy_rejection_points_to_switching_visual_style() -> None:
-    """真实案例（2026-08-31，《我欲封天》EP3-EP10 视频阶段 8/10 集被拒）：
-    视频供应商按隐私政策拒收摄影类画风的输入图，这是确定性终态（同一画风
-    重试必然复现），文案不得邀请用户"重试"，必须指向真出路（换画风），
-    且不能把供应商英文原文直接甩给用户了事。"""
+    """真实案例（2026-08-31，《我欲封天》EP3-EP10 视频阶段 8/10 集被拒；
+    2026-10-02 ERR-20261002-de0b34 把同一个 kind 接到了轮询路径，文案改为
+    逐字转述供应商原文——见 app.harness.hiagent_input_image_privacy.
+    input_image_privacy_rejection_guidance 的模块/函数文档字符串）：视频供应商
+    按隐私政策拒收摄影类画风的输入图，这是确定性终态（同一输入对同一政策
+    必然复现），文案不得邀请用户"重试"，必须指向真出路（换画风）。
+    这里 ``meta={}`` 没有 ``_seedance_image_input_labels``（旧数据/未落标签的
+    场景），对不上具体是哪张参考图时必须如实说明，不能编造。"""
     exc = ProviderError(
         "上游请求失败（HTTP 400）",
         raw=REAL_PRIVACY_RAW_BODY,
@@ -87,12 +91,14 @@ def test_input_image_privacy_rejection_points_to_switching_visual_style() -> Non
     assert code == "VIDEO_INPUT_IMAGE_PRIVACY_REJECTED"
     # 确定性终态：不建议原样重试，明确说明重试大概率复现同样的拒绝。
     assert "可稍后重试" not in message
-    assert "同一画风原样重试大概率复现同样的拒绝" in message
+    assert "必然复现" in message
     # 指向真出路：具体的非真人画风名字（从 VISUAL_STYLE_PRESETS 派生），不是空话。
     assert "国漫电影风" in message and "古典水墨风" in message
     assert "已停止对本镜的自动付费重试" in message
-    # 不把供应商英文原文直接甩给用户——原始英文措辞不出现在落地文案里。
-    assert "may contain real person" not in message
+    # 没有标签可对应时如实说明，不假装知道是哪张图。
+    assert "无法对应到具体参考图" in message
+    # 现在必须逐字转述供应商原文（出路要可核验，不能只给一句空泛的分类结论）。
+    assert REAL_PRIVACY_RAW_BODY in message
 
 
 def test_input_image_privacy_rejection_is_externally_terminal_and_not_retryable() -> None:

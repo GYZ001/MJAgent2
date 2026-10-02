@@ -22,11 +22,11 @@ from typing import Any
 from app import config, hiagent, video_modes
 from app.db import get_conn, now
 from app.harness.hiagent_input_image_privacy import (
-    INPUT_IMAGE_PRIVACY_CODE, INPUT_IMAGE_PRIVACY_REJECTED_KIND,
+    INPUT_IMAGE_PRIVACY_REJECTED_KIND, input_image_privacy_rejection_guidance,
+    is_input_image_privacy_rejection,
 )
 from app.hiagent import ProviderError
 from app.orchestration.media_runs import mark_media_job_state
-from app.visual_styles import VISUAL_STYLE_PRESETS
 
 from .common import LeaseLost
 from .enqueue import DEAD_PROVIDER_TASK_SQL, _row_value
@@ -122,15 +122,10 @@ def _video_model_rejection_guidance(
                 "也未向视频服务提交本镜。请更换获准的提示词模型或人工调整内容后再继续。",
             )
         if exc.failure.kind == INPUT_IMAGE_PRIVACY_REJECTED_KIND:
+            labels = meta.get("_seedance_image_input_labels") or []
             return (
                 "VIDEO_INPUT_IMAGE_PRIVACY_REJECTED",
-                "视频供应商判定本镜输入图疑似真人肖像，按隐私政策拒收"
-                f"（供应商错误码 {INPUT_IMAGE_PRIVACY_CODE}）。真人摄影风/精修真人风越接近"
-                "真实人像越容易触发这类判定，同一画风原样重试大概率复现同样的拒绝，"
-                "系统已停止对本镜的自动付费重试。请到项目设置改用非真人画风（"
-                + "、".join(preset.name for preset in VISUAL_STYLE_PRESETS if not preset.photographic)
-                + "）后重新生成定妆照与本镜；若需继续保留当前摄影类画风，"
-                "可仅保留图片产出、不生成视频。",
+                input_image_privacy_rejection_guidance(provider_text, labels),
             )
         mode = str(meta.get("mode") or meta.get("planned_mode") or "")
         quote = f"供应商原文：{provider_text}。" if provider_text else ""
@@ -296,6 +291,11 @@ def settle_terminal_poll_failure(
             conn, job_id, owner, version_id=version_id, error_text=error_text,
         ):
             return failure
+        # 结构化隐私拒收（供应商 code 精确匹配）同输入同政策必然复现，第一次就
+        # 判终态，不等「3 个独立任务相同拒绝」——那条判据是给无结构化信号的
+        # 通用技术故障用的，这里已经有供应商自己的分类，没必要再靠行为猜。
+        if is_input_image_privacy_rejection(error_text):
+            return hiagent.ProviderFailure.model_rejection(INPUT_IMAGE_PRIVACY_REJECTED_KIND)
         history = _prior_shot_terminal_failure_records(conn, shot_id)
         if rejection_repeated_across_tasks(history):
             failure = hiagent.ProviderFailure.model_rejection(PROVIDER_CONTENT_REJECTED_KIND)

@@ -42,18 +42,40 @@ Kept dependency-free of ``app.hiagent`` (only plain values, no
 ``ProviderError``/``ProviderFailure`` construction) so it cannot form an
 import cycle with it -- callers turn ``INPUT_IMAGE_PRIVACY_REJECTED_KIND``
 into a typed ``ProviderFailure.model_rejection(...)`` themselves.
+
+2026-10-02（ERR-20261002-de0b34，真实生产失败）: the **poll** path hits the
+same rejection but in a different envelope than the HTTP-400-body shape this
+module was written against. ``app.seedance.SeedanceAdapter.poll_video_task``
+already unwraps one layer (``result["error"] = error_obj.get("message", "")``
+-- see its module), so by the time detection runs here the text is either
+the flat ``{"message": ..., "type": ..., "code": ...}`` object with no
+``error`` wrapper at all, or that object prefixed with HiAgent's own
+``"Error code: 400 - "`` banner. Both are read by
+``app.harness.hiagent_input_image_rejection._embedded_error_object``
+(already written to peel exactly these two shapes for the sibling
+``rejected_input_image_index`` detector), so detection here now delegates to
+it instead of re-parsing with a bare ``json.loads`` that only understood the
+create-stage ``{"error": {...}}`` shape. One parser, both call sites --
+not a second implementation that could drift out of sync.
 """
 from __future__ import annotations
 
-import json
+from app.harness.hiagent_input_image_rejection import (
+    _embedded_error_object, rejected_reference_labels,
+)
+from app.visual_styles import VISUAL_STYLE_PRESETS
 
 INPUT_IMAGE_PRIVACY_CODE = "InputImageSensitiveContentDetected.PrivacyInformation"
 INPUT_IMAGE_PRIVACY_REJECTED_KIND = "input_image_privacy_rejected"
 
 
 def is_input_image_privacy_rejection(body: str) -> bool:
-    """True iff the raw HTTP error body carries the provider's own
-    deterministic real-person-privacy rejection code for an input image.
+    """True iff the raw error body/text carries the provider's own
+    deterministic real-person-privacy rejection code for an input image, in
+    any of the three shapes seen in production: the create-stage
+    ``{"error": {"code": ..., ...}}`` HTTP body, the flat poll-stage
+    ``{"message": ..., "type": ..., "code": ...}`` object, or that object
+    prefixed with ``"Error code: 400 - "``.
 
     Same input always yields the same result (pure string/JSON parsing, no
     I/O) -- retrying the identical request against the identical provider
@@ -61,12 +83,50 @@ def is_input_image_privacy_rejection(body: str) -> bool:
     an externally-terminal, non-retryable rejection rather than a transient
     fault.
     """
-    try:
-        payload = json.loads(body)
-    except (TypeError, ValueError, json.JSONDecodeError):
+    payload = _embedded_error_object(body)
+    if payload is None:
         return False
-    if not isinstance(payload, dict):
-        return False
-    error_payload = payload.get("error")
-    code = error_payload.get("code") if isinstance(error_payload, dict) else None
-    return str(code or "") == INPUT_IMAGE_PRIVACY_CODE
+    return str(payload.get("code") or "") == INPUT_IMAGE_PRIVACY_CODE
+
+
+def input_image_privacy_rejection_guidance(provider_text: str, labels: list[dict]) -> str:
+    """把真人隐私拒收翻成面向用户的中文落地文案：逐字转述供应商原文、点名被判
+    疑似真人的参考图（拿不到标签时如实说明，不编造）、声明系统已停止自动重
+    试、再按被拒图的类型给出路（CLAUDE.md「拦住用户时必须给出路」）。
+
+    ``provider_text`` 是调用方已经取好的 ``(exc.raw or "").strip()``（创建阶段
+    是整段 HTTP 400 body，轮询阶段是 ``error.message`` 里嵌的那段结构化文本）；
+    ``labels`` 是本镜 ``image_inputs._seedance_image_input_labels``，可能为空
+    （旧数据、或这次失败发生在还没写入标签的阶段）。
+    """
+    rejected = rejected_reference_labels(provider_text, labels)
+    quote = f"供应商原文：{provider_text}。" if provider_text else ""
+    if rejected:
+        named = "、".join(
+            f"「{item.get('label') or item.get('entity_name') or '未标注参考图'}」"
+            for item in rejected
+        )
+        pointer = f"系统比对本次任务的输入参数，判定疑似真人的是：{named}。"
+    else:
+        pointer = "供应商未指明是哪一张输入图，系统也无法对应到具体参考图（可能是旧数据或下标越界）。"
+    character_names = [
+        str(item.get("entity_name") or "").strip()
+        for item in rejected
+        if str(item.get("type") or "") == "character" and str(item.get("entity_name") or "").strip()
+    ]
+    non_photographic = "、".join(preset.name for preset in VISUAL_STYLE_PRESETS if not preset.photographic)
+    if character_names:
+        who = "、".join(f"「{name}」" for name in character_names)
+        exit_path = (
+            f"请到人物谱为{who}重新生成定妆照（换一张全身照，脸部占比小通常能通过供应商判定）；"
+            f"或到项目设置改用非真人画风（{non_photographic}）后重新生成定妆照与本镜。"
+        )
+    else:
+        exit_path = (
+            f"请到项目设置改用非真人画风（{non_photographic}）后重新生成定妆照与本镜；"
+            "若需继续保留当前摄影类画风，可仅保留图片产出、不生成视频。"
+        )
+    return (
+        f"视频供应商判定本镜输入图疑似真人肖像，按隐私政策拒收（供应商错误码 {INPUT_IMAGE_PRIVACY_CODE}）。"
+        f"{quote}{pointer}同一输入对同一供应商政策必然复现，系统已停止对本镜的自动付费重试。{exit_path}"
+    )
