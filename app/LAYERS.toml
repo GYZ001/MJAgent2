@@ -310,6 +310,11 @@ allowed_exceptions = []
                                 # 聚合 + 用途绑定读写路由，挂 APIRouter，只被
                                 # app.main 引用，与 app.audit.api 同一种
                                 # "路由→域"入口角色，同一条理由判 L5
+"app.video_modes.character_looks_api" = 5  # 2026-10-02 新增（人物造型照 P0）：
+                                # 覆盖 app.video_modes = 4 前缀。挂 APIRouter，
+                                # 只被 app.main 引用，与 app.models_registry.api/
+                                # app.audit.api 同一种"路由→域"入口角色，同一条
+                                # 理由判 L5
 
 # ---- L3 供应商适配：可依赖 L0-L2 ----
 "app.harness.model_gateway" = 3

@@ -61,6 +61,13 @@ _TYPE_PURPOSE_ZH: dict[str, str] = {
         "表情或画面构图；生成的视频画面里只呈现这一人，不得出现网格线、分隔线或"
         "多个人像，也不得把这张九宫格原样画进输出画面"
     ),
+    # 本段造型照专用说明（2026-10-02，人物造型照：头像九宫格因被 Seedance 判定真人
+    # 隐私拒收，非默认造型段改送「同一张脸、本段这身衣服」的正面全身造型照，
+    # view_role=="look"、costume_mode 恒为 None）：与老的 baked 文案（上面
+    # "character"/"character_no_name"）语义接近（都是"脸+服装都锁"），但显式点出
+    # "本段"，避免模型把它当成角色通用定妆照、在跨段场景混用时产生歧义。
+    "character_look": "角色{who}的本段造型照参考，脸、发型、体型与服装均以此图为准",
+    "character_look_no_name": "本段造型照参考，脸、发型、体型与服装均以此图为准",
     "scene": "场景参考，只用来锁定环境外观",
     "prop": "道具{who}参考，只用来锁定外观与材质",
     "prop_no_name": "道具参考，只用来锁定外观与材质",
@@ -129,6 +136,8 @@ def _character_purpose_key(has_name: bool, costume_mode: Any, view_role: Any = N
     共用 costume_mode=="neutral"，但图片内容不同（九格 vs 单张全身），必须有
     独立说明，否则视频模型可能把九宫格误读成九个不同的人。"""
     neutral = costume_mode == "neutral"
+    if view_role == "look":
+        return "character_look" if has_name else "character_look_no_name"
     if neutral and view_role == "face_closeup":
         return "character_headshot_grid" if has_name else "character_headshot_grid_no_name"
     if has_name:

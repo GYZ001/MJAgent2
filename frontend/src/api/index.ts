@@ -128,6 +128,8 @@ export const api = {
   cancelStoryboard: storyboardApi.api_storyboard.cancelStoryboard,
   setVideoModel: storyboardApi.api_storyboard.setVideoModel,
   getShotReview: storyboardApi.api_storyboard.getShotReview,
+  getCharacterLooks: storyboardApi.api_storyboard.getCharacterLooks,
+  startCharacterLooks: storyboardApi.api_storyboard.startCharacterLooks,
 
   /* ── 成片与交付域 ── */
   getMixStatus: deliveryApi.getMixStatus,

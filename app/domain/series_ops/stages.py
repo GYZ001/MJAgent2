@@ -19,11 +19,14 @@ symbol 就是全部调用点的唯一绑定，不需要额外的 patch_series_op
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from fastapi import HTTPException
 
 from app import task_registry
 from app.db import get_conn
+
+log = logging.getLogger(__name__)
 
 STAGE_SEQUENCE: tuple[str, ...] = ("screenplay", "storyboard", "confirm", "video", "final")
 
@@ -288,6 +291,23 @@ def _checkpoint_wait_message(cp) -> str:
     return _video_wait_message(detail, cp.phase)
 
 
+async def _ensure_character_looks_before_dispatch(episode_id: str) -> None:
+    """连播自动发起视频生成前先补齐人物造型照（P0，2026-10-02）：非默认造型段
+    没有造型照会退回定妆照（可能带偏服装），能在派发前补上就不留这份降级。
+    失败不阻断生成——分镜台选图会退回定妆照并留可见提示，这里只是尽力而为。"""
+    row = get_conn().execute(
+        "SELECT project_id FROM episodes WHERE id=?", (episode_id,),
+    ).fetchone()
+    if not row:
+        return
+    from app.video_modes.character_looks_ensure import ensure_character_looks
+
+    try:
+        await ensure_character_looks(project_id=str(row["project_id"]), episode_id=episode_id)
+    except Exception:  # noqa: BLE001 - 造型照补齐失败不得阻断连播视频生成
+        log.exception("[CHARACTER_LOOKS_ENSURE_BEFORE_DISPATCH_FAILED] episode_id=%s", episode_id)
+
+
 async def _resume_paused_video(episode_id: str, run_id: str, cp) -> str | None:
     """PAUSED_EXTERNAL 且是服务重启导致时尝试唤醒原运行；返回 None 表示已唤醒，
     返回值非 None 时是给用户看的等待文案（唤醒失败或缺少可续跑的授权）。"""
@@ -298,6 +318,7 @@ async def _resume_paused_video(episode_id: str, run_id: str, cp) -> str | None:
             "生成台因服务重启暂停，但缺少可续跑的补齐授权，需要人工在生成台重新发起",
             cp.phase,
         )
+    await _ensure_character_looks_before_dispatch(episode_id)
     try:
         await _complete_episode_core(episode_id, {
             "mode": "resume",
@@ -346,6 +367,7 @@ async def _kick_video_completion(episode_id: str, run_id: str) -> None:
     # 走到这里要么没有在等的运行，要么是「旧授权因分镜重做/过期/用尽而失效」——那是流程
     # 自己造成的状态变化，连播台自己重新发起一次 fresh 补齐（按当前发布版分镜签新授权），
     # 不把人晾到生成台点确认（2026-09-05 产品复盘：我欲封天第 10 集卡在 UPSTREAM_VERSION_CHANGED）。
+    await _ensure_character_looks_before_dispatch(episode_id)
     try:
         await _complete_episode_core(episode_id, {
             "mode": "fresh",
