@@ -58,19 +58,6 @@ def ensure_registered() -> None:
     _register_human_only(registry)
     _register_commands(registry)
     _register_exemptions(registry)
-    # app/capabilities/exemptions.py 已在 500 行默认上限零余量（见该文件头部
-    # changelog："加完支付的 4 条豁免后该文件 516/500 行"——这次同理，不在那边
-    # 再加一条把它推过线），登记在这里。人物造型照（2026-10-02）的补齐触发与
-    # POST /api/projects/{project_id}/props/{name}/regenerate（exemptions.py 同款
-    # "单件素材人工补齐触发，页面入口，不向 Agent/MCP 开放"）同一类：幂等去重
-    # （claim_or_get CAS），不删除/不覆盖任何既有产物，失败时选图退回定妆照，
-    # 不是需要展示 Impact 并等待用户确认的领域命令。
-    registry.exempt_rest(
-        "POST /api/episodes/{episode_id}/character-looks",
-        "人物造型照补齐触发；幂等去重，不改变任何既有产物，失败时分镜台选图自动退回定妆照，"
-        "页面入口，不向 Agent/MCP 开放",
-        scopes=frozenset({"manju:media-generate"}),
-    )
     _bind_handlers(registry)
     _REGISTERED = True
 

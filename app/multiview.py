@@ -487,7 +487,7 @@ def _storyboard_pack_asset_dependencies(
     def _display_name(identity_or_scene_id: str) -> str:
         return str(identity_or_scene_id).split(":", 1)[-1] if identity_or_scene_id else ""
 
-    from app.video_modes.character_look_views import resolve_character_look_selection  # 函数内导入：app.video_modes 包初始化反向依赖本模块，模块级会成环（同款先例见 manifest_revisions_match）
+    from app.video_modes.character_look_selection import pick_character_reference_view  # 函数内导入：app.video_modes 包初始化反向依赖本模块，模块级会成环（同款先例见 manifest_revisions_match）
     from app.video_modes.scene_state_selection import resolve_scene_reference_entry  # 函数内导入：理由同上一行
 
     characters_out: list[dict[str, Any]] = []
@@ -505,11 +505,12 @@ def _storyboard_pack_asset_dependencies(
         portrait_id = current["portrait_id"] if current else None
         image_path = current["image_path"] if current else ""
         usable = current is not None
-        wardrobe_matches_default = str(entry.get("wardrobe_matches_default") or "")
-        selected_view, look_notice = resolve_character_look_selection(
-            conn=conn, segment=segment, identity_id=identity_id, portrait_id=portrait_id,
-            front_full_image_path=image_path, usable=usable, wardrobe_matches_default=wardrobe_matches_default, name=name,
-        )
+        ready_views = list_portrait_views(portrait_id, conn=conn) if portrait_id else []
+        ready_views = [v for v in ready_views if v.get("status") == "ready" and v.get("image_path")]
+        selected_view = pick_character_reference_view(
+            wardrobe_matches_default=str(entry.get("wardrobe_matches_default") or ""),
+            portrait_id=portrait_id, front_full_image_path=image_path, ready_views=ready_views,
+        ) if usable else None
         if selected_view is not None:
             selected_view["purposes"] = [PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, PURPOSE_VIDEO_INPUT]
         characters_out.append({
@@ -524,7 +525,6 @@ def _storyboard_pack_asset_dependencies(
             "selected_views": [selected_view] if selected_view else [],
             "available_view_roles": [selected_view["view_role"]] if selected_view else [],
             "missing_required": [] if (selected_view or not has_card) else ["front_full"],
-            "look_notice": look_notice,
         })
 
     def _resolve_scene_entry(scene_entry: dict[str, Any]) -> dict[str, Any]:

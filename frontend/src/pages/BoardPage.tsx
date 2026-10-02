@@ -13,7 +13,6 @@ import DecisionDialog from '../components/DecisionDialog'
 import QueryState from '../components/QueryState'; import StaleRefreshBanner from '../components/StaleRefreshBanner'
 import StoryboardAdaptationPanel from '../components/StoryboardAdaptationPanel'
 import StoryboardPackSegmentView from '../components/StoryboardPackSegmentView'
-import CharacterLooksPanel from '../components/CharacterLooksPanel'
 import { useRefsSettledRefresh } from '../hooks/useRefsSettledRefresh'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { storyboardTaskNotice } from '../lib/productionNotices'
@@ -937,7 +936,6 @@ export default function BoardPage() {
               复制后期文字合成清单{packDegradedExportText ? '' : '（暂无）'}
             </button>
           </div>
-          <CharacterLooksPanel episodeId={episodeId!} />
         </section>
       )}
 

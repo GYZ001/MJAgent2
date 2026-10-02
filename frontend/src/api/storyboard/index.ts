@@ -3,15 +3,12 @@
 // 重新导出与 `api.<method>` 对象组装，不放业务逻辑。
 import * as methods from "./methods";
 
-import * as characterLooks from "./characterLooks";
-
 export * from "./shot";
 export * from "./shotEditSession";
 export * from "./versions";
 export * from "./pack";
 export * from "./status";
 export * from "./methods";
-export * from "./characterLooks";
 
 export const api_storyboard = {
   getStoryboardStatus: methods.getStoryboardStatus,
@@ -25,6 +22,4 @@ export const api_storyboard = {
   cancelStoryboard: methods.cancelStoryboard,
   setVideoModel: methods.setVideoModel,
   getShotReview: methods.getShotReview,
-  getCharacterLooks: characterLooks.getCharacterLooks,
-  startCharacterLooks: characterLooks.startCharacterLooks,
 };

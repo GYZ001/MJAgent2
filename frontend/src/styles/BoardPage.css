@@ -588,26 +588,6 @@
 .storyboard-pack-degraded-copy {
   margin-left: auto;
 }
-.character-looks-panel {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--hairline);
-  color: var(--ink-soft);
-  font: 500 11.5px var(--ui);
-}
-.character-looks-panel b {
-  color: var(--ink);
-}
-.character-looks-count-bad {
-  color: var(--cinnabar-deep);
-}
-.character-looks-error {
-  color: var(--cinnabar-deep);
-}
 .storyboard-pack-empty-hint {
   margin: 8px 0 0;
   color: var(--ink-faint);

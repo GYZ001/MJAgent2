@@ -16,17 +16,6 @@ async def generate_episode(args: I.VideoGenerateEpisodeInput) -> CommandResult:
         claim_video_command_operation,
         finish_video_command_operation,
     )
-    # 函数内导入：导入本 handler 模块时不加载 app.video_modes（实测 sys.modules 无该包），模块级导入会让能力注册期连带初始化 video_modes→multiview 整条链
-    from app.video_modes.character_looks_ensure import (
-        pending_character_looks_gate,
-        resolve_episode_project,
-    )
-
-    project_id = resolve_episode_project(args.episode_id)
-    if project_id is not None:
-        pending_message = await pending_character_looks_gate(project_id, args.episode_id, None)
-        if pending_message is not None:
-            return failed(pending_message, error_code="character_looks_pending")
 
     command = "video.generate_episode"
     request_fingerprint = canonical_command_request_fingerprint(
@@ -253,18 +242,6 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
         claim_video_command_operation,
         finish_video_command_operation,
     )
-    # 函数内导入：导入本 handler 模块时不加载 app.video_modes（实测 sys.modules 无该包），模块级导入会让能力注册期连带初始化 video_modes→multiview 整条链
-    from app.video_modes.character_looks_ensure import (
-        pending_character_looks_gate,
-        resolve_shot_scope,
-    )
-
-    shot_scope = resolve_shot_scope(args.shot_id)
-    if shot_scope is not None:
-        shot_project_id, shot_episode_id = shot_scope
-        pending_message = await pending_character_looks_gate(shot_project_id, shot_episode_id, [args.shot_id])
-        if pending_message is not None:
-            return failed(pending_message, error_code="character_looks_pending")
 
     command = "video.generate_shot"
     request_fingerprint = canonical_command_request_fingerprint(

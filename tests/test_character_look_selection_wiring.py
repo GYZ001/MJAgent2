@@ -14,7 +14,6 @@ import inspect
 
 from app import multiview
 from app.video_modes import reference_assemble
-from app.video_modes import character_look_views
 
 
 def test_build_library_reference_assets_forwards_costume_mode_to_asset_from_path():
@@ -27,25 +26,10 @@ def test_library_anchor_assets_from_manifest_carries_costume_mode():
     assert '"costume_mode": view.get("costume_mode")' in source
 
 
-def test_storyboard_pack_asset_dependencies_calls_resolve_character_look_selection():
-    """2026-10-02 人物造型照改造：multiview.py 已卡在行数棘轮基线上（零余量），
-    「查造型照→选参考图→算退回提示」三步收进
-    ``app.video_modes.character_look_views.resolve_character_look_selection`` 一次
-    调用，装配函数只留调用与取值，不展开三步——断言跟着改成钉住这一次调用与
-    wardrobe_matches_default 的赋值来源，而不是深入到被合并掉的中间步骤。"""
+def test_storyboard_pack_asset_dependencies_calls_pick_character_reference_view():
     source = inspect.getsource(multiview._storyboard_pack_asset_dependencies)
-    assert "resolve_character_look_selection(" in source
-    assert "wardrobe_matches_default = str(entry.get(\"wardrobe_matches_default\")" in source
-    assert "wardrobe_matches_default=wardrobe_matches_default" in source
-
-
-def test_resolve_character_look_selection_calls_look_view_helpers():
-    """人物造型照（2026-10-02）：造型照查询、选图策略与退回提示三个 helper 确实
-    接进了 ``resolve_character_look_selection`` 内部，不是定义了函数却没调用。"""
-    source = inspect.getsource(character_look_views.resolve_character_look_selection)
-    assert "resolve_segment_look_view(" in source
     assert "pick_character_reference_view(" in source
-    assert "look_fallback_notice(" in source
+    assert "wardrobe_matches_default=str(entry.get(\"wardrobe_matches_default\")" in source
 
 
 def test_wardrobe_plan_segment_rule_text_still_wired_into_task_payload_rules():

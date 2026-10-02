@@ -73,7 +73,6 @@ from app.payments.routes import router as payments_router
 from app.provider_task_zero_cost_api import router as provider_task_zero_cost_router
 from app.quota_policy.api import router as quota_policy_router
 from app.quota_policy.api import storage_router as quota_storage_router
-from app.video_modes.character_looks_api import router as character_looks_router
 from app.quota_policy.api import usage_router as quota_usage_router
 from app.quota_policy.schema import ensure_schema as ensure_quota_policy_schema
 from app.subtitles.store import ensure_schema as ensure_subtitles_schema
@@ -377,7 +376,6 @@ app.include_router(router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(identity_review_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(planning_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(orchestration_router, dependencies=_PROJECT_OWNER_DEPS)
-app.include_router(character_looks_router, dependencies=_PROJECT_OWNER_DEPS)  # 人物造型照：/api/episodes/{episode_id}/character-looks
 app.include_router(orgs_router, dependencies=_PROJECT_OWNER_DEPS)  # EP-01 第二阶段：组织/团队/角色/项目授权 REST
 app.include_router(quota_policy_router, dependencies=_PROJECT_OWNER_DEPS)  # EP-04 第一阶段：/api/system/quota/plans|allocations
 app.include_router(quota_usage_router, dependencies=_PROJECT_OWNER_DEPS)  # EP-04 第一阶段：/api/system/usage/*
