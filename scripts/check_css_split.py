@@ -24,6 +24,8 @@ PAGES = {
         # 判成「不属于任何页面」，从而要求挪进 index.css（同 SegmentIdentityReview
         # 的先例）。
         'components/SegmentDialogueRevision.tsx',
+        # 2026-10-02 人物造型照状态/补齐面板：只嵌在分镜台节拍概览区，同上先例。
+        'components/CharacterLooksPanel.tsx',
     ],
     'WallPage': [
         'pages/WallPage.tsx',
