@@ -39,6 +39,7 @@ from PIL import Image
 
 from app import hiagent
 from app.atomic_io import atomic_write_bytes
+from app.harness import model_gateway
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -125,7 +126,8 @@ async def _detect_head_geometry(
     messages = _build_geometry_messages(image_url)
     last_error: Exception | None = None
     for attempt in (1, 2):
-        raw = await hiagent.chat(
+        # 走 model_gateway（app/portraits 下的唯一模型入口，见 scripts/check_contract_surface.py 的 FORBIDDEN）：带追踪元数据与网关重试
+        raw = await model_gateway.chat(
             messages, temperature=0, max_tokens=300,
             provider=hiagent.active_provider("vlm"),
             call_meta={"kind": "vlm_headshot_crop_geometry", "attempt": attempt, **call_meta},

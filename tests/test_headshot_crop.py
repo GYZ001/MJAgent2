@@ -2,7 +2,7 @@
 
 覆盖：几何核验的代码核验分支、裁切框计算（含 clothing_top_y 截断/夹边/加宽）、
 JPEG APP11（C2PA/JUMBF）段的纯字节搬运、视觉模型两次不合格抛异常、以及端到端
-裁切流程（打桩 hiagent.chat，不发真实网络请求）。
+裁切流程（打桩 model_gateway.chat，不发真实网络请求）。
 """
 from __future__ import annotations
 
@@ -210,7 +210,7 @@ async def test_detect_head_geometry_succeeds_on_first_valid_response(monkeypatch
         assert kwargs["provider"] == "vlm-provider"
         return _json.dumps(_valid_payload())
 
-    monkeypatch.setattr(hc.hiagent, "chat", fake_chat)
+    monkeypatch.setattr(hc.model_gateway, "chat", fake_chat)
     monkeypatch.setattr(hc.hiagent, "active_provider", lambda kind: "vlm-provider")
 
     result = await hc._detect_head_geometry(
@@ -232,7 +232,7 @@ async def test_detect_head_geometry_retries_once_then_succeeds(monkeypatch, tmp_
             return "not even json"
         return _json.dumps(_valid_payload())
 
-    monkeypatch.setattr(hc.hiagent, "chat", fake_chat)
+    monkeypatch.setattr(hc.model_gateway, "chat", fake_chat)
     monkeypatch.setattr(hc.hiagent, "active_provider", lambda kind: "vlm-provider")
 
     result = await hc._detect_head_geometry(
@@ -251,7 +251,7 @@ async def test_detect_head_geometry_raises_after_two_failures(monkeypatch, tmp_p
         calls["n"] += 1
         return "still not json"
 
-    monkeypatch.setattr(hc.hiagent, "chat", fake_chat)
+    monkeypatch.setattr(hc.model_gateway, "chat", fake_chat)
     monkeypatch.setattr(hc.hiagent, "active_provider", lambda kind: "vlm-provider")
 
     with caplog.at_level(logging.WARNING, logger="app.portraits.headshot_crop"):
@@ -275,7 +275,7 @@ async def test_crop_headshot_from_portrait_preserves_app11_provenance(monkeypatc
     async def fake_chat(_messages, **_kwargs):
         return _json.dumps(_valid_payload())
 
-    monkeypatch.setattr(hc.hiagent, "chat", fake_chat)
+    monkeypatch.setattr(hc.model_gateway, "chat", fake_chat)
     monkeypatch.setattr(hc.hiagent, "active_provider", lambda kind: "vlm-provider")
 
     qa = await hc.crop_headshot_from_portrait(
@@ -304,7 +304,7 @@ async def test_crop_headshot_from_portrait_without_app11_flags_no_provenance(
     async def fake_chat(_messages, **_kwargs):
         return _json.dumps(_valid_payload())
 
-    monkeypatch.setattr(hc.hiagent, "chat", fake_chat)
+    monkeypatch.setattr(hc.model_gateway, "chat", fake_chat)
     monkeypatch.setattr(hc.hiagent, "active_provider", lambda kind: "vlm-provider")
 
     with caplog.at_level(logging.WARNING, logger="app.portraits.headshot_crop"):
@@ -330,7 +330,7 @@ async def test_crop_headshot_from_portrait_flags_tight_neck_margin(
     async def fake_chat(_messages, **_kwargs):
         return _json.dumps(tight_payload)
 
-    monkeypatch.setattr(hc.hiagent, "chat", fake_chat)
+    monkeypatch.setattr(hc.model_gateway, "chat", fake_chat)
     monkeypatch.setattr(hc.hiagent, "active_provider", lambda kind: "vlm-provider")
 
     with caplog.at_level(logging.WARNING, logger="app.portraits.headshot_crop"):
@@ -354,7 +354,7 @@ async def test_crop_headshot_from_portrait_roomy_neck_margin_no_warning(
     async def fake_chat(_messages, **_kwargs):
         return _json.dumps(_valid_payload())
 
-    monkeypatch.setattr(hc.hiagent, "chat", fake_chat)
+    monkeypatch.setattr(hc.model_gateway, "chat", fake_chat)
     monkeypatch.setattr(hc.hiagent, "active_provider", lambda kind: "vlm-provider")
 
     with caplog.at_level(logging.WARNING, logger="app.portraits.headshot_crop"):
@@ -366,9 +366,16 @@ async def test_crop_headshot_from_portrait_roomy_neck_margin_no_warning(
     assert not any("颈部余量偏紧" in record.message for record in caplog.records)
 
 
-def test_module_uses_real_hiagent_binding_for_monkeypatch() -> None:
-    """守卫：headshot_crop 必须用 ``from app import hiagent`` 再 ``hiagent.chat``
-    这种绑定方式，不能 ``from app.hiagent import chat``——后者会让测试里对
-    ``hc.hiagent.chat`` 的打桩静默失效（CLAUDE.md「拆包会静默废掉 monkeypatch」
-    同一类教训）。"""
+def test_module_uses_real_model_gateway_binding_for_monkeypatch() -> None:
+    """守卫：headshot_crop 的视觉调用必须走 ``from app.harness import model_gateway``
+    再 ``model_gateway.chat``（app/portraits 下禁止直接 hiagent.chat，见
+    scripts/check_contract_surface.py），不能 ``from ...model_gateway import chat``
+    ——后者会让测试里对 ``hc.model_gateway.chat`` 的打桩静默失效（CLAUDE.md
+    「拆包会静默废掉 monkeypatch」同一类教训）。"""
+    import inspect
+
+    from app.harness import model_gateway
+
+    assert hc.model_gateway is model_gateway
     assert hc.hiagent is hiagent
+    assert "hiagent.chat(" not in inspect.getsource(hc)
