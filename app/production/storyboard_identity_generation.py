@@ -21,7 +21,7 @@ IDENTITY_GENERATION_RULES = [
     "resources.characters[].display_name 使用输入角色正名或群演 label；有图的可见角色用 @完整名字 后接空格或标点，群演用独立描述。仅有声音的角色使用 speech 占位符发声，无需 @人物图片。",
     "叙述者的 speaker_identity_id 固定填写旁白，delivery_kind=narration，delivery=offscreen_voice，resources.characters 只列人物。source_segment_index 沿用原文 [段N] 编号，与视频 segment_no 分开；必保台词包括原文拼音、异体字、错别字均照录，source_quote_id 逐字取自对应 quote_id。",
     "闪回/回忆画面里出现的人物，若外观明显不是这个角色当前的年龄或形态（童年、少年、年迈等），写进 resources.flashback_figures（label 用称呼如「六岁的顾屿」，description 写清年龄区间、脸型、发型、服装颜色材质等至少三项可视觉验证特征），不要列入 resources.characters、也不要用 @人名指他——@ 的意思是「这一镜用这个角色当前的定妆照」，闪回人物没有这张图可用，镜头正文直接用这个称呼和 description 里的特征描述这个人。闪回画面里如果人物就是角色卡当前的年龄和形态，仍按普通角色处理，正常列入 resources.characters、可以用 @。",
-    "resources.characters[].wardrobe_matches_default：本段这个人物的穿着是否就是人物谱定妆照默认造型（即第一次出场时的那套服装）。本段规则如果已经按全集服装表告知了某个人物该填 yes 还是 no，直接照填，不要自己重新判断；没有被告知时，按本段原文与 continuity_memo 自行判断——确实没有任何换装/脱下/新增配饰证据填 yes，有证据表明穿着不同填 no，拿不准填 unsure。这个字段决定生成时送全身照还是头像照，填 unsure 时会保守按头像照处理（只锁长相，服装以本段文字为准），不会因为漏填而让画面服装被参考图压过正文。",
+    "resources.characters[].wardrobe_matches_default：本段这个人物的穿着是否就是人物谱定妆照默认造型（即第一次出场时的那套服装）。本段规则如果已经按全集服装表告知了某个人物该填 yes 还是 no，直接照填，不要自己重新判断；没有被告知时，按本段原文与 continuity_memo 自行判断——确实没有任何换装/脱下/新增配饰证据填 yes，有证据表明穿着不同填 no，拿不准填 unsure。这个字段决定生成时送全身照还是头像九宫格，填 unsure 时会保守按头像九宫格处理（只锁长相，服装以本段文字为准），不会因为漏填而让画面服装被参考图压过正文。",
 ]
 
 

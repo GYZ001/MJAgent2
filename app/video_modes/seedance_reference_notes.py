@@ -43,6 +43,24 @@ _TYPE_PURPOSE_ZH: dict[str, str] = {
     # 不变，冻结测试锁住，只有 ref["costume_mode"]=="neutral" 才切到这两条。
     "character_neutral": "角色{who}的人物参考，只用来锁定长相、发型与体型，服装和表情以本段文字为准",
     "character_neutral_no_name": "人物参考，只用来锁定长相、发型与体型，服装和表情以本段文字为准",
+    # 头像九宫格专用说明（2026-10-02，Seedance 对单张大头近景触发
+    # InputImageSensitiveContentDetected.PrivacyInformation 真人隐私误判后改为九宫格）：
+    # 必须显式说明"这是同一人物的九个角度"，否则视频模型可能把九格误读成九个不同的人，
+    # 或者把网格本身画进输出画面。``costume_mode=="neutral"`` 且
+    # ``view_role=="face_closeup"`` 才切到这两条；只满足 costume_mode==neutral（例如
+    # 中性身份 front_full）仍用上面两条 character_neutral 文案，不受影响。
+    "character_headshot_grid": (
+        "角色{who}的头像九宫格参考：图中 3×3 共九格头像都是{who}一人在不同角度下的"
+        "头部照片，并非九个不同的人；只用来锁定长相与发型，不用于确定服装、表情或"
+        "画面构图；生成的视频画面里只呈现{who}这一人，不得出现网格线、分隔线或多个"
+        "人像，也不得把这张九宫格原样画进输出画面"
+    ),
+    "character_headshot_grid_no_name": (
+        "头像九宫格参考：图中 3×3 共九格头像是同一位角色在不同角度下的头部照片，"
+        "九格是同一个人，不是九个不同的人；只用来锁定长相与发型，不用于确定服装、"
+        "表情或画面构图；生成的视频画面里只呈现这一人，不得出现网格线、分隔线或"
+        "多个人像，也不得把这张九宫格原样画进输出画面"
+    ),
     "scene": "场景参考，只用来锁定环境外观",
     "prop": "道具{who}参考，只用来锁定外观与材质",
     "prop_no_name": "道具参考，只用来锁定外观与材质",
@@ -103,11 +121,16 @@ def _scene_multi_purpose_zh(ref: dict[str, Any]) -> str:
     return f"场景「{name}」参考，只用来锁定环境外观（主视角）"
 
 
-def _character_purpose_key(has_name: bool, costume_mode: Any) -> str:
+def _character_purpose_key(has_name: bool, costume_mode: Any, view_role: Any = None) -> str:
     """选人物参考图用途说明的字典 key：``costume_mode=="neutral"``（见
     app.portraits.neutral_identity）切到中性文案，其余任何值（含老数据没有
-    这个字段的 None）都是老文案，逐字不变。"""
+    这个字段的 None）都是老文案，逐字不变。``view_role=="face_closeup"``
+    （九宫格头像，2026-10-02）在此基础上再细分一档——它与中性身份 front_full
+    共用 costume_mode=="neutral"，但图片内容不同（九格 vs 单张全身），必须有
+    独立说明，否则视频模型可能把九宫格误读成九个不同的人。"""
     neutral = costume_mode == "neutral"
+    if neutral and view_role == "face_closeup":
+        return "character_headshot_grid" if has_name else "character_headshot_grid_no_name"
     if has_name:
         return "character_neutral" if neutral else "character"
     return "character_neutral_no_name" if neutral else "character_no_name"
@@ -125,7 +148,7 @@ def _reference_purpose_zh(ref: dict[str, Any], *, scene_count: int = 1) -> tuple
     if ref_type == "plot_key_frame":
         return _plot_key_frame_purpose_zh(ref, who), related
     if ref_type == "character":
-        template = _TYPE_PURPOSE_ZH[_character_purpose_key(bool(who), ref.get("costume_mode"))]
+        template = _TYPE_PURPOSE_ZH[_character_purpose_key(bool(who), ref.get("costume_mode"), ref.get("view_role"))]
     elif ref_type == "prop":
         template = _TYPE_PURPOSE_ZH["prop" if who else "prop_no_name"]
     elif ref_type == "scene" and scene_count > 1:
