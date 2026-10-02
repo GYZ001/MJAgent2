@@ -328,6 +328,14 @@ def _segment_shared_rules() -> list[str]:
         "应该勉强套用一个不属于本段的场景 id；但只要 relevant_assets.scenes "
         "非空且本段画面确实发生在其中某个场景，就必须把对应 scene_id 列进 "
         "resources.scenes，不得因为篇幅或注意力被其他字段占用而省略。",
+        "resources.scenes[] 每条还要填 scene_state_matches_card：本段画面里这个"
+        "场景此刻的物理状态和陈设，是否就是 relevant_assets.scenes 场景卡描述的"
+        "默认样子（场景卡默认是未被破坏的日常布置）。本段原文或 continuity_memo "
+        "显示这个场景此刻处于被水淹、被砸、翻乱、搬空、灾后、停电关灯等任何与"
+        "场景卡不同的持久或显著状态时填 no；没有任何这类证据、场景就是默认状态"
+        "时填 yes；原文没写清楚、拿不准时填 unsure。这个字段决定生成时要不要把"
+        "场景卡参考图发给视频模型：填 no 或 unsure 时参考图会被省略、画面完全"
+        "按本段文字描述生成，不要因为担心漏发参考图就不假思索一律填 yes。",
     ]
 
 

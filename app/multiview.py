@@ -485,6 +485,7 @@ def _storyboard_pack_asset_dependencies(
         return str(identity_or_scene_id).split(":", 1)[-1] if identity_or_scene_id else ""
 
     from app.video_modes.character_look_selection import pick_character_reference_view  # 函数内导入：app.video_modes 包初始化反向依赖本模块，模块级会成环（同款先例见 manifest_revisions_match）
+    from app.video_modes.scene_state_selection import resolve_scene_reference_entry  # 函数内导入：理由同上一行
 
     characters_out: list[dict[str, Any]] = []
     for entry in resources.get("characters") or []:
@@ -528,30 +529,13 @@ def _storyboard_pack_asset_dependencies(
         scenes = getattr(bible, "scenes", None) or []
         has_card = bool(sname and match_scene_name(sname, scenes, allow_fuzzy=False))
         row = scene_row_for_episode(project_id, sname, episode_no, conn=conn) if has_card else None
-        scene_reference_id = row["id"] if row else None
-        image_path = str(row["image_path"] or "") if row else ""
-        usable = bool(image_path) and Path(image_path).is_file()
-        selected_view = {
-            "id": scene_reference_id,
-            "view_role": "establishing",
-            "image_path": image_path,
-            "input_fingerprint": scene_reference_id,
-            "purposes": [PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, PURPOSE_VIDEO_INPUT],
-        } if usable else None
-        entry = {
-            "name": sname,
-            "asset_required": has_card,
-            "scene_revision_id": scene_reference_id,
-            "pack_status": PACK_STATUS_READY if usable else None,
-            "asset_usable": usable,
-            "pack_usable": usable,
-            "primary_usable": usable,
-            "selected_view_ids": [scene_reference_id] if selected_view else [],
-            "selected_views": [selected_view] if selected_view else [],
-            "available_view_roles": ["establishing"] if selected_view else [],
-            "missing_required": [] if (selected_view or not has_card) else ["establishing"],
-        }  # 正文点名 @场景名·反打 且有带通过证据的反打图时追加该视角（app.scene_reverse.segment_views）
-        return augment_scene_entry_with_reverse_angle(entry, conn=conn, scene_reference_id=scene_reference_id, scene_name=sname, purposes=[PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, PURPOSE_VIDEO_INPUT],
+        entry = resolve_scene_reference_entry(
+            scene_name=sname, has_card=has_card, scene_reference_id=(row["id"] if row else None),
+            image_path=str(row["image_path"] or "") if row else "",
+            scene_state_matches_card=str(scene_entry.get("scene_state_matches_card") or ""),
+            purposes=[PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, PURPOSE_VIDEO_INPUT],
+        )  # 正文点名 @场景名·反打 且有带通过证据的反打图时追加该视角；状态不一致省略主图时反打图一并不查（scene_reference_id 三元传 None）
+        return augment_scene_entry_with_reverse_angle(entry, conn=conn, scene_reference_id=(None if entry["scene_state_omitted_reason"] else entry["scene_revision_id"]), scene_name=sname, purposes=[PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, PURPOSE_VIDEO_INPUT],
                                                       mentioned_scene_names=mentioned_reverse_scene_names(str(segment.get("prompt_text") or ""), scene_entries, display_name=_display_name))
 
     # 一段可以在中途转场到第二个（甚至更多）场景——之前这里写死只取
@@ -856,6 +840,8 @@ def manifest_production_blockers(manifest: dict[str, Any] | None) -> list[str]:
         if not scene.get("scene_revision_id"):
             if scene.get("asset_required", True):
                 blockers.append(f"场景「{name}」缺少本集场景版本")
+        elif scene.get("scene_state_omitted_reason"):
+            continue  # 按设计省略（状态不符/未确认），不是缺图，不拦截
         elif not (scene.get("selected_view_ids") or scene.get("selected_views")):
             # 有图就是可用（用户拍板 2026-09-01）：场景不再因 pack_status 未 ready
             # 或缺侧视角而被判成拦路项——那会让"主图明明在、生成也拿得到"的场景
@@ -913,6 +899,8 @@ def scan_episode_reference_asset_gaps(
         scenes = [manifest.get("scene") or {}, *(manifest.get("additional_scenes") or [])]
         for scene in scenes:
             if not (isinstance(scene, dict) and scene.get("asset_required", True)):
+                continue
+            if scene.get("scene_state_omitted_reason"):  # 按设计不发图，不是缺图
                 continue
             if (
                 not scene.get("scene_revision_id")

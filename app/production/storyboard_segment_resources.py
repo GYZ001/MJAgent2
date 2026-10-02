@@ -12,6 +12,8 @@ X as X``），测试与其余调用方 import 路径不变（tests/test_storyboa
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from app.schemas.segment_identity import FlashbackFigure, SegmentCharacter as _AiResourceCharacter
@@ -21,6 +23,16 @@ class _AiResourceScene(BaseModel):
     scene_id: str
     scene_reference_id: str | None = None
     description: str = ""
+    #: 本段这个场景此刻的物理状态/陈设是否就是场景卡默认状态（取值规则见
+    #: app.production.storyboard_narrative_arc._segment_shared_rules）。
+    #: 资产装配（app.video_modes.scene_state_selection）据此决定要不要把
+    #: 场景卡参考图发给视频模型：yes 照常发送；no/unsure 保守按"不一致"处理、
+    #: 不发送，场景全凭正文——与人物 wardrobe_matches_default 同一思路，但
+    #: 场景没有退一步仍然诚实的降级素材，unsure 的保守方向因此是不发图而
+    #: 不是发图。此字段上线前生成的存量分镜没有这个 key（读出来是空字符串，
+    #: 不是这里的 pydantic 默认值 "unsure"）：那是"从未被问过"，不是"问了
+    #: 答不出来"，装配时按原有行为照常发送，不对存量分镜追溯新增限制。
+    scene_state_matches_card: Literal["yes", "no", "unsure"] = "unsure"
 
 
 class _AiResourceProp(BaseModel):

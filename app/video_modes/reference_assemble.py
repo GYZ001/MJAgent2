@@ -208,7 +208,11 @@ async def _build_library_reference_assets(
             bible, identity_names, limit=max(1, len(identity_names)),
             project_id=project_id, episode_no=episode_no, shot=shot,
         ))
-    if not any(asset.entity_type == "scene" for asset in assets):
+    # manifest 场景段按状态不一致主动省略了参考图（scene_state_omitted_reason，
+    # 见 app.video_modes.scene_state_selection）时不能走这条回退——回退按场景名
+    # 直接查图库，不认那个省略决定，会把本该不发的旧状态图原样塞回来。
+    scene_state_omitted = bool((manifest.get("scene") or {}).get("scene_state_omitted_reason"))
+    if not any(asset.entity_type == "scene" for asset in assets) and not scene_state_omitted:
         assets.extend(scene_reference_assets(
             bible,
             scene_name,
