@@ -1297,73 +1297,19 @@ def test_worker_does_not_self_fence_on_gallery_generated_by_current_job(monkeypa
     )
 
 
-# test_worker_still_fences_gallery_change_on_another_shot 搬到
-# tests/test_review_dependency_asset_scope.py::
-# test_sibling_shared_library_revision_change_still_fences（2026-10-01，
-# _review_shared_asset_entities 最小作用域收窄后原夹具不再代表真实共享依赖，
-# 搬家顺便避免把这个已经顶格的文件再撑大，见该文件模块 docstring）。
-
-
-def test_worker_ignores_sibling_gallery_growth_on_another_shot(monkeypatch) -> None:
-    """复现 EP1 段5/6/7 假失败：兄弟镜并发解析出新素材条目，不得让在途镜误判过期。
-
-    与 ``test_worker_still_fences_gallery_change_on_another_shot`` 对照：那个
-    测试里兄弟镜是把已存在的条目改了内容（rule_version 变化），仍必须拦住；
-    这里兄弟镜只是新增了一条之前不存在的条目（自己的资格解析第一次落库），
-    不得让别的在途镜的资格快照被判定过期——两者都不要求 narrative authority，
-    直接命中 ``assets_equal`` 的非豁免分支。
-    """
-    conn = _conn()
-    conn.execute(
-        """INSERT INTO shots(
-               id,episode_id,shot_no,duration_s,shot_size,camera_move,
-               scene_setting,action_desc,characters,dialogues,storyboard_artifact_id
-           ) VALUES('s2','e',2,5,'中景','固定','日，测试室内场景',
-                    'other','[]','[]','board-1')"""
-    )
-    original_reference = {
-        "id": "other-ref", "selectedForSeedance": True,
-        "gate_status": "passed", "rule_version": "r1",
-    }
-    conn.execute(
-        """INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,created_at)
-           VALUES('v-other','s2',1,'p','other-key','succeeded',?,0)""",
-        (json.dumps({"reference_images": [original_reference]}),),
-    )
-    conn.commit()
-    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
-    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
-    snapshot = api._review_upstream_snapshot("e")
-    captured = {
-        key: snapshot.get(key) for key in (
-            "qualification_version", "published_screenplay_artifact_id",
-            "confirmed_storyboard_artifact_id", "screenplay_revision",
-            "storyboard_revision", "asset_inputs", "asset_soft_warnings",
-        )
-    }
-    conn.execute(
-        """INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,created_at)
-           VALUES('v-current','s1',1,'p','current-key','running',?,1)""",
-        (json.dumps({"review_dependency_snapshot": captured}),),
-    )
-    # 兄弟镜 s2 的画廊只是新增了一条条目（自己首次落库的解析结果），原有的
-    # other-ref 原样保留、内容未变。
-    new_sibling_reference = {
-        "id": "brand-new-sibling-ref", "selectedForSeedance": True,
-        "gate_status": "passed", "rule_version": "r1",
-    }
-    conn.execute(
-        "UPDATE shot_versions SET image_inputs=? WHERE id='v-other'",
-        (json.dumps({"reference_images": [original_reference, new_sibling_reference]}),),
-    )
-    conn.commit()
-
-    # 修复前：assets_equal 用整集精确列表相等比较，这里会误炸
-    # REVIEW_DEPENDENCY_STALE；修复后：只要求 expected 是 current 的子集，
-    # 新增条目不影响已被别的在途镜依赖的既有条目，不应报错。
-    worker._assert_review_dependency_fence(
-        {"episode_id": "e", "shot_id": "s1"}, "v-current", "candidate",
-    )
+# test_worker_still_fences_gallery_change_on_another_shot /
+# test_worker_ignores_sibling_gallery_growth_on_another_shot 都搬到
+# tests/test_review_dependency_asset_scope.py（2026-10-02）：
+# ``_assert_review_dependency_fence`` 的资产判据已经从"拿兄弟镜头画廊做子集
+# 比较"（``_review_shared_asset_entities``/``_review_asset_contract``，两次
+# 《顾念长安》EP1 事故后已删除）改成"只认本镜自己捕获/冻结的
+# reference_manifest"（``app.media_exec.authority._review_shot_manifest_
+# equal``）——兄弟镜画廊变化（无论是改内容还是纯新增）现在结构上就不会被
+# 比较，这两条"兄弟镜变化不牵连本镜"的回归已经被新文件里更贴近事故现场的
+# ``test_sibling_gallery_view_switch_does_not_fence`` 取代；"真过期仍须拦住"
+# 的安全网见同文件 ``test_own_portrait_replaced_still_fences``/``test_own_
+# scene_reference_replaced_still_fences``，均避免把这个已经顶格的文件再撑大
+# （见该文件模块 docstring）。
 
 
 def _terminal_projection(coverage: dict | None, **extra) -> dict:

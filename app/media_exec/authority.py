@@ -352,26 +352,23 @@ def _assert_review_dependency_fence(job, version_id: str, write_point: str) -> N
         "screenplay_revision", "storyboard_revision",
     )
     upstream_equal = all(current.get(key) == captured.get(key) for key in upstream_keys)
-    expected_assets = captured.get("asset_inputs") or []
-    current_assets = current.get("asset_inputs") or []
-    # The current shot's gallery is produced/updated by this very job.  It is
-    # an output of the run, not an upstream dependency: comparing it here
-    # makes a successful reference build invalidate its own captured token.
-    target_shot_id = row["shot_id"] if row else None
-
-    # Subset check, not full-set equality: a sibling shot resolving/growing its
-    # own gallery must not invalidate this job (EP1 shots 5/6/7, 2026-09-15).
-    # Narrowed further to shared-library entities only (2026-10-01《顾念长安》
-    # EP1 二次生产事故：段 20 自己改选哪几件道具、段 19 丢一张本镜用不到的
-    # "反打"场景图，都把毫不相关的段 5/18 任务判成过期——见
-    # _review_shared_asset_entities 文档）。disappearing/changed entries within
-    # that narrowed scope still fail closed.
-    shared_entities = _review_shared_asset_entities(expected_assets, target_shot_id)
-    assets_equal = bool(
-        not expected_assets
-        or _review_asset_contract(expected_assets, target_shot_id, shared_entities)
-        <= _review_asset_contract(current_assets, target_shot_id, shared_entities)
-    )
+    # 本镜自己依赖哪些库资产，只认本镜自己捕获/冻结的 reference_manifest
+    # （见 _review_shot_manifest_equal 文档）——不再拿"整集范围的素材快照"
+    # 做子集比较：兄弟镜选了哪张图是它自己的输出，不是本镜的上游依赖
+    # （2026-10-01《顾念长安》EP1 二次生产事故：段 19/20 的画廊变化把毫不
+    # 相关的段 15/16/17 判成 REVIEW_DEPENDENCY_STALE）。
+    shot_id = str(row["shot_id"] if row else _row_value(job, "shot_id") or "")
+    try:
+        assets_equal, asset_drift = _review_shot_manifest_equal(
+            conn, job=job, episode_id=str(episode_id), shot_id=shot_id, meta=meta,
+        )
+    except Exception as exc:  # 同上（346 行）：fail-closed 且带诊断码，
+        # 否则会穿透到 run_job.py 的通用 except(ProviderError, Exception)。
+        raise ReviewDependencyFence(json.dumps({
+            "code": "REVIEW_DEPENDENCY_STALE",
+            "write_point": write_point,
+            "message": f"本镜依赖资产复核失败：{exc}",
+        }, ensure_ascii=False)) from exc
     if (
         current.get("eligible_for_production")
         and upstream_equal
@@ -384,6 +381,7 @@ def _assert_review_dependency_fence(job, version_id: str, write_point: str) -> N
         "expected_qualification_version": expected,
         "current_qualification_version": current.get("qualification_version"),
         "blockers": current.get("blockers") or [],
+        "asset_drift": asset_drift,
     }
     try:
         from app.observability.metrics import inc
@@ -416,44 +414,86 @@ def _assert_job_lease(job_id: str, owner: str, *, lease_seconds: float = 180.0) 
     if not media_scheduler.renew_lease(job_id, owner, lease_seconds=lease_seconds):
         raise LeaseLost(f"job lease lost: {job_id} / {owner}")
 
-__all__ = [name for name in globals() if not name.startswith("__")]
 
-
-def _review_shared_asset_entities(items, target_shot_id):
-    """本镜自己在捕获快照时实际依赖的「共享素材库」实体集合。
-
-    只有 (entity_type, entity_name) 且带着真实 ``asset_version``（人物库
-    portrait_id / 场景库 scene_reference_id）的条目才代表"多个镜头引用同一条
-    库记录"；道具参考图在本仓库没有稳定库版本号（见
-    ``app.video_modes.prop_references.prop_library_anchors``，从不写
-    library_revision_id/library_view_id），它的 selectedForSeedance 勾选只是
-    那一镜自己这次生成的输出，不是任何其它镜头的上游依赖。
-
-    2026-10-01《顾念长安》EP1 两次生产事故实测复现：段 20 自己换了一次道具
-    勾选（与本镜无关）、段 19 的参考图少了一张本镜根本不用的"反打"场景图，
-    都曾把毫不相关的段 18/段 5 任务判成 REVIEW_DEPENDENCY_STALE——前者没有
-    asset_version、后者的实体不在本镜自己的依赖集合里，两者都不该参与比较。
+def _review_shot_manifest_equal(
+    conn, *, job, episode_id: str, shot_id: str, meta: dict[str, Any],
+) -> tuple[bool, list[str]]:
+    """本镜自己依赖的库版本（人物定妆照/视角、场景参考）是否仍与捕获时冻结的
+    一致——判据与解析函数都和 ``app.media_exec.input_reference`` 复核参考画廊
+    有效性时完全相同：``resolve_shot_asset_dependencies`` 产出当前清单，
+    ``manifest_revisions_match`` 判定是否与冻结的 ``meta["reference_manifest"]``
+    一致，不再拿"其它镜头当前选了哪些素材"做子集比较（已删除的
+    ``_review_shared_asset_entities``/``_review_asset_contract``：见调用处注释）。
+    本镜还没冻结过 manifest（首次生成）时没有东西可比较，判定未过期。
     """
-    return {
-        (item.get("entity_type"), item.get("entity_name"))
-        for item in items
-        if item.get("shot_id") == target_shot_id and item.get("asset_version")
-    }
+    frozen = meta.get("reference_manifest")
+    if not isinstance(frozen, dict):
+        return True, []
+    shot_row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
+    episode = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    project_id = str(_row_value(job, "project_id") or "")
+    project = conn.execute(
+        "SELECT bible_json FROM projects WHERE id=?", (project_id,),
+    ).fetchone()
+    if shot_row is None or episode is None or project is None:
+        # 归属已经消失：更早的 REVIEW_DEPENDENCY_EPISODE_MISSING 等判据会先拦，
+        # 这里没有可比较的库状态，不重复判定。
+        return True, []
+    # 与 app.media_exec.input_reference._prepare_reference_mode_inputs_impl 取
+    # bible/screenplay 同一份来源：模块级 import 这些模块会在 authority.py 与
+    # app.schemas/app.portraits/app.production.screenplay_authority 之间制造
+    # 与本文件顶部 review_wall 同款的初始化期循环，保持函数内导入。
+    from app.schemas import Bible  # 同上：避免 authority.py 模块级卷入 schemas 初始化期循环
+    from app.portraits import bible_for_episode  # 同上：同一条函数内导入理由
+
+    bible = bible_for_episode(
+        project_id,
+        Bible.model_validate(json.loads(project["bible_json"] or "{}")),
+        episode["episode_no"],
+    )
+    screenplay = None
+    if _row_value(episode, "id") or _row_value(episode, "screenplay_json"):
+        from app.production.screenplay_authority import resolve_downstream_screenplay  # 同上：同一条函数内导入理由
+
+        screenplay = resolve_downstream_screenplay(episode_id, conn=conn).screenplay
+    from app.multiview import manifest_revisions_match, resolve_shot_asset_dependencies  # 同上：同一条函数内导入理由
+
+    shot_model = _load_shot_model(shot_row)
+    # 必须用本版本冻结的合同覆盖 shots 行当前值（可能已被单镜编辑接口改写且
+    # 不联动提升 storyboard_revision），否则视角选择（依赖 risk_tags 的
+    # contact_phase）会随单镜编辑误判 asset_drift，与 input_reference 同款写法。
+    from app.continuity import apply_shot_contract  # 同上：同一条函数内导入理由
+
+    apply_shot_contract(shot_model, meta.get("shot_contract_json"))
+    current = resolve_shot_asset_dependencies(
+        project_id=project_id, episode_no=episode["episode_no"], shot_id=shot_id,
+        shot=shot_model, scene_name=getattr(shot_model, "scene_name", None) or None,
+        conn=conn, bible=bible, screenplay=screenplay,
+    )
+    if manifest_revisions_match(frozen, current):
+        return True, []
+    return False, _review_manifest_entity_diff(frozen, current)
 
 
-def _review_asset_contract(items, target_shot_id, shared_entities):
-    """比较其他镜头里、本镜真正共享依赖的素材身份，忽略引用行编号。"""
-    # version_id/ref_id 是每次任务新生成的行 id，同一素材再入队就换一个
-    # （EP1 串接实测：链上相邻镜头先后重建参考图行，彼此把对方快照里的旧
-    # ref_id 判成消失）；shared_entities 把比较范围收窄到本镜自己依赖、且真有
-    # 库版本号的实体（见 _review_shared_asset_entities 文档）。
-    return {
-        json.dumps(
-            {key: value for key, value in item.items() if key not in {"version_id", "ref_id"}},
-            ensure_ascii=False, sort_keys=True,
-        )
-        for item in items
-        if item.get("shot_id") != target_shot_id
-        and item.get("asset_version")
-        and (item.get("entity_type"), item.get("entity_name")) in shared_entities
-    }
+def _review_manifest_entity_diff(frozen: dict[str, Any], current: dict[str, Any]) -> list[str]:
+    """``manifest_revisions_match`` 判定不一致时具体是哪些实体变了，供
+    ``REVIEW_DEPENDENCY_STALE`` 的 ``detail.asset_drift`` 排障用；闸门本身仍
+    按 ``manifest_revisions_match`` 一次性判定，这里不参与判定逻辑。"""
+    # 同 _review_shot_manifest_equal：避免 authority.py 模块级卷入 app.multiview 初始化期循环
+    from app.multiview import manifest_asset_revision_ids, manifest_asset_view_fingerprints
+
+    changed: set[str] = set()
+    frozen_rev = manifest_asset_revision_ids(frozen)
+    current_rev = manifest_asset_revision_ids(current)
+    for key in set(frozen_rev) | set(current_rev):
+        if frozen_rev.get(key) != current_rev.get(key):
+            changed.add(key)
+    frozen_fp = manifest_asset_view_fingerprints(frozen)
+    current_fp = manifest_asset_view_fingerprints(current)
+    for key in set(frozen_fp) | set(current_fp):
+        if frozen_fp.get(key) != current_fp.get(key):
+            changed.add(":".join(key))
+    return sorted(changed)
+
+
+__all__ = [name for name in globals() if not name.startswith("__")]

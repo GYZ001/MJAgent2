@@ -1067,31 +1067,30 @@ def _resume_reused_paused_job(
         )
     )
 
-    def asset_contract(items):
-        return sorted(
-            json.dumps(
-                {
-                    key: value
-                    for key, value in item.items()
-                    if key != "version_id"
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-            for item in items
-            if item.get("shot_id") != row["shot_id"]
-        )
+    # 本镜自己依赖哪些库资产，只认本镜自己捕获/冻结的 reference_manifest——
+    # 与 app.media_exec.authority._assert_review_dependency_fence 的 worker_start
+    # 判据同一函数、同一判据，不要在这条恢复路径上另起一套"整集 asset_inputs
+    # 精确列表、排除本镜自身"的旧式子集比较（那套比较拿兄弟镜头当前状态当
+    # 本镜依赖，还会因排除本镜自身而漏掉本镜自己资产被替换的真过期：
+    # 2026-10-01《顾念长安》EP1 二次生产事故同根因，2026-10-02 代码评审在恢复
+    # 路径上发现同类残留）。
+    from .authority import _review_shot_manifest_equal  # 函数内导入：authority.py 模块级 import
+    # 本模块（_load_shot_model/_row_value），模块级互相导入会成环，只有真的
+    # 走到暂停任务恢复这一步才需要这份判据。
 
-    expected_assets = captured.get("asset_inputs") or []
-    current_assets = current_snapshot.get("asset_inputs") or []
-    assets_equal = bool(
-        current_requires_authority
-        or not expected_assets
-        or asset_contract(expected_assets) == asset_contract(current_assets)
-    )
+    try:
+        assets_equal, asset_drift = _review_shot_manifest_equal(
+            conn, job=row, episode_id=str(row["episode_id"]), shot_id=str(row["shot_id"]),
+            meta=meta,
+        )
+    except Exception as exc:  # 资格复核失败一律 fail-closed，不得当作"未过期"放行
+        raise ValueError(
+            f"[REVIEW_DEPENDENCY_STALE] 本镜依赖资产复核失败，禁止直接恢复：{exc}"
+        ) from exc
     if not upstream_equal or not authority_equal or not assets_equal:
         raise ValueError(
             "[REVIEW_DEPENDENCY_STALE] 暂停任务绑定的发布依赖已变化，禁止直接恢复"
+            + (f"（{'/'.join(asset_drift)}）" if not assets_equal and asset_drift else "")
         )
 
     provider_task_id = str(row["provider_task_id"] or "").strip()
