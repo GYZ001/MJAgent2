@@ -108,6 +108,29 @@ def test_is_key_prop_mention_description_clause_gate() -> None:
     assert judge.is_key_prop_mention(thin) is False
 
 
+async def test_assess_prop_appearance_prompt_forbids_other_objects_bleeding_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """用户投诉根因：《顾念长安》"浅灰色卫衣"的 appearance_canonical 把贴身佩戴的
+    另一件道具（星盘）压在卫衣上的印痕写进了卫衣外观，出图据此在卫衣胸前画出一个
+    不该有的星盘图案——星盘另有自己的道具卡。提示词必须正面声明"只写这件道具自身
+    可见的外观，其它物件与动作痕迹各归其它物件/剧情"，锁住这条规则不被回退。"""
+    captured: dict[str, str] = {}
+
+    async def _capture_chat_structured(messages, **_kwargs):
+        captured["prompt"] = messages[0]["content"]
+        return SimpleNamespace(appearance_canonical="浅灰色卫衣、棉质、圆领、无印花", aliases=[])
+
+    monkeypatch.setattr(judge.model_gateway, "chat_structured", _capture_chat_structured)
+    await judge.assess_prop_appearance(
+        "浅灰色卫衣", "隔着卫衣按住胸前那枚星盘", style="国漫电影风", ep_label="EP01",
+    )
+    prompt = captured["prompt"]
+    assert "藏在它里面的" in prompt and "被它包住或遮住的东西" in prompt
+    assert "它们各自有自己的道具卡或分镜画面去表现" in prompt
+    assert "appearance_canonical" in prompt.split("不写进")[-1]
+
+
 # ---------------------------------------------------------------------------
 # schemas：旧数据无 props 字段仍可加载
 # ---------------------------------------------------------------------------
