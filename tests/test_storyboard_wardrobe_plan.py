@@ -113,6 +113,22 @@ def test_rules_are_positive_statements_referencing_known_assets():
     assert "进门" in joined and "入睡" in joined  # 情境边界示例
 
 
+def test_rules_cover_mid_scene_visible_state_change_positively():
+    """2026-10-02 真实回归：proj_ca86b15ab7d7《顾念长安》EP1 第 12 段原文明写
+    「替她把外套的扣子扣好」，但旧规则只把"跨情境边界换装"列为要登记的变化，
+    第三条反而劝阻同一场戏里多记录，于是这次扣好从未进全集服装表，后续段
+    被"默认沿用上一段"的敞开状态拉回，第 16 段还编出一次"重新扣好"的动作。
+    正面陈述：原文明写的可见状态变化（扣好/解开、系上/摘下、拉链等）即使在
+    同一场戏里也要追加记录；且"不要多给几条记录"这条劝阻必须收窄到"原文也
+    没有写到状态变化"的情况，不能无条件覆盖这类场景。"""
+    joined = "".join(wardrobe_plan_beat_sheet_rules())
+    assert "扣好或解开" in joined
+    assert "即使人物仍待在同一个地点、同一场戏里" in joined
+    assert "原文也没有写到这个人物穿着/佩戴状态发生变化时" in joined
+    # 收窄后的劝阻不再是无条件的"同一场戏就不要多记"
+    assert "同一场连续戏份里人物的着装保持不变，不要在没有情境边界跨越的情况下多给几条记录" not in joined
+
+
 # ---------------------------------------------------------------------------
 # known_identity_ids / build_wardrobe_state：未知 identity_id/beat_id 剔除+advisory
 # ---------------------------------------------------------------------------

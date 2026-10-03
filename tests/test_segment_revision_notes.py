@@ -87,7 +87,7 @@ def test_adaptation_summary_carries_full_wardrobe_and_prop_lists():
     payload = {"asset_manifest": {"characters": [{"identity_id": "bible:c1", "display_name": "温念"}]}}
     result = assemble_adaptation_summary(
         adaptation_mode="faithful", planned_segment_count=1, beat_draft=draft, dialogue_quotes=[],
-        projected_segment_count=None, drop_review=None,
+        projected_segment_count=None, drop_review=None, wardrobe_recheck=None,
         segments=[SourceSegment(segment_id="s1", text="两人在咖啡馆见面。", start_offset=0, end_offset=9)], payload=payload,
     )
     assert result["wardrobe_plan_full"] == [wardrobe.model_dump(mode="json")]
@@ -108,7 +108,7 @@ def test_adaptation_summary_carries_full_prop_appearance_locks():
     payload = {"asset_manifest": {"characters": []}}
     result = assemble_adaptation_summary(
         adaptation_mode="faithful", planned_segment_count=1, beat_draft=draft, dialogue_quotes=[],
-        projected_segment_count=None, drop_review=None,
+        projected_segment_count=None, drop_review=None, wardrobe_recheck=None,
         segments=[SourceSegment(segment_id="s1", text="两人在咖啡馆见面。", start_offset=0, end_offset=9)], payload=payload,
     )
     assert result["prop_appearance_locks_full"] == [lock.model_dump(mode="json")]

@@ -252,7 +252,7 @@ def test_assemble_adaptation_summary_faithful_mode_has_no_hooks_key_value():
     )
     result = _assemble_adaptation_summary(
         adaptation_mode="faithful", planned_segment_count=1, beat_draft=draft, dialogue_quotes=[],
-        projected_segment_count=None, drop_review=None, segments=[SourceSegment(segment_id="s1", text="少年站在山顶。", start_offset=0, end_offset=7)],
+        projected_segment_count=None, drop_review=None, wardrobe_recheck=None, segments=[SourceSegment(segment_id="s1", text="少年站在山顶。", start_offset=0, end_offset=7)],
         payload={},
     )
     assert result["adaptation_mode"] == "faithful"
@@ -274,7 +274,7 @@ def test_assemble_adaptation_summary_short_drama_carries_hooks_from_final_draft(
     segments = [SourceSegment(segment_id="s1", text="少年站在山顶。", start_offset=0, end_offset=7)]
     result = _assemble_adaptation_summary(
         adaptation_mode="short_drama", planned_segment_count=1, beat_draft=draft, dialogue_quotes=[],
-        projected_segment_count=1, drop_review=None, segments=segments, payload={},
+        projected_segment_count=1, drop_review=None, wardrobe_recheck=None, segments=segments, payload={},
     )
     assert result["hooks"] == {
         "status": "ok",

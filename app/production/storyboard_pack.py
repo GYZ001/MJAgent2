@@ -74,7 +74,7 @@ from app.production.storyboard_beat_sheet import (
     _AiBeat as _AiBeat, _AiBeatSheetDraft as _AiBeatSheetDraft, _AiSegmentPlan as _AiSegmentPlan, _beat_sheet_rules as _beat_sheet_rules,
     _paratext_exclusion_rule as _paratext_exclusion_rule, _paratext_segment_indexes as _paratext_segment_indexes, _source_block_for_prompt as _source_block_for_prompt, _validate_beat_sheet_draft as _validate_beat_sheet_draft,
 )
-from app.production.storyboard_short_drama_review import generate_beat_sheet_with_drop_review
+from app.production.storyboard_wardrobe_recheck import generate_beat_sheet_with_wardrobe_recheck
 from app.production.storyboard_continuity_memo import (
     _AiContinuityMemo, continuity_memo_character_advisories, continuity_memo_errors,
 )
@@ -1102,7 +1102,7 @@ async def generate_storyboard_pack(
     # 2026-09-23 改编强度档位：档位以生成这一刻的项目设置为准并写进留档
     # （见 StoryboardPack.adaptation），之后项目档位被改只影响以后的生成。
     adaptation_mode = resolve_adaptation_mode(conn, ep["project_id"])
-    beat_draft, projected_segment_count, drop_review = await generate_beat_sheet_with_drop_review(
+    beat_draft, projected_segment_count, drop_review, wardrobe_recheck = await generate_beat_sheet_with_wardrobe_recheck(
         episode_id=episode_id, episode_no=episode_no, segments=segments, payload=payload,
         dialogue_quotes=dialogue_quotes, contract_version=STORYBOARD_PACK_VERSION,
         adaptation_mode=adaptation_mode,
@@ -1187,7 +1187,7 @@ async def generate_storyboard_pack(
         ),
         adaptation=_assemble_adaptation_summary(
             adaptation_mode=adaptation_mode, planned_segment_count=planned_segment_count, beat_draft=beat_draft,
-            dialogue_quotes=dialogue_quotes, projected_segment_count=projected_segment_count, drop_review=drop_review, segments=segments, payload=payload,
+            dialogue_quotes=dialogue_quotes, projected_segment_count=projected_segment_count, drop_review=drop_review, wardrobe_recheck=wardrobe_recheck, segments=segments, payload=payload,
         ),
     )
 

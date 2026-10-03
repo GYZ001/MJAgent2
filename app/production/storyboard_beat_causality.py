@@ -327,7 +327,8 @@ def segment_advisories(turns_here: list[Any], prompt_text: str) -> list[str]:
 
 def assemble_adaptation_summary(
     *, adaptation_mode: str, planned_segment_count: int, beat_draft: Any, dialogue_quotes: list[DialogueQuote],
-    projected_segment_count: int | None, drop_review: Any, segments: list[SourceSegment], payload: dict[str, Any],
+    projected_segment_count: int | None, drop_review: Any, wardrobe_recheck: Any,
+    segments: list[SourceSegment], payload: dict[str, Any],
 ) -> dict[str, Any]:
     """adaptation 留档字典组装，从 ``storyboard_pack.generate_storyboard_pack``
     抽出腾 function_lines（该函数已顶 baseline 153）；hooks 见 ``storyboard_
@@ -366,7 +367,15 @@ def assemble_adaptation_summary(
     外观会与整集生成时不一致（跨段漂移）。只对本次改动后新产出的
     ``storyboard_pack_adaptation`` 留档生效——本次改动之前已生成的留档没有
     这个 key，``_existing_plan`` 据此可见地警告，不默默当作"没有锁定"处理，
-    见 ``storyboard_identity_regenerate._restored_plan_items`` 文档。"""
+    见 ``storyboard_identity_regenerate._restored_plan_items`` 文档。
+
+    ``wardrobe_recheck``（2026-10-02）：``storyboard_wardrobe_recheck.recheck_
+    wardrobe_mid_scene_changes`` 的三态 summary（``{"status": "skipped"|"ok"|
+    "failed", "changes_found": int, "added_count": int}``），由调用方
+    ``storyboard_wardrobe_recheck.generate_beat_sheet_with_wardrobe_recheck``
+    在合并进 ``beat_draft.wardrobe_plan`` 之后原样传入——``wardrobe_plan``/
+    ``wardrobe_plan_full`` 两个既有 key 已经按合并后的最终 ``beat_draft`` 重算，
+    这个新 key 只是额外记录"这次复核本身跑得怎样、补登了几条"，不重复统计。"""
     return {
         **_short_drama.adaptation_summary(
             adaptation_mode=adaptation_mode, planned_segment_count=planned_segment_count, segment_count=len(beat_draft.segments),
@@ -374,6 +383,7 @@ def assemble_adaptation_summary(
             kept_dialogue_chars=_short_drama_budget.kept_dialogue_chars(beat_draft.kept_lines, dialogue_quotes), projected_segment_count=projected_segment_count,
         ),
         "drop_review": drop_review,
+        "wardrobe_recheck": wardrobe_recheck,
         "hooks": _short_drama_hooks.hook_summary(beat_draft, segments, adaptation_mode=adaptation_mode),
         "causality": causality_summary(beat_draft, segments),
         "foreshadowing": _beat_foreshadowing.foreshadowing_summary(beat_draft, segments),

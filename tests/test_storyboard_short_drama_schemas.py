@@ -61,7 +61,14 @@ from app.source_excerpt import SourceSegment
 # segment_key_actions_rule，无条件追加、不按 paratext/context 判空）+ _AiSegmentPlan
 # 新增 key_actions 一个字段——同一份"覆盖忠实档的落点"逻辑，新值同样用本文件夹具
 # 实测得到。
-_EXPECTED_FAITHFUL_FINGERPRINT = "4d64677af4be1d9ff0cd76ff"
+# 2026-10-02（P0-D 服装表规则补同场可见状态变化，真实回归 proj_ca86b15ab7d7 EP1 第
+# 12 段「替她把外套的扣子扣好」从未登记入全集服装表导致后续段被拉回敞开、第 16 段
+# 还编出一次重新扣好的动作）：wardrobe_plan_beat_sheet_rules 追加一条正面陈述——原文
+# 明写衣物/配饰可见状态变化时，即使同一场戏也要追加记录；并把"不要多给几条记录"的
+# 劝阻收窄到"原文也没有写到状态变化"的情况，不再无条件覆盖这类场景。字段形状不变，
+# 只是 rules[] 文本变长，task_payload 指纹随之改变——同一份"覆盖忠实档的落点"逻辑，
+# 新值同样用本文件夹具实测得到。
+_EXPECTED_FAITHFUL_FINGERPRINT = "a5b7ebcb75c40101acdc125f"
 
 
 def _fixture_segments() -> list[SourceSegment]:

@@ -36,11 +36,15 @@ appearance``）把体貌特征、默认服装、默认表情焊在同一段文�
 抄进体貌锚点或着装描述时，「隔着卫衣贴胸挂着」这类写法会被视频模型当成外衣上能看见
 的花纹/图案画出来，应该写成「看不见」或「衣服下若隐若现的轻微凸起」。
 
-覆盖点选在 ``storyboard_short_drama_review.generate_beat_sheet_with_drop_review``
-返回前（该模块唯一的编排出口），不在 ``storyboard_pack.generate_storyboard_pack`` 里
-（后者已在 ``app/FILE_CONVENTIONS.toml`` 的 line_count 棘轮基线上零余量，见其模块
-docstring）——覆盖必须晚于短剧档可能存在的「第二遍」生成，否则第二遍会读到已经被
-裁剪过的锚点、误判「这个人物没有标准服装信息」。
+覆盖点选在 ``storyboard_pack.generate_storyboard_pack`` 的唯一编排接线点
+``storyboard_wardrobe_recheck.generate_beat_sheet_with_wardrobe_recheck`` 返回前
+（2026-10-02 起取代直接调用 ``storyboard_short_drama_review.generate_beat_sheet_
+with_drop_review``——后者仍保留、仍在返回前做同一次覆盖，只是生产路径不再经它，
+见该模块与 ``storyboard_wardrobe_recheck`` 模块 docstring），不在 ``storyboard_pack.
+generate_storyboard_pack`` 本体里（后者已在 ``app/FILE_CONVENTIONS.toml`` 的
+line_count 棘轮基线上零余量，见其模块 docstring）——覆盖必须晚于短剧档可能存在的
+「第二遍」生成、也必须晚于本集可能新增的服装表同场变化复核，否则读到的锚点/服装表
+会是覆盖或复核之前的旧状态。
 """
 from __future__ import annotations
 
