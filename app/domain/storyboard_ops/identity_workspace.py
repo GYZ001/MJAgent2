@@ -15,6 +15,7 @@ from app.production.storyboard_identity_regenerate import refreshed_required_dia
 from app.production.storyboard_identity_scope import bind_quote_identities
 from app.production.storyboard_identity_submission import segment_submission_errors
 from app.production.storyboard_pack import _load_indexed_source_segments, _manifest_speaker_names, _paratext_segment_indexes
+from app.production.storyboard_prop_label_validation import prop_label_bracket_note_errors
 from app.production.storyboard_scene_binding import rebind_manifest_scene_references
 from app.production.storyboard_speech_render import attach_quote_provenance, render_segment_speech, speech_template_errors
 from app.production.storyboard_identity_validation import identity_schema_errors
@@ -111,7 +112,11 @@ def prepare_identity_candidate(conn, *, shot_id: str, candidate: dict) -> dict:
     result["degraded_capabilities"] = [n for n in result.get("degraded_capabilities") or [] if "STORYBOARD_IDENTITY_" not in n]
     result = canonical_segment_identities(result, payload)
     result["prompt_text"] = result.get("speech_template") or result.get("prompt_text") or ""
-    errors = [*identity_contract_errors(result, require_explicit=True), *registered_subject_errors(result, payload), *speech_template_errors(result, require_tokens=True)]
+    errors = [*identity_contract_errors(result, require_explicit=True), *registered_subject_errors(result, payload), *speech_template_errors(result, require_tokens=True),
+              *prop_label_bracket_note_errors(
+                  (result.get("resources") or {}).get("props") or [],
+                  payload=payload, source_segment_indexes=result.get("source_segment_indexes") or [],
+              )]
     if errors:
         raise ValueError("；".join(errors))
     attach_quote_provenance(result)

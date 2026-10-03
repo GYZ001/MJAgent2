@@ -8,6 +8,7 @@ from app.production.storyboard_speech_render import (
     attach_quote_provenance, render_segment_speech, speech_template_errors,
 )
 from app.production.storyboard_identity_validation import final_identity_prompt_errors, quote_provenance_errors
+from app.production.storyboard_prop_label_validation import prop_label_bracket_note_errors
 from app.production.storyboard_reference_tag_repair import repair_segment_reference_tags
 
 log = logging.getLogger(__name__)
@@ -45,7 +46,11 @@ def generated_identity_errors(
         log.info("[STORYBOARD_REFERENCE_TAG_REPAIR] @ 引用与紧随文字之间已补空格：%s", "、".join(fixed))
     errors = [*identity_contract_errors(segment), *identity_contract_errors(normalized, require_explicit=True),
               *registered_subject_errors(normalized, payload),
-              *speech_template_errors(normalized, require_tokens=True), *quote_provenance_errors(normalized)]
+              *speech_template_errors(normalized, require_tokens=True), *quote_provenance_errors(normalized),
+              *prop_label_bracket_note_errors(
+                  (normalized.get("resources") or {}).get("props") or [],
+                  payload=payload, source_segment_indexes=source_indexes,
+              )]
     if not errors:
         render_segment_speech(normalized, dialect=dialect, narrator_voice_character=narrator_voice_character)
         errors.extend(final_identity_prompt_errors(normalized))

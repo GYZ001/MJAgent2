@@ -66,6 +66,21 @@ beat_id）与"模型有没有觉得这件道具这段被用到"（措辞模糊�
    ``resources.props`` 要按画面显眼程度与跨段一致性重要程度从高到低排列——机制只能
    原样保留模型给出的顺序，顺序本身是否"重要的排前面"仍要靠这句话要求模型自己做到。
 
+5. 第四版（2026-10-02，《顾念长安》EP1 第 14/15 段真实成片复查，经「修订本段」重生成
+   后发现）：第二版把判据从二分改成三态后，"部分可见只写露出部分"这句话被模型理解成
+   "把可见范围写进 label 本身"——``resources.props`` 出现了「浅蓝色碎花长裙（外套下摆
+   露出的一截）」「米白色针织开衫（外套领口露出的领口）」这类 label，括号里的说明本该
+   写进 ``description``。``app.video_modes.prop_references.resolve_segment_prop_
+   manifest_entries`` 按 label 逐字查道具卡，带括号的 label 查不到卡，参考图没有送给
+   视频模型，第 15 段温念的浅蓝碎花长裙被画成了另一条裤子。修法：两个方言补一句正面
+   陈述——label 逐字取自道具卡名称或其登记别名，可见范围/部位/归属一律写进
+   description，不写进 label、不加括号；新增结构校验 ``storyboard_prop_label_
+   validation.prop_label_bracket_note_errors``（label 是"已知道具名+紧跟括号"的形状
+   就报错，交给既有生成重试/人工修订拒存机制，不静默剥括号替模型"修好"），接入逐段
+   生成（``storyboard_identity_generation.generated_identity_errors``）与「修订本段」
+   （``app.domain.storyboard_ops.identity_workspace.prepare_identity_candidate``）两条
+   路径。
+
 不改 ``storyboard_dialects.py``（499/500 行，新增逻辑已没有余量）——接线方式照抄
 ``storyboard_shot_mandates.py``「静态、无条件、按 render_format 选方言」的先例，两个
 模型方言各自的文案在阶段二对每一段都无条件拼进 ``dialect_instructions``，不依赖任何
@@ -105,6 +120,12 @@ SEEDANCE_PROP_VISIBILITY_RULE = (
     "外观一致性的重要程度，从高到低排列——画面里越显眼、在别的段也会出现的道具排得越靠前；"
     "参考图张数有上限，排在后面的道具会最先被舍弃，只按这两项重要性判断，不按道具名字或"
     "类型排序。"
+    "resources.props 每一条的 label 只能是这件道具/衣物本身的名称：有道具卡的，逐字使用"
+    "relevant_assets.props 里给出的这件道具的名称或其登记的别名，一个字都不能改，也不能在"
+    "后面加括号或任何其它说明；没有道具卡的，写它的通用名称（例如「帆布包」「保温杯」）。"
+    "这件道具这一段是完全可见、只露出一截、露出的是哪个部位、此刻挂在谁身上或放在什么"
+    "位置，这类说明一律写进 description，不写进 label，也不得在 label 后面用括号补充——"
+    "label 只负责标识这是同一件道具，可见范围/部位/归属这些描述交给 description。"
 )
 
 MINIMAX_H3_PROP_VISIBILITY_RULE = (
@@ -139,7 +160,15 @@ MINIMAX_H3_PROP_VISIBILITY_RULE = (
     "important by how prominent they are in this segment's picture and how much cross-segment "
     "appearance consistency they need -- a more prominent prop, or one that also appears in other "
     "segments, goes first. Reference images have a hard cap, and items listed later are the first "
-    "to be dropped -- order by these two factors, never by name or type."
+    "to be dropped -- order by these two factors, never by name or type. "
+    "Each resources.props entry's label must be nothing but the prop/garment's own name: if it has "
+    "a prop card, use verbatim the name given for it in relevant_assets.props, or one of its "
+    "registered aliases -- not a single character changed, and never append a parenthetical or any "
+    "other note after it; if it has no prop card, write its generic name (e.g. \"canvas bag\", "
+    "\"thermos\"). Whether it is fully visible, only a sliver shows, which part is showing, or whose "
+    "hands or which spot it is at right now -- all of that belongs in description, never in label "
+    "and never appended to label in parentheses -- label only exists to identify this as the same "
+    "prop; the visible-portion/location/ownership description belongs in description."
 )
 
 
