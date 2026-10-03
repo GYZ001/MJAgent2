@@ -131,6 +131,74 @@ async def test_assess_prop_appearance_prompt_forbids_other_objects_bleeding_in(
     assert "appearance_canonical" in prompt.split("不写进")[-1]
 
 
+async def test_assess_prop_appearance_prompt_rejects_category_only_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """真实缺陷（proj_ca86b15ab7d7《顾念长安》EP1）：模型给"对面木椅"报的别名里
+    混着只剩品类名的"椅子"，登记后以后任何一集写"椅子"都会错误复用这张咖啡馆
+    木椅的参考图。提示词必须正面声明"只剩品类名的泛称不算别名"，锁住这条规则。"""
+    captured: dict[str, str] = {}
+
+    async def _capture_chat_structured(messages, **_kwargs):
+        captured["prompt"] = messages[0]["content"]
+        return SimpleNamespace(appearance_canonical="深色木质，靠背雕花，扶手处有裂纹", aliases=[])
+
+    monkeypatch.setattr(judge.model_gateway, "chat_structured", _capture_chat_structured)
+    await judge.assess_prop_appearance(
+        "对面木椅", "深色木质，靠背雕花", style="国漫电影风", ep_label="EP01",
+    )
+    prompt = captured["prompt"]
+    assert "椅子" in prompt and "杯子" in prompt  # 示例词命中新规则
+    assert "只剩下品类名的泛称" in prompt
+    assert "本身不是别名" in prompt
+
+
+# ---------------------------------------------------------------------------
+# service.register_prop_card_for_label：分镜阶段补卡的别名收紧（allowed_aliases）
+# ---------------------------------------------------------------------------
+
+async def test_register_prop_card_for_label_keeps_alias_used_as_label_in_episode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_project("p_alias_keep")
+    monkeypatch.setattr(judge.model_gateway, "chat_structured", _fake_chat_structured)
+    monkeypatch.setattr(service, "generate_prop_reference_image", _fake_generate_image)
+
+    result = await service.register_prop_card_for_label(
+        get_conn(), "p_alias_keep", 1, "旧猫包", "灰色帆布材质的旧背包",
+        style="国漫电影风", ep_label="第 1 集", allowed_aliases=frozenset({"旧包"}),
+    )
+
+    assert result["name"] == "旧猫包"
+    bible = json.loads(get_conn().execute(
+        "SELECT bible_json FROM projects WHERE id='p_alias_keep'",
+    ).fetchone()["bible_json"])
+    prop = next(p for p in bible["props"] if p["name"] == "旧猫包")
+    assert prop["aliases"] == ["旧包"]  # _fake_chat_structured 的别名落在 allowed_aliases 里，保留
+
+
+async def test_register_prop_card_for_label_drops_alias_not_used_as_label(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    _seed_project("p_alias_drop")
+    monkeypatch.setattr(judge.model_gateway, "chat_structured", _fake_chat_structured)
+    monkeypatch.setattr(service, "generate_prop_reference_image", _fake_generate_image)
+
+    with caplog.at_level("INFO"):
+        result = await service.register_prop_card_for_label(
+            get_conn(), "p_alias_drop", 1, "旧猫包", "灰色帆布材质的旧背包",
+            style="国漫电影风", ep_label="第 1 集", allowed_aliases=frozenset(),
+        )
+
+    assert result["name"] == "旧猫包"
+    bible = json.loads(get_conn().execute(
+        "SELECT bible_json FROM projects WHERE id='p_alias_drop'",
+    ).fetchone()["bible_json"])
+    prop = next(p for p in bible["props"] if p["name"] == "旧猫包")
+    assert prop["aliases"] == []  # "旧包" 不在空的 allowed_aliases 里，丢弃
+    assert any("[PROP_STORYBOARD_CARD_ALIAS_DROPPED]" in r.message for r in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # schemas：旧数据无 props 字段仍可加载
 # ---------------------------------------------------------------------------

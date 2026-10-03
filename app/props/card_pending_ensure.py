@@ -46,6 +46,7 @@ from app.evidence.txn_guard import rollback_uncommitted_on_error
 from app.props.card_match import match_existing_prop_card
 from app.props.card_pending_scan import (
     candidate_labels_without_card,
+    label_shot_occurrences,
     load_episode_shot_rows,
 )
 from app.props.card_pending_store import (
@@ -165,6 +166,7 @@ def _combined_evidence(label: str, info: dict[str, Any], source_text: str) -> tu
 async def _build_one_label(
     *, project_id: str, episode_no: int, label: str, info: dict[str, Any],
     style: str, ep_label: str, source_text: str, cards: list[Any],
+    allowed_aliases: frozenset[str],
 ) -> None:
     row, should_build = await claim_or_get(project_id=project_id, label=label)
     if not should_build:
@@ -188,6 +190,7 @@ async def _build_one_label(
             return
         result = await register_prop_card_for_label(
             conn, project_id, episode_no, label, description, style=style, ep_label=ep_label,
+            allowed_aliases=allowed_aliases,
         )
         resolved_name = (result or {}).get("name") or label
         if result is not None and not result.get("has_image"):
@@ -261,12 +264,17 @@ async def ensure_storyboard_prop_cards(
             style = bible.world.visual_style_canonical
             ep_label = f"第 {episode_no} 集"
             semaphore = asyncio.Semaphore(_MAX_CONCURRENT_BUILDS)
+            # 别名收紧的数据来源：本集（始终按整集，不受 shot_ids 收窄，与候选判定
+            # 同一取舍）分镜里实际出现过的全部 label——模型提议的别名只有落在这个
+            # 集合里才登记，见 service.register_prop_card_for_label 的案情与派单。
+            episode_labels = frozenset(label_shot_occurrences(shot_rows))
 
             async def _run(label: str, info: dict[str, Any]) -> None:
                 async with semaphore:
                     await _build_one_label(
                         project_id=project_id, episode_no=episode_no, label=label, info=info,
                         style=style, ep_label=ep_label, source_text=source_text, cards=bible.props,
+                        allowed_aliases=episode_labels,
                     )
 
             await asyncio.gather(*[_run(label, info) for label, info in buildable.items()])

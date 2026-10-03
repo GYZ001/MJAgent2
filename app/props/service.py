@@ -117,30 +117,53 @@ def bind_existing_prop_alias(conn: sqlite3.Connection, project_id: str, canonica
 
 async def register_prop_card_for_label(
     conn: sqlite3.Connection, project_id: str, episode_no: int, label: str, description: str,
-    *, style: str, ep_label: str,
+    *, style: str, ep_label: str, allowed_aliases: frozenset[str],
 ) -> dict | None:
     """供 ``app.props.card_pending_ensure``（分镜阶段补卡）新建一张道具卡：
     复用 ``_register_one_prop`` 同一条写入路径（模型写外观锚点 + 出图 + 世界书
     + ``prop_references`` 登记），不另起一份建卡逻辑。``description`` 已由
     调用方把本集跨段的全部描述 + 原文原句拼好，这里原样传给
-    ``assess_prop_appearance`` 的 ``description`` 入参。"""
+    ``assess_prop_appearance`` 的 ``description`` 入参。
+
+    ``allowed_aliases``（2026-10-03，必传、无默认值——CLAUDE.md「Ownership
+    Must Be Explicit」）：调用方须传本集分镜 ``resources.props`` 里实际出现过
+    的全部 label 集合（见 ``app.props.card_pending_scan.label_shot_occurrences``），
+    模型提议的别名只有落在这个集合里才登记，见 ``_register_one_prop`` 的过滤
+    说明与案情。"""
     return await _register_one_prop(
         conn, project_id, episode_no, {"label": label, "description": description},
-        style=style, ep_label=ep_label,
+        style=style, ep_label=ep_label, allowed_aliases=allowed_aliases,
     )
 
 
 async def _register_one_prop(
     conn: sqlite3.Connection, project_id: str, episode_no: int, mention: dict,
-    *, style: str, ep_label: str,
+    *, style: str, ep_label: str, allowed_aliases: frozenset[str] | None,
 ) -> dict | None:
+    """``allowed_aliases``（必传、无默认值）：``None`` 表示调用方明确选择不收紧
+    （映射台 ``ensure_props_for_labels`` 既有行为，别名来自模型申报即登记，不
+    改动），非 ``None`` 时表示调用方（分镜阶段补卡）要求别名必须能在数据里
+    找到依据——只保留落在该集合里的别名，其余按 CLAUDE.md「不得兜底填充」丢弃
+    并记日志，不默默吞掉（真实事故：模型把"椅子""杯子""毛衫"这类只剩品类名的
+    泛称报成别名，登记后以后任何一集提到同品类的另一件东西都会错误复用这张卡
+    的参考图）。"""
     label = str(mention.get("label") or "").strip()
     verdict = await assess_prop_appearance(
         label, str(mention.get("description") or ""), style=style, ep_label=ep_label,
     )
+    aliases = verdict["aliases"]
+    if allowed_aliases is not None:
+        dropped = [a for a in aliases if a not in allowed_aliases]
+        if dropped:
+            log.info(
+                "[PROP_STORYBOARD_CARD_ALIAS_DROPPED] label=%s 丢弃别名=%s"
+                "（本集分镜未把它们用作任何道具的 label，不采信）",
+                label, dropped,
+            )
+        aliases = [a for a in aliases if a in allowed_aliases]
     prop = Prop(
         name=label, appearance_canonical=verdict["appearance_canonical"],
-        aliases=verdict["aliases"], first_episode_no=episode_no,
+        aliases=aliases, first_episode_no=episode_no,
     )
     if not _append_prop_to_bible(conn, project_id, prop):
         return None  # 并发下已被抢先登记（重读会看到别的调用刚写入的同名道具），不重复建
@@ -265,8 +288,12 @@ async def ensure_props_for_labels(
                 bound_existing += 1
                 continue
             try:
+                # allowed_aliases=None：映射台既有行为不收紧别名（本次改动只收紧分镜阶段
+                # 补卡 register_prop_card_for_label 这一条路径，见该函数与 _register_one_prop
+                # 的 docstring）——显式传 None 而不是省略参数，避免日后有人以为漏传。
                 result = await _register_one_prop(
                     conn, project_id, episode_no, {**mention, "label": base}, style=style, ep_label=ep_label,
+                    allowed_aliases=None,
                 )
             except Exception as exc:  # noqa: BLE001 单个道具登记失败不影响其它道具继续
                 errors.append(f"{label}：道具库登记失败：{exc}")
