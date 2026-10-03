@@ -334,8 +334,15 @@ async def _complete_reference_mode_with_healed_assets(
         return None
     from app.media_pipeline import stages as media_stages
     from app.media_pipeline.stage_state import set_pipeline_stage
+    from app.video_modes.prop_composite_pack import merge_prop_composite_overflow  # 只有本函数用到，不提到模块顶层常驻
 
     meta["mode_decision"] = video_modes.decision_to_dict(decision)
+    # 超限道具合成拼图顶替槽位，须在 reference_images 定稿前完成，见
+    # app.video_modes.prop_composite_pack 模块 docstring。
+    required_names = list(meta.get("required_reference_characters") or [])
+    assets = await merge_prop_composite_overflow(
+        assets, project_id=job["project_id"], required_identity_names=required_names,
+    )
     meta["reference_images"] = video_modes.dedupe_reference_dicts(
         [a.public_dict() for a in assets]
     )
@@ -349,7 +356,7 @@ async def _complete_reference_mode_with_healed_assets(
     prompt_text = video_modes.append_reference_prompt_notes(
         prompt_text, assets, duration_s=shot_model.duration_s,
         aspect_ratio=str(meta.get("aspect_ratio") or "9:16"),
-        required_identity_names=list(meta.get("required_reference_characters") or []),
+        required_identity_names=required_names,
     )
     try:
         from app.media_pipeline.reference_store import upsert_reference_set_from_meta

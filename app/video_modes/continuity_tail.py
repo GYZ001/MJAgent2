@@ -20,6 +20,31 @@ from .seedance_pack import _dedupe_assets
 
 
 
+def _restore_sideband_fields(asset: ReferenceImageAsset, ref: dict[str, Any]) -> None:
+    """两处 ``ReferenceImageAsset`` 构造分支（``_asset_from_path``/直接构造）
+    都没有现成参数透传这些"旁路字段"，必须显式从原始 ``ref`` 读回来，否则
+    尾帧到达后的重装配会把它们静默重置成初值——``resources_order``
+    （2026-10-01，``ref_pack_priority`` 超限裁剪会退回看随机 id）与
+    ``composite_member_labels``/``composite_member_fingerprints``
+    （2026-10-03，拼图条目的成员信息会从冻结清单与供应商提示词里消失）都已
+    真实踩过这个坑，统一收在这个函数里避免第三次重复。"""
+    asset.id = ref.get("id") or asset.id
+    asset.selectedForSeedance = bool(ref.get("selectedForSeedance"))
+    asset.deleted = bool(ref.get("deleted"))
+    asset.rejectReason = ref.get("rejectReason")
+    asset.dependency_manifest = ref.get("dependency_manifest")
+    asset.prompt_contract_version = ref.get("prompt_contract_version")
+    asset.keyframe_contract_fingerprint = ref.get("keyframe_contract_fingerprint")
+    asset.candidate_no = ref.get("candidate_no")
+    asset.keyframe_index = ref.get("keyframe_index")
+    asset.keyframe_total = ref.get("keyframe_total")
+    asset.keyframe_time_ratio = ref.get("keyframe_time_ratio")
+    asset.keyframe_target_desc = ref.get("keyframe_target_desc")
+    asset.resources_order = ref.get("resources_order")
+    asset.composite_member_labels = list(ref.get("composite_member_labels") or [])
+    asset.composite_member_fingerprints = list(ref.get("composite_member_fingerprints") or [])
+
+
 async def assemble_continuity_tail(
     *, conn: Any, project_id: str, episode_no: int, episode_id: str, shot_id: str,
     shot: Shot, bible: Bible, meta: dict[str, Any], prev_shot: Any | None,
@@ -80,24 +105,7 @@ async def assemble_continuity_tail(
                 required=bool(ref.get("required")),
                 slot_key=ref.get("slot_key"),
             )
-        asset.id = ref.get("id") or asset.id
-        asset.selectedForSeedance = bool(ref.get("selectedForSeedance"))
-        asset.deleted = bool(ref.get("deleted"))
-        asset.rejectReason = ref.get("rejectReason")
-        asset.dependency_manifest = ref.get("dependency_manifest")
-        asset.prompt_contract_version = ref.get("prompt_contract_version")
-        asset.keyframe_contract_fingerprint = ref.get("keyframe_contract_fingerprint")
-        asset.candidate_no = ref.get("candidate_no")
-        asset.keyframe_index = ref.get("keyframe_index")
-        asset.keyframe_total = ref.get("keyframe_total")
-        asset.keyframe_time_ratio = ref.get("keyframe_time_ratio")
-        asset.keyframe_target_desc = ref.get("keyframe_target_desc")
-        # 2026-10-01：道具装箱顺序信号（见 app.video_modes.prop_references
-        # 模块 docstring）——两处 ReferenceImageAsset 构造分支都没有现成参数
-        # 透传它，必须和上面其它"旁路字段"一样显式从原始 ref 读回来，否则
-        # 尾帧到达后的重装配会把它静默重置成 None，ref_pack_priority 超限
-        # 裁剪又退回看随机 id。
-        asset.resources_order = ref.get("resources_order")
+        _restore_sideband_fields(asset, ref)
 
         # 静态参考图可能在等待上一镜尾帧期间被人工废弃，QA 淘汰图也会
         # 保留 video_input 用途供审计。两者都只能留在废弃画廊，不能参与

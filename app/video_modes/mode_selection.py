@@ -128,6 +128,15 @@ class ReferenceImageAsset:
     # app.multiview.ref_pack_priority 超限裁剪时按声明顺序取舍，不靠随机 id。
     # 只对 entity_type == "prop" 有意义；其余类型恒为 None。
     resources_order: int | None = None
+    # 2026-10-03（app.video_modes.prop_composite_pack）：超出参考图张数上限时，
+    # 本应被丢弃的道具与最后一个放得下的道具合成一张拼图占用一个槽位。这两个
+    # 字段只在 view_role=="prop_composite" 的合成条目上非空：按拼图里从左到右、
+    # 从上到下的呈现顺序列出成员 label 与各自源图内容指纹（sha256）。写进
+    # ReferenceImageAsset（而不是只在合成函数内部留痕）是为了让它随
+    # public_dict() 一起落进 reference_images/image_inputs，成为本镜冻结清单
+    # 的一部分，供人工核查「这张拼图里到底是哪几件道具」。
+    composite_member_labels: list[str] = field(default_factory=list)
+    composite_member_fingerprints: list[str] = field(default_factory=list)
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)

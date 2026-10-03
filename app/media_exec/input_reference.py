@@ -15,6 +15,7 @@ import json
 from typing import Any
 
 from app.video_plan.prev_frame_reference import prev_frame_reference_enabled
+from app.video_modes.prop_composite_pack import merge_prop_composite_overflow
 from app import config, video_modes
 from app.db import log_provider_call, now
 from app.hiagent import ProviderError
@@ -265,15 +266,17 @@ async def _prepare_reference_mode_inputs_impl(
         )
         if assets:
             _delete_rejected_assets(rejected_assets)
-            assembled_refs = video_modes.dedupe_reference_dicts(
-                [a.public_dict() for a in assets]
-            )
+            assembled_refs = video_modes.dedupe_reference_dicts([a.public_dict() for a in assets])
             assembled_meta = {**meta, "reference_images": assembled_refs}
             if not video_modes.reference_gallery_matches_library_policy(assembled_meta):
                 _invalidate_reference_checkpoint("continuity_assembly_library_asset_invalid")
                 assets = []
         if assets:
-            meta["reference_images"] = assembled_refs
+            required_names = list(meta.get("required_reference_characters") or [])
+            assets = await merge_prop_composite_overflow(
+                assets, project_id=job["project_id"], required_identity_names=required_names,
+            )
+            meta["reference_images"] = video_modes.dedupe_reference_dicts([a.public_dict() for a in assets])
             meta["reference_generation_complete"] = True
             meta["reference_static_ready"] = True
             meta["continuity_anchor_ready"] = True
@@ -282,12 +285,9 @@ async def _prepare_reference_mode_inputs_impl(
             meta.pop("first_frame_path", None)
             meta.pop("last_frame_path", None)
             prompt_text = video_modes.append_reference_prompt_notes(
-                prompt_text,
-                assets,
+                prompt_text, assets,
                 duration_s=shot_model.duration_s, aspect_ratio=str(meta.get("aspect_ratio") or "9:16"),
-                required_identity_names=list(
-                    meta.get("required_reference_characters") or []
-                ),
+                required_identity_names=required_names,
             )
             try:
                 from app.media_pipeline.reference_store import upsert_reference_set_from_meta
@@ -434,9 +434,11 @@ async def _prepare_reference_mode_inputs_impl(
     if assets:
         meta["mode_decision"] = video_modes.decision_to_dict(decision)
         _delete_rejected_assets(rejected_assets)
-        meta["reference_images"] = video_modes.dedupe_reference_dicts(
-            [a.public_dict() for a in assets]
+        required_names = list(meta.get("required_reference_characters") or [])
+        assets = await merge_prop_composite_overflow(
+            assets, project_id=job["project_id"], required_identity_names=required_names,
         )
+        meta["reference_images"] = video_modes.dedupe_reference_dicts([a.public_dict() for a in assets])
         meta["reference_generation_complete"] = True
         meta["reference_static_ready"] = True
         meta["continuity_anchor_ready"] = True
@@ -470,12 +472,9 @@ async def _prepare_reference_mode_inputs_impl(
         meta.pop("first_frame_scene_id", None)
         meta.pop("last_frame_scene_id", None)
         prompt_text = video_modes.append_reference_prompt_notes(
-            prompt_text,
-            assets,
+            prompt_text, assets,
             duration_s=shot_model.duration_s, aspect_ratio=str(meta.get("aspect_ratio") or "9:16"),
-            required_identity_names=list(
-                meta.get("required_reference_characters") or []
-            ),
+            required_identity_names=required_names,
         )
         _assert_reference_lease()
         try:

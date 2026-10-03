@@ -70,6 +70,15 @@ _TYPE_PURPOSE_ZH: dict[str, str] = {
     "scene_state": "场景「{who}」当前状态参考：空间布局、门窗家具位置与此刻的状态（如积水、倒伏、破损）以此图为准；图中没有人物，人物按正文",
     "prop": "道具{who}参考，只用来锁定外观与材质",
     "prop_no_name": "道具参考，只用来锁定外观与材质",
+    # 道具拼图（2026-10-03，app.video_modes.prop_composite_pack）：参考图张数超出
+    # 上限时，本应被丢弃的道具与最后一个放得下的道具合成一张拼图占用一个槽位。
+    # 必须显式说明"这是拼图、按顺序对应哪几件物件"，否则模型会把拼图本身的网格
+    # 构图当成画面内容的一部分画进视频（本仓已有画面文字/构图类似闸门拦这类问题，
+    # 这里从提示词源头避免制造新的违规来源）。
+    "prop_composite": (
+        "这是多件道具的外观参考拼图，按从左到右、从上到下依次是：{who}；"
+        "画面中只出现这些物件本身，不要出现拼图、分格或白边"
+    ),
     "style": "风格参考，只用来锁定画面风格",
     # 与 app.video_plan.prev_frame_reference.PREVIOUS_FRAME_PURPOSE_ZH 同一句（那边有测试锁住），
     # 这里不 import：video_modes 包不能反向依赖 video_plan.generate 所在的包初始化链。
@@ -155,6 +164,11 @@ def _reference_purpose_zh(ref: dict[str, Any], *, scene_count: int = 1) -> tuple
         return _plot_key_frame_purpose_zh(ref, who), related
     if ref_type == "character":
         template = _TYPE_PURPOSE_ZH[_character_purpose_key(bool(who), ref.get("costume_mode"), ref.get("view_role"))]
+    elif ref_type == "prop" and ref.get("view_role") == "prop_composite":
+        template = _TYPE_PURPOSE_ZH["prop_composite"]
+        who = "、".join(
+            str(name).strip() for name in (ref.get("composite_member_labels") or []) if str(name).strip()
+        )
     elif ref_type == "prop":
         template = _TYPE_PURPOSE_ZH["prop" if who else "prop_no_name"]
     elif ref_type == "scene" and ref.get("view_role") == "scene_state":

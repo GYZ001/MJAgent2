@@ -10,7 +10,6 @@ from app.hiagent import ProviderError
 from .text_only_submission import empty_reference_submission
 from app.video_plan import VideoInputIntent
 
-from .keyframe_contract import is_narrative_keyframe_slot
 from .mode_selection import (
     FIRST_FRAME_MODE,
     FIRST_LAST_FRAME_MODE,
@@ -18,8 +17,6 @@ from .mode_selection import (
     ReferenceImageAsset,
     VIDEO_INPUT_MODE,
     _MAX_TIMELINE_KEYFRAMES,
-    max_character_reference_images,
-    max_reference_images,
 )
 from .reference_prompt import reference_gallery_matches_library_policy
 from .seedance_reference_notes import (
@@ -50,114 +47,22 @@ def pack_reference_images_for_seedance(
     max_keyframes: int | None = None,
     required_identity_names: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """必需用途优先装箱；分数只在同类候选内排序。关键帧不会被高分定妆照挤掉。"""
-    from app.multiview import pack_references_by_purpose
-    usable = []
-    seen_inputs: set[str] = set()
-    for r in refs:
-        # ``purposes`` describes what an asset was generated for and is retained
-        # on rejected candidates for audit.  Only the explicit selection flag is
-        # authoritative for the current provider request.
-        if r.get("selectedForSeedance") and not r.get("deleted"):
-            key = str(
-                r.get("path")
-                or r.get("image_path")
-                or r.get("url")
-                or r.get("id")
-                or ""
-            )
-            if key and key in seen_inputs:
-                continue
-            if key:
-                seen_inputs.add(key)
-            usable.append(r)
+    """必需用途优先装箱；分数只在同类候选内排序。关键帧不会被高分定妆照挤掉。
+
+    去重/关键帧分组/角色配额预处理搬到 ``reference_packing_preview.py``（见该
+    模块 docstring 的搬家理由），供 ``app.video_modes.prop_composite_pack``
+    复用同一份而不必重新发明——超限时探测"道具会被丢弃"必须与这里用同一套
+    排序，否则两边判断可能对不上。
+    """
+    from app.multiview import pack_references_by_purpose  # 只有本函数这一处用到，不提到模块顶层常驻（既有写法，原样保留）
+
+    from .reference_packing_preview import prepare_usable_refs_and_limits  # 同上：只有这一处用到，不提到模块顶层常驻
+
+    usable, limit, char_limit = prepare_usable_refs_and_limits(
+        refs, max_images=max_images, max_keyframes=max_keyframes,
+    )
     if not usable:
         return []
-    # 最后一道污染防线：同一逻辑 slot 若被历史/手工 meta 误标了多个 winner，
-    # 仍只取 QA 最高的一张；不同时序 slot 必须全部保留。无 slot 的旧数据视为同一组。
-    def _score(ref: dict[str, Any]) -> tuple[float, int]:
-        value = ref.get("qualityScore")
-        if value is None and isinstance(ref.get("qa"), dict):
-            value = ref["qa"].get("overall")
-        try:
-            numeric = float(value) if value is not None else float("-inf")
-        except (TypeError, ValueError):
-            numeric = float("-inf")
-        try:
-            candidate_no = int(ref.get("candidate_no") or 1)
-        except (TypeError, ValueError):
-            candidate_no = 1
-        return (numeric, -candidate_no)
-
-    keyframe_winners: dict[str, dict[str, Any]] = {}
-    non_keyframes: list[dict[str, Any]] = []
-    for ref in usable:
-        if ref.get("type") != "plot_key_frame" and not is_narrative_keyframe_slot(ref.get("slot_key")):
-            non_keyframes.append(ref)
-            continue
-        group_key = str(ref.get("slot_key") or "__legacy_narrative_keyframe__")
-        current = keyframe_winners.get(group_key)
-        if current is None or _score(ref) > _score(current):
-            keyframe_winners[group_key] = ref
-    timeline_winners = list(keyframe_winners.values())
-
-    def _timeline_order(ref: dict[str, Any]) -> tuple[float, int]:
-        try:
-            ratio = float(ref.get("keyframe_time_ratio"))
-        except (TypeError, ValueError):
-            ratio = 1.0
-        try:
-            index = int(ref.get("keyframe_index") or 999)
-        except (TypeError, ValueError):
-            index = 999
-        return ratio, index
-
-    declared_totals: list[int] = []
-    for ref in timeline_winners:
-        try:
-            declared_totals.append(int(ref.get("keyframe_total")))
-        except (TypeError, ValueError):
-            continue
-    if max_keyframes is not None:
-        keyframe_limit = max(1, min(int(max_keyframes), _MAX_TIMELINE_KEYFRAMES))
-    else:
-        keyframe_limit = 1 if declared_totals and max(declared_totals) <= 1 else _MAX_TIMELINE_KEYFRAMES
-    if len(timeline_winners) > keyframe_limit:
-        master = next(
-            (ref for ref in timeline_winners if ref.get("slot_key") == "narrative_keyframe"),
-            None,
-        )
-        chosen = [master] if master is not None else []
-        for ref in sorted(timeline_winners, key=_timeline_order):
-            if len(chosen) >= keyframe_limit:
-                break
-            if ref not in chosen:
-                chosen.append(ref)
-        timeline_winners = chosen
-    timeline_winners.sort(key=_timeline_order)
-    # Keep one explicit character-library anchor per identity even when a
-    # narrative keyframe also contains that person. Seedance 2.0 can bind both
-    # images to one named subject when the prompt declares the mapping; the
-    # clean library image is the identity truth if the scene keyframe drifts.
-    usable = non_keyframes + timeline_winners
-    limit = max_images if max_images is not None else max_reference_images()
-    distinct_character_identities = {
-        str(ref.get("entity_name") or "").strip()
-        or next(
-            (
-                str(name).strip()
-                for name in (ref.get("relatedCharacterIds") or ref.get("related_character_ids") or [])
-                if str(name).strip()
-            ),
-            "",
-        )
-        for ref in usable
-        if str(ref.get("type") or "") == "character"
-    }
-    distinct_character_identities.discard("")
-    char_limit = max(
-        max_character_reference_images(), len(distinct_character_identities),
-    )
     return pack_references_by_purpose(
         usable,
         max_images=limit,
@@ -249,7 +154,12 @@ def _reference_input_label(ref: dict[str, Any], role: str) -> dict[str, Any]:
         for name in (ref.get("relatedCharacterIds") or ref.get("related_character_ids") or [])
         if str(name).strip()
     ]
-    if ref_type == "character" and entity_name:
+    composite_labels = [
+        str(name).strip() for name in (ref.get("composite_member_labels") or []) if str(name).strip()
+    ]
+    if ref_type == "prop" and ref.get("view_role") == "prop_composite" and composite_labels:
+        label = f"道具拼图 · {'、'.join(composite_labels)}"
+    elif ref_type == "character" and entity_name:
         label = f"角色参考 · {entity_name}"
     elif ref_type == "scene" and entity_name:
         label = f"场景参考 · {entity_name}"
@@ -268,6 +178,70 @@ def _reference_input_label(ref: dict[str, Any], role: str) -> dict[str, Any]:
         "slot_key": ref.get("slot_key"),
         "label": label,
     }
+
+
+def _dropped_prop_labels(
+    refs: list[dict[str, Any]], usable: list[dict[str, Any]],
+) -> set[str]:
+    """声明过（``selectedForSeedance``）却最终没有以任何形式送达的道具 label——
+    与 ``dropped_scenes`` 同一可见信号取舍，props 多一层：被
+    ``app.video_modes.prop_composite_pack`` 合成进拼图的道具原条目会被标成
+    ``selectedForSeedance=False``（不再"声明"），但它的 label 仍经拼图条目的
+    ``composite_member_labels`` 算作"覆盖"，不会被误报成丢弃。"""
+    declared = {
+        str(ref.get("entity_name") or "").strip()
+        for ref in refs
+        if str(ref.get("type") or "") == "prop"
+        and ref.get("selectedForSeedance")
+        and not ref.get("deleted")
+        and ref.get("view_role") != "prop_composite"  # 拼图自身是合成产物，不是原本声明的道具 label
+        and str(ref.get("entity_name") or "").strip()
+    }
+    covered: set[str] = set()
+    for ref in usable:
+        if str(ref.get("type") or "") != "prop":
+            continue
+        if ref.get("view_role") == "prop_composite":
+            covered.update(
+                str(name).strip()
+                for name in (ref.get("composite_member_labels") or [])
+                if str(name).strip()
+            )
+            continue
+        name = str(ref.get("entity_name") or "").strip()
+        if name:
+            covered.add(name)
+    return declared - covered
+
+
+def _record_reference_degradations(
+    meta: dict[str, Any], refs: list[dict[str, Any]], usable: list[dict[str, Any]],
+) -> None:
+    """声明过（``selectedForSeedance``）却最终没能以任何形式送达的场景/道具
+    label 写成可见信号，不拦截生产——与原 ``dropped_scenes`` 分支同一取舍，
+    只是把场景与道具两条并到一处，给 ``build_seedance_image_inputs`` 腾行数。"""
+    declared_scene_names = {
+        name
+        for ref in refs
+        if str(ref.get("type") or "") == "scene"
+        and ref.get("selectedForSeedance")
+        and not ref.get("deleted")
+        for name in (str(ref.get("entity_name") or "").strip(),)
+        if name
+    }
+    covered_scene_names = {
+        name
+        for ref in usable
+        if str(ref.get("type") or "") == "scene"
+        for name in (str(ref.get("entity_name") or "").strip(),)
+        if name
+    }
+    dropped_scenes = sorted(declared_scene_names - covered_scene_names)
+    if dropped_scenes:
+        meta["_seedance_scene_reference_degraded"] = dropped_scenes
+    dropped_props = sorted(_dropped_prop_labels(refs, usable))
+    if dropped_props:
+        meta["_seedance_prop_reference_degraded"] = dropped_props
 
 
 _CONTINUITY_FRAME_LABELS = {
@@ -325,29 +299,11 @@ def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
                 "REFERENCE_IMAGE_MODE 缺少必需人物身份参考图："
                 + "、".join(missing_identities)
             )
-        # 场景不像人物身份那样硬拦截（同一段可以声明多个转场场景，挤不下
-        # 时该丢谁本来就该由 Seedance 张数上限的装箱优先级决定，不该整段
-        # 直接失败）。但"声明过、最终没挂上"不能沉默——按用户既定方向做成
-        # 可见的降级标记，写回 meta 供观测台/前端展示，不拦截生产。
-        declared_scene_names = {
-            name
-            for ref in refs
-            if str(ref.get("type") or "") == "scene"
-            and ref.get("selectedForSeedance")
-            and not ref.get("deleted")
-            for name in (str(ref.get("entity_name") or "").strip(),)
-            if name
-        }
-        covered_scene_names = {
-            name
-            for ref in usable
-            if str(ref.get("type") or "") == "scene"
-            for name in (str(ref.get("entity_name") or "").strip(),)
-            if name
-        }
-        dropped_scenes = sorted(declared_scene_names - covered_scene_names)
-        if dropped_scenes:
-            meta["_seedance_scene_reference_degraded"] = dropped_scenes
+        # 场景/道具都不像人物身份那样硬拦截（场景可以声明多个转场场景、道具
+        # 超限会被装箱优先级挤掉，挤不下该丢谁本来就该由装箱规则决定，不该
+        # 整段直接失败）。但"声明过、最终没挂上"不能沉默——按用户既定方向
+        # 做成可见的降级标记，写回 meta 供观测台/前端展示，不拦截生产。
+        _record_reference_degradations(meta, refs, usable)
         out: list[tuple[str, str]] = []
         labels: list[dict[str, Any]] = []
         for ref in usable:
