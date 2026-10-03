@@ -379,3 +379,22 @@ def test_module_uses_real_model_gateway_binding_for_monkeypatch() -> None:
     assert hc.model_gateway is model_gateway
     assert hc.hiagent is hiagent
     assert "hiagent.chat(" not in inspect.getsource(hc)
+
+
+def test_crop_box_trusts_clothing_top_when_collar_rises_above_estimated_chin() -> None:
+    """B 上顾屿实测几何：头框下沿 0.23 偏松，立领领尖在 0.22。下边界以衣领为准
+    裁在下巴估计之上，不再把领尖带进头像照。"""
+    head_box = [0.40, 0.08, 0.60, 0.23]
+    box = hc._compute_crop_box_px(head_box, 0.22, img_w=1440, img_h=2560)
+    chin_px = 0.23 * 2560
+    collar_px = 0.22 * 2560
+    assert box[3] < collar_px
+    assert box[3] < chin_px
+
+
+def test_crop_box_floor_protects_face_when_clothing_estimate_is_too_high() -> None:
+    """衣领估得离谱地高（落在嘴部附近）时，最多裁到头框 80% 高度处。"""
+    head_box = [0.40, 0.08, 0.60, 0.23]
+    box = hc._compute_crop_box_px(head_box, 0.15, img_w=1440, img_h=2560)
+    floor_px = (0.08 + 0.15 * 0.8) * 2560
+    assert box[3] == round(floor_px)

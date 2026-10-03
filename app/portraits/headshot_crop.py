@@ -147,8 +147,13 @@ def _compute_crop_box_px(
     head_box: list[float], clothing_top_y: float, *, img_w: int, img_h: int,
 ) -> tuple[int, int, int, int]:
     """裁切框：左右各外扩头框宽 25%、上外扩头框高 10%；下边界取"下巴+头框高
-    25%"与"clothing_top_y-头框高2%"中更靠上的一个，但不小于下巴；全部夹在图
-    内；宽度不足高度 0.8 倍时左右对称加宽（同样夹在图内）。"""
+    25%"与"clothing_top_y-头框高2%"中更靠上的一个，但不高于头框 80% 高度处；
+    全部夹在图内；宽度不足高度 0.8 倍时左右对称加宽（同样夹在图内）。
+
+    底线是头框 80% 处而不是下巴（2026-10-02 B 上顾屿实测）：立领衬衫的领尖比
+    视觉模型估的下巴还高（模型给的头框下沿偏松），按「不高于下巴」会把灰领尖
+    带进头像照，视频里就可能把衬衫领画到别的衣服里。衣领位置是更直接的证据，
+    以它为准；80% 底线保证衣领估得过高时最多裁到下巴附近，不伤五官。"""
     x0, y0, x1, y1 = head_box
     px0, py0, px1, py1 = x0 * img_w, y0 * img_h, x1 * img_w, y1 * img_h
     head_w, head_h = px1 - px0, py1 - py0
@@ -157,7 +162,7 @@ def _compute_crop_box_px(
     right = px1 + head_w * 0.25
     top = py0 - head_h * 0.10
     bottom = min(chin_y + head_h * 0.25, clothing_top_y * img_h - head_h * 0.02)
-    bottom = max(bottom, chin_y)
+    bottom = max(bottom, py0 + head_h * 0.8)
     left, top = max(0.0, left), max(0.0, top)
     right, bottom = min(float(img_w), right), min(float(img_h), bottom)
     width, height = right - left, bottom - top
