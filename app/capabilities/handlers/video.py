@@ -16,6 +16,40 @@ async def generate_episode(args: I.VideoGenerateEpisodeInput) -> CommandResult:
         claim_video_command_operation,
         finish_video_command_operation,
     )
+    # 函数内导入：导入本 handler 模块时不加载 app.video_modes（实测 sys.modules 无该包），模块级导入会让能力注册期连带初始化 video_modes→multiview 整条链（同款先例见下方 generate_shot）
+    from app.video_modes.scene_state_ensure import pending_scene_state_gate, resolve_episode_project
+
+    project_id = resolve_episode_project(args.episode_id)
+    if project_id is not None:
+        # 2026-10-02 代码评审 #0：only_incomplete（「继续生成剩余镜头」）只会重新
+        # 派发尚未完成的那部分镜头，闸门范围必须跟着收窄，否则任意一个早已完成、
+        # 本次根本不会触碰的镜头所属场景状态缺口都会拦住整次续跑；判据与
+        # app.domain.video_ops.generate._generate_episode_core 的 only_incomplete
+        # 裁剪同源（completed_shot_ids），不许各自实现一遍再漂移。
+        gate_shot_ids: list[str] | None = None
+        skip_gate = False
+        if args.only_incomplete:
+            from app.db import get_conn  # 函数内导入：只在需要收窄闸门范围这条分支才用，其余调用路径不需要连接
+            from app.domain.video_ops.generate import completed_shot_ids  # 判据与 _generate_episode_core 的 only_incomplete 裁剪必须同源，不另起一套
+
+            conn = get_conn()
+            done = completed_shot_ids(conn, args.episode_id)
+            all_shot_ids = [
+                row["id"] for row in conn.execute(
+                    "SELECT id FROM shots WHERE episode_id=?", (args.episode_id,),
+                ).fetchall()
+            ]
+            gate_shot_ids = [sid for sid in all_shot_ids if sid not in done]
+            # 续跑范围为空（全部镜头已完成）时没有要重新发给视频模型的段，不检查
+            # 场景状态图——传空列表会被 `_target_shot_nos` 的 `not shot_ids` 短路
+            # 成「不过滤=整集」，反而把本该跳过的检查错误地放大回整集范围。
+            skip_gate = not gate_shot_ids
+        if not skip_gate:
+            pending_message = await pending_scene_state_gate(
+                project_id, args.episode_id, gate_shot_ids,
+            )
+            if pending_message is not None:
+                return failed(pending_message, error_code="scene_state_pending")
 
     command = "video.generate_episode"
     request_fingerprint = canonical_command_request_fingerprint(
@@ -242,6 +276,15 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
         claim_video_command_operation,
         finish_video_command_operation,
     )
+    # 函数内导入：导入本 handler 模块时不加载 app.video_modes（实测 sys.modules 无该包），模块级导入会让能力注册期连带初始化 video_modes→multiview 整条链
+    from app.video_modes.scene_state_ensure import pending_scene_state_gate, resolve_shot_scope
+
+    shot_scope = resolve_shot_scope(args.shot_id)
+    if shot_scope is not None:
+        shot_project_id, shot_episode_id = shot_scope
+        pending_message = await pending_scene_state_gate(shot_project_id, shot_episode_id, [args.shot_id])
+        if pending_message is not None:
+            return failed(pending_message, error_code="scene_state_pending")
 
     command = "video.generate_shot"
     request_fingerprint = canonical_command_request_fingerprint(

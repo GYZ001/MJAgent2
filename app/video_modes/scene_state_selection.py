@@ -124,5 +124,13 @@ def resource_scene_state_advisories(scenes: list[Any]) -> list[str]:
             name, str(getattr(scene, "scene_state_matches_card", "") or ""),
         )
         if reason:
-            advisories.append(f"[STORYBOARD_SCENE_REF_OMITTED_STATE_CHANGED][未拦截] 场景「{name}」：{reason}")
+            # 2026-10-02 代码评审 #0：场景状态图机制要求 scene_reference_id（场景
+            # 卡），没有卡（素材库没有对应图、模型按规则如实留空）的场景结构性地
+            # 永远不会生成状态图——补一句兑现不了的承诺比不补更糟（CLAUDE.md
+            # 「界面承诺必须与实际行为一致」），只在确实有卡时才这么说。
+            scene_reference_id = str(getattr(scene, "scene_reference_id", "") or "")
+            note = "；生成视频前会自动生成场景状态图作为参考" if scene_reference_id else ""
+            advisories.append(
+                f"[STORYBOARD_SCENE_REF_OMITTED_STATE_CHANGED][未拦截] 场景「{name}」：{reason}{note}"
+            )
     return advisories

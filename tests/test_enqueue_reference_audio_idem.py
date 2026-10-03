@@ -164,17 +164,14 @@ def test_enabled_with_voice_matches_fingerprint_reference_audios(monkeypatch) ->
 
 # --------------------------- only_incomplete 完成度过滤（真正的保护机制） ---------------------------
 
-# 逐字复制自 app/domain/video_ops/generate.py::_generate_episode_core（约
-# 217-232 行，body.get("only_incomplete") 分支）——在这里独立验证同一份 SQL
-# 的行为；下面的源码字符串核对确保真实文件改了这段查询时本测试会跟着炸。
-_COMPLETED_IDS_SQL = """SELECT s.id FROM shots s
-                   WHERE s.episode_id=? AND (
-                       s.adopted_version_id IS NOT NULL OR EXISTS(
-                           SELECT 1 FROM shot_versions v
-                           WHERE v.shot_id=s.id AND v.status='succeeded'
-                             AND v.video_path IS NOT NULL AND v.video_path!=''
-                       )
-                   )"""
+# 逐字复制自 app/domain/video_ops/generate.py::completed_shot_ids（2026-10-02
+# 从 _generate_episode_core 的 body.get("only_incomplete") 分支抽出，供场景
+# 状态图闸门的续跑范围裁剪复用，判据不变、只搬了位置）——在这里独立验证同一份
+# SQL 的行为；下面的源码字符串核对确保真实文件改了这段查询时本测试会跟着炸。
+_COMPLETED_IDS_SQL = """SELECT s.id FROM shots s WHERE s.episode_id=? AND (
+               s.adopted_version_id IS NOT NULL OR EXISTS(
+                   SELECT 1 FROM shot_versions v WHERE v.shot_id=s.id
+                   AND v.status='succeeded' AND v.video_path IS NOT NULL AND v.video_path!=''))"""
 
 
 def test_generate_py_still_contains_the_exact_completed_ids_query() -> None:

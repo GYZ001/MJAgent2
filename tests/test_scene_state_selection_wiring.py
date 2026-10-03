@@ -28,10 +28,20 @@ _TAG = "[STORYBOARD_SCENE_REF_OMITTED_STATE_CHANGED][未拦截]"
 
 # ---------- 源码级接线守卫（防止字段加了却没接进真正消费它的通路） ----------
 
-def test_resolve_scene_entry_calls_resolve_scene_reference_entry():
+def test_resolve_scene_entry_calls_resolve_scene_entry_with_state():
+    """2026-10-02 场景状态图接入后，``_resolve_scene_entry`` 只留一次对
+    ``scene_state_assembly.resolve_scene_entry_with_state`` 的调用（省略判断+
+    状态图替换+反打叠加三件事都搬进那个函数，见其所在模块文档）。"""
     source = inspect.getsource(mv._storyboard_pack_asset_dependencies)
-    assert "resolve_scene_reference_entry(" in source
+    assert "resolve_scene_entry_with_state(" in source
     assert 'scene_entry.get("scene_state_matches_card")' in source
+
+
+def test_resolve_scene_entry_with_state_calls_resolve_scene_reference_entry():
+    from app.video_modes import scene_state_assembly
+
+    source = inspect.getsource(scene_state_assembly.resolve_scene_entry_with_state)
+    assert "resolve_scene_reference_entry(" in source
     assert 'entry["scene_state_omitted_reason"]' in source
 
 
@@ -271,6 +281,40 @@ def test_segment_content_advisories_silent_when_matches_card_field_unset():
         emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
     )
     assert not any(_TAG in a for a in advisories)
+
+
+def test_segment_content_advisories_promises_auto_state_image_only_with_scene_card():
+    """2026-10-02 代码评审 #0：场景状态图机制要求 scene_reference_id（场景卡），
+    model_dump 为该字段按规则如实留空的场景（素材库没有对应图）结构性地永远不会
+    生成状态图——advisory 不能对它许下兑现不了的承诺（CLAUDE.md「界面承诺必须与
+    实际行为一致」）。"""
+    draft = _draft(resources=_AiSegmentResources(
+        scenes=[_AiResourceScene(
+            scene_id="scene:温念的出租屋", scene_reference_id=None, scene_state_matches_card="no",
+        )],
+    ))
+    advisories = _segment_content_advisories(
+        draft, source_segment_indexes=[1], manifest=None,
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
+    )
+    matched = [a for a in advisories if _TAG in a and "温念的出租屋" in a]
+    assert matched
+    assert "场景状态图" not in matched[0]
+
+
+def test_segment_content_advisories_promises_auto_state_image_when_scene_card_present():
+    draft = _draft(resources=_AiSegmentResources(
+        scenes=[_AiResourceScene(
+            scene_id="scene:温念的出租屋", scene_reference_id="scene_ref_a", scene_state_matches_card="no",
+        )],
+    ))
+    advisories = _segment_content_advisories(
+        draft, source_segment_indexes=[1], manifest=None,
+        emotional_turns_here=(), foreshadowing_here=(), prop_entrances_here=(), prop_locks_here=(),
+    )
+    matched = [a for a in advisories if _TAG in a and "温念的出租屋" in a]
+    assert matched
+    assert "场景状态图" in matched[0]
 
 
 def test_segment_content_advisories_silent_when_matches_card_explicit_yes():

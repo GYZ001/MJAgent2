@@ -59,6 +59,10 @@ _TYPE_PURPOSE_ZH: dict[str, str] = {
         "或画面构图；服装以正文与服装道具参考为准"
     ),
     "scene": "场景参考，只用来锁定环境外观",
+    # 场景状态图（2026-10-02，app.video_modes.scene_state_ensure）：本段场景此刻的
+    # 物理状态与场景卡默认状态不一致时，装配期用这张图替代场景卡主图，见
+    # app.video_modes.scene_state_assembly.resolve_scene_entry_with_state。
+    "scene_state": "场景「{who}」当前状态参考：空间布局、门窗家具位置与此刻的状态（如积水、倒伏、破损）以此图为准；图中没有人物，人物按正文",
     "prop": "道具{who}参考，只用来锁定外观与材质",
     "prop_no_name": "道具参考，只用来锁定外观与材质",
     "style": "风格参考，只用来锁定画面风格",
@@ -148,6 +152,11 @@ def _reference_purpose_zh(ref: dict[str, Any], *, scene_count: int = 1) -> tuple
         template = _TYPE_PURPOSE_ZH[_character_purpose_key(bool(who), ref.get("costume_mode"), ref.get("view_role"))]
     elif ref_type == "prop":
         template = _TYPE_PURPOSE_ZH["prop" if who else "prop_no_name"]
+    elif ref_type == "scene" and ref.get("view_role") == "scene_state":
+        # 状态图不受「只有一张场景图才用通用文案」限制：无论本次打包的场景图
+        # 是一张（状态图替代主图）还是两张（+ 反打），都要点名哪张图是状态图。
+        template = _TYPE_PURPOSE_ZH["scene_state"]
+        who = str(ref.get("entity_name") or "").strip()
     elif ref_type == "scene" and scene_count > 1:
         return _scene_multi_purpose_zh(ref), related
     else:

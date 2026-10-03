@@ -186,6 +186,64 @@ async def test_paused_external_resume_conflict_falls_back_to_wait_message(
     assert "全片补齐任务已在启动或运行" in message
 
 
+@pytest.mark.asyncio
+async def test_fresh_dispatch_calls_scene_state_ensure_before_video(monkeypatch) -> None:
+    """2026-10-02 代码评审 #0：`_ensure_scene_state_views_before_dispatch` 的两个
+    调用点此前零覆盖——删掉调用后既有 44 条回归照常全绿，因为它们只打桩了
+    `series_stages.get_conn`，没人断言场景状态图补齐被调用过。直接断言调用参数，
+    让「接线被删掉」这件事能让测试变红。"""
+    conn = _conn(None)
+    monkeypatch.setattr(series_stages, "get_conn", lambda: conn)
+    captured: list[dict] = []
+
+    async def fake_ensure(*, project_id, episode_id):
+        captured.append({"project_id": project_id, "episode_id": episode_id})
+
+    monkeypatch.setattr(series_stages, "ensure_scene_state_views", fake_ensure)
+
+    async def fake_complete(episode_id, body, **_kwargs):
+        return {}
+
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", fake_complete)
+
+    await series_stages._kick_video_completion("e", "series-run-1")
+
+    assert captured == [{"project_id": "p", "episode_id": "e"}]
+
+
+@pytest.mark.asyncio
+async def test_resume_paused_dispatch_calls_scene_state_ensure_before_video(
+    monkeypatch,
+) -> None:
+    """同上，覆盖 `_resume_paused_video`（PAUSED_EXTERNAL + 有 grant_id）这条
+    调用点。"""
+    conn = _conn("run-old")
+    _insert_run(conn, "run-old", "PAUSED_EXTERNAL")
+    monkeypatch.setattr(series_stages, "get_conn", lambda: conn)
+    patch_video_supervisor_everywhere(
+        monkeypatch,
+        "load_latest_checkpoint",
+        lambda _eid: SimpleNamespace(
+            run_id="run-old", grant_id="grant-1", phase="DISPATCHING", outcome=None,
+        ),
+    )
+    captured: list[dict] = []
+
+    async def fake_ensure(*, project_id, episode_id):
+        captured.append({"project_id": project_id, "episode_id": episode_id})
+
+    monkeypatch.setattr(series_stages, "ensure_scene_state_views", fake_ensure)
+
+    async def fake_complete(episode_id, body, **_kwargs):
+        return {"run_id": "run-new"}
+
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", fake_complete)
+
+    await series_stages._kick_video_completion("e", "series-run-1")
+
+    assert captured == [{"project_id": "p", "episode_id": "e"}]
+
+
 def _insert_minimal(conn: sqlite3.Connection, table: str, **values) -> None:
     """按 pragma 把 NOT NULL 且无默认值的列补上占位，只关心测试点名的列。"""
     cols = conn.execute(f"pragma table_info({table})").fetchall()

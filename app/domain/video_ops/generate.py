@@ -33,6 +33,18 @@ def _shot_by_no(episode_id: str, shot_no: int):
     return get_conn().execute(
         "SELECT id FROM shots WHERE episode_id=? AND shot_no=?", (episode_id, shot_no)).fetchone()
 
+def completed_shot_ids(conn, episode_id: str) -> set[str]:
+    """已有可用成片/已采纳版本的镜头集合——与场景状态图闸门 only_incomplete 续跑
+    范围裁剪（见 app.capabilities.handlers.video.generate_episode）同源，不许各自实现一遍再漂移。"""
+    rows = conn.execute(
+        """SELECT s.id FROM shots s WHERE s.episode_id=? AND (
+               s.adopted_version_id IS NOT NULL OR EXISTS(
+                   SELECT 1 FROM shot_versions v WHERE v.shot_id=s.id
+                   AND v.status='succeeded' AND v.video_path IS NOT NULL AND v.video_path!=''))""",
+        (episode_id,),
+    ).fetchall()
+    return {row["id"] for row in rows}
+
 @router.post("/episodes/{episode_id}/generate")
 async def generate_episode(episode_id: str, body: dict | None = None):
     """先生成并校验整集三模式计划，再按素材依赖 DAG 安全入队。"""
@@ -215,19 +227,7 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
         selected = shots
     completed_count = 0
     if body.get("only_incomplete"):
-        completed_ids = {
-            row["id"] for row in conn.execute(
-                """SELECT s.id FROM shots s
-                   WHERE s.episode_id=? AND (
-                       s.adopted_version_id IS NOT NULL OR EXISTS(
-                           SELECT 1 FROM shot_versions v
-                           WHERE v.shot_id=s.id AND v.status='succeeded'
-                             AND v.video_path IS NOT NULL AND v.video_path!=''
-                       )
-                   )""",
-                (episode_id,),
-            ).fetchall()
-        }
+        completed_ids = completed_shot_ids(conn, episode_id)
         completed_count = sum(1 for item in selected if item["row"]["id"] in completed_ids)
         selected = [item for item in selected if item["row"]["id"] not in completed_ids]
     bound_selected_ids = [

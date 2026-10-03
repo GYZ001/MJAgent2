@@ -33,6 +33,10 @@ def _scene_ref() -> dict:
     return {"type": "scene"}
 
 
+def _scene_state_ref(name: str) -> dict:
+    return {"type": "scene", "view_role": "scene_state", "entity_name": name}
+
+
 def test_at_mention_replaced_with_picture_number_and_trailing_space_kept():
     prompt = "镜头1：固定远景镜头，@李麦麦 20多岁职场女性，蹲在门口。"
     refs = [_character_ref("李麦麦")]
@@ -318,3 +322,25 @@ def test_character_purpose_note_neutral_front_full_unaffected_by_headshot_crop_b
 
     assert "图片1：角色温念的人物参考，只用来锁定长相、发型与体型，服装和表情以本段文字为准" in result
     assert "头像参考（定妆照头部裁切）" not in result
+
+
+def test_scene_state_purpose_note_names_scene_and_states_no_people():
+    """场景状态图（2026-10-02）的用途说明必须点名场景、说明"按此刻状态"，
+    且明确图中没有人物——人物仍按正文——即使只有这一张场景类参考图（不触发
+    `_scene_multi_purpose_zh` 的"两张及以上"分支）。"""
+    refs = [_scene_state_ref("温念的出租屋")]
+
+    result = build_seedance_reference_prompt_notes("镜头18：积水没过脚踝。", refs, aspect_ratio="9:16")
+
+    assert "图片1：场景「温念的出租屋」当前状态参考" in result
+    assert "没有人物，人物按正文" in result
+
+
+def test_scene_state_purpose_note_distinct_from_plain_establishing():
+    """establishing 主图与状态图的措辞不能混用：状态图不说"锁定环境外观"
+    这种默认状态措辞。"""
+    refs = [_scene_state_ref("温念的出租屋")]
+
+    result = build_seedance_reference_prompt_notes("镜头18：积水没过脚踝。", refs, aspect_ratio="9:16")
+
+    assert "只用来锁定环境外观" not in result

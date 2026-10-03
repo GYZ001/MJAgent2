@@ -34,7 +34,7 @@ from app.refs import (
 from app.scene_reverse.draft import draft_behind_camera_note
 from app.scene_reverse.judge import judge_reverse_angle
 from app.scene_reverse.produce import produce_reverse_angle_view
-from app.scene_reverse.segment_views import augment_scene_entry_with_reverse_angle, mentioned_reverse_scene_names, scene_anchor_entity_name
+from app.scene_reverse.segment_views import scene_anchor_entity_name
 from app.validators import match_scene_name
 from app.visual_styles import is_photographic_style_prompt
 
@@ -488,7 +488,7 @@ def _storyboard_pack_asset_dependencies(
         return str(identity_or_scene_id).split(":", 1)[-1] if identity_or_scene_id else ""
 
     from app.video_modes.character_look_selection import pick_character_reference_view  # 函数内导入：app.video_modes 包初始化反向依赖本模块，模块级会成环（同款先例见 manifest_revisions_match）
-    from app.video_modes.scene_state_selection import resolve_scene_reference_entry  # 函数内导入：理由同上一行
+    from app.video_modes.scene_state_assembly import resolve_scene_entry_with_state  # 函数内导入：理由同上一行
 
     characters_out: list[dict[str, Any]] = []
     for entry in resources.get("characters") or []:
@@ -532,14 +532,13 @@ def _storyboard_pack_asset_dependencies(
         scenes = getattr(bible, "scenes", None) or []
         has_card = bool(sname and match_scene_name(sname, scenes, allow_fuzzy=False))
         row = scene_row_for_episode(project_id, sname, episode_no, conn=conn) if has_card else None
-        entry = resolve_scene_reference_entry(
-            scene_name=sname, has_card=has_card, scene_reference_id=(row["id"] if row else None),
-            image_path=str(row["image_path"] or "") if row else "",
+        return resolve_scene_entry_with_state(  # 场景状态图接入+正文点名反打，见该函数文档
+            conn=conn, shot_id=shot_id, scene_name=sname, has_card=has_card, bible=bible,
+            scene_reference_id=(row["id"] if row else None), image_path=str(row["image_path"] or "") if row else "",
             scene_state_matches_card=str(scene_entry.get("scene_state_matches_card") or ""),
-            purposes=[PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, PURPOSE_VIDEO_INPUT],
-        )  # 正文点名 @场景名·反打 且有带通过证据的反打图时追加该视角；状态不一致省略主图时反打图一并不查（scene_reference_id 三元传 None）
-        return augment_scene_entry_with_reverse_angle(entry, conn=conn, scene_reference_id=(None if entry["scene_state_omitted_reason"] else entry["scene_revision_id"]), scene_name=sname, purposes=[PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, PURPOSE_VIDEO_INPUT],
-                                                      mentioned_scene_names=mentioned_reverse_scene_names(str(segment.get("prompt_text") or ""), scene_entries, display_name=_display_name))
+            purposes=[PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, PURPOSE_VIDEO_INPUT], scene_entries=scene_entries,
+            prompt_text=str(segment.get("prompt_text") or ""), display_name=_display_name,
+        )
 
     # 一段可以在中途转场到第二个（甚至更多）场景——之前这里写死只取
     # scene_entries[0]，多场景转场镜实测（EP2 段2/shot_53d87e5d107d，两个
