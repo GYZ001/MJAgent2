@@ -298,7 +298,8 @@ def test_character_purpose_note_switches_to_headshot_crop_wording_for_face_close
     result = build_seedance_reference_prompt_notes(prompt, refs, aspect_ratio="9:16")
 
     assert "角色温念的头像参考（定妆照头部裁切）" in result
-    assert "只用来锁定长相与发型" in result
+    assert "只用来锁定长相、发色与刘海" in result
+    assert "头发长度与整体发型以正文为准" in result
     assert "服装以正文与服装道具参考为准" in result
     assert "只用来锁定长相、发型与体型，服装和表情以本段文字为准" not in result
 
@@ -309,7 +310,8 @@ def test_character_purpose_note_headshot_crop_no_name_variant():
 
     result = build_seedance_reference_prompt_notes("镜头1：固定镜头。", refs, aspect_ratio="9:16")
 
-    assert "头像参考（定妆照头部裁切），只用来锁定长相与发型" in result
+    assert "头像参考（定妆照头部裁切），只用来锁定长相、发色与刘海" in result
+    assert "头发长度与整体发型以正文为准" in result
     assert "{who}" not in result
 
 
