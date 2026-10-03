@@ -1,8 +1,9 @@
 """app.portraits.headshot_crop：头像照从全身定妆照裁切（2026-10-02）。
 
 覆盖：几何核验的代码核验分支、裁切框计算（含 clothing_top_y 截断/夹边/加宽）、
-JPEG APP11（C2PA/JUMBF）段的纯字节搬运、视觉模型两次不合格抛异常、以及端到端
-裁切流程（打桩 model_gateway.chat，不发真实网络请求）。
+JPEG APP11（C2PA/JUMBF）段的纯字节搬运、视觉模型两次不合格抛异常、裁后复核
+（无衣物/有衣物上移后清/两轮都有停在底线/格式不合格两次按未判定不阻断）、以及
+端到端裁切流程（打桩 model_gateway.chat，不发真实网络请求）。
 """
 from __future__ import annotations
 
@@ -398,3 +399,101 @@ def test_crop_box_floor_protects_face_when_clothing_estimate_is_too_high() -> No
     box = hc._compute_crop_box_px(head_box, 0.15, img_w=1440, img_h=2560)
     floor_px = (0.08 + 0.15 * 0.8) * 2560
     assert box[3] == round(floor_px)
+
+
+# ---------------------------------------------------------------------------
+# 裁后复核：按 call_meta["kind"]/["round"] 分发不同响应的 fake_chat
+# ---------------------------------------------------------------------------
+
+def _make_recheck_chat(geometry_payload: dict, round_responses: dict):
+    """geometry 调用固定返回 geometry_payload；裁后复核第 N 轮调用返回
+    round_responses[N]——给一个 dict 表示一次就核验通过，给一个两元素 list
+    表示连续两次都返回该原始字符串（用于模拟格式不合格两次）。"""
+    import json as _json
+
+    def _raw(value):
+        return value if isinstance(value, str) else _json.dumps(value)
+
+    async def fake_chat(_messages, **kwargs):
+        call_meta = kwargs["call_meta"]
+        if call_meta["kind"] == "vlm_headshot_crop_geometry":
+            return _json.dumps(geometry_payload)
+        responses = round_responses[call_meta["round"]]
+        if isinstance(responses, list):
+            return _raw(responses[call_meta["attempt"] - 1])
+        return _raw(responses)
+
+    return fake_chat
+
+
+async def test_crop_headshot_recheck_no_clothing_leaves_box_unchanged(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "front_full.jpg"
+    source.write_bytes(_jpeg_bytes(size=(800, 1200)))
+    dest = tmp_path / "face_closeup.jpg"
+    fake_chat = _make_recheck_chat(_valid_payload(), {1: {"has_clothing": False, "clothing_top_y": None}})
+    monkeypatch.setattr(hc.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(hc.hiagent, "active_provider", lambda kind: "vlm-provider")
+
+    qa = await hc.crop_headshot_from_portrait(str(source), dest_path=str(dest), call_meta={})
+
+    assert qa["clothing_visible"] is False
+    assert len(qa["clothing_recheck_rounds"]) == 1
+    assert qa["crop_box_px"] == [220, 42, 580, 285]
+
+
+async def test_crop_headshot_recheck_clothing_then_clear_shrinks_box(monkeypatch, tmp_path) -> None:
+    """第一轮判有衣物 → 上移下边界重裁 → 第二轮判清，最终 clothing_visible=False。"""
+    source = tmp_path / "front_full.jpg"
+    source.write_bytes(_jpeg_bytes(size=(800, 1200)))
+    dest = tmp_path / "face_closeup.jpg"
+    fake_chat = _make_recheck_chat(_valid_payload(), {
+        1: {"has_clothing": True, "clothing_top_y": 0.9},
+        2: {"has_clothing": False, "clothing_top_y": None},
+    })
+    monkeypatch.setattr(hc.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(hc.hiagent, "active_provider", lambda kind: "vlm-provider")
+
+    qa = await hc.crop_headshot_from_portrait(str(source), dest_path=str(dest), call_meta={})
+
+    assert qa["clothing_visible"] is False
+    assert len(qa["clothing_recheck_rounds"]) == 2
+    assert qa["crop_box_px"][3] == 257
+    assert qa["crop_box_px"][3] < 285
+
+
+async def test_crop_headshot_recheck_clothing_both_rounds_stops_at_floor(
+    monkeypatch, tmp_path, caplog,
+) -> None:
+    """两轮都判有衣物：停在头框 80% 底线，qa 记 clothing_visible=True 并 warning。"""
+    source = tmp_path / "front_full.jpg"
+    source.write_bytes(_jpeg_bytes(size=(800, 1200)))
+    dest = tmp_path / "face_closeup.jpg"
+    fake_chat = _make_recheck_chat(_valid_payload(), {
+        1: {"has_clothing": True, "clothing_top_y": 0.1},
+        2: {"has_clothing": True, "clothing_top_y": 0.5},
+    })
+    monkeypatch.setattr(hc.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(hc.hiagent, "active_provider", lambda kind: "vlm-provider")
+
+    with caplog.at_level(logging.WARNING, logger="app.portraits.headshot_crop"):
+        qa = await hc.crop_headshot_from_portrait(str(source), dest_path=str(dest), call_meta={})
+
+    assert qa["clothing_visible"] is True
+    assert qa["crop_box_px"][3] == 204
+    assert any("两轮均检出衣物" in record.message for record in caplog.records)
+
+
+async def test_crop_headshot_recheck_unverified_does_not_block(monkeypatch, tmp_path) -> None:
+    """复核格式连续两次不合格：按未判定处理，不阻断整条裁切流程。"""
+    source = tmp_path / "front_full.jpg"
+    source.write_bytes(_jpeg_bytes(size=(800, 1200)))
+    dest = tmp_path / "face_closeup.jpg"
+    fake_chat = _make_recheck_chat(_valid_payload(), {1: ["not json", "still not json"]})
+    monkeypatch.setattr(hc.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(hc.hiagent, "active_provider", lambda kind: "vlm-provider")
+
+    qa = await hc.crop_headshot_from_portrait(str(source), dest_path=str(dest), call_meta={})
+
+    assert qa["clothing_visible"] is False
+    assert qa["clothing_recheck_rounds"][0]["recheck"] == "unverified"
+    assert dest.is_file()

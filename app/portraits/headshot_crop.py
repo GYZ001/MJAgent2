@@ -25,13 +25,24 @@ JPEG 的 APP11（0xFFEB，C2PA/JUMBF）鉴真数据段就依然放行，剥掉�
 是同一安全边界的两面，本函数不会为了好看而牺牲这条硬约束去贴近衣领——但
 观感确实偏局促。不做静默接受：``qa["neck_margin_ratio"]`` 低于阈值时记一条
 可见信号（warning），供后续抽查，不自动调整裁切框。
+
+裁后复核（2026-10-02 新增，同一张顾屿定妆照两次几何估计分别给出 0.22 和
+0.24，第二次的裁切图底部露出了灰色衬衫领——头像照带衣服会让视频模型把衬衫
+领画进别的衣服里）：渲染出裁切图之后，再用同一个视觉模型看裁切图本身判断
+是否带入了衣物，而不是只信一次几何估计。发现衣物就把下边界上移（不越过头框
+80% 的硬底线）重裁一次，最多两轮；两轮都仍判有衣物就停在底线并在 ``qa``
+里记 ``clothing_visible=True``（可见信号，不阻断生成）。复核格式连续两次不
+合格按「未判定」处理（``recheck="unverified"``），同样不阻断——复核是质量
+加强，不是新增的强制闸门。
 """
 from __future__ import annotations
 
+import base64
 import io
 import json
 import logging
 import struct
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -72,7 +83,7 @@ def _build_geometry_messages(image_url: str) -> list[dict[str, Any]]:
     ]
 
 
-def _parse_geometry_json(raw: str) -> dict[str, Any]:
+def _parse_json_object(raw: str) -> dict[str, Any]:
     text = (raw or "").strip()
     start, end = text.find("{"), text.rfind("}")
     body = text[start:end + 1] if start >= 0 and end > start else text
@@ -118,29 +129,159 @@ def _validate_geometry(data: dict[str, Any], *, img_w: int, img_h: int) -> dict[
     return {"head_box": [x0, y0, x1, y1], "clothing_top_y": clothing_top_y}
 
 
-async def _detect_head_geometry(
-    source_path: str, *, img_w: int, img_h: int, call_meta: dict[str, Any],
-) -> dict[str, Any]:
-    """一次 VLM 调用定位头部几何；不合格重问一次，仍不合格抛异常（不兜底）。"""
-    image_url = hiagent.data_url_from_file(source_path)
-    messages = _build_geometry_messages(image_url)
+async def _chat_json_twice(
+    messages: list[dict[str, Any]],
+    *,
+    parse_and_validate: Callable[[str], dict[str, Any]],
+    kind: str,
+    call_meta: dict[str, Any],
+) -> tuple[dict[str, Any] | None, Exception | None]:
+    """几何检测与裁后复核共用的调用封装：同一张图最多问两次同一个问题，第一次
+    核验通过就返回；两次都不合格返回 ``(None, 最后一次错误)``，不在这里决定失败
+    后怎么办——几何检测要抛异常，裁后复核要降级成「未判定」且不阻断，两种处置
+    留给各自调用方。"""
     last_error: Exception | None = None
     for attempt in (1, 2):
         # 走 model_gateway（app/portraits 下的唯一模型入口，见 scripts/check_contract_surface.py 的 FORBIDDEN）：带追踪元数据与网关重试
         raw = await model_gateway.chat(
             messages, temperature=0, max_tokens=300,
             provider=hiagent.active_provider("vlm"),
-            call_meta={"kind": "vlm_headshot_crop_geometry", "attempt": attempt, **call_meta},
+            call_meta={"kind": kind, "attempt": attempt, **call_meta},
             response_format={"type": "json_object"},
         )
         try:
-            return _validate_geometry(_parse_geometry_json(raw), img_w=img_w, img_h=img_h)
+            return parse_and_validate(raw), None
         except ValueError as exc:
             last_error = exc
-            _LOGGER.warning("[HEADSHOT_CROP][第 %d 次几何核验未通过] %s", attempt, exc)
-    raise ValueError(
-        f"头像裁切几何核验连续两次未通过，无法从该定妆照裁出头像照：{last_error}"
-    ) from last_error
+            _LOGGER.warning("[HEADSHOT_CROP][%s 第 %d 次核验未通过] %s", kind, attempt, exc)
+    return None, last_error
+
+
+async def _detect_head_geometry(
+    source_path: str, *, img_w: int, img_h: int, call_meta: dict[str, Any],
+) -> dict[str, Any]:
+    """一次 VLM 调用定位头部几何；不合格重问一次，仍不合格抛异常（不兜底）。"""
+    image_url = hiagent.data_url_from_file(source_path)
+    messages = _build_geometry_messages(image_url)
+    result, error = await _chat_json_twice(
+        messages,
+        parse_and_validate=lambda raw: _validate_geometry(_parse_json_object(raw), img_w=img_w, img_h=img_h),
+        kind="vlm_headshot_crop_geometry",
+        call_meta=call_meta,
+    )
+    if result is None:
+        raise ValueError(
+            f"头像裁切几何核验连续两次未通过，无法从该定妆照裁出头像照：{error}"
+        ) from error
+    return result
+
+
+# ---------- 裁后复核：看裁切图本身是否带入了衣物 ----------
+
+_CLOTHING_CHECK_PROMPT = (
+    "这是一张从人物全身定妆照裁出的头像照。请判断画面里是否出现任何衣物（衣领、"
+    "领口、肩部衣料等）——头发、皮肤、背景都不算衣物。\n"
+    "如果有衣物，给出衣物在本图可见范围内的最高点，用归一化比例表示（0 到 1 之间，"
+    "相对本图高度，0 是画面最顶端）；没有衣物时这一项填 null。\n"
+    '只返回一个 JSON 对象：{"has_clothing": true 或 false, "clothing_top_y": 数字或 null}。'
+)
+
+
+def _build_clothing_check_messages(image_url: str) -> list[dict[str, Any]]:
+    return [
+        {"role": "system", "content": "Return exactly one valid JSON object. No Markdown, no prose."},
+        {"role": "user", "content": [
+            {"type": "text", "text": _CLOTHING_CHECK_PROMPT},
+            {"type": "image_url", "image_url": {"url": image_url}},
+        ]},
+    ]
+
+
+def _validate_clothing_check(data: dict[str, Any]) -> dict[str, Any]:
+    """代码核验裁后复核的返回：`has_clothing` 必须是布尔值；`clothing_top_y`
+    为 null 或 [0,1] 内的数字；`has_clothing=true` 时 `clothing_top_y` 不得为
+    null（没有衣物最高点就没法知道该上移多少）。不合格一律抛 ValueError。"""
+    has_clothing = data.get("has_clothing")
+    if not isinstance(has_clothing, bool):
+        raise ValueError(f"has_clothing 不是布尔值：{has_clothing!r}")
+    clothing_top_y = data.get("clothing_top_y")
+    if clothing_top_y is not None:
+        try:
+            clothing_top_y = float(clothing_top_y)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"clothing_top_y 不是数字或 null：{data!r}") from exc
+        if not (0.0 <= clothing_top_y <= 1.0):
+            raise ValueError(f"clothing_top_y={clothing_top_y} 不在 [0,1] 归一化范围内")
+    if has_clothing and clothing_top_y is None:
+        raise ValueError("has_clothing=true 但 clothing_top_y 为 null")
+    return {"has_clothing": has_clothing, "clothing_top_y": clothing_top_y}
+
+
+def _data_url_from_jpeg_bytes(jpeg_bytes: bytes) -> str:
+    return f"data:image/jpeg;base64,{base64.b64encode(jpeg_bytes).decode('ascii')}"
+
+
+async def _recheck_crop_for_clothing(
+    cropped: Image.Image, *, call_meta: dict[str, Any], round_no: int,
+) -> dict[str, Any]:
+    """裁后复核一轮：把裁切图本身喂给同一个视觉模型判断是否带入了衣物。格式
+    连续两次不合格按「未判定」处理（``recheck="unverified"``），不阻断——复核
+    是质量加强，不是新增的强制闸门，判不出来不能拖住整条生产流水线。"""
+    buffer = io.BytesIO()
+    cropped.save(buffer, format="JPEG", quality=95)
+    image_url = _data_url_from_jpeg_bytes(buffer.getvalue())
+    messages = _build_clothing_check_messages(image_url)
+    result, error = await _chat_json_twice(
+        messages,
+        parse_and_validate=lambda raw: _validate_clothing_check(_parse_json_object(raw)),
+        kind="vlm_headshot_crop_clothing_check",
+        call_meta={"round": round_no, **call_meta},
+    )
+    if result is None:
+        _LOGGER.warning(
+            "[HEADSHOT_CROP][裁后复核第 %d 轮未判定] 连续两次未通过格式核验，按"
+            "未判定处理，不阻断：%s", round_no, error,
+        )
+        return {"has_clothing": None, "clothing_top_y": None, "recheck": "unverified"}
+    return {**result, "recheck": "ok"}
+
+
+async def _run_clothing_recheck_rounds(
+    image: Image.Image, box: tuple[int, int, int, int], *, head_box: list[float],
+    img_h: int, call_meta: dict[str, Any],
+) -> tuple[Image.Image, tuple[int, int, int, int], dict[str, Any]]:
+    """裁后复核最多两轮：发现衣物就把下边界上移到衣领之上重裁，两轮都仍判有
+    衣物就停在硬底线（`_crop_floor_bottom_px`），qa 里记 clothing_visible=True
+    供人工抽查；无衣物或复核未判定都不算「有衣物」，不触发调整。"""
+    cropped = _render_crop(image, box)
+    rounds: list[dict[str, Any]] = []
+    clothing_visible = False
+    for round_no in (1, 2):
+        recheck = await _recheck_crop_for_clothing(cropped, call_meta=call_meta, round_no=round_no)
+        rounds.append({**recheck, "crop_box_px": list(box)})
+        clothing_visible = recheck["has_clothing"] is True
+        if not clothing_visible:
+            break
+        if round_no == 2:
+            _LOGGER.warning(
+                "[HEADSHOT_CROP][裁后复核两轮均检出衣物] 已停在头框 80%% 底线，"
+                "保留底线裁切供人工抽查：call_meta=%s", call_meta,
+            )
+            break
+        new_bottom = _shrink_bottom_for_clothing(box, recheck["clothing_top_y"], head_box=head_box, img_h=img_h)
+        box = (box[0], box[1], box[2], new_bottom)
+        cropped = _render_crop(image, box)
+    return cropped, box, {"clothing_visible": clothing_visible, "clothing_recheck_rounds": rounds}
+
+
+def _crop_floor_bottom_px(head_box: list[float], *, img_h: int) -> float:
+    """裁切下边界不得越过的硬底线：头框顶 + 头框高 80%。初始裁切与裁后复核的
+    「发现衣物就上移下边界」调整共用同一条线，避免同一公式写两处而后续改一处
+    漏一处（2026-10-02 顾屿实测：底线是头框 80% 处而不是下巴，立领领尖常比
+    视觉模型估的下巴还高）。"""
+    y0, y1 = head_box[1], head_box[3]
+    head_h_px = (y1 - y0) * img_h
+    return y0 * img_h + head_h_px * 0.8
 
 
 def _compute_crop_box_px(
@@ -162,7 +303,7 @@ def _compute_crop_box_px(
     right = px1 + head_w * 0.25
     top = py0 - head_h * 0.10
     bottom = min(chin_y + head_h * 0.25, clothing_top_y * img_h - head_h * 0.02)
-    bottom = max(bottom, py0 + head_h * 0.8)
+    bottom = max(bottom, _crop_floor_bottom_px(head_box, img_h=img_h))
     left, top = max(0.0, left), max(0.0, top)
     right, bottom = min(float(img_w), right), min(float(img_h), bottom)
     width, height = right - left, bottom - top
@@ -191,6 +332,21 @@ def _neck_margin_ratio(
         return 0.0
     chin_y_px = y1 * img_h
     return (box[3] - chin_y_px) / head_h_px
+
+
+def _shrink_bottom_for_clothing(
+    box: tuple[int, int, int, int], clothing_top_y: float, *, head_box: list[float], img_h: int,
+) -> int:
+    """裁后复核判定裁切图里有衣物时，把下边界上移到「衣物最高点 - 头框高 2%」，
+    但不越过 `_crop_floor_bottom_px` 那条硬底线、也不比当前下边界更靠下（只收
+    紧不放宽）。`clothing_top_y` 是裁后复核返回的坐标，相对裁切框自身归一化。"""
+    _, top, _, bottom = box
+    head_h_px = (head_box[3] - head_box[1]) * img_h
+    candidate = top + clothing_top_y * (bottom - top) - head_h_px * 0.02
+    floor = _crop_floor_bottom_px(head_box, img_h=img_h)
+    new_bottom = max(candidate, floor)
+    new_bottom = min(new_bottom, bottom)
+    return round(new_bottom)
 
 
 def _render_crop(image: Image.Image, box: tuple[int, int, int, int]) -> Image.Image:
@@ -259,8 +415,12 @@ async def crop_headshot_from_portrait(
     """从全身定妆照裁出头颈部位头像照；不调用任何生图模型。
 
     返回 qa 字典：``provenance_preserved``、``head_box``、``clothing_top_y``、
-    ``crop_box_px``、``output_size``、``source_path``、``neck_margin_ratio``，
-    供调用方写进 ``character_portrait_views.qa_json``。
+    ``crop_box_px``、``output_size``、``source_path``、``neck_margin_ratio``、
+    ``clothing_visible``、``clothing_recheck_rounds``，供调用方写进
+    ``character_portrait_views.qa_json``。``clothing_recheck_rounds`` 是裁后
+    复核每一轮的记录（``has_clothing``/``clothing_top_y``/``recheck``/调整后
+    ``crop_box_px``），`crop_box_px`/`neck_margin_ratio` 都是复核调整之后的
+    最终值。
     """
     source_bytes = Path(source_path).read_bytes()
     with Image.open(source_path) as opened:
@@ -269,7 +429,9 @@ async def crop_headshot_from_portrait(
     img_w, img_h = image.size
     geometry = await _detect_head_geometry(source_path, img_w=img_w, img_h=img_h, call_meta=call_meta)
     box = _compute_crop_box_px(geometry["head_box"], geometry["clothing_top_y"], img_w=img_w, img_h=img_h)
-    cropped = _render_crop(image, box)
+    cropped, box, recheck_qa = await _run_clothing_recheck_rounds(
+        image, box, head_box=geometry["head_box"], img_h=img_h, call_meta=call_meta,
+    )
     buffer = io.BytesIO()
     cropped.save(buffer, format="JPEG", quality=95)
     app11_segments = _extract_app11_segments(source_bytes)
@@ -298,4 +460,5 @@ async def crop_headshot_from_portrait(
         "output_size": list(cropped.size),
         "source_path": source_path,
         "neck_margin_ratio": round(neck_margin_ratio, 3),
+        **recheck_qa,
     }
