@@ -107,6 +107,29 @@ def _bind_known_base(
     known.add(canonical)
 
 
+def bind_existing_prop_alias(conn: sqlite3.Connection, project_id: str, canonical_name: str, alias: str) -> bool:
+    """供 ``app.props.card_pending_ensure``（分镜阶段补卡，label 命中既有卡时
+    只登记别名、不新建卡）复用同一条别名登记路径，不得另写一份——与
+    ``ensure_props_for_labels`` 内部调用 ``_append_prop_alias`` 的语义完全一致。
+    """
+    return _append_prop_alias(conn, project_id, canonical_name, alias)
+
+
+async def register_prop_card_for_label(
+    conn: sqlite3.Connection, project_id: str, episode_no: int, label: str, description: str,
+    *, style: str, ep_label: str,
+) -> dict | None:
+    """供 ``app.props.card_pending_ensure``（分镜阶段补卡）新建一张道具卡：
+    复用 ``_register_one_prop`` 同一条写入路径（模型写外观锚点 + 出图 + 世界书
+    + ``prop_references`` 登记），不另起一份建卡逻辑。``description`` 已由
+    调用方把本集跨段的全部描述 + 原文原句拼好，这里原样传给
+    ``assess_prop_appearance`` 的 ``description`` 入参。"""
+    return await _register_one_prop(
+        conn, project_id, episode_no, {"label": label, "description": description},
+        style=style, ep_label=ep_label,
+    )
+
+
 async def _register_one_prop(
     conn: sqlite3.Connection, project_id: str, episode_no: int, mention: dict,
     *, style: str, ep_label: str,

@@ -17,7 +17,8 @@ async def generate_episode(args: I.VideoGenerateEpisodeInput) -> CommandResult:
         finish_video_command_operation,
     )
     # 函数内导入：导入本 handler 模块时不加载 app.video_modes（实测 sys.modules 无该包），模块级导入会让能力注册期连带初始化 video_modes→multiview 整条链（同款先例见下方 generate_shot）
-    from app.video_modes.scene_state_ensure import pending_scene_state_gate, resolve_episode_project
+    from app.video_modes.scene_state_ensure import resolve_episode_project
+    from app.capabilities.handlers.video_gates import pending_video_dispatch_gate  # 函数内导入：同上，场景状态/道具闸门不需要在模块加载期常驻
 
     project_id = resolve_episode_project(args.episode_id)
     if project_id is not None:
@@ -45,11 +46,9 @@ async def generate_episode(args: I.VideoGenerateEpisodeInput) -> CommandResult:
             # 成「不过滤=整集」，反而把本该跳过的检查错误地放大回整集范围。
             skip_gate = not gate_shot_ids
         if not skip_gate:
-            pending_message = await pending_scene_state_gate(
-                project_id, args.episode_id, gate_shot_ids,
-            )
-            if pending_message is not None:
-                return failed(pending_message, error_code="scene_state_pending")
+            gate = await pending_video_dispatch_gate(project_id, args.episode_id, gate_shot_ids)
+            if gate is not None:
+                return failed(gate[0], error_code=gate[1])
 
     command = "video.generate_episode"
     request_fingerprint = canonical_command_request_fingerprint(
@@ -277,14 +276,15 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
         finish_video_command_operation,
     )
     # 函数内导入：导入本 handler 模块时不加载 app.video_modes（实测 sys.modules 无该包），模块级导入会让能力注册期连带初始化 video_modes→multiview 整条链
-    from app.video_modes.scene_state_ensure import pending_scene_state_gate, resolve_shot_scope
+    from app.video_modes.scene_state_ensure import resolve_shot_scope
+    from app.capabilities.handlers.video_gates import pending_video_dispatch_gate  # 函数内导入：同上
 
     shot_scope = resolve_shot_scope(args.shot_id)
     if shot_scope is not None:
         shot_project_id, shot_episode_id = shot_scope
-        pending_message = await pending_scene_state_gate(shot_project_id, shot_episode_id, [args.shot_id])
-        if pending_message is not None:
-            return failed(pending_message, error_code="scene_state_pending")
+        gate = await pending_video_dispatch_gate(shot_project_id, shot_episode_id, [args.shot_id])
+        if gate is not None:
+            return failed(gate[0], error_code=gate[1])
 
     command = "video.generate_shot"
     request_fingerprint = canonical_command_request_fingerprint(

@@ -25,6 +25,7 @@ from fastapi import HTTPException
 
 from app import task_registry
 from app.db import get_conn
+from app.props.card_pending_ensure import ensure_storyboard_prop_cards
 from app.video_modes.scene_state_ensure import ensure_scene_state_views
 
 log = logging.getLogger(__name__)
@@ -305,6 +306,10 @@ async def _ensure_scene_state_views_before_dispatch(episode_id: str) -> None:
         await ensure_scene_state_views(project_id=str(row["project_id"]), episode_id=episode_id)
     except Exception:  # noqa: BLE001 - 状态图补齐失败不得阻断连播视频生成
         log.exception("[SCENE_STATE_ENSURE_BEFORE_DISPATCH_FAILED] episode_id=%s", episode_id)
+    try:
+        await ensure_storyboard_prop_cards(project_id=str(row["project_id"]), episode_id=episode_id)
+    except Exception:  # noqa: BLE001 - 补卡失败不得阻断连播视频生成，退回"该道具无卡"的既有降级
+        log.exception("[PROP_STORYBOARD_CARD_ENSURE_BEFORE_DISPATCH_FAILED] episode_id=%s", episode_id)
 
 
 async def _resume_paused_video(episode_id: str, run_id: str, cp) -> str | None:
