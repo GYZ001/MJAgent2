@@ -14,6 +14,7 @@ from app import config
 from app.artifacts import _adopted_video_paths
 from app.atomic_io import atomic_copy
 from app.db import get_conn, new_id, now, rows_to_dicts
+from app.evidence.identity_revision_retention import is_retained_after_revision
 from app.final_edit_enhance import apply_enhancements_sync
 from app.media_pipeline.delivery_encode import (
     low_priority, encode_timeout_s, probe_resolution, probe_video_codec, uniform_resolution,
@@ -885,7 +886,8 @@ def episode_mix_status(episode_id: str) -> dict:
                     "has_adopted": bool(vid),
                     "has_model_candidate": bool(model_candidate),
                     "playback_rate": playback_rate,
-                    "effective_duration_s": effective_duration_s})
+                    "effective_duration_s": effective_duration_s,
+                    "retained_after_revision": bool(v and is_retained_after_revision(v["adoption_reason"]))})  # 保留的修订前采用版
     available = sum(1 for item in out if item["has_model_candidate"])
     skipped_shot_nos = [item["shot_no"] for item in out if not item["has_model_candidate"]]
     active_shot_nos = _active_generation_shot_nos(conn, episode_id)

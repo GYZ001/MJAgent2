@@ -20,6 +20,7 @@ from app.domain.review_wall import (
 )
 from app.evidence import media as media_evidence
 from app.evidence import repository as evidence_repository
+from app.evidence.identity_revision_retention import release_if_retained_after_revision
 from app.harness.types import Evaluation
 from fastapi import HTTPException
 from pathlib import Path
@@ -146,6 +147,7 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
         )],
     )
     shot = conn.execute("SELECT episode_id, adopted_version_id FROM shots WHERE id=?", (shot_id,)).fetchone()
+    previous_version_id = shot["adopted_version_id"] if shot else None
     previous_rate = float(v["playback_rate"] or 1.0)
     conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (version_id, shot_id))
     _settle_waiting_human(conn, v, overridden)
@@ -176,6 +178,11 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
         from app.artifacts import invalidate_episode_delivery_authority
 
         invalidate_episode_delivery_authority(conn, shot["episode_id"])
+    # 修订本段保留的采用版本被这次人工采纳真正替换掉（不是单纯调倍速）：转普通
+    # stale，「仍在使用修订前视频」的标记随之消失（CLAUDE.md「退场时漏恢复半边
+    # 状态」——替换发生了却忘了收尾旧标记，界面会继续显示一个已经不成立的提示）。
+    if previous_version_id != version_id:
+        release_if_retained_after_revision(conn, previous_version_id, reason="修订前保留的采用版本已被新版本替换，转为历史版本")
     conn.commit()
     _review_write_audit(
         "video_version.adopt", "shot", shot_id, target_version=version_id,

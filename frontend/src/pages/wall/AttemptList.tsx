@@ -107,13 +107,18 @@ export default function AttemptList({
           <button type="button" key={version.id}
             className={`wall-attempt-card${version.id === previewId ? ' selected' : ''}${isAdopted ? ' adopted' : ''}`}
             aria-pressed={version.id === previewId}
-            aria-label={`v${version.version_no}，${isStale ? '已过期，仅供对照，不可采纳' : statusLabel(version.status)}${isAdopted ? '，已采纳' : ''}${isOutdatedAspect ? `，旧画幅 ${versionAspectRatio}` : ''}`}
+            aria-label={`v${version.version_no}，${isStale ? '已过期，仅供对照，不可采纳' : statusLabel(version.status)}${isAdopted ? '，已采纳' : ''}${isAdopted && version.retained_after_revision ? '，仍用修订前视频' : ''}${isOutdatedAspect ? `，旧画幅 ${versionAspectRatio}` : ''}`}
             disabled={adopting != null}
             onClick={() => void select(version)}>
             <span className="wall-attempt-card-top">
               <b>v{version.version_no}</b>
               <span className={stampClass(version.status)}>{isStale ? '已过期' : statusLabel(version.status)}</span>
               {isAdopted && <span className="stamp ok">已采纳</span>}
+              {isAdopted && version.retained_after_revision && (
+                <span className="stamp grey" title="本段分镜已修订，这条视频仍是修订前生成的内容；重新生成成功后系统会自动替换，也可在此手动采纳新版本">
+                  仍用修订前视频
+                </span>
+              )}
               {adopting === version.id && <span className="stamp">采纳中…</span>}
               {isOutdatedAspect && <span className="stamp grey" title="该版本生成时的画幅与项目当前画幅不同，仅提示，不影响采纳">旧画幅 {versionAspectRatio}</span>}
             </span>

@@ -122,3 +122,48 @@ describe("旧画幅提示徽标", () => {
     act(() => view.unmount());
   });
 });
+
+// 2026-10-03 用户拍板：「修订本段」保存后原采用版本继续采用，生成台候选列表须
+// 明确提示「仍用修订前视频」，不能让用户以为这是当前分镜的正常产物。
+describe("修订本段保留采用版本的提示徽标", () => {
+  it("已采纳版本带 retained_after_revision 时显示徽标与可读的 aria-label", () => {
+    const view = renderList(
+      [
+        { ...BASE_VERSION, id: "v1", status: "succeeded", video_url: "/media/v1.mp4", retained_after_revision: true },
+        { ...BASE_VERSION, id: "v2", version_no: 2, status: "failed", video_url: undefined },
+      ],
+      "v1",
+    );
+    const card = view.root.findAllByType("button")[0];
+    expect(textOf(card)).toContain("仍用修订前视频");
+    expect(card.props["aria-label"]).toContain("仍用修订前视频");
+    act(() => view.unmount());
+  });
+
+  it("已采纳版本不带标记时不显示该徽标", () => {
+    const view = renderList(
+      [
+        { ...BASE_VERSION, id: "v1", status: "succeeded", video_url: "/media/v1.mp4", retained_after_revision: false },
+        { ...BASE_VERSION, id: "v2", version_no: 2, status: "failed", video_url: undefined },
+      ],
+      "v1",
+    );
+    const card = view.root.findAllByType("button")[0];
+    expect(textOf(card)).not.toContain("仍用修订前视频");
+    act(() => view.unmount());
+  });
+
+  it("带标记但不是当前采用版本时不显示（徽标只跟已采纳状态绑定）", () => {
+    const view = renderList(
+      [
+        { ...BASE_VERSION, id: "v1", status: "succeeded", video_url: "/media/v1.mp4", retained_after_revision: true },
+        { ...BASE_VERSION, id: "v2", version_no: 2, status: "succeeded", video_url: "/media/v2.mp4" },
+      ],
+      "v2",
+    );
+    const cards = view.root.findAllByType("button");
+    expect(textOf(cards[0])).not.toContain("仍用修订前视频");
+    expect(textOf(cards[1])).not.toContain("仍用修订前视频");
+    act(() => view.unmount());
+  });
+});

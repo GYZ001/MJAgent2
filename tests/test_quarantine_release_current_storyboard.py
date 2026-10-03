@@ -9,7 +9,8 @@ stale，漏掉了同镜一条更早的 quarantined 候选（v1，历史供应商
 频任务」而失败、界面无出路（拦用户）。
 
 本文件覆盖四点：
-1. 修订本段同时作废 succeeded 与 quarantined 候选；
+1. 修订本段作废未被保留采用的 succeeded 与 quarantined 候选（原采用版本改为
+   保留——用户 2026-10-03 拍板，见 app.evidence.identity_revision_retention）；
 2. 放行只认指纹匹配当前分镜合同的隔离版本，非 2.x 镜头维持原语义；
 3. 收敛存量坏数据（succeeded 但仍占槽、且没有存活 job），真在途的不动；
 4. 收敛后，此前被卡住的「修订本段」保存恢复可用。
@@ -99,6 +100,9 @@ def _pack_conn() -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 def test_revision_stales_both_succeeded_and_quarantined(fixture, tmp_path):
+    """v1 是修订前的采用版本：用户 2026-10-03 拍板后继续保留采用（不转
+    stale），其余候选（这里的 v1b）照旧全部作废——「同时作废」只对非采用候选
+    成立。"""
     conn, segment, _, _ = fixture
     late_video = tmp_path / "late-arrival.mp4"
     late_video.write_bytes(b"late-provider-result")
@@ -117,8 +121,10 @@ def test_revision_stales_both_succeeded_and_quarantined(fixture, tmp_path):
         r["id"]: (r["status"], r["video_slot_active"])
         for r in conn.execute("SELECT id,status,video_slot_active FROM shot_versions WHERE shot_id='s1'")
     }
-    assert rows["v1"] == ("stale", 0)
+    assert rows["v1"] == ("succeeded", 0), "修订前的采用版本保留采用，不随批量作废被转 stale"
     assert rows["v1b"] == ("stale", 0), "quarantined 候选此前不在 WHERE 范围内，会原样留在 quarantined"
+    shot = conn.execute("SELECT adopted_version_id FROM shots WHERE id='s1'").fetchone()
+    assert shot["adopted_version_id"] == "v1"
 
 
 # ---------------------------------------------------------------------------

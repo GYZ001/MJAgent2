@@ -35,6 +35,8 @@ interface MixShot {
   has_model_candidate?: boolean;
   playback_rate?: number;
   effective_duration_s?: number;
+  /** 当前采用版本是「修订本段」保留下来的旧视频；新版本采用后会自动替换。 */
+  retained_after_revision?: boolean;
 }
 
 export interface MixStatus {

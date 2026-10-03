@@ -12,6 +12,7 @@ import {
   formatDeliveryTime,
   nextCinemaTab,
   reconcileMixStatus,
+  retainedAfterRevisionDetail,
 } from './CinemaPage'
 import type { MixStatus } from '../api'
 
@@ -198,5 +199,25 @@ describe('成片台——合成同步报错必须清掉持久化幂等键', () =
     expect(catchBody).toMatch(/localStorage\.removeItem\(deliveryOperationStorageKey\(`concat:\$\{ep\.id\}`\)\)/)
     expect(catchBody.indexOf('localStorage.removeItem'))
       .toBeLessThan(catchBody.indexOf('toast((e as Error).message, true)'))
+  })
+})
+
+// 2026-10-03 用户拍板：「修订本段」保存后原采用版本继续采用，合成确认弹窗必须
+// 明确提示哪些镜仍在用修订前的视频，不能让界面显得这是当前分镜的正常产物。
+describe('合成确认弹窗——修订前保留视频提示', () => {
+  const shot = (shot_no: number, retained: boolean) => ({
+    shot_id: `s${shot_no}`, shot_no, duration_s: 15, video_url: '/media/v.mp4',
+    has_adopted: true, retained_after_revision: retained,
+  })
+
+  it('有镜头仍用修订前视频时给出带镜号的提示文案', () => {
+    const detail = retainedAfterRevisionDetail({ shots: [shot(1, false), shot(2, true), shot(3, true)] })
+    expect(detail).toBe('仍在使用修订前的视频：镜 2、3（重新生成成功后自动替换，也可在生成台手动采纳）')
+  })
+
+  it('没有镜头带标记时返回 null（details 里不留空行）', () => {
+    expect(retainedAfterRevisionDetail({ shots: [shot(1, false)] })).toBeNull()
+    expect(retainedAfterRevisionDetail({ shots: [] })).toBeNull()
+    expect(retainedAfterRevisionDetail(null)).toBeNull()
   })
 })

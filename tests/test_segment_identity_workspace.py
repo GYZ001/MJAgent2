@@ -65,6 +65,9 @@ def read_independent(query, args=()):
 
 
 def test_preview_is_read_only_and_apply_retains_history_and_sibling(fixture):
+    """用户 2026-10-03 拍板：修订本段保存后，原采用版本继续采用（不再置
+    ``adopted_version_id=NULL``），直到新版本被采用为止——真实回归 EP1 段 33：
+    连续重拍失败会让该段在采用链路上空缺。"""
     conn, segment, _, paths = fixture
     before = read_independent("SELECT * FROM shots")
     candidate = candidate_of(segment)
@@ -74,11 +77,13 @@ def test_preview_is_read_only_and_apply_retains_history_and_sibling(fixture):
     result = workspace.save_identity_candidate(conn,shot_id="s1",baseline=identity_contract_fingerprint(segment),candidate=candidate)
     after = read_independent("SELECT * FROM shots")
     assert after[1] == before[1]
-    assert after[0]["adopted_version_id"] is None
+    assert after[0]["adopted_version_id"] == "v1"
+    assert result["retained_version_id"] == "v1"
     assert json.loads(after[0]["characters"]) == ["孟浩"]
-    assert result["history_versions_preserved"] == 1
-    versions = read_independent("SELECT id,status,video_path FROM shot_versions ORDER BY id")
-    assert [(v["id"],v["status"]) for v in versions] == [("v1","stale"),("v2","succeeded")]
+    assert result["history_versions_preserved"] == 0
+    versions = read_independent("SELECT id,status,video_path,adoption_reason FROM shot_versions ORDER BY id")
+    assert [(v["id"],v["status"]) for v in versions] == [("v1","succeeded"),("v2","succeeded")]
+    assert "保留原采用版本" in versions[0]["adoption_reason"]
     assert all(path.read_bytes() == b"original-video-must-survive" for path in paths)
     assert read_independent("SELECT status FROM artifacts WHERE id=?",(result["artifact_id"],))[0]["status"] == "approved"
 

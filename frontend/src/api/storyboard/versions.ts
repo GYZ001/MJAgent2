@@ -47,6 +47,9 @@ export interface ShotVersion {
   provider_task_id?: string | null;
   artifact_id?: string | null;
   adoption_reason?: string | null;
+  /** 「修订本段」保存时保留的原采用版本：段落合同已更新，这条视频仍是修订前的
+   *  内容，新版本采用后会被替换（见后端 app.evidence.identity_revision_retention）。 */
+  retained_after_revision?: boolean;
   playback_rate?: number | null;
   technical_validation_json?: string | null;
   created_at?: number | null;

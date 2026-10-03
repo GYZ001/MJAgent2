@@ -12,6 +12,7 @@ from app.domain.common import (
     _public_failure_log,
     _public_reference_image,
 )
+from app.evidence.identity_revision_retention import is_retained_after_revision
 from app.media_urls import build_media_url
 
 
@@ -95,6 +96,10 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
     for version in versions:
         version["qa"] = json.loads(version["qa_json"]) if version["qa_json"] else None
         version.pop("qa_json", None)
+        # 修订本段保留的采用版本：生成台候选列表需要一个明确命名的字段，不能让
+        # 前端去猜 adoption_reason 文案子串（CLAUDE.md「界面承诺必须与实际行为
+        # 一致」——这是展示「仍在使用修订前视频」的唯一依据）。
+        version["retained_after_revision"] = is_retained_after_revision(version.get("adoption_reason"))
         meta = json.loads(version.get("image_inputs") or "{}") if include_inputs else {}
         # aspect_ratio 独立于 include_inputs/超长省略取值：轻量查询与被截断的
         # image_inputs 都不含完整 meta，只有 SQL 侧单独 json_extract 的这一列

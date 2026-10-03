@@ -51,6 +51,18 @@ export function canConcatenateMix(mix: Pick<MixStatus, 'ready' | 'shots_ready'> 
   return Boolean(mix && mix.ready && mix.shots_ready > 0)
 }
 
+/** 用户 2026-10-03 拍板：「修订本段」保存后原采用版本继续采用，合成确认弹窗
+ *  必须明确提示哪些镜仍在用修订前的视频——不能让界面显得这是当前分镜的正常
+ *  产物（CLAUDE.md「界面承诺必须与实际行为一致」）。没有这类镜时返回 null，
+ *  不在 details 里留一条空行。 */
+export function retainedAfterRevisionDetail(mix: Pick<MixStatus, 'shots'> | null): string | null {
+  const retainedShotNos = (mix?.shots ?? [])
+    .filter(shot => shot.retained_after_revision)
+    .map(shot => shot.shot_no)
+  if (!retainedShotNos.length) return null
+  return `仍在使用修订前的视频：镜 ${retainedShotNos.join('、')}（重新生成成功后自动替换，也可在生成台手动采纳）`
+}
+
 export function finalEditStatusLabel(report: Record<string, unknown>): string {
   if (report.ok === true) return '当前成片已执行确定性文字、镜间转场与音轨衔接'
   if (report.mode === 'draft_concat' && report.skipped_final_edit === true) {
@@ -234,6 +246,7 @@ export default function CinemaPage() {
 
   const selectedPackage = packages.find(item => item.id === selectedPackageId) ?? null
   const spedShots = mix?.shots.filter(shot => shot.has_adopted && Math.abs((shot.playback_rate ?? 1) - 1) > 0.0001) ?? []
+  const retainedAfterRevisionLine = retainedAfterRevisionDetail(mix)
   const canReview = selectedPackage?.status === 'waiting_human'
   const selectedPackageIndex = selectedPackage
     ? packages.findIndex(item => item.id === selectedPackage.id)
@@ -843,6 +856,7 @@ export default function CinemaPage() {
                 mix.skipped_shot_nos?.length
                   ? `本次直接跳过尚无真实视频的镜号：${mix.skipped_shot_nos.join('、')}`
                   : '所有分镜均已有真实视频',
+                ...(retainedAfterRevisionLine ? [retainedAfterRevisionLine] : []),
                 '若视频合成组件不可用，系统会明确提示，首个片段不会冒充最终成片',
               ]}
               confirmLabel={mix.final_video_url ? '确认重新合成' : '确认合成成品'}

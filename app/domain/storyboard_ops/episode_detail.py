@@ -40,6 +40,17 @@ from .staleness import _shot_video_is_stale
 from .status_snapshot import _storyboard_status_snapshot
 
 
+def _adopted_video_retained_after_revision(shot: dict) -> bool:
+    """当前采用版本是不是「修订本段」保留下来的那一版——供生成台/成片台展示
+    「仍在使用修订前视频」。``shot["versions"]`` 必须已经填好（含
+    ``retained_after_revision``，见 ``_public_shot_versions``）才能调用。"""
+    adopted_id = shot.get("adopted_version_id")
+    return any(
+        version.get("id") == adopted_id and version.get("retained_after_revision")
+        for version in shot.get("versions") or []
+    )
+
+
 @router.get("/episodes/{episode_id}/storyboard/status")
 def storyboard_status(episode_id: str):
     detail = episode_detail(episode_id, view="board")
@@ -302,10 +313,9 @@ def _episode_detail_projection(episode_id: str, view: str | None) -> dict:
         ):
             s["delivery_fallback_active"] = True
             s["adopted_version_id"] = None
+        s["adopted_video_retained_after_revision"] = _adopted_video_retained_after_revision(s)
         s["pipeline"] = pipeline_statuses.get(s["id"])
-        s["video_status"] = (
-            s["pipeline"].get("video_status") if s["pipeline"] else None
-        )
+        s["video_status"] = s["pipeline"].get("video_status") if s["pipeline"] else None
         # 透出 grade / fallback，供生成台 A/B 分色
         try:
             from app.evidence.media import grade_shot_video
@@ -448,6 +458,7 @@ def shot_review_detail(shot_id: str):
     ):
         shot["delivery_fallback_active"] = True
         shot["adopted_version_id"] = None
+    shot["adopted_video_retained_after_revision"] = _adopted_video_retained_after_revision(shot)
     try:
         from app.media_pipeline.status import shot_pipeline_status
         shot["pipeline"] = shot_pipeline_status(shot_id, conn=conn)

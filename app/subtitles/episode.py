@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from app.atomic_io import atomic_write_text
+from app.evidence.identity_revision_retention import retained_dialogue_snapshot
 from app.final_edit import _font_path
 from app.media_urls import build_media_url
 from app.production.storyboard_identity_contract import effective_delivery_kind
@@ -122,9 +123,18 @@ def _legacy_line_specs(legacy: list) -> list[LineSpec]:
     return specs
 
 
-def shot_line_specs(shot_row: Any) -> list[LineSpec]:
+def shot_line_specs(shot_row: Any, *, dialogue_snapshot: dict | None = None) -> list[LineSpec]:
     """优先 ``shot_contract_json.storyboard_pack_segment.dialogue[]``；没有则
-    退回旧版 ``shots.dialogues[]``（speaker/line/delivery）。"""
+    退回旧版 ``shots.dialogues[]``（speaker/line/delivery）。
+
+    ``dialogue_snapshot`` 非空时优先于两者：修订本段保留的旧采用版本，视频实际
+    说的是修订前的台词，``shots.shot_contract_json`` 已经是修订后的新合同——
+    字幕/ASR 对齐必须按生成那一刻冻结的台词取词，不能读当前合同（见
+    ``app.evidence.identity_revision_retention.retained_dialogue_snapshot``
+    唯一生产点）。快照本身没有台词（空分镜段）时返回空列表，不回退到当前
+    合同——那同样是「这条视频生成时就没有台词」的真实状态。"""
+    if dialogue_snapshot is not None:
+        return _segment_line_specs(dialogue_snapshot, dialogue_snapshot.get("dialogue") or [])
     try:
         contract = json.loads(_row_field(shot_row, "shot_contract_json") or "null")
     except (TypeError, ValueError):
@@ -185,7 +195,7 @@ def _collect_jobs_and_cache(
             continue
         version_id = str(manifest_item["adopted_version_id"])
         media_sha = str(manifest_item["file_sha256"])
-        lines = shot_line_specs(row)
+        lines = shot_line_specs(row, dialogue_snapshot=retained_dialogue_snapshot(conn, version_id))
         cached_result = store.get_alignment(
             conn, shot_version_id=version_id, media_sha256=media_sha, model_id=model_id,
             algo_version=align.ALGO_VERSION,

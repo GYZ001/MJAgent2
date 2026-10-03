@@ -4,6 +4,7 @@ from copy import deepcopy
 
 from app.artifacts import invalidate_episode_delivery_authority, invalidate_episode_final
 from app.evidence import repository as evidence_repository
+from app.evidence.identity_revision_retention import mark_retained_after_revision
 from app.harness.contracts import get_contract
 from app.harness.types import Evaluation, EvidenceArtifact
 from app.production.storyboard_dialogue_extract import extract_dialogue_targets
@@ -145,25 +146,53 @@ def _assert_idle_current(conn, shot_id: str, expected: str) -> tuple[dict, dict,
     return row, episode, segment
 
 
-def _record_identity_revision(conn, row: dict, segment: dict) -> str:
+def _record_identity_revision(conn, row: dict, segment: dict, *, retained_version_id: str | None) -> str:
+    """``row["adopted_version_id"]`` 原样写回（不再无条件置 NULL）：用户 2026-10-03
+    拍板——修订本段不应让该段在采用链路上空缺，原采用版本继续采用直到新版本被
+    采用为止。真正的「打上保留标记、把其余候选转 stale」在调用方
+    ``save_identity_candidate`` 里做（那里才知道哪个 id 需要排除、需要哪份台词
+    快照），这里只负责不再误删这个指针。
+
+    ``retained_version_id``：若非空，查出它的 ``shot_versions.artifact_id``（它的
+    ``shot_video`` Artifact），传给 ``protect_descendant_ids``——这条视频的
+    ``parent_artifact_ids`` 指向本函数即将 supersede 的旧 ``storyboard_shot``
+    Artifact，不保护就会被级联 stale（``create_and_commit_artifact_in_transaction``
+    的 supersede/stale 级联覆盖整条谱系），导致 ``downstream_authority`` 把它判
+    「视频 Artifact 已失效」——保留了采用指针却在交付权威校验里形同无效（真实
+    回归：EP1 段 33，见 tests/test_identity_revision_retention.py 的级联回归）。"""
     contract = json.loads(row["shot_contract_json"] or "{}")
     contract["storyboard_pack_segment"] = segment
     names = {c["identity_id"]:c.get("display_name") or c["identity_id"] for c in segment["resources"]["characters"]}
     dialogues = [{"speaker":d["speaker_identity_id"],"line":d["line"],"delivery":d.get("delivery") or "spoken_dialogue","emotion":"平静"} for d in segment["dialogue"]]
-    conn.execute("UPDATE shots SET shot_contract_json=?, characters=?, dialogues=?, adopted_version_id=NULL WHERE id=?", (json.dumps(contract,ensure_ascii=False),json.dumps([names[i] for i in visible_character_ids(segment)],ensure_ascii=False),json.dumps(dialogues,ensure_ascii=False),row["id"]))
+    conn.execute("UPDATE shots SET shot_contract_json=?, characters=?, dialogues=?, adopted_version_id=? WHERE id=?", (json.dumps(contract,ensure_ascii=False),json.dumps([names[i] for i in visible_character_ids(segment)],ensure_ascii=False),json.dumps(dialogues,ensure_ascii=False),row.get("adopted_version_id"),row["id"]))
     saved = conn.execute("SELECT * FROM shots WHERE id=?", (row["id"],)).fetchone()
     shot = _board_from_shot_rows([saved], 1).shots[0]
+    protect_ids = set()
+    if retained_version_id:
+        retained_artifact = conn.execute(
+            "SELECT artifact_id FROM shot_versions WHERE id=?", (retained_version_id,),
+        ).fetchone()
+        if retained_artifact and retained_artifact["artifact_id"]:
+            protect_ids.add(str(retained_artifact["artifact_id"]))
     artifact = evidence_repository.create_and_commit_artifact_in_transaction(conn, EvidenceArtifact(
         type="storyboard_shot",scope_type="storyboard_checkpoint",scope_id=f"{row['episode_id']}:{row['shot_no']}",
         status="candidate",trust_level="T1",content=shot.model_dump(mode="json"),
         parent_artifact_ids=[row["storyboard_artifact_id"]] if row.get("storyboard_artifact_id") else [],contract_version=get_contract("storyboard").version,
-    ), [Evaluation(evaluator_type="deterministic",evaluator_name="segment_identity_revision",evaluator_version=segment["identity_contract_version"],status="passed",hard_gate_passed=True,score=100,evidence={"identity_fingerprint":segment["identity_contract_fingerprint"]})])
+    ), [Evaluation(evaluator_type="deterministic",evaluator_name="segment_identity_revision",evaluator_version=segment["identity_contract_version"],status="passed",hard_gate_passed=True,score=100,evidence={"identity_fingerprint":segment["identity_contract_fingerprint"]})],
+       protect_descendant_ids=protect_ids or None)
     conn.execute("UPDATE shots SET storyboard_artifact_id=? WHERE id=?", (artifact["id"], row["id"]))
     return artifact["id"]
 
 
 def save_identity_candidate(conn, *, shot_id: str, baseline: str, candidate: dict) -> dict:
-    """持有写锁后重验来源和版本；全部成功才替换，旧视频文件完整保留。"""
+    """持有写锁后重验来源和版本；全部成功才替换，旧视频文件完整保留。
+
+    原采用版本（若有）不随本次修订被撤销采用——继续计入交付清单，直到新版本
+    重新生成成功、技术合格后被自动采用（``app.evidence.media.
+    select_best_video_candidate`` 对带保留标记的版本不再 sticky，池里一旦
+    出现修订后的新版本就会换成它），或人工 ``POST /shots/{id}/adopt`` 替换
+    为止，见返回值 ``retained_version_id``（无原采用版本时为 ``None``，
+    行为不变）。"""
     conn.execute("BEGIN IMMEDIATE")
     try:
         row, episode, original = _assert_idle_current(conn, shot_id, baseline)
@@ -174,12 +203,32 @@ def save_identity_candidate(conn, *, shot_id: str, baseline: str, candidate: dic
                 prepared.get(k) == original.get(k) for k in ("narrator_voice_character", "speech_dialect")):
             conn.rollback()
             return {"unchanged":True}
-        artifact_id = _record_identity_revision(conn, row, prepared)
+        # 先取出原采用版本 id：既是「保留哪条」的判据，也要传给
+        # _record_identity_revision 保护它的 shot_video Artifact 不被本次 supersede
+        # 级联误伤（见该函数文档）。
+        retained_version_id = row.get("adopted_version_id")
+        artifact_id = _record_identity_revision(conn, row, prepared, retained_version_id=retained_version_id)
+        # 原采用版本（若有）继续采用：打保留标记 + 连同它此刻冻结的台词快照一起
+        # 写入，供字幕/ASR 对齐按生成那一刻的台词取词（见
+        # app.evidence.identity_revision_retention 文档）；排除出下面的批量
+        # stale，否则会被当成「普通旧候选」一并作废，刚保留就被撤销。
+        if retained_version_id:
+            mark_retained_after_revision(
+                conn, retained_version_id,
+                dialogue_snapshot={
+                    "dialogue": original.get("dialogue") or [],
+                    "resources": {"characters": (original.get("resources") or {}).get("characters") or []},
+                },
+            )
         # quarantined 版本也要一并作废：它是「历史供应商任务晚到」的素材，内容同样
         # 出自本次修订前的旧合同；只清 succeeded 会漏掉它，被
         # release_orphan_quarantined_versions（app/media_exec/quarantine_release.py）
         # 当「孤儿」放行成当前分镜的候选（生产实例 ver_d967abc82f1c）。
-        changed = conn.execute("UPDATE shot_versions SET status='stale', error='片段发声或人物身份已修订；此版本保留供历史对比', video_slot_active=0 WHERE shot_id=? AND status IN ('succeeded','quarantined')", (shot_id,)).rowcount
+        changed = conn.execute(
+            "UPDATE shot_versions SET status='stale', error='片段发声或人物身份已修订；此版本保留供历史对比', video_slot_active=0 "
+            "WHERE shot_id=? AND status IN ('succeeded','quarantined') AND id!=?",
+            (shot_id, retained_version_id or ""),
+        ).rowcount
         conn.execute("UPDATE episodes SET status='scripted', storyboard_warning=NULL WHERE id=?", (episode["id"],))
         invalidate_episode_delivery_authority(conn, episode["id"])
         conn.commit()
@@ -187,4 +236,7 @@ def save_identity_candidate(conn, *, shot_id: str, baseline: str, candidate: dic
         conn.rollback()
         raise
     invalidate_episode_final(episode["id"])
-    return {"artifact_id":artifact_id,"history_versions_preserved":changed,"segment":prepared}
+    return {
+        "artifact_id": artifact_id, "history_versions_preserved": changed, "segment": prepared,
+        "retained_version_id": retained_version_id,
+    }

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from app.db import get_conn
+from app.evidence.identity_revision_retention import is_retained_after_revision
 
 
 _CONFIRMED_EPISODE_STATUSES = frozenset({"confirmed", "generating", "done", "mixed"})
@@ -45,7 +46,7 @@ def _adopted_video_authority_row_query(episode_id: str, db) -> list[Any]:
     return db.execute(
         """SELECT s.id AS shot_id,s.shot_no,s.adopted_version_id,
                   v.status AS version_status,v.video_path,v.artifact_id,v.playback_rate,
-                  v.technical_validation_json
+                  v.technical_validation_json,v.adoption_reason
              FROM shots s
              LEFT JOIN shot_versions v ON v.id=s.adopted_version_id
             WHERE s.episode_id=? ORDER BY s.shot_no""",
@@ -59,6 +60,16 @@ def _adopted_video_authority_for_row(row, *, conn) -> dict[str, Any]:
     Shared by the strict (all-shots) and partial (skip-tolerant) manifest
     builders below so both apply the exact same per-shot technical/authority
     gate — only what happens with a failing row differs between the two.
+
+    修订本段保留采用版本（``app.evidence.identity_revision_retention``）不需要
+    在这里额外放宽：这个函数的全部判据只核验「这条视频本身」（文件、
+    ``shot_video`` Artifact、技术门禁、内容哈希），不比较 ``shots.
+    storyboard_artifact_id`` 与当前分镜合同是否一致——那层「分镜内容是否已
+    变更」的判据在 ``app.domain.storyboard_ops.staleness._shot_video_is_stale``/
+    ``app.video_supervisor.coverage._video_stale_for_shot``，两者都只是 UI 提示
+    信号/Supervisor 重拍触发器，不是交付门禁（读过两处调用点确认过，不是假设）。
+    保留版本的视频文件、Artifact、技术校验证据全部原样未变，天然通过本函数；
+    这里只需把标记透出给 manifest item，供界面/审计识别。
     """
     path = Path(str(row["video_path"] or ""))
     if (
@@ -126,6 +137,9 @@ def _adopted_video_authority_for_row(row, *, conn) -> dict[str, Any]:
         "artifact_hash": actual_artifact_hash,
         "file_sha256": digest.hexdigest(),
         "playback_rate": float(row["playback_rate"] or 1.0),
+        # 进 manifest_hash 的规范化 JSON：修订前后两次交付在这个字段上不同，
+        # 哈希随之区分，不会把保留版本冒充成新合同下的产物（见模块文档）。
+        "retained_after_revision": is_retained_after_revision(row["adoption_reason"]),
     }
 
 

@@ -467,9 +467,9 @@ def create_and_commit_artifact_in_transaction(
     artifact: EvidenceArtifact,
     evaluations: list[Evaluation],
     *,
-    step_run_id: str | None = None,
+    step_run_id: str | None = None, protect_descendant_ids: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Create and adopt an artifact without committing the caller's transaction."""
+    """Create and adopt an artifact without committing the caller's transaction. ``protect_descendant_ids`` 把这些 id 的后代产物排除在本次 supersede/stale 级联之外（例如仍在采用链路上的「修订本段保留版本」）。"""
     if artifact.content is None and artifact.file_path and not Path(artifact.file_path).is_file():
         raise FileNotFoundError(artifact.file_path)
     if not evaluations:
@@ -566,7 +566,7 @@ def create_and_commit_artifact_in_transaction(
     for previous_id in previous:
         descendants = list_descendants(
             previous_id,
-            exclude_ids={artifact_id, *release_fences},
+            exclude_ids={artifact_id, *release_fences, *(protect_descendant_ids or set())},
         )
         conn.executemany(
             "UPDATE artifacts SET status='stale',stale_reason=? "

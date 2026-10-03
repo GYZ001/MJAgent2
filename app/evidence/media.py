@@ -8,6 +8,10 @@ from typing import Any
 
 from app.db import get_conn
 from app.evidence import character_count, repository, subtitle_overlay
+from app.evidence.identity_revision_retention import (
+    pick_auto_adopt_candidate,
+    release_if_retained_after_revision,
+)
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 
 
@@ -409,10 +413,7 @@ def select_best_video_candidate(shot_id: str) -> dict[str, Any] | None:
         "SELECT adopted_version_id FROM shots WHERE id=?", (shot_id,)
     ).fetchone()
     adopted_id = previous["adopted_version_id"] if previous else None
-    best = next(
-        (entry for entry in technical_pool if entry["id"] == adopted_id),
-        technical_pool[0],
-    )
+    best = pick_auto_adopt_candidate(technical_pool, adopted_id)  # 保留版本不享受 sticky
     already_adopted = adopted_id == best["id"]
     if already_adopted:
         reason = best.get("adoption_reason") or (
@@ -429,12 +430,11 @@ def select_best_video_candidate(shot_id: str) -> dict[str, Any] | None:
         if previous and adopted_id != best["id"]:
             from app.artifacts import invalidate_episode_delivery_authority
 
-            shot = conn.execute(
-                "SELECT episode_id FROM shots WHERE id=?",
-                (shot_id,),
-            ).fetchone()
+            shot = conn.execute("SELECT episode_id FROM shots WHERE id=?", (shot_id,)).fetchone()
             if shot:
                 invalidate_episode_delivery_authority(conn, shot["episode_id"])
+            # 保留版本（见 app.evidence.identity_revision_retention）真被换掉：转 stale。
+            release_if_retained_after_revision(conn, adopted_id, reason="修订前保留的采用版本已被系统代采新版本替换，转为历史版本")
         conn.commit()
     if previous and adopted_id != best["id"]:
         from app.artifacts import invalidate_episode_final
