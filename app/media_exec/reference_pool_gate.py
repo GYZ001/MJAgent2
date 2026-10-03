@@ -334,15 +334,13 @@ async def _complete_reference_mode_with_healed_assets(
         return None
     from app.media_pipeline import stages as media_stages
     from app.media_pipeline.stage_state import set_pipeline_stage
-    from app.video_modes.prop_composite_pack import merge_prop_composite_overflow  # 只有本函数用到，不提到模块顶层常驻
 
     meta["mode_decision"] = video_modes.decision_to_dict(decision)
-    # 超限道具合成拼图顶替槽位，须在 reference_images 定稿前完成，见
-    # app.video_modes.prop_composite_pack 模块 docstring。
     required_names = list(meta.get("required_reference_characters") or [])
-    assets = await merge_prop_composite_overflow(
-        assets, project_id=job["project_id"], required_identity_names=required_names,
-    )
+    # 道具超限拼图已经在 video_modes.build_reference_assets（本函数调用方
+    # _attempt_reference_self_heal 的产出）内部截断前完成，这里不再需要（也
+    # 不可能，理由同 app.media_exec.input_reference 主路径那处同类清理）事后
+    # 再调一次 merge_prop_composite_overflow。
     meta["reference_images"] = video_modes.dedupe_reference_dicts(
         [a.public_dict() for a in assets]
     )

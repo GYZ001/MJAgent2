@@ -435,9 +435,8 @@ async def _prepare_reference_mode_inputs_impl(
         meta["mode_decision"] = video_modes.decision_to_dict(decision)
         _delete_rejected_assets(rejected_assets)
         required_names = list(meta.get("required_reference_characters") or [])
-        assets = await merge_prop_composite_overflow(
-            assets, project_id=job["project_id"], required_identity_names=required_names,
-        )
+        # 道具超限拼图已在 build_reference_assets 内部截断前完成，这里不再
+        # 需要事后补一次（见 reference_assemble._apply_prop_composite_overflow）。
         meta["reference_images"] = video_modes.dedupe_reference_dicts([a.public_dict() for a in assets])
         meta["reference_generation_complete"] = True
         meta["reference_static_ready"] = True

@@ -106,6 +106,91 @@ def select_library_references(
     return selected
 
 
+def _resolve_assembly_identity_names(
+    *, bible: Bible, screenplay: EpisodeScreenplay | None, visible_names: list[str],
+) -> list[str]:
+    """本镜可见角色名 -> 可用于图库检索的身份名；纯移动自
+    ``_build_library_reference_assets``（逐行未改），给该函数腾出行数预算
+    接入道具拼图编排（见 ``_apply_prop_composite_overflow``）。"""
+    bible_names = {character.name for character in bible.characters}
+    if screenplay is not None and screenplay.narrative_plan is not None:
+        from app.identity_contracts import narrative_identity_resolver
+
+        resolver = narrative_identity_resolver(bible, screenplay)
+        return list(dict.fromkeys(
+            identity.asset_name
+            for identity in (
+                resolver.resolve(name, usage="visual") for name in visible_names
+            )
+            if identity.allows_asset
+        ))
+    return [name for name in visible_names if name in bible_names]
+
+
+def _freeze_assembly_meta(meta: dict[str, Any], manifest: dict[str, Any]) -> None:
+    """装配完成后的 meta 定稿记账；纯移动自 ``_build_library_reference_assets``
+    尾部（逐行未改），同一腾行数理由见 ``_resolve_assembly_identity_names``。"""
+    meta.update({
+        "reference_input_policy_version": REFERENCE_INPUT_POLICY_VERSION,
+        "reference_manifest": manifest,
+        "reference_manifest_frozen": True,
+        "reference_slots": {},
+        "keyframe_sequence": {"beats": [], "beat_count": 0},
+        "narrative_keyframe_missing": False,
+    })
+    for key in (
+        "keyframe_fallback_mode",
+        "keyframe_structural_fallback_slots",
+        "keyframe_contract_fingerprint",
+    ):
+        meta.pop(key, None)
+
+
+async def _apply_prop_composite_overflow(
+    assets: list[ReferenceImageAsset], identity_names: list[str], max_images: int, project_id: str,
+) -> tuple[list[ReferenceImageAsset], list[ReferenceImageAsset]]:
+    """装配阶段、``select_library_references`` 真正截断之前探测"按同一规则会
+    丢哪些道具"，与最后一个已入选且无人脸的单张道具合成拼图顶替其槽位。
+
+    截断前拼，不是截断后补救：``app.media_exec.input_reference``/
+    ``reference_pool_gate`` 原来在截断后调用
+    ``app.video_modes.prop_composite_pack.merge_prop_composite_overflow``，
+    但那时收到的已经是本函数截断完、超限道具 ``selectedForSeedance=False``
+    的残局——``reference_packing_preview`` 只看 ``selectedForSeedance=True``
+    的条目，永远探测不到超限（2026-10-03《顾念长安》第 1 集第 10 段线上实测：
+    10 项参考图里的白色陶瓷杯被截断却没有合成拼图）。那两处调用因此失去意义，
+    已随本次改动删除；真正仍需要它的是尾帧到达后的连续性重装配
+    （``app.video_modes.continuity_tail.assemble_continuity_tail`` 会把全部
+    技术有效资产重新标回 ``selectedForSeedance=True``，截断推迟到供应商提交
+    前的 ``pack_reference_images_for_seedance``，那条路径的截断判据仍是
+    ``ref_pack_priority`` 不是这里的 ``select_library_references``，两者不能
+    合并）。
+
+    返回 ``(完整候选列表含审计条目, 参与下一次 select_library_references 的
+    候选列表)``——被拼图吞并的成员原条目只留在前者里供人工核查，不进后者，
+    否则会在重新选取时与拼图一起抢同一个槽位。未超限、或找不到可用锚点/
+    成员不足两张而无法合成时，两个返回值都原样是 ``assets``。
+    """
+    naive_selected = select_library_references(assets, identity_names, max_images)
+    naive_ids = {id(a) for a in naive_selected}
+    dropped_props = [
+        a for a in assets if (a.entity_type or a.type) == "prop" and id(a) not in naive_ids
+    ]
+    if not dropped_props:
+        return assets, assets
+    from .prop_composite_pack import composite_overflow_props  # 避免模块级循环：prop_composite_pack 不反向导入本模块
+
+    result = await composite_overflow_props(
+        project_id=project_id, dropped_props=dropped_props, anchor_candidates=naive_selected,
+    )
+    if result is None:
+        return assets, assets
+    composite, merged_ids = result
+    kept = [a for a in assets if id(a) not in merged_ids]
+    merged_members = [a for a in assets if id(a) in merged_ids]
+    return [*kept, composite, *merged_members], [*kept, composite]
+
+
 async def _build_library_reference_assets(
     *,
     conn: Any,
@@ -134,20 +219,9 @@ async def _build_library_reference_assets(
     meta = existing_meta if existing_meta is not None else {}
     scene_name = str(getattr(shot, "scene_name", "") or "").strip()
     visible_names = effective_characters_visible(shot)
-    bible_names = {character.name for character in bible.characters}
-    if screenplay is not None and screenplay.narrative_plan is not None:
-        from app.identity_contracts import narrative_identity_resolver
-
-        resolver = narrative_identity_resolver(bible, screenplay)
-        identity_names = list(dict.fromkeys(
-            identity.asset_name
-            for identity in (
-                resolver.resolve(name, usage="visual") for name in visible_names
-            )
-            if identity.allows_asset
-        ))
-    else:
-        identity_names = [name for name in visible_names if name in bible_names]
+    identity_names = _resolve_assembly_identity_names(
+        bible=bible, screenplay=screenplay, visible_names=visible_names,
+    )
 
     manifest = resolve_shot_asset_dependencies(
         project_id=project_id,
@@ -224,7 +298,10 @@ async def _build_library_reference_assets(
         if (asset.entity_type or asset.type) in {"character", "scene", "prop"} and asset.source == "asset_library"
     ]
 
-    selected = select_library_references(assets, identity_names, max_reference_images())
+    assets, selectable = await _apply_prop_composite_overflow(
+        assets, identity_names, max_reference_images(), project_id,
+    )
+    selected = select_library_references(selectable, identity_names, max_reference_images())
     selected_ids = {id(asset) for asset in selected}
     for asset in assets:
         asset.shotId = shot_id
@@ -237,20 +314,7 @@ async def _build_library_reference_assets(
             *([PURPOSE_VIDEO_INPUT] if id(asset) in selected_ids else []),
         ])
 
-    meta.update({
-        "reference_input_policy_version": REFERENCE_INPUT_POLICY_VERSION,
-        "reference_manifest": manifest,
-        "reference_manifest_frozen": True,
-        "reference_slots": {},
-        "keyframe_sequence": {"beats": [], "beat_count": 0},
-        "narrative_keyframe_missing": False,
-    })
-    for key in (
-        "keyframe_fallback_mode",
-        "keyframe_structural_fallback_slots",
-        "keyframe_contract_fingerprint",
-    ):
-        meta.pop(key, None)
+    _freeze_assembly_meta(meta, manifest)
     if on_progress is not None:
         on_progress(list(assets), [])
     # P0 修复：``warnings``（= assert_manifest_allows_production 对本镜 manifest

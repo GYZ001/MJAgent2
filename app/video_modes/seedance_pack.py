@@ -180,14 +180,34 @@ def _reference_input_label(ref: dict[str, Any], role: str) -> dict[str, Any]:
     }
 
 
+def _manifest_ready_prop_labels(meta: dict[str, Any]) -> set[str]:
+    """本段 ``reference_manifest`` 里声明且 ready 的道具 label——装配阶段
+    （``app.video_modes.reference_assemble.select_library_references``）超限
+    截断掉的道具没有 ``selectedForSeedance`` 痕迹可查（它的条目从一开始就是
+    ``False``，不是"声明后被撤销"），只能从这份冻结 manifest 回溯；与下面
+    ``_dropped_prop_labels`` 靠 ``selectedForSeedance`` 算出的 ``declared``
+    取并集，两层截断（装配阶段 / 供应商提交前的 ``ref_pack_priority``）都要
+    能被同一个信号看见，不能只盯住后一层。"""
+    manifest = meta.get("reference_manifest")
+    props = manifest.get("props") if isinstance(manifest, dict) else None
+    if not isinstance(props, list):
+        return set()
+    return {
+        str(p.get("label") or "").strip()
+        for p in props
+        if isinstance(p, dict) and p.get("ready") and str(p.get("label") or "").strip()
+    }
+
+
 def _dropped_prop_labels(
-    refs: list[dict[str, Any]], usable: list[dict[str, Any]],
+    meta: dict[str, Any], refs: list[dict[str, Any]], usable: list[dict[str, Any]],
 ) -> set[str]:
-    """声明过（``selectedForSeedance``）却最终没有以任何形式送达的道具 label——
-    与 ``dropped_scenes`` 同一可见信号取舍，props 多一层：被
-    ``app.video_modes.prop_composite_pack`` 合成进拼图的道具原条目会被标成
-    ``selectedForSeedance=False``（不再"声明"），但它的 label 仍经拼图条目的
-    ``composite_member_labels`` 算作"覆盖"，不会被误报成丢弃。"""
+    """声明过（``selectedForSeedance``）或 manifest 里 ready 却最终没有以任何
+    形式送达的道具 label——与 ``dropped_scenes`` 同一可见信号取舍，props 多
+    两层：被 ``app.video_modes.prop_composite_pack`` 合成进拼图的道具原条目
+    会被标成 ``selectedForSeedance=False``（不再"声明"），但它的 label 仍经
+    拼图条目的 ``composite_member_labels`` 算作"覆盖"，不会被误报成丢弃；装配
+    阶段截断掉的道具靠 ``_manifest_ready_prop_labels`` 补上（见该函数）。"""
     declared = {
         str(ref.get("entity_name") or "").strip()
         for ref in refs
@@ -196,7 +216,7 @@ def _dropped_prop_labels(
         and not ref.get("deleted")
         and ref.get("view_role") != "prop_composite"  # 拼图自身是合成产物，不是原本声明的道具 label
         and str(ref.get("entity_name") or "").strip()
-    }
+    } | _manifest_ready_prop_labels(meta)
     covered: set[str] = set()
     for ref in usable:
         if str(ref.get("type") or "") != "prop":
@@ -239,7 +259,7 @@ def _record_reference_degradations(
     dropped_scenes = sorted(declared_scene_names - covered_scene_names)
     if dropped_scenes:
         meta["_seedance_scene_reference_degraded"] = dropped_scenes
-    dropped_props = sorted(_dropped_prop_labels(refs, usable))
+    dropped_props = sorted(_dropped_prop_labels(meta, refs, usable))
     if dropped_props:
         meta["_seedance_prop_reference_degraded"] = dropped_props
 
