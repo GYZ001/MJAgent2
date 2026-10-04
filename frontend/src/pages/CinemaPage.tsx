@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import { api, DeliveryPackageRecord, DeliveryReadiness, MixStatus, MixResult } from '../api'
 import { useEpisode, useNav, usePoll } from '../App'
 import EpisodeCrumb from '../components/EpisodeCrumb'
+import AssetRefreshPanel from '../components/AssetRefreshPanel'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import QueryState from '../components/QueryState'; import StaleRefreshBanner from '../components/StaleRefreshBanner'
 import DecisionDialog from '../components/DecisionDialog'
@@ -442,6 +443,8 @@ export default function CinemaPage() {
       </header>
       {/* 已有 ep 后台轮询失败不再被早退 QueryState 吞掉，见 StaleRefreshBanner 注释 */}
       <StaleRefreshBanner error={error} onRetry={() => void refreshEpisode()} objectName="成片台" />
+
+      <AssetRefreshPanel episodeId={ep.id} onToast={toast} onRefresh={refreshEpisode} />
 
       {mix ? (
         <>

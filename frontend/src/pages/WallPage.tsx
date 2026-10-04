@@ -19,7 +19,7 @@ import { reconcileProviderTasksAndReport, reusedReasonLabel } from '../lib/provi
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
 import { extractReferenceAudiosByVersion, extractReferenceImagesByVersion, shotVersionSignature, type VersionAudios } from '../lib/wallReferences'
 import GenerationReferenceGallery from '../components/GenerationReferenceGallery'
-import SegmentResourcePanel from '../components/SegmentResourcePanel'
+import SegmentResourcePanel from '../components/SegmentResourcePanel'; import AssetRefreshPanel from '../components/AssetRefreshPanel'
 import AttemptList from './wall/AttemptList'
 import CritiqueRetakePanel from './wall/CritiqueRetakePanel'
 import PlaybackRateControl from './wall/PlaybackRateControl'
@@ -443,7 +443,7 @@ export default function WallPage() {
         )}
       </section>
 
-      <div className="workspace-gap" />
+      <AssetRefreshPanel episodeId={ep.id} onToast={toast} onRefresh={refreshAll} /><div className="workspace-gap" />
 
       {!shots.length ? (
         <div className="empty">

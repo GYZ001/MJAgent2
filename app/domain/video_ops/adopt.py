@@ -103,8 +103,19 @@ def _assert_candidate_not_stale(version_id: str) -> dict:
     return artifact
 
 
-def _adopt_version_core(shot_id: str, body: dict) -> dict:
-    """人工采用视频版本的领域逻辑，供 REST 路由与 ``video.adopt_version`` Command Handler 共用。"""
+def _adopt_version_apply(shot_id: str, body: dict, *, conn) -> dict:
+    """``_adopt_version_core`` 不含提交的核心步骤：供单镜采用与
+    ``app.domain.video_ops.asset_refresh`` 的整组原子采用共用。``conn`` 必填、
+    不留默认值（CLAUDE.md「所有权显式」）——提交时机由调用方决定：单镜路径每
+    次调用各自提交一次（行为不变）；整组采用要在同一个事务里对多段各调一次
+    本函数、全部成功后才由调用方一次性 ``conn.commit()``，任何一段失败整组
+    回滚，不产生「一部分段换了新图一部分没换」的新型不一致。
+
+    返回值除对外契约字段外，还带下划线前缀的内部字段（``_episode_id``/
+    ``_adoption_changed``/``_old_state``/``_new_state``）供调用方决定何时写审计
+    日志、何时失效整集成片缓存——这两类收尾动作不属于"采用这一步"的数据库
+    事务本身，调用方可以选择提交后再做（单镜路径）或者整组全部提交后只做一
+    次（批量路径），本函数不替调用方做这个决定。"""
     from app.video_playback import normalize_playback_rate
 
     version_id = body.get("version_id")
@@ -113,7 +124,6 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     _review_assert_shot_positive(shot_id, body.get("qualification_version"))
-    conn = get_conn()
     v = conn.execute("SELECT * FROM shot_versions WHERE id=? AND shot_id=?", (version_id, shot_id)).fetchone()
     human_override = _assert_version_adoptable(v, body)
     artifact = _assert_candidate_not_stale(version_id)
@@ -183,25 +193,38 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
     # 状态」——替换发生了却忘了收尾旧标记，界面会继续显示一个已经不成立的提示）。
     if previous_version_id != version_id:
         release_if_retained_after_revision(conn, previous_version_id, reason="修订前保留的采用版本已被新版本替换，转为历史版本")
-    conn.commit()
-    _review_write_audit(
-        "video_version.adopt", "shot", shot_id, target_version=version_id,
-        old_state={
-            "adopted_version_id": shot["adopted_version_id"] if shot else None,
-            "playback_rate": previous_rate,
-        },
-        new_state={"adopted_version_id": version_id, "playback_rate": playback_rate}, reason=reason,
-        idempotency_key=body.get("idempotency_key"), request_id=body.get("request_id"),
-    )
-    if adoption_changed:
-        worker.invalidate_episode_final(shot["episode_id"])
     return {
         "adopted": version_id,
         "artifact_id": artifact["id"],
         "reason": reason,
         "playback_rate": playback_rate,
         "video_plan_reconcile": reconcile_result,
+        "_episode_id": shot["episode_id"] if shot else None,
+        "_adoption_changed": adoption_changed,
+        "_old_state": {
+            "adopted_version_id": shot["adopted_version_id"] if shot else None,
+            "playback_rate": previous_rate,
+        },
+        "_new_state": {"adopted_version_id": version_id, "playback_rate": playback_rate},
     }
+
+
+_ADOPT_INTERNAL_KEYS = ("_episode_id", "_adoption_changed", "_old_state", "_new_state")
+
+
+def _adopt_version_core(shot_id: str, body: dict) -> dict:
+    """人工采用视频版本的领域逻辑，供 REST 路由与 ``video.adopt_version`` Command Handler 共用。"""
+    conn = get_conn()
+    result = _adopt_version_apply(shot_id, body, conn=conn)
+    conn.commit()
+    _review_write_audit(
+        "video_version.adopt", "shot", shot_id, target_version=result["adopted"],
+        old_state=result["_old_state"], new_state=result["_new_state"], reason=result["reason"],
+        idempotency_key=body.get("idempotency_key"), request_id=body.get("request_id"),
+    )
+    if result["_adoption_changed"]:
+        worker.invalidate_episode_final(result["_episode_id"])
+    return {k: v for k, v in result.items() if k not in _ADOPT_INTERNAL_KEYS}
 
 @router.post("/shots/{shot_id}/adopt")
 async def adopt_version(shot_id: str, body: dict):

@@ -186,3 +186,28 @@ from .misc import (
 )
 
 from . import storyboard_adaptation as storyboard_adaptation  # 注册 GET /episodes/{id}/storyboard-adaptation 路由
+
+from .asset_drift import (
+    candidate_matches_current as candidate_matches_current,
+    candidate_usable as candidate_usable,
+    current_entity_keys as current_entity_keys,
+    entity_diff as entity_diff,
+    episode_bible_and_screenplay as episode_bible_and_screenplay,
+    frozen_manifest_of as frozen_manifest_of,
+    shot_current_manifest as shot_current_manifest,
+)
+
+from .asset_refresh_report import (
+    candidate_adopt_check as candidate_adopt_check,
+    episode_asset_refresh_groups as episode_asset_refresh_groups,
+)
+
+from .asset_refresh import (
+    _account_quota as _account_quota,
+    _assert_adopt_request as _assert_adopt_request,
+    _asset_refresh_adopt_core as _asset_refresh_adopt_core,
+    _asset_refresh_regenerate_core as _asset_refresh_regenerate_core,
+    asset_refresh_adopt as asset_refresh_adopt,
+    asset_refresh_regenerate as asset_refresh_regenerate,
+    asset_refresh_report as asset_refresh_report,
+)

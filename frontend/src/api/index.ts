@@ -23,6 +23,7 @@
 // `import { api } from '../api'`，这里只是换文件组织，不是换 API。
 
 import { download, get, mutate, request, ApiError, ApprovalRequiredError, onUnauthenticated } from "./client";
+import * as assetRefreshApi from "./assetRefresh";
 import * as bibleApi from "./bible";
 import * as screenplayApi from "./screenplay";
 import * as storyboardApi from "./storyboard";
@@ -41,6 +42,7 @@ export type { ApprovalPreflight } from "./client";
 export { numToCn };
 export * from "./sso";
 export * from "./common";
+export * from "./assetRefresh";
 export * from "./bible";
 export * from "./screenplay";
 export * from "./prepPack";
@@ -68,6 +70,11 @@ export const api = {
   shotGenerate: videoApi.api_video.shotGenerate,
   shotAdoptVersion: videoApi.api_video.shotAdoptVersion,
   getReviewContext: videoApi.api_video.getReviewContext,
+
+  /* ── 参考资产已更新面板（生成台/成片台） ── */
+  getAssetRefreshReport: assetRefreshApi.api_asset_refresh.getAssetRefreshReport,
+  regenerateAssetRefresh: assetRefreshApi.api_asset_refresh.regenerateAssetRefresh,
+  adoptAssetRefreshGroup: assetRefreshApi.api_asset_refresh.adoptAssetRefreshGroup,
 
   /* ── 人物谱域 ── */
   sceneRefsPrecheck: bibleApi.api_bible.sceneRefsPrecheck,

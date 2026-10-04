@@ -307,3 +307,33 @@ def test_legacy_reverse_angle_view_id_as_fingerprint_stays_stale(conn):
     shot_row = conn.execute("SELECT * FROM shots WHERE id='shot_1'").fetchone()
     ver_row = conn.execute("SELECT * FROM shot_versions WHERE id='ver_1'").fetchone()
     assert _shot_adopted_assets_stale(conn, shot_row, ver_row) is True
+
+
+def test_prop_drift_detected_even_when_character_and_scene_multiview_disabled(conn, monkeypatch):
+    """两个多视角开关（``character_multiview_enabled``/``scene_multiview_
+    enabled``）都被关掉时，道具漂移仍必须被判 stale——``_props_stale`` 判的
+    是道具库状态，与"人物/场景要不要走多视角"这件事无关，不能被这两个开关
+    连带挂起（2026-10-03 用仓库内真实函数复现：构造 ready False→True 的真实
+    道具漂移，关闭两个开关后旧实现返回 False，应为 True）。"""
+    import app.multiview as multiview_mod
+    import app.video_modes.prop_references as prop_references_mod
+
+    monkeypatch.setattr(multiview_mod, "character_multiview_enabled", lambda: False)
+    monkeypatch.setattr(multiview_mod, "scene_multiview_enabled", lambda: False)
+    monkeypatch.setattr(
+        prop_references_mod, "resolve_segment_prop_manifest_entries",
+        lambda entries, *, conn, project_id, episode_no: [
+            {"label": entries[0]["label"], "ready": True, "prop_revision_id": "rev-new"},
+        ],
+    )
+    _, episode_id = _seed_episode(conn)
+    manifest = {
+        "characters": [], "scene": None, "additional_scenes": [],
+        "props": [{"label": "马克杯", "ready": False, "prop_revision_id": None}],
+    }
+    _seed_shot_and_version(conn, shot_id="shot_1", episode_id=episode_id, version_id="ver_1", manifest=manifest)
+    conn.commit()
+
+    shot_row = conn.execute("SELECT * FROM shots WHERE id='shot_1'").fetchone()
+    ver_row = conn.execute("SELECT * FROM shot_versions WHERE id='ver_1'").fetchone()
+    assert _shot_adopted_assets_stale(conn, shot_row, ver_row) is True

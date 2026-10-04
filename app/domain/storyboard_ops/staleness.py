@@ -124,8 +124,6 @@ def _shot_adopted_assets_stale(conn, shot_row, version_row) -> bool:
         from app.portraits import current_portrait_ref
     except Exception:  # noqa: BLE001
         return False
-    if not character_multiview_enabled() and not scene_multiview_enabled():
-        return False
     manifest = _adopted_reference_manifest(version_row)
     if manifest is None:
         return False
@@ -134,39 +132,78 @@ def _shot_adopted_assets_stale(conn, shot_row, version_row) -> bool:
         return False
     project_id, episode_no = ep["project_id"], ep["episode_no"]
 
-    for ch in manifest.get("characters") or []:
-        name = str(ch.get("name") or "")
-        if not name:
-            continue
-        frozen_rev = ch.get("look_revision_id")
-        identity_id = str(ch.get("identity_id") or "") or None
-        current = current_portrait_ref(
-            project_id, name, episode_no, visual_entity_id=identity_id, conn=conn,
-        )
-        current_id = current["portrait_id"] if current else None
-        if current_id != frozen_rev:
-            return True
-        if _selected_views_stale(
-            conn, ch.get("selected_views"), frozen_rev=frozen_rev, current_id=current_id,
-            table="character_portrait_views", parent_column="portrait_id",
-        ):
-            return True
+    # 人物/场景多视角判据受这两个全局开关控制（都关掉时跳过下面两段循环），
+    # 但道具判据（``_props_stale``）与多视角功能无关，必须始终执行——曾经把
+    # ``_props_stale`` 的调用也挂在这同一道 if 之后，两个开关都被关掉时道具
+    # 漂移会被整体吞掉（2026-10-03 用仓库内真实函数复现：构造 ready False→
+    # True 的真实道具漂移，关闭两个开关后本函数仍返回 False）。
+    if character_multiview_enabled() or scene_multiview_enabled():
+        for ch in manifest.get("characters") or []:
+            name = str(ch.get("name") or "")
+            if not name:
+                continue
+            frozen_rev = ch.get("look_revision_id")
+            identity_id = str(ch.get("identity_id") or "") or None
+            current = current_portrait_ref(
+                project_id, name, episode_no, visual_entity_id=identity_id, conn=conn,
+            )
+            current_id = current["portrait_id"] if current else None
+            if current_id != frozen_rev:
+                return True
+            if _selected_views_stale(
+                conn, ch.get("selected_views"), frozen_rev=frozen_rev, current_id=current_id,
+                table="character_portrait_views", parent_column="portrait_id",
+            ):
+                return True
 
-    scenes = [manifest.get("scene") or {}, *(manifest.get("additional_scenes") or [])]
-    for scene in scenes:
-        if not isinstance(scene, dict):
+        scenes = [manifest.get("scene") or {}, *(manifest.get("additional_scenes") or [])]
+        for scene in scenes:
+            if not isinstance(scene, dict):
+                continue
+            name = str(scene.get("name") or "")
+            if not name:
+                continue
+            frozen_rev = scene.get("scene_revision_id")
+            row = scene_row_for_episode(project_id, name, episode_no, conn=conn)
+            current_id = row["id"] if row else None
+            if current_id != frozen_rev:
+                return True
+            if _selected_views_stale(
+                conn, scene.get("selected_views"), frozen_rev=frozen_rev, current_id=current_id,
+                table="scene_reference_views", parent_column="scene_reference_id",
+            ):
+                return True
+    return _props_stale(conn, manifest, project_id, episode_no)
+
+
+def _props_stale(conn, manifest: dict, project_id: str, episode_no: int) -> bool:
+    """冻结 manifest 里的道具参考（ready/外观卡版本）是否已落后于当前库状态。
+
+    ``prop_revision_id`` 是 2026-10-01 才加入冻结 manifest 的字段（见
+    ``app.video_modes.prop_references`` 模块 docstring）：更早冻结的条目里这
+    个键根本不存在，不是显式 None——只在冻结条目确实带着这个键时才比较它，
+    否则会把"补充字段"误判成"道具变了"（2026-10-03 实测过的真实陷阱：B 库
+    里 `绿萝`/`手机`/`外套` 的 prop_references 行从未重新登记过，仅因为代码
+    升级补了新字段，旧冻结 manifest 就会被误判成 32/35 段全部过期）。``ready``
+    字段在这次升级之前就已存在，可以放心直接比较。"""
+    try:
+        # 延迟导入：道具库 app.props 未就位时按"查不到就不算变化"降级，与本
+        # 文件其余资产类型同款的失败隔离策略（见函数开头 try/except 注释）。
+        from app.video_modes.prop_references import resolve_segment_prop_manifest_entries
+    except Exception:  # noqa: BLE001
+        return False
+    for frozen_prop in manifest.get("props") or []:
+        if not isinstance(frozen_prop, dict):
             continue
-        name = str(scene.get("name") or "")
-        if not name:
+        label = str(frozen_prop.get("label") or "").strip()
+        if not label:
             continue
-        frozen_rev = scene.get("scene_revision_id")
-        row = scene_row_for_episode(project_id, name, episode_no, conn=conn)
-        current_id = row["id"] if row else None
-        if current_id != frozen_rev:
+        current = resolve_segment_prop_manifest_entries(
+            [{"label": label, "description": frozen_prop.get("description")}],
+            conn=conn, project_id=project_id, episode_no=episode_no,
+        )[0]
+        if bool(frozen_prop.get("ready")) != bool(current.get("ready")):
             return True
-        if _selected_views_stale(
-            conn, scene.get("selected_views"), frozen_rev=frozen_rev, current_id=current_id,
-            table="scene_reference_views", parent_column="scene_reference_id",
-        ):
+        if "prop_revision_id" in frozen_prop and frozen_prop["prop_revision_id"] != current.get("prop_revision_id"):
             return True
     return False

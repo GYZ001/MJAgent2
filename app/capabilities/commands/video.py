@@ -11,11 +11,57 @@ from __future__ import annotations
 from app.capabilities import inputs as I
 from app.capabilities.commands import build_command as _cmd
 from app.capabilities.handlers import video as h_video
+from app.capabilities.handlers import video_asset_refresh as h_asset_refresh
+from app.capabilities.inputs_asset_refresh import (
+    VideoAssetRefreshAdoptInput,
+    VideoAssetRefreshRegenerateInput,
+)
 from app.capabilities.registry import CommandSpec
 from app.capabilities.schemas import ConfirmationPolicy, IdempotencyPolicy, RiskLevel
 
 
 def commands() -> list[CommandSpec]:
+    return [*_legacy_commands(), *_asset_refresh_commands()]
+
+
+def _asset_refresh_commands() -> list[CommandSpec]:
+    """「参考资产已更新」面板两个写命令——独立小函数，不塞进
+    ``_legacy_commands()``：该函数已经贴着 ``function_lines`` 棘轮基线
+    （246 行），加两条新命令会把它推过基线（CLAUDE.md「装不下时先想怎么拆，
+    不要先想加基线」）。"""
+    return [
+        _cmd(
+            "video.asset_refresh_regenerate",
+            title="成组重生成参考资产已更新的段落",
+            description="对本集「参考资产已更新」分组里需要重生成的段落逐一提交重生成（经全部生成闸门）",
+            input_model=VideoAssetRefreshRegenerateInput,
+            risk=RiskLevel.R2_MATERIAL,
+            confirmation=ConfirmationPolicy.NEVER,
+            idempotency=IdempotencyPolicy.REQUIRED,
+            scopes={"manju:media-generate"},
+            side_effect="creates_paid_video_jobs_for_asset_refresh_group",
+            handler=h_asset_refresh.asset_refresh_regenerate,
+            rest_routes=("POST /api/episodes/{episode_id}/asset-refresh/regenerate",),
+            tags=("video", "stale-assets"),
+        ),
+        _cmd(
+            "video.asset_refresh_adopt",
+            title="整组采用参考资产已更新的段落",
+            description="按指定版本一次性原子采用一个实体分组下的全部段落，任何一段不合格整组拒绝",
+            input_model=VideoAssetRefreshAdoptInput,
+            risk=RiskLevel.R3_DESTRUCTIVE,
+            confirmation=ConfirmationPolicy.NEVER,
+            idempotency=IdempotencyPolicy.REQUIRED,
+            scopes={"manju:project-write"},
+            side_effect="adopts_version_group_human_decision",
+            handler=h_asset_refresh.asset_refresh_adopt,
+            rest_routes=("POST /api/episodes/{episode_id}/asset-refresh/adopt",),
+            tags=("video", "gate", "decide"),
+        ),
+    ]
+
+
+def _legacy_commands() -> list[CommandSpec]:
     return [
         _cmd(
             "video.generate_episode",
