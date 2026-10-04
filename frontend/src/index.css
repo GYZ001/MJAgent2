@@ -10621,3 +10621,24 @@ a.voice-chip-text {
   gap: 8px;
   margin-top: 12px;
 }
+
+/* 道具卡复核「待你确认」列表（PropAuditDoubts，物件库每张卡下方，2026-10-03）：
+   物件库页没有独立分包样式表（PropsPage 不在 check_css_split 的 PAGES 里），
+   组件放在 components/ 下，样式与同页其它类一样留在 index.css。只用既有变量。 */
+.prop-audit-doubts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--hairline);
+}
+.prop-audit-doubt-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.prop-audit-doubt-item > div {
+  display: flex;
+  gap: 6px;
+}

@@ -310,6 +310,15 @@ async def _ensure_scene_state_views_before_dispatch(episode_id: str) -> None:
         await ensure_storyboard_prop_cards(project_id=str(row["project_id"]), episode_id=episode_id)
     except Exception:  # noqa: BLE001 - 补卡失败不得阻断连播视频生成，退回"该道具无卡"的既有降级
         log.exception("[PROP_STORYBOARD_CARD_ENSURE_BEFORE_DISPATCH_FAILED] episode_id=%s", episode_id)
+    try:
+        # 函数内导入：card_audit_ensure 拉入 card_audit 整条模型调用契约，只有真正
+        # 派发视频前才需要，避免 stages 模块加载期背上这条链。
+        from app.props import card_audit_ensure
+        await card_audit_ensure.ensure_fresh_audits_for_episode(
+            get_conn(), str(row["project_id"]), episode_id,
+        )
+    except Exception:  # noqa: BLE001 - 复核失败不得阻断连播视频生成，保留旧卡（既有降级）
+        log.exception("[PROP_CARD_AUDIT_ENSURE_BEFORE_DISPATCH_FAILED] episode_id=%s", episode_id)
 
 
 async def _resume_paused_video(episode_id: str, run_id: str, cp) -> str | None:

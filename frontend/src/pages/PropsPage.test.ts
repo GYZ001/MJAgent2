@@ -1,8 +1,14 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import type { PropItem } from '../api'
-import { filterPropItems, propStamp, propStatusBucket } from './PropsPage'
+import type { PropAuditRecord, PropItem } from '../api'
+import { filterPropItems, propAuditSummaryText, propStamp, propStatusBucket } from './PropsPage'
+
+const audit = (over: Partial<PropAuditRecord> = {}): PropAuditRecord => ({
+  prop_name: '浅灰色卫衣', rules_version: '2026-10-03', status: 'ready',
+  old_appearance: '灰色、棉质、胸前有星盘压痕', new_appearance: '灰色、棉质',
+  removed_clauses: [], removed_aliases: [], reimaged: false, feature_shortfall: false, error: null, ...over,
+})
 
 const source = readFileSync(fileURLToPath(new URL('./PropsPage.tsx', import.meta.url)), 'utf-8')
 
@@ -39,6 +45,43 @@ describe('物件库搜索与筛选（与场景库对齐）', () => {
     expect(filterPropItems(items, '', 'ready').map(i => i.name)).toEqual(['旧猫包'])
     expect(filterPropItems(items, '', 'missing').map(i => i.name)).toEqual(['摄像机'])
     expect(filterPropItems(items, '', 'failed').map(i => i.name)).toEqual(['聚光灯'])
+  })
+})
+
+// 道具卡「按现行规则复核」结果文案（2026-10-03）：删了哪些子句/别名、为什么、
+// 是否重出图、特征不足提示——界面文案与实际行为一致，没有改动就不显示多余信息。
+describe('道具卡复核结果文案', () => {
+  it('没有复核记录时不显示任何内容', () => {
+    expect(propAuditSummaryText(undefined)).toBeNull()
+  })
+  it('running 态显示复核中', () => {
+    expect(propAuditSummaryText(audit({ status: 'running' }))).toBe('正在按现行规则复核…')
+  })
+  it('failed 态显示未通过原因', () => {
+    expect(propAuditSummaryText(audit({ status: 'failed', error: '模型超时' }))).toBe('复核未通过：模型超时')
+  })
+  it('ready 但无删改时不显示任何内容（没动就不说多余的话）', () => {
+    expect(propAuditSummaryText(audit({ status: 'ready' }))).toBeNull()
+  })
+  it('列出被删子句与别名、是否重出图、特征不足提示', () => {
+    const text = propAuditSummaryText(audit({
+      removed_clauses: [{ index: 3, category: 'other_object_or_mark', reason: '星盘压痕', text: '胸前有星盘压痕' }],
+      removed_aliases: [{ alias: '椅子', source: 'model_nominated', reason: '只剩品类名' }],
+      reimaged: true, feature_shortfall: true,
+    }))
+    expect(text).toContain('外观「胸前有星盘压痕」（星盘压痕）')
+    expect(text).toContain('别名「椅子」（只剩品类名）')
+    expect(text).toContain('已重新出图')
+    expect(text).toContain('特征不足 3 项')
+  })
+})
+
+// 手动入口接线（无组件渲染基建，静态扫描守住按钮与两个新 API 的调用，见下方注释）。
+describe('道具库——按现行规则复核手动入口接线', () => {
+  it('toolbar 有复核按钮，点击调用 api.auditProps 并刷新复核结果', () => {
+    expect(source).toMatch(/按现行规则复核/)
+    expect(source).toMatch(/api\.auditProps\(projectId\)/)
+    expect(source).toMatch(/api\.listPropAudits\(projectId\)/)
   })
 })
 

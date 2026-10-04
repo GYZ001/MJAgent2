@@ -58,8 +58,15 @@ def _seed_shot(episode_id: str, shot_no: int, props: list[dict]) -> None:
     conn.commit()
 
 
-async def _fake_chat_structured(_messages, **_kwargs):
-    return SimpleNamespace(appearance_canonical="白色陶瓷材质、圆口、带配套茶托", aliases=[])
+_FAKE_PROP_APPEARANCE = "白色陶瓷材质、圆口、带配套茶托"
+
+
+async def _fake_chat_structured(_messages, **kwargs):
+    # 触发点①同步复核：每条子句须显式"不删除"，空列表会判定成失败重试而非"全部保留"。
+    if (kwargs.get("call_meta") or {}).get("stage") == "audit_prop_card":
+        n = len(_FAKE_PROP_APPEARANCE.split("、"))
+        return SimpleNamespace(clauses=[{"index": i + 1, "remove": False} for i in range(n)], aliases=[])
+    return SimpleNamespace(appearance_canonical=_FAKE_PROP_APPEARANCE, aliases=[])
 
 
 async def _explode_chat_structured(*_a, **_k):
@@ -491,4 +498,3 @@ def test_registering_new_prop_card_does_not_change_adopted_video_delivery_manife
 
     assert after["manifest_hash"] == before["manifest_hash"]
     assert after_partial["manifest_hash"] == before_partial["manifest_hash"]
-

@@ -112,6 +112,10 @@ export const api = {
   addManualScene: bibleApi.addManualScene,
   listProps: bibleApi.listProps,
   regenerateProp: bibleApi.regenerateProp,
+  auditProps: bibleApi.auditProps,
+  listPropAudits: bibleApi.listPropAudits,
+  confirmPropAuditDoubt: bibleApi.confirmPropAuditDoubt,
+  keepPropAuditDoubt: bibleApi.keepPropAuditDoubt,
   replaceSceneImage: bibleApi.replaceSceneImage,
   rollbackManualSceneImage: bibleApi.rollbackManualSceneImage,
 

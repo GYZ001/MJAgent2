@@ -168,7 +168,31 @@ async def _register_one_prop(
     if not _append_prop_to_bible(conn, project_id, prop):
         return None  # 并发下已被抢先登记（重读会看到别的调用刚写入的同名道具），不重复建
     image_path = await _generate_and_persist_prop_image(conn, project_id, episode_no, prop, style=style)
+    await _audit_new_card_now(project_id, label)
     return {"name": label, "has_image": bool(image_path)}
+
+
+async def _audit_new_card_now(project_id: str, prop_name: str) -> None:
+    """新卡创建后立即按现行规则复核一次（触发点①，2026-10-03）：提示词规则
+    ≠生效（同类教训见 CLAUDE.md「分镜正文复核后处理」），新卡落库后立刻核
+    一遍能当场纠正模型没完全照提示词写的外观/别名。两条建卡路径（映射台
+    ``ensure_props_for_labels`` 与分镜补卡 ``register_prop_card_for_label``）
+    都走本函数所在的 ``_register_one_prop``，复核只需接这一处。
+
+    同步等待（不是后台 fire-and-forget）：复核是一次文本模型调用（CLAUDE.md
+    「文本免费但视频有额度」——不占视频生成额度，只有延迟成本），同步跑完能
+    保证卡创建返回时复核记录已经是 ``ready``/``failed``，避免
+    ``app.props.card_audit_ensure`` 的生成前懒复核把"刚建好、还没来得及后台
+    复核"的新卡误判成需要再拦一轮 409——否则用户建完卡立刻点生成会撞上一条
+    自己制造的"正在复核"提示。失败只记日志，不影响建卡本身已经成功（复核
+    记录会落 ``failed``，按既有重试额度机制处理，不会无限期挡住生成）。"""
+    # 函数内导入：card_audit 拉入 card_audit_rules 的模型调用契约，只有真正建卡
+    # 成功这一刻才需要它，避免 service 模块加载期就背上这条链。
+    from .card_audit import audit_one_prop_card
+    try:
+        await audit_one_prop_card(project_id, prop_name, dry_run=False)
+    except Exception:  # noqa: BLE001 - 复核失败不影响新卡已经建成这件事
+        log.exception("[PROP_CARD_AUDIT_AFTER_CREATE_FAILED] project=%s prop=%s", project_id, prop_name)
 
 
 def _prop_mention_skip_reason(

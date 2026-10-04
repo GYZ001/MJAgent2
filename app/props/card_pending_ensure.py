@@ -304,8 +304,10 @@ async def pending_prop_card_gate(
 ) -> str | None:
     """生成入口闸门（P0）：只读扫描目标段（``shot_ids`` 为 ``None`` 时整集）
     涉及的候选 label，任意一个仍处在"要拦"的状态（见 ``_is_blocking``）就
-    启动后台补卡并返回提示文案；全部不拦（已建成/已用尽重试额度）时返回
-    ``None``，不阻塞生成。"""
+    启动后台补卡并返回提示文案；全部不拦后，再检查这些段用到的既有道具卡
+    是否按现行规则复核版本落后（``app.props.card_audit_ensure``，2026-10-03
+    新增，触发点②），落后同样拦住并后台发起复核。全部不拦（已建成/复核已是
+    最新版本/重试额度用尽）时返回 ``None``，不阻塞生成。"""
     conn = get_conn()
     resolved = _episode_text_and_no(conn, episode_id)
     if resolved is None:
@@ -320,9 +322,16 @@ async def pending_prop_card_gate(
     scoped = _filter_candidates_for_shots(candidates, target_shot_nos)
     pending_rows = {label: get_pending(conn, project_id=project_id, label=label) for label in scoped}
     pending = [label for label, row in pending_rows.items() if _is_blocking(row)]
-    if not pending:
-        return None
-    if any(_needs_new_launch(pending_rows[label]) for label in pending):
-        launch_background_ensure(project_id=project_id, episode_id=episode_id, shot_ids=shot_ids)
     scope = "本段" if shot_ids else "本集"
-    return f"{scope}涉及的 {len(pending)} 件道具正在补建参考图（约 1 分钟），生成好后再点「生成」"
+    if pending:
+        if any(_needs_new_launch(pending_rows[label]) for label in pending):
+            launch_background_ensure(project_id=project_id, episode_id=episode_id, shot_ids=shot_ids)
+        return f"{scope}涉及的 {len(pending)} 件道具正在补建参考图（约 1 分钟），生成好后再点「生成」"
+    # 函数内导入：card_audit_ensure 拉入 card_audit 整条模型调用契约，只有建卡闸门
+    # 全部放行、确实要查复核版本时才需要。
+    from app.props import card_audit_ensure
+    stale_audit = card_audit_ensure.stale_audit_props_for_shots(conn, project_id, bible, shot_rows, target_shot_nos)
+    if not stale_audit:
+        return None
+    card_audit_ensure.launch_audit_for_stale_if_needed(conn, project_id, stale_audit)
+    return f"{scope}涉及的 {len(stale_audit)} 件道具卡正在按现行规则复核外观/别名，稍后重试"

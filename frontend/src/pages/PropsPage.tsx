@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, type PropItem } from '../api'
+import { api, type PropAuditRecord, type PropItem } from '../api'
 import { useNav, useProject } from '../App'
 import PrepSubnav from '../components/PrepSubnav'
+import PropAuditDoubts from '../components/PropAuditDoubts'
 import QueryState from '../components/QueryState'; import StaleRefreshBanner from '../components/StaleRefreshBanner'
 import SearchField from '../components/SearchField'
 import { SINGLE_ROW_ASSET_PAGE, useFillPageSize } from '../hooks/useFillPageSize'
@@ -48,6 +49,8 @@ export default function PropsPage() {
   const [items, setItems] = useState<PropItem[] | null>(null)
   const [listError, setListError] = useState<string | null>(null)
   const [busyName, setBusyName] = useState<string | null>(null)
+  const [auditByName, setAuditByName] = useState<Record<string, PropAuditRecord>>({})
+  const [auditBusy, setAuditBusy] = useState(false)
   const [pageSize, gridRef] = useFillPageSize(SINGLE_ROW_ASSET_PAGE)
   const [listState, setListState] = usePrepListState(projectId!, 'prop-library', pageSize)
   const search = listState.search
@@ -77,6 +80,17 @@ export default function PropsPage() {
   }, [projectId])
   useEffect(() => { void load() }, [load])
 
+  const loadAudits = useCallback(async () => {
+    if (!projectId) return
+    try {
+      const res = await api.listPropAudits(projectId)
+      setAuditByName(Object.fromEntries(res.items.map(item => [item.prop_name, item])))
+    } catch {
+      // 复核结果只是辅助展示，读取失败不影响道具库主列表可用
+    }
+  }, [projectId])
+  useEffect(() => { void loadAudits() }, [loadAudits])
+
   const all = items ?? []
   const query = search.trim()
   const hasCriteria = Boolean(query) || Boolean(statusFilter)
@@ -102,6 +116,34 @@ export default function PropsPage() {
       toast(e instanceof Error ? e.message : String(e))
     } finally {
       setBusyName(null)
+    }
+  }
+
+  const handleDoubtResolved = (propName: string, doubtKey: string) => {
+    setAuditByName(current => {
+      const record = current[propName]
+      if (!record) return current
+      return {
+        ...current,
+        [propName]: {
+          ...record,
+          doubts: record.doubts.filter(d => (d.kind === 'alias' ? `alias:${d.alias}` : `clause:${d.text}`) !== doubtKey),
+        },
+      }
+    })
+  }
+
+  const runAudit = async () => {
+    if (!projectId || auditBusy) return
+    setAuditBusy(true)
+    try {
+      const res = await api.auditProps(projectId)
+      toast(res.accepted.length ? `已受理 ${res.accepted.length} 张卡的复核，稍后刷新查看结果` : '当前没有道具卡需要复核')
+      await loadAudits()
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e))
+    } finally {
+      setAuditBusy(false)
     }
   }
 
@@ -137,14 +179,18 @@ export default function PropsPage() {
                 <option value="missing">未出图</option><option value="failed">出图失败</option>
               </select>
               {hasCriteria && <button type="button" className="btn small ghost" onClick={resetList}>清除搜索与筛选</button>}
+              <button type="button" className="btn small" disabled={auditBusy} onClick={() => void runAudit()}>
+                {auditBusy ? '复核受理中…' : '按现行规则复核'}
+              </button>
               <span className="library-result-count" role="status">
                 共 {all.length} 个道具{hasCriteria ? ` · 当前显示 ${filtered.length}` : ''}
               </span>
             </div>
             <div ref={gridRef} className="figure-grid">
               {paged.map(item => (
-                <PropCard key={item.name} item={item} busy={busyName === item.name}
-                  onRegenerate={() => void regenerate(item.name)} />
+                <PropCard key={item.name} item={item} busy={busyName === item.name} audit={auditByName[item.name]}
+                  projectId={projectId!} toast={toast} onRegenerate={() => void regenerate(item.name)}
+                  onDoubtResolved={doubtKey => handleDoubtResolved(item.name, doubtKey)} />
               ))}
             </div>
             {pageSize > 0 && !paged.length && (
@@ -174,7 +220,10 @@ export default function PropsPage() {
   )
 }
 
-function PropCard({ item, busy, onRegenerate }: { item: PropItem; busy: boolean; onRegenerate: () => void }) {
+function PropCard({ item, busy, audit, projectId, toast, onRegenerate, onDoubtResolved }: {
+  item: PropItem; busy: boolean; audit?: PropAuditRecord; projectId: string; toast: (message: string) => void
+  onRegenerate: () => void; onDoubtResolved: (doubtKey: string) => void
+}) {
   const stamp = propStamp(item.status, Boolean(item.image_url))
   return (
     <article className="figure scene-card">
@@ -193,10 +242,39 @@ function PropCard({ item, busy, onRegenerate }: { item: PropItem; busy: boolean;
       <div className="scene-card-summary">
         <p className="hint">{item.appearance || '（世界书里还没有规范外观描述）'}</p>
         {item.aliases.length > 0 && <small className="hint">别名：{item.aliases.join('、')}</small>}
+        <PropAuditSummary audit={audit} />
+        {audit && audit.doubts.length > 0 && (
+          <PropAuditDoubts projectId={projectId} propName={item.name} doubts={audit.doubts}
+            onResolved={onDoubtResolved} toast={toast} />
+        )}
         <button type="button" className="btn small" disabled={busy} onClick={onRegenerate}>
           {busy ? '生成中…' : '重新生成参考图'}
         </button>
       </div>
     </article>
   )
+}
+
+/** 复核结果文案：删了哪些子句/别名、为什么、是否重出图、特征不足提示——
+ * 界面文案与实际行为一致（删了就说删了，没动就不显示多余信息）；无内容
+ * 时返回 null，由调用方决定不渲染任何元素。纯函数，便于直接单测。 */
+export function propAuditSummaryText(audit?: PropAuditRecord): string | null {
+  if (!audit) return null
+  if (audit.status === 'running') return '正在按现行规则复核…'
+  if (audit.status === 'failed') return `复核未通过：${audit.error || '未知原因'}`
+  const { removed_clauses: clauses, removed_aliases: aliases } = audit
+  if (!clauses.length && !aliases.length) return null
+  const parts = [
+    ...clauses.map(c => `外观「${c.text}」（${c.reason}）`),
+    ...aliases.map(a => `别名「${a.alias}」（${a.reason}）`),
+  ]
+  let text = `复核已删除：${parts.join('；')}`
+  if (audit.reimaged) text += '，已重新出图'
+  if (audit.feature_shortfall) text += '（特征不足 3 项，建议人工核查）'
+  return text
+}
+
+function PropAuditSummary({ audit }: { audit?: PropAuditRecord }) {
+  const text = propAuditSummaryText(audit)
+  return text ? <small className="hint">{text}</small> : null
 }

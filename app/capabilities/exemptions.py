@@ -160,6 +160,9 @@ EXEMPT_ROUTE_PERMISSIONS: dict[str, _RouteExemption] = {
         "物件库人工重生成单件道具参考图；页面评审入口，不向 Agent/MCP 开放",
         _GENERATE,
     ),
+    "POST /api/projects/{project_id}/props/audit": _RouteExemption("物件库人工发起整项目道具卡复核；文本调用不计费，页面入口，不向 Agent/MCP 开放", _GENERATE),
+    "POST /api/projects/{project_id}/props/audit/confirm": _RouteExemption("人工确认删除一条复核存疑；按卡名+原文定位后走与自动删除同一条核验，页面入口", _GENERATE),
+    "POST /api/projects/{project_id}/props/audit/keep": _RouteExemption("人工保留一条复核存疑（否定模型的怀疑）；只落决定记录，不改动道具卡内容", _DECIDE),
     "POST /api/shots/{shot_id}/edit-session": _RouteExemption(
         "分镜编辑租约签发；不改变分镜内容",
         _WRITE,
@@ -387,10 +390,7 @@ EXEMPT_ROUTE_PERMISSIONS: dict[str, _RouteExemption] = {
         "团队成员批量增删同上，仅组织管理员可调用",
         _ADMIN,
     ),
-    "DELETE /api/teams/{team_id}/members/{user_id}": _RouteExemption(
-        "同上",
-        _ADMIN,
-    ),
+    "DELETE /api/teams/{team_id}/members/{user_id}": _RouteExemption("同上", _ADMIN),
     "POST /api/roles": _RouteExemption(
         "自定义角色创建是组织治理操作，不是制作领域命令；仅组织管理员可调用",
         _ADMIN,

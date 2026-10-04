@@ -244,6 +244,40 @@ async def test_resume_paused_dispatch_calls_scene_state_ensure_before_video(
     assert captured == [{"project_id": "p", "episode_id": "e"}]
 
 
+@pytest.mark.asyncio
+async def test_fresh_dispatch_calls_prop_card_audit_ensure_before_video(monkeypatch) -> None:
+    """同一类零覆盖隐患（见本文件顶部 2026-10-02 代码评审 #0）：道具卡复核
+    懒触发（``app.props.card_audit_ensure.ensure_fresh_audits_for_episode``，
+    2026-10-03 新增）接在 ``_ensure_scene_state_views_before_dispatch`` 里，
+    是函数内延迟导入，不能走 ``series_stages.xxx`` 打桩，必须打在真实模块
+    ``app.props.card_audit_ensure`` 上才拦得住。"""
+    from app.props import card_audit_ensure
+
+    conn = _conn(None)
+    monkeypatch.setattr(series_stages, "get_conn", lambda: conn)
+    monkeypatch.setattr(series_stages, "ensure_scene_state_views", lambda **_k: _noop())
+    monkeypatch.setattr(series_stages, "ensure_storyboard_prop_cards", lambda **_k: _noop())
+    captured: list[dict] = []
+
+    async def fake_ensure(conn, project_id, episode_id):
+        captured.append({"project_id": project_id, "episode_id": episode_id})
+
+    monkeypatch.setattr(card_audit_ensure, "ensure_fresh_audits_for_episode", fake_ensure)
+
+    async def fake_complete(episode_id, body, **_kwargs):
+        return {}
+
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", fake_complete)
+
+    await series_stages._kick_video_completion("e", "series-run-1")
+
+    assert captured == [{"project_id": "p", "episode_id": "e"}]
+
+
+async def _noop() -> None:
+    return None
+
+
 def _insert_minimal(conn: sqlite3.Connection, table: str, **values) -> None:
     """按 pragma 把 NOT NULL 且无默认值的列补上占位，只关心测试点名的列。"""
     cols = conn.execute(f"pragma table_info({table})").fetchall()
