@@ -75,6 +75,8 @@ _PORTRAIT_PHOTOGRAPHIC_STYLE_NOTE = (
 _PORTRAIT_OVERRIDE_APPEARANCE_ONLY_NOTE = (
     "最近一次用户编辑文案作为完整外观补充；全局画风合同仍独立生效"
 )
+# 外观锚点逐字拼进提示词、常含"唇色淡粉""蜜桃色腮红"，与写实画风肤色规则直接矛盾（2026-10-04《顾念长安》实测）；照 character_view_prompt 的"冲突时全局画风优先"同一原则声明优先级，不删改锚点原文。
+_PORTRAIT_ANCHOR_STYLE_PRIORITY_NOTE = "外观锚点与前述画风锁定（含面部与皮肤要求）如有冲突，以画风锁定为准：面部一律画成干净素颜、肤色均匀，锚点里关于妆容与面部颜色的描述不体现在画面上"
 PRODUCTION_APPEARANCE_MIN_CHARS = 20
 PRODUCTION_APPEARANCE_MAX_CHARS = 80
 # 场景锚点的长度闸，与人物外观锚点同构：闸的数字和写进提示词的数字必须是同一个。
@@ -117,13 +119,14 @@ def visual_style_lock(visual_style: str) -> str:
 
 def character_visual_style_lock(visual_style: str) -> str:
     from app.visual_styles import is_photographic_style_prompt
+    from app.portraits.portrait_skin_blush import portrait_skin_blush_addendum  # portraits 反向依赖本模块，只能延迟导入
     style = normalize_prompt_text(visual_style or "").strip()
     if is_photographic_style_prompt(style):
         return normalize_prompt_text(
             f"{visual_style_lock(visual_style)}。"
             "人物面部与皮肤必须采用照片级摄影写实质感和自然人体比例，保留清晰可见的"
             "肌理、毛孔与光影层次；角色身份仍是虚构数字角色，但渲染手法不得画成卡通、"
-            "二次元或 CG 材质"
+            "二次元或 CG 材质" + portrait_skin_blush_addendum(photographic=True)
         )
     return normalize_prompt_text(
         f"{visual_style_lock(visual_style)}。"
@@ -180,13 +183,11 @@ def portrait_prompt(visual_style: str, anchor: str, period_costume_canonical: st
         if period_costume else
         "服装形制、面料、鞋履、束发和配饰必须服从角色外观锚点与世界年代，不得擅自加入现代或跨时代元素。"
     )
-    privacy_note = (
-        _PORTRAIT_PHOTOGRAPHIC_STYLE_NOTE
-        if is_photographic_style_prompt(normalize_prompt_text(visual_style or "").strip())
-        else _PORTRAIT_PRIVACY_SAFE_STYLE
-    )
+    photographic = is_photographic_style_prompt(normalize_prompt_text(visual_style or "").strip())
+    privacy_note = _PORTRAIT_PHOTOGRAPHIC_STYLE_NOTE if photographic else _PORTRAIT_PRIVACY_SAFE_STYLE
+    anchor_priority_note = f"{_PORTRAIT_ANCHOR_STYLE_PRIORITY_NOTE}。" if photographic else ""  # 只写实画风下冲突，非写实画风的妆容颜色不是缺陷
     return normalize_prompt_text(
-        f"{style}。单角色全身定妆照：{body}。"
+        f"{style}。{anchor_priority_note}单角色全身定妆照：{body}。"
         "完整遵循锚点声明的实体形态、空间关系、姿态和关联道具；"
         "若锚点未声明特殊姿态，则采用正面中性展示姿态。纯浅米色背景，全身完整可见。"
         "头顶、肩臂和鞋底均不得贴边或出画，主体四周保留至少 8% 安全边距。"
@@ -388,7 +389,7 @@ async def _generate_one_character_portrait(
         portrait_override_appearance_anchor(c.appearance_canonical, override), style,
     )
     last_error: Exception | None = None
-    # Score-only：只生成一次；QA 低分不带 critique 重生（PRD QA-SO #14）。
+    # Score-only：候选级只生成一次；肤色局部色块核验自有独立的有界重画（下方 generate_front_full_with_skin_check）。
     for attempt in range(1, 2):
         portrait_id: str | None = None
         path = str(Path(ref_path(project_id, c.name)).with_name(
@@ -414,21 +415,18 @@ async def _generate_one_character_portrait(
                     "reuse_successful_operation": True,
                 })
             rollback_before_long_wait(conn, "character_portrait:generate_image")
-            item = await hiagent.generate_image(
-                prompt,
-                size=config.REF_IMAGE_SIZE,
-                call_meta=call_meta,
-            )
-            if item.get("url"):
-                await download_or_invalidate_reuse(conn, item["url"], path, call_meta)  # 5xx→作废复用结果再抛
-            elif item.get("b64_json"):
-                import base64
-                atomic_write_bytes(path, base64.b64decode(item["b64_json"]))
-            else:
-                raise hiagent.ProviderError(f"图像响应缺少 url/b64_json：{list(item.keys())}")
-            # VLM 图片质检已下线：定妆照是否可用只看文件是否存在（技术校验），
-            # 由 record_reference_asset 内部的 validate_image_file 判定；不再产生分数。
-            qa: dict = {}
+            from app.portraits.portrait_skin_blush_check import generate_front_full_with_skin_check  # portraits 反向依赖本模块，只能延迟导入
+            async def _generate_candidate(gen_prompt: str, meta: dict) -> None:
+                item = await hiagent.generate_image(gen_prompt, size=config.REF_IMAGE_SIZE, call_meta=meta)
+                if item.get("url"):
+                    await download_or_invalidate_reuse(conn, item["url"], path, meta)  # 5xx→作废复用结果再抛
+                elif item.get("b64_json"):
+                    import base64
+                    atomic_write_bytes(path, base64.b64decode(item["b64_json"]))
+                else:
+                    raise hiagent.ProviderError(f"图像响应缺少 url/b64_json：{list(item.keys())}")
+            blush = await generate_front_full_with_skin_check(prompt=prompt, path=path, visual_style=style, call_meta=call_meta, generate_and_write=_generate_candidate, project_id=project_id, character_name=c.name)
+            prompt, qa = blush["final_prompt"], {}  # qa 留空保持 trust_level 口径不变，肤色结果记进 content（非评分字段）
             artifact = record_reference_asset(
                 asset_type="character_portrait",
                 scope_id=f"{project_id}:{c.name}:1",
@@ -438,6 +436,7 @@ async def _generate_one_character_portrait(
                     "appearance": effective_appearance,
                     "prompt": prompt,
                     "attempt": attempt,
+                    "skin_blush_check": blush,
                 },
                 parent_artifact_ids=(
                     [project["bible_artifact_id"]] if project["bible_artifact_id"] else []

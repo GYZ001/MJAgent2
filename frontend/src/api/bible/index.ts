@@ -4,11 +4,13 @@ import * as core from "./core";
 import * as characters from "./characters";
 import * as scenes from "./scenes";
 import * as manual from "./manual";
+import * as skinBlush from "./skinBlush";
 
 export * from "./core";
 export * from "./characters";
 export * from "./scenes";
 export * from "./manual";
+export * from "./skinBlush";
 
 export const api_bible = {
   // core
@@ -44,5 +46,7 @@ export const api_bible = {
   addManualScene: manual.addManualScene,
   replaceSceneImage: manual.replaceSceneImage,
   rollbackManualSceneImage: manual.rollbackManualSceneImage,
+  // 定妆照肤色局部色块核验
+  auditPortraitSkinBlush: skinBlush.auditPortraitSkinBlush,
 };
 export * from "./props";

@@ -237,3 +237,7 @@ from .props_api import (
 # 2026-09-23 角色固定音色：只为让 voice_routes 的路由装饰器在启动时注册到共用 router 而导入
 # 模块，不再导出任何名字（门面不得再长）；调用方一律写 app.domain.bible_ops.voice_routes.<函数>。
 from . import voice_routes  # noqa: F401
+
+# 2026-10-04 定妆照肤色局部色块核验：同上，只为注册路由装饰器而导入，不导出名字；
+# 调用方一律写 app.domain.bible_ops.portrait_skin_blush_audit.<函数>。
+from . import portrait_skin_blush_audit  # noqa: F401

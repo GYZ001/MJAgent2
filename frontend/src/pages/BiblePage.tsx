@@ -379,6 +379,7 @@ export default function BiblePage() {
   const [qaDetail, setQaDetail] = useState<{ characterName: string; portrait: Portrait | null } | null>(null)
   const [compareDetail, setCompareDetail] = useState<{ title: string; images: { src: string; label: string }[] } | null>(null)
   const [timelineCharacter, setTimelineCharacter] = useState('')
+  const [skinBlushFlags, setSkinBlushFlags] = useState<Record<string, boolean>>({})
   const [skipConfirm, setSkipConfirm] = useState<{ count: number; names: string[] } | null>(null)
   const [conflict, setConflict] = useState<{
     message: string
@@ -545,6 +546,20 @@ export default function BiblePage() {
       void refreshRefsProgress()
     }
   }, [p?.bible_status, p?.refs_status, refreshRefsProgress])
+
+  // 肤色色块告警要在人物卡本身可见，不止在生成参数弹窗里（2026-10-04 复查）；project 级一次性核验全部角色，非写实画风后端直接返回空列表，不计费不耗配额。
+  const portraitVersionKey = (p?.bible?.characters ?? []).map(c => `${c.name}:${c.ref_image_url || ''}`).join('|')
+  useEffect(() => {
+    if (!p?.id) return
+    let active = true
+    api.auditPortraitSkinBlush(p.id).then(r => {
+      if (!active) return
+      const next: Record<string, boolean> = {}
+      for (const item of r.results) if (item.checked && item.has_local_color) next[item.character_name] = true
+      setSkinBlushFlags(next)
+    }).catch(() => undefined)
+    return () => { active = false }
+  }, [p?.id, portraitVersionKey])
 
   useEffect(() => {
     if (!projectId || !editing || !dirty) return
@@ -1049,6 +1064,9 @@ export default function BiblePage() {
                   <span className={`stamp ${stamp.color}`}>{stamp.label}</span>{characterPortraitStatusDetail(c) && <span className="portrait-status-detail hint" role="status">　{characterPortraitStatusDetail(c)}</span>}
                   <VoiceChip projectId={p.id} characterName={c.name} />
                 </div>
+                {skinBlushFlags[c.name] && (
+                  <div className="warning-banner" role="status">脸部有局部颜色（腮红/红晕），视频里会被画成色块。<button className="btn small" type="button" onClick={() => setParamsCharacterName(c.name)} style={{ marginLeft: 8 }}>查看详情</button></div>
+                )}
                 {(c.ref_image_url || hasPortraitImage) && (
                   <CharacterPortraitGallery
                     projectId={p.id}
@@ -1285,6 +1303,13 @@ function PortraitBlock({ projectId, character: c, disabled, onChanged, regenerat
   const [saving, setSaving] = useState(false)
   const [restoreConfirm, setRestoreConfirm] = useState(false)
   const [discardConfirm, setDiscardConfirm] = useState(false)
+  // 肤色局部色块核验：不计费只读检查，画风不是写实时后端直接返回空列表。
+  const [skinBlush, setSkinBlush] = useState<{ checked: boolean; has_local_color: boolean | null } | null>(null)
+  useEffect(() => {
+    let active = true
+    api.auditPortraitSkinBlush(projectId, c.name).then(r => { if (active) setSkinBlush(r.results[0] || null) }).catch(() => undefined)
+    return () => { active = false }
+  }, [projectId, c.name, c.ref_image_url])
   const isOverridden = !!(c.portrait_prompt_override || '').trim()
   const savedPrompt = c.portrait_prompt_override || c.portrait_prompt_effective || ''
   const draftChanged = draft !== null && draft !== savedPrompt
@@ -1322,6 +1347,12 @@ function PortraitBlock({ projectId, character: c, disabled, onChanged, regenerat
   return (
     <div style={{ marginTop: 10 }}>
       <label className="f">当前定妆提示词{isOverridden ? ' · 用户已修改' : ' · 系统默认'}</label>
+      {skinBlush?.checked && skinBlush.has_local_color && (
+        <div className="warning-banner" role="status">
+          脸部有局部颜色（腮红/红晕），视频里会被画成色块；建议重新生成定妆照（已生成的视频会在「参考资产已更新」面板里出现）。
+          <button className="btn small" disabled={disabled} onClick={regenerate} style={{ marginLeft: 8 }}>重新生成定妆照</button>
+        </div>
+      )}
       {draft === null ? (
         <>
           <div className="prompt-source-chips" aria-label="定妆提示词组成">

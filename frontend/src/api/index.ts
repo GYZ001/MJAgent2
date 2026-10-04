@@ -101,6 +101,7 @@ export const api = {
   listPortraitCandidates: bibleApi.api_bible.listPortraitCandidates,
   adoptPortraitCandidate: bibleApi.api_bible.adoptPortraitCandidate,
   rollbackPortraitCandidate: bibleApi.api_bible.rollbackPortraitCandidate,
+  auditPortraitSkinBlush: bibleApi.api_bible.auditPortraitSkinBlush,
   generateBible: bibleApi.generateBible,
   generateRefs: bibleApi.generateRefs,
   cancelBibleGeneration: bibleApi.cancelBibleGeneration,

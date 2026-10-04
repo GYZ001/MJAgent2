@@ -276,3 +276,24 @@ describe('人物谱——已有数据时后台轮询刷新失败不得被吞', (
     expect(source).toMatch(/<StaleRefreshBanner error=\{error\} onRetry=\{refresh\} objectName="人物谱" \/>/)
   })
 })
+
+// 定妆照肤色局部色块核验（2026-10-04）：无组件渲染测试基建，继续用源码静态
+// 扫描守住「取结果→不合格时渲染告警+复用既有重生成入口」这条接线不回归。
+describe('人物谱——定妆照肤色局部色块告警', () => {
+  it('PortraitBlock 调用核验接口并把结果存进状态', () => {
+    expect(source).toMatch(/api\.auditPortraitSkinBlush\(projectId, c\.name\)/)
+  })
+
+  it('仅在 checked && has_local_color 为真时渲染告警，按钮复用既有 regenerate 回调', () => {
+    expect(source).toMatch(/skinBlush\?\.checked && skinBlush\.has_local_color && \(/)
+    expect(source).toContain('脸部有局部颜色（腮红/红晕），视频里会被画成色块')
+    expect(source).toMatch(/className="warning-banner"[\s\S]{0,300}onClick=\{regenerate\}/)
+  })
+
+  // 原实现告警只在打开弹窗后可见，不在人物卡本身上；补 project 级核验 + 卡上徽标。
+  it('人物卡本身（不经弹窗）直接渲染告警徽标，project 级核验结果按角色名索引', () => {
+    expect(source).toMatch(/api\.auditPortraitSkinBlush\(p\.id\)/)
+    expect(source).toMatch(/setSkinBlushFlags\(next\)/)
+    expect(source).toMatch(/\{skinBlushFlags\[c\.name\] && \(/)
+  })
+})
