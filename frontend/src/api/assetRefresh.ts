@@ -15,7 +15,9 @@ export type AssetRefreshMemberStatus =
 
 export interface AssetRefreshCandidate {
   version_id: string;
+  version_no: number;
   created_at: number;
+  video_url: string | null;
 }
 
 export interface AssetRefreshMember {
@@ -27,6 +29,9 @@ export interface AssetRefreshMember {
   reason: string;
   candidates: AssetRefreshCandidate[];
   entity_category: AssetRefreshCategory | null;
+  /** 本段当前采用版本号；没有已采用版本（not_adopted）时为 null。用于在候选
+   *  下拉旁对比「现采用 v{n}」。 */
+  adopted_version_no: number | null;
 }
 
 export interface AssetRefreshGroup {

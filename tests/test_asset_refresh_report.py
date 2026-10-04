@@ -230,8 +230,93 @@ def test_existing_matching_candidate_marks_has_candidate_not_needs_regen(monkeyp
     report = episode_asset_refresh_groups(conn, _episode_row(conn))
     member = report["groups"][0]["members"][0]
     assert member["status"] == "has_candidate"
-    assert member["candidates"] == [{"version_id": "v2", "created_at": 2}]
+    # video_path 落在 pytest tmp_path 下，不在 config.PROJECTS_DIR 之下，
+    # build_media_url 据其文档约定在这种情况下返回 None（见下方
+    # test_candidate_includes_version_no_and_video_url 验证非 None 的真实情形）。
+    assert member["candidates"] == [{"version_id": "v2", "version_no": 2, "created_at": 2, "video_url": None}]
+    assert member["adopted_version_no"] == 1
     assert report["needs_regen_shot_count"] == 0
+
+
+def test_candidate_includes_version_no_and_video_url(monkeypatch, tmp_path) -> None:
+    """2026-10-03 用户发现候选下拉框只显示裸的 version_id（如 ver_xxx），既
+    分不清版本也无法预览。候选必须带 version_no 与可播放的 video_url。"""
+    from app import config as app_config
+
+    conn = _fresh_conn()
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    monkeypatch.setattr(app_config, "PROJECTS_DIR", projects_dir)
+    image = tmp_path / "mug6.png"
+    image.write_bytes(b"x")
+    video_dir = projects_dir / "p" / "e"
+    video_dir.mkdir(parents=True)
+    video = video_dir / "candidate.mp4"
+    video.write_bytes(b"v")
+    monkeypatch.setattr(prop_references, "_prop_reference_lookup", _lookup_stub(str(image), "prop_mug_rev2"))
+    _insert_pack_shot(conn, shot_id="s1", shot_no=1, adopted_version_id="v1")
+    _insert_version(conn, version_id="v1", shot_id="s1", version_no=1, frozen_manifest=_prop_manifest(ready=True, revision_id="prop_mug_rev1"))
+    _insert_version(
+        conn, version_id="v2", shot_id="s1", version_no=2,
+        frozen_manifest=_prop_manifest(ready=True, revision_id="prop_mug_rev2"), video_path=str(video),
+    )
+    conn.commit()
+
+    report = episode_asset_refresh_groups(conn, _episode_row(conn))
+    candidate = report["groups"][0]["members"][0]["candidates"][0]
+    assert candidate["version_no"] == 2
+    assert candidate["video_url"] is not None
+    assert candidate["video_url"].startswith("/media/p/e/candidate.mp4")
+
+
+def test_multiple_candidates_ordered_newest_first_for_default_preselection(monkeypatch, tmp_path) -> None:
+    """前端默认预选取 ``candidates[0]``，这里必须保证顺序是"最新候选排第一"，
+    否则默认预选会悄悄选中最旧的候选而不是最新的。"""
+    conn = _fresh_conn()
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    image = tmp_path / "mug7.png"
+    image.write_bytes(b"x")
+    video_a = tmp_path / "a.mp4"
+    video_a.write_bytes(b"v")
+    video_b = tmp_path / "b.mp4"
+    video_b.write_bytes(b"v")
+    monkeypatch.setattr(prop_references, "_prop_reference_lookup", _lookup_stub(str(image), "prop_mug_rev2"))
+    _insert_pack_shot(conn, shot_id="s1", shot_no=1, adopted_version_id="v1")
+    _insert_version(conn, version_id="v1", shot_id="s1", version_no=1, frozen_manifest=_prop_manifest(ready=True, revision_id="prop_mug_rev1"))
+    _insert_version(
+        conn, version_id="v2", shot_id="s1", version_no=2,
+        frozen_manifest=_prop_manifest(ready=True, revision_id="prop_mug_rev2"), video_path=str(video_a),
+    )
+    _insert_version(
+        conn, version_id="v3", shot_id="s1", version_no=3,
+        frozen_manifest=_prop_manifest(ready=True, revision_id="prop_mug_rev2"), video_path=str(video_b),
+    )
+    conn.commit()
+
+    report = episode_asset_refresh_groups(conn, _episode_row(conn))
+    candidates = report["groups"][0]["members"][0]["candidates"]
+    assert [c["version_id"] for c in candidates] == ["v3", "v2"]
+
+
+def test_not_adopted_member_has_null_adopted_version_no(monkeypatch, tmp_path) -> None:
+    """未采用任何版本的段不该假造一个采用版本号；已采用的段要如实带上
+    version_no，供前端展示"现采用 v{n}"与候选对比。"""
+    conn = _fresh_conn()
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    image = tmp_path / "mug9.png"
+    image.write_bytes(b"x")
+    monkeypatch.setattr(prop_references, "_prop_reference_lookup", _lookup_stub(str(image), "prop_mug_rev2"))
+    _insert_pack_shot(conn, shot_id="s1", shot_no=1, adopted_version_id="v1")
+    _insert_version(conn, version_id="v1", shot_id="s1", version_no=1, frozen_manifest=_prop_manifest(ready=True, revision_id="prop_mug_rev1"))
+    _insert_pack_shot(conn, shot_id="s2", shot_no=2, adopted_version_id=None)
+    conn.commit()
+
+    report = episode_asset_refresh_groups(conn, _episode_row(conn))
+    members = {m["shot_id"]: m for m in report["groups"][0]["members"]}
+    assert members["s2"]["status"] == "not_adopted"
+    assert members["s2"]["adopted_version_no"] is None
+    assert members["s1"]["adopted_version_no"] == 1
 
 
 def test_quota_sums_distinct_shots_without_double_counting(monkeypatch, tmp_path) -> None:

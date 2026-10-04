@@ -20,6 +20,13 @@ function newIdemKey(prefix: string): string {
   return `${prefix}:${rand}`
 }
 
+/** created_at 可能是秒或毫秒（后端历史上两种口径都出现过，同 CinemaPage 的
+ *  判断方式），本地格式展示给用户辨认候选版本。 */
+function formatCreatedAt(epochSeconds: number): string {
+  const ms = epochSeconds < 1_000_000_000_000 ? epochSeconds * 1000 : epochSeconds
+  return new Date(ms).toLocaleString('zh-CN', { hour12: false })
+}
+
 type SelectionMap = Record<string, Record<string, string>>
 
 export default function AssetRefreshPanel({
@@ -158,25 +165,44 @@ function AssetRefreshGroupCard({
         <b>{group.entity_name}</b><span className="hint">（{group.category_label}）</span>
       </div>
       <ul>
-        {group.members.map(member => (
-          <li key={member.shot_id}>
-            段 {member.shot_no}：{member.status_label}
-            {member.status === 'has_candidate' && (
-              <select
-                aria-label={`段 ${member.shot_no} 采用候选版本`}
-                value={selected[member.shot_id] || ''}
-                onChange={event => onSelect(member.shot_id, event.target.value)}
-              >
-                {member.candidates.map(candidate => (
-                  <option key={candidate.version_id} value={candidate.version_id}>{candidate.version_id}</option>
-                ))}
-              </select>
-            )}
-            {member.status !== 'latest' && member.status !== 'not_adopted' && (
-              <span className="hint"> {member.reason}</span>
-            )}
-          </li>
-        ))}
+        {group.members.map(member => {
+          const selectedVersionId = selected[member.shot_id] || ''
+          const selectedCandidate = member.candidates.find(c => c.version_id === selectedVersionId)
+          return (
+            <li key={member.shot_id} className="asset-refresh-member">
+              段 {member.shot_no}：{member.status_label}
+              {member.adopted_version_no != null && (
+                <span className="hint"> （现采用 v{member.adopted_version_no}）</span>
+              )}
+              {member.status === 'has_candidate' && (
+                <span className="asset-refresh-candidate">
+                  <select
+                    aria-label={`段 ${member.shot_no} 采用候选版本`}
+                    value={selectedVersionId}
+                    onChange={event => onSelect(member.shot_id, event.target.value)}
+                  >
+                    {member.candidates.map(candidate => (
+                      <option key={candidate.version_id} value={candidate.version_id}>
+                        v{candidate.version_no}（{formatCreatedAt(candidate.created_at)}）
+                      </option>
+                    ))}
+                  </select>
+                  {selectedCandidate?.video_url && (
+                    <a
+                      className="asset-refresh-preview-link" href={selectedCandidate.video_url}
+                      target="_blank" rel="noreferrer"
+                    >
+                      预览
+                    </a>
+                  )}
+                </span>
+              )}
+              {member.status !== 'latest' && member.status !== 'not_adopted' && (
+                <span className="hint"> {member.reason}</span>
+              )}
+            </li>
+          )
+        })}
       </ul>
       <div className="asset-refresh-actions">
         <button type="button" className="btn" disabled={busy || !needsRegen} onClick={onRegenerate}>

@@ -10559,3 +10559,65 @@ a.voice-chip-text {
 .storyboard-adaptation-drop-list small {
   color: var(--ink-soft);
 }
+
+/* 参考资产已更新面板（AssetRefreshPanel，生成台/成片台共用，2026-10-03）：
+   组件本身不挂在任一页面目录下（WallPage 与 CinemaPage 各引用一次），按
+   py scripts/check_css_split.py 的归属判据，这类跨页复用的类必须留在
+   index.css，不能拆进某一页的分包样式表。只用既有 CSS 变量，不写字面色值，
+   两套皮肤天然一致，不需要暗色覆盖。 */
+.asset-refresh-panel {
+  margin-top: 16px;
+}
+.asset-refresh-panel > div:first-child {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.asset-refresh-panel > div:first-child span {
+  color: var(--ink-faint);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.asset-refresh-group {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--hairline);
+}
+.asset-refresh-group:first-of-type {
+  margin-top: 10px;
+  padding-top: 0;
+  border-top: none;
+}
+.asset-refresh-group > ul {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.asset-refresh-member {
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.asset-refresh-candidate {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+}
+.asset-refresh-candidate select {
+  max-width: 280px;
+}
+.asset-refresh-preview-link {
+  color: var(--indigo);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.asset-refresh-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
