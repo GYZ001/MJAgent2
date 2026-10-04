@@ -38,9 +38,9 @@ def _seed_project(project_id: str, *, props_list: list[dict] | None = None) -> N
 
 def test_verify_clause_removal_accepts_person_or_action_owner() -> None:
     removed, _records, _missing, doubts = card_audit_rules.verify_clause_removal_verdicts(
-        1, [{"index": 1, "remove": True, "category": "other_object_or_mark",
+        ["蹭上的痕迹"], [{"index": 1, "remove": True, "category": "other_object_or_mark",
              "owner": card_audit_rules.OWNER_PERSON_OR_ACTION, "reason": "蹭上的痕迹"}],
-        frozenset(),
+        frozenset(), cooccurring_owners=frozenset(), all_props=[],
     )
     assert removed == {1} and doubts == []
 
@@ -49,8 +49,8 @@ def test_verify_clause_removal_downgrades_owner_without_card_to_doubt() -> None:
     """真实案例：止血丹外观前几句写的是装它的瓷瓶，瓷瓶没有自己的道具卡——
     降级为存疑，不删除，这条外观信息不会因为"容器没有卡"而从所有卡里消失。"""
     removed, records, missing, doubts = card_audit_rules.verify_clause_removal_verdicts(
-        1, [{"index": 1, "remove": True, "category": "other_object_or_mark", "owner": "瓷瓶", "reason": "容器外观"}],
-        frozenset({"止血丹"}),
+        ["容器外观"], [{"index": 1, "remove": True, "category": "other_object_or_mark", "owner": "瓷瓶", "reason": "容器外观"}],
+        frozenset({"止血丹"}), cooccurring_owners=frozenset(), all_props=[],
     )
     assert removed == set() and records == []
     assert missing == set()  # 模型确实给出了判定，只是降级，不算"缺失判定"
@@ -59,10 +59,10 @@ def test_verify_clause_removal_downgrades_owner_without_card_to_doubt() -> None:
 
 def test_verify_clause_removal_uncertain_clause_becomes_self_doubt() -> None:
     removed, records, missing, doubts = card_audit_rules.verify_clause_removal_verdicts(
-        1, [{"index": 1, "remove": True, "category": "other_object_or_mark",
+        ["容器外观"], [{"index": 1, "remove": True, "category": "other_object_or_mark",
              "owner": card_audit_rules.OWNER_PERSON_OR_ACTION,
              "uncertain": True, "reason": "分不清是容器还是本体"}],
-        frozenset(),
+        frozenset(), cooccurring_owners=frozenset(), all_props=[],
     )
     assert removed == set() and records == [] and missing == set()
     assert doubts == [{"index": 1, "doubt_type": "model_self_doubt", "reason": "分不清是容器还是本体"}]
@@ -82,17 +82,23 @@ def test_catalog_text_for_prompt_lists_other_cards_excluding_self() -> None:
 def test_merge_clause_judgments_both_agree_removes() -> None:
     raw_a = [{"index": 1, "remove": True, "category": "plot_state", "reason": "A"}]
     raw_b = [{"index": 1, "remove": True, "category": "plot_state", "reason": "B"}]
-    merged = card_audit_consensus.merge_clause_judgments(1, raw_a, raw_b, frozenset(), ["泡水后发蔫"])
+    merged = card_audit_consensus.merge_clause_judgments(
+        ["泡水后发蔫"], raw_a, raw_b, frozenset(), cooccurring_owners=frozenset(), all_props=[],
+    )
     assert merged["removed_indexes"] == {1}
     assert merged["doubts"] == []
     assert "A" in merged["removed_records"][0]["reason"] and "B" in merged["removed_records"][0]["reason"]
+    assert merged["removed_records"][0]["keep_fragment"] == ""
+    assert merged["keep_fragments"] == {}
 
 
 def test_merge_clause_judgments_disagreement_becomes_doubt_not_deletion() -> None:
     """真实不稳定样本：泡面铝箔盖一次判删一次判留——两次不一致就不删，转存疑。"""
     raw_a = [{"index": 1, "remove": True, "category": "plot_state", "reason": "已开盖"}]
     raw_b = [{"index": 1, "remove": False, "reason": "未提及"}]
-    merged = card_audit_consensus.merge_clause_judgments(1, raw_a, raw_b, frozenset(), ["铝箔盖"])
+    merged = card_audit_consensus.merge_clause_judgments(
+        ["铝箔盖"], raw_a, raw_b, frozenset(), cooccurring_owners=frozenset(), all_props=[],
+    )
     assert merged["removed_indexes"] == set()
     assert len(merged["doubts"]) == 1
     doubt = merged["doubts"][0]
@@ -105,13 +111,29 @@ def test_merge_clause_judgments_owner_without_card_surfaces_as_doubt_even_if_agr
     只产出一条存疑（审查发现：此前对同一下标 A/B 各自降级会各产出一条，造成
     同一 ``doubt_key`` 下两条重复记录，前端 React key 冲突）。"""
     raw = [{"index": 1, "remove": True, "category": "other_object_or_mark", "owner": "汤碗", "reason": "容器"}]
-    merged = card_audit_consensus.merge_clause_judgments(1, raw, raw, frozenset({"小馄饨"}), ["盛着热汤"])
+    merged = card_audit_consensus.merge_clause_judgments(
+        ["盛着热汤"], raw, raw, frozenset({"小馄饨"}), cooccurring_owners=frozenset(), all_props=[],
+    )
     assert merged["removed_indexes"] == set()
     assert len(merged["doubts"]) == 1
     doubt = merged["doubts"][0]
     assert doubt["doubt_type"] == card_audit_consensus.DOUBT_TYPE_OWNER_WITHOUT_CARD
     assert doubt["owner"] == "汤碗"
     assert doubt["reason_a"] == "容器" and doubt["reason_b"] == "容器"
+
+
+def test_merge_clause_judgments_owner_not_cooccurring_surfaces_as_doubt_even_if_agreed() -> None:
+    """两次都判定「别的物件」、owner 确有这张卡，但从未与本卡共现——两次一致
+    也不能删，必须降级为 owner_not_cooccurring 存疑（2026-10-03-v3）。"""
+    raw = [{"index": 1, "remove": True, "category": "other_object_or_mark", "owner": "白色陶瓷杯", "reason": "容器外观"}]
+    merged = card_audit_consensus.merge_clause_judgments(
+        ["容器为马克杯"], raw, raw, frozenset({"白色陶瓷杯"}), cooccurring_owners=frozenset(), all_props=[],
+    )
+    assert merged["removed_indexes"] == set()
+    assert len(merged["doubts"]) == 1
+    doubt = merged["doubts"][0]
+    assert doubt["doubt_type"] == card_audit_consensus.DOUBT_TYPE_OWNER_NOT_COOCCURRING
+    assert doubt["owner"] == "白色陶瓷杯"
 
 
 def test_merge_clause_judgments_one_call_removes_other_downgrades_single_doubt() -> None:
@@ -121,7 +143,9 @@ def test_merge_clause_judgments_one_call_removes_other_downgrades_single_doubt()
               "owner": "瓷瓶", "reason": "容器A"}]
     raw_b = [{"index": 1, "remove": True, "category": "other_object_or_mark",
               "owner": "没卡的容器", "reason": "容器B"}]
-    merged = card_audit_consensus.merge_clause_judgments(1, raw_a, raw_b, frozenset({"瓷瓶"}), ["装它的瓷瓶"])
+    merged = card_audit_consensus.merge_clause_judgments(
+        ["装它的瓷瓶"], raw_a, raw_b, frozenset({"瓷瓶"}), cooccurring_owners=frozenset({"瓷瓶"}), all_props=[],
+    )
     assert merged["removed_indexes"] == set()
     assert len(merged["doubts"]) == 1
     doubt = merged["doubts"][0]
@@ -133,11 +157,105 @@ def test_merge_clause_judgments_invalid_category_surfaces_as_single_doubt() -> N
     """模型判定 remove=true 却给了三类之外的 category：不静默丢弃，降级为
     ``invalid_category`` 存疑；两次都如此也只产出一条，不重复。"""
     raw = [{"index": 1, "remove": True, "category": "weird_category", "reason": "说不清"}]
-    merged = card_audit_consensus.merge_clause_judgments(1, raw, raw, frozenset(), ["某条外观"])
+    merged = card_audit_consensus.merge_clause_judgments(
+        ["某条外观"], raw, raw, frozenset(), cooccurring_owners=frozenset(), all_props=[],
+    )
     assert merged["removed_indexes"] == set()
     assert len(merged["doubts"]) == 1
     assert merged["doubts"][0]["doubt_type"] == card_audit_rules.DOUBT_TYPE_INVALID_CATEGORY
     assert merged["doubts"][0]["category"] == "weird_category"
+
+
+# ---------------------------------------------------------------------------
+# 2b) card_audit_rules._valid_keep_fragment / merge keep_fragment 采信
+# ---------------------------------------------------------------------------
+
+def test_valid_keep_fragment_accepts_literal_substring() -> None:
+    """返回 ``(有效片段, 是否尝试过)``——核验通过时两者都带有信息。"""
+    assert card_audit_rules._valid_keep_fragment(
+        "原生心形翠绿色叶片约三分之二边缘发黑发蔫", "心形翠绿色叶片",
+    ) == ("心形翠绿色叶片", True)
+
+
+def test_valid_keep_fragment_rejects_non_substring_but_marks_attempted() -> None:
+    """非逐字子串核验不通过，片段本身不采信（空串），但"尝试过"必须是
+    True——不能和"压根没给"用同一个信号表示，否则会在两次合并时把"一次尝试
+    失败"误判成"两次都没给→整句删除"（2026-10-04 审查发现并修复）。"""
+    assert card_audit_rules._valid_keep_fragment(
+        "原生心形翠绿色叶片约三分之二边缘发黑发蔫", "改写过的叶片",
+    ) == ("", True)
+
+
+def test_valid_keep_fragment_rejects_whole_clause_but_marks_attempted() -> None:
+    clause = "原生心形翠绿色叶片约三分之二边缘发黑发蔫"
+    assert card_audit_rules._valid_keep_fragment(clause, clause) == ("", True)
+
+
+def test_valid_keep_fragment_not_given_is_not_attempted() -> None:
+    """压根没给 ``keep_fragment``（空值/None）——这才是真正的"没尝试"。"""
+    clause = "原生心形翠绿色叶片约三分之二边缘发黑发蔫"
+    assert card_audit_rules._valid_keep_fragment(clause, "") == ("", False)
+    assert card_audit_rules._valid_keep_fragment(clause, None) == ("", False)
+
+
+def test_merge_clause_judgments_adopts_keep_fragment_when_both_calls_agree() -> None:
+    """真实案例：绿萝"原生心形翠绿色叶片约三分之二边缘发黑发蔫"整句删除会让
+    "心形翠绿色叶片"这条植物固有外观一并丢失——两次都给出且完全相同的
+    keep_fragment 才采用。"""
+    clause = "原生心形翠绿色叶片约三分之二边缘发黑发蔫"
+    raw = [{
+        "index": 1, "remove": True, "category": "plot_state", "reason": "泡水后发黑",
+        "keep_fragment": "心形翠绿色叶片",
+    }]
+    merged = card_audit_consensus.merge_clause_judgments(
+        [clause], raw, raw, frozenset(), cooccurring_owners=frozenset(), all_props=[],
+    )
+    assert merged["removed_indexes"] == {1}
+    assert merged["keep_fragments"] == {1: "心形翠绿色叶片"}
+    assert merged["removed_records"][0]["keep_fragment"] == "心形翠绿色叶片"
+    assert merged["doubts"] == []
+
+
+def test_merge_clause_judgments_keep_fragment_mismatch_becomes_doubt_not_deletion() -> None:
+    """两次都同意删除，但给出的 keep_fragment 不一致（这里是只有一边给）——
+    不能猜哪一边对，整条转存疑，既不整句删除也不采用任一方的片段。"""
+    clause = "原生心形翠绿色叶片约三分之二边缘发黑发蔫"
+    raw_a = [{
+        "index": 1, "remove": True, "category": "plot_state", "reason": "泡水后发黑",
+        "keep_fragment": "心形翠绿色叶片",
+    }]
+    raw_b = [{"index": 1, "remove": True, "category": "plot_state", "reason": "泡水后发黑"}]
+    merged = card_audit_consensus.merge_clause_judgments(
+        [clause], raw_a, raw_b, frozenset(), cooccurring_owners=frozenset(), all_props=[],
+    )
+    assert merged["removed_indexes"] == set()
+    assert merged["keep_fragments"] == {}
+    assert len(merged["doubts"]) == 1
+    doubt = merged["doubts"][0]
+    assert doubt["doubt_type"] == card_audit_consensus.DOUBT_TYPE_KEEP_FRAGMENT_MISMATCH
+    assert doubt["keep_fragment_a"] == "心形翠绿色叶片" and doubt["keep_fragment_b"] == ""
+
+
+def test_merge_clause_judgments_invalid_keep_fragment_attempt_becomes_doubt_not_deletion() -> None:
+    """审查发现并修复的真实复发场景：A 给了一个 keep_fragment，但不是逐字
+    连续子串（核验不通过，采信值是空串）；B 完全没给 keep_fragment（同样是
+    空串）。修复前两边"采信值"都是空串，会被判成"两次都没给→整句删除"，
+    把 A 已经明确表达过的"这条子句里有东西该保留"的意图悄悉吞掉——必须转
+    存疑，不能静默整句删除。"""
+    clause = "原生心形翠绿色叶片约三分之二边缘发黑发蔫"
+    raw_a = [{
+        "index": 1, "remove": True, "category": "plot_state", "reason": "泡水后发黑",
+        "keep_fragment": "心形的翠绿叶片",  # 不是逐字连续子串，核验不通过
+    }]
+    raw_b = [{"index": 1, "remove": True, "category": "plot_state", "reason": "泡水后发黑"}]  # 完全没给
+    merged = card_audit_consensus.merge_clause_judgments(
+        [clause], raw_a, raw_b, frozenset(), cooccurring_owners=frozenset(), all_props=[],
+    )
+    assert merged["removed_indexes"] == set(), "不能静默整句删除——A 曾尝试保留一部分"
+    assert merged["keep_fragments"] == {}
+    assert len(merged["doubts"]) == 1
+    doubt = merged["doubts"][0]
+    assert doubt["doubt_type"] == card_audit_consensus.DOUBT_TYPE_KEEP_FRAGMENT_MISMATCH
 
 
 def test_merge_alias_judgments_disagreement_becomes_doubt() -> None:
@@ -166,7 +284,7 @@ def test_filter_doubts_against_kept_decisions_suppresses_matching_key() -> None:
 async def test_compute_audit_two_calls_disagree_keeps_clause_and_records_doubt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    prop = Prop(name="泡面", appearance_canonical="红色包装袋、方形桶装、铝箔密封盖", aliases=[])
+    prop = Prop(name="泡面", appearance_canonical="红色包装袋，方形桶装，铝箔密封盖", aliases=[])
 
     async def _fake(_prop, clauses, _owner_catalog_text, *, call_tag):
         verdicts = [{"index": i + 1, "remove": False} for i in range(len(clauses))]
@@ -175,7 +293,7 @@ async def test_compute_audit_two_calls_disagree_keeps_clause_and_records_doubt(
         return {"clauses": verdicts, "aliases": []}
     monkeypatch.setattr(card_audit.card_audit_rules, "request_prop_card_audit_judgment", _fake)
 
-    result = await card_audit.compute_prop_card_audit(prop, [prop])
+    result = await card_audit.compute_prop_card_audit(prop, [prop], label_segments={})
     assert result["appearance_changed"] is False
     assert result["new_appearance"] == prop.appearance_canonical
     assert len(result["doubts"]) == 1
@@ -183,7 +301,7 @@ async def test_compute_audit_two_calls_disagree_keeps_clause_and_records_doubt(
 
 
 async def test_compute_audit_respects_kept_doubt_keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    prop = Prop(name="泡面2", appearance_canonical="红色包装袋、方形桶装、铝箔密封盖", aliases=[])
+    prop = Prop(name="泡面2", appearance_canonical="红色包装袋，方形桶装，铝箔密封盖", aliases=[])
 
     async def _fake(_prop, clauses, _owner_catalog_text, *, call_tag):
         verdicts = [{"index": i + 1, "remove": False} for i in range(len(clauses))]
@@ -193,7 +311,7 @@ async def test_compute_audit_respects_kept_doubt_keys(monkeypatch: pytest.Monkey
     monkeypatch.setattr(card_audit.card_audit_rules, "request_prop_card_audit_judgment", _fake)
 
     kept = frozenset({card_audit_consensus.clause_doubt_key("铝箔密封盖")})
-    result = await card_audit.compute_prop_card_audit(prop, [prop], kept)
+    result = await card_audit.compute_prop_card_audit(prop, [prop], kept, label_segments={})
     assert result["doubts"] == []  # 人工已保留过，同规则版本内不再呈现
 
 

@@ -47,13 +47,37 @@ def _seed_audit_with_doubts(project_id: str, prop_name: str, doubts: list[dict],
 
 
 # ---------------------------------------------------------------------------
+# 0) keep_fragment 在人工确认前必须可见（2026-10-03-v3）：keep_fragment_
+#    mismatch 这类存疑的两个候选片段要原样留在 doubts_json 里，供界面展示
+#    （CLAUDE.md「拦住用户时必须给出路」的同一精神——不止给按钮，也要给够
+#    判断依据）。
+# ---------------------------------------------------------------------------
+
+def test_keep_fragment_fields_visible_on_seeded_doubt_before_resolution() -> None:
+    _seed_project("p-fragment-visible", props_list=[{"name": "绿萝", "appearance_canonical": "x", "aliases": []}])
+    doubt_key = card_audit_consensus.clause_doubt_key("原生心形翠绿色叶片约三分之二边缘发黑发蔫")
+    _seed_audit_with_doubts("p-fragment-visible", "绿萝", [
+        {
+            "kind": "clause", "index": 1, "text": "原生心形翠绿色叶片约三分之二边缘发黑发蔫",
+            "doubt_type": "keep_fragment_mismatch", "reason_a": "泡水后发黑", "reason_b": "泡水后发黑",
+            "keep_fragment_a": "心形翠绿色叶片", "keep_fragment_b": "",
+        },
+    ])
+    conn = get_conn()
+    items = card_audit.audits_for_project(conn, "p-fragment-visible")
+    doubt = next(d for d in items[0]["doubts"] if card_audit_consensus.doubt_key(d) == doubt_key)
+    assert doubt["keep_fragment_a"] == "心形翠绿色叶片"
+    assert doubt["keep_fragment_b"] == ""
+
+
+# ---------------------------------------------------------------------------
 # 1) confirm_doubt：子句/别名，按原文逐字定位，走同一条核验+重出图
 # ---------------------------------------------------------------------------
 
 async def test_confirm_doubt_deletes_clause_and_reimages(monkeypatch: pytest.MonkeyPatch) -> None:
     """真实案例：止血丹卡的外观把装它的瓷瓶样子也写进去——瓷瓶没有自己的卡，
     自动复核降级成存疑；人工看过原文确认这条确实该删。"""
-    appearance = "朱红色圆丸、瓷瓶外观为青花纹样、略有磕碰"
+    appearance = "朱红色圆丸，瓷瓶外观为青花纹样，略有磕碰"
     _seed_project("p-confirm-1", props_list=[{"name": "止血丹", "appearance_canonical": appearance, "aliases": []}])
     doubt_key = card_audit_consensus.clause_doubt_key("瓷瓶外观为青花纹样")
     _seed_audit_with_doubts("p-confirm-1", "止血丹", [
@@ -70,7 +94,7 @@ async def test_confirm_doubt_deletes_clause_and_reimages(monkeypatch: pytest.Mon
 
     conn = get_conn()
     bible = json.loads(conn.execute("SELECT bible_json FROM projects WHERE id='p-confirm-1'").fetchone()["bible_json"])
-    assert bible["props"][0]["appearance_canonical"] == "朱红色圆丸、略有磕碰"
+    assert bible["props"][0]["appearance_canonical"] == "朱红色圆丸，略有磕碰"
     row = card_audit_store.get_audit(conn, project_id="p-confirm-1", prop_name="止血丹")
     assert json.loads(row["doubts_json"]) == []
     decision = conn.execute(
@@ -117,7 +141,7 @@ async def test_confirm_doubt_stale_text_raises_without_mutating(monkeypatch: pyt
 
 
 async def test_confirm_doubt_reimage_failure_rolls_back_atomically(monkeypatch: pytest.MonkeyPatch) -> None:
-    appearance = "红色、圆形、带柄把"
+    appearance = "红色，圆形，带柄把"
     _seed_project("p-confirm-5", props_list=[{"name": "道具A", "appearance_canonical": appearance, "aliases": []}])
     doubt_key = card_audit_consensus.clause_doubt_key("带柄把")
     _seed_audit_with_doubts("p-confirm-5", "道具A", [
@@ -145,7 +169,7 @@ async def test_confirm_doubt_persist_failure_reports_clearly_not_bare_crash(
     写事务遇到非 ``ValueError`` 异常（例如数据库瞬时故障），不能让异常原样
     冒泡——那会被路由层当成裸 500，且用户看不出"卡其实已经改了"。必须转成
     明确说明"已删除但记录没更新、请刷新"的 ``ValueError``（转 409）。"""
-    appearance = "红色、圆形、带柄把"
+    appearance = "红色，圆形，带柄把"
     _seed_project("p-confirm-6", props_list=[{"name": "道具A", "appearance_canonical": appearance, "aliases": []}])
     doubt_key = card_audit_consensus.clause_doubt_key("带柄把")
     _seed_audit_with_doubts("p-confirm-6", "道具A", [
@@ -225,7 +249,7 @@ async def test_keep_doubt_missing_key_raises() -> None:
 async def test_keep_doubt_then_recompute_does_not_resurface_same_doubt(monkeypatch: pytest.MonkeyPatch) -> None:
     """端到端：人工保留一条存疑后，同一规则版本内重新复核不再把它判成存疑
     呈现给用户——即使模型两次判定仍然不一致。"""
-    prop = Prop(name="泡面3", appearance_canonical="红色包装袋、方形桶装、铝箔密封盖", aliases=[])
+    prop = Prop(name="泡面3", appearance_canonical="红色包装袋，方形桶装，铝箔密封盖", aliases=[])
 
     async def _fake(_prop, clauses, _owner_catalog_text, *, call_tag):
         verdicts = [{"index": i + 1, "remove": False} for i in range(len(clauses))]
@@ -234,7 +258,7 @@ async def test_keep_doubt_then_recompute_does_not_resurface_same_doubt(monkeypat
         return {"clauses": verdicts, "aliases": []}
     monkeypatch.setattr(card_audit.card_audit_rules, "request_prop_card_audit_judgment", _fake)
 
-    first = await card_audit.compute_prop_card_audit(prop, [prop])
+    first = await card_audit.compute_prop_card_audit(prop, [prop], label_segments={})
     assert len(first["doubts"]) == 1
     doubt_key = card_audit_consensus.doubt_key(first["doubts"][0])
 
@@ -247,7 +271,7 @@ async def test_keep_doubt_then_recompute_does_not_resurface_same_doubt(monkeypat
     kept = card_audit_store.get_kept_doubt_keys(
         get_conn(), project_id="p-keep-3", prop_name=prop.name, rules_version="v-fixed",
     )
-    second = await card_audit.compute_prop_card_audit(prop, [prop], kept)
+    second = await card_audit.compute_prop_card_audit(prop, [prop], kept, label_segments={})
     assert second["doubts"] == []
 
 

@@ -19,6 +19,12 @@ export function doubtReasonLabel(doubt: PropAuditDoubt): string {
   if (doubt.doubt_type === 'invalid_category') {
     return `模型判定该删，但给出的类别不是约定的三类之一，无法自动采信，需要人工核对`
   }
+  if (doubt.doubt_type === 'owner_not_cooccurring') {
+    return `判定属于「${doubt.owner || '另一件物件'}」，但这件道具与它在分镜里从未同时出现过，可能不是同一件实物，需要人工确认`
+  }
+  if (doubt.doubt_type === 'keep_fragment_mismatch') {
+    return `两次判定都认为这句该删，但各自要保留的片段不一致（一次保留：${doubt.keep_fragment_a || '（整句删除）'}；另一次保留：${doubt.keep_fragment_b || '（整句删除）'}），需要人工确认该保留哪一部分——下面的「确认删除」会把这句整句删除、不会自动采纳其中任一片段，拿不准先点「保留」`
+  }
   return `两次独立判定不一致（一次：${doubt.reason_a || '未判删'}；另一次：${doubt.reason_b || '未判删'}）`
 }
 

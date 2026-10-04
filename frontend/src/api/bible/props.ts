@@ -50,6 +50,10 @@ export interface PropAuditDoubt {
   reason_a?: string;
   reason_b?: string;
   owner?: string;
+  /** doubt_type 为 keep_fragment_mismatch 时，两次独立判定各自给出的待保留
+   * 片段（不一致才会转这种存疑，见 app.props.card_audit_consensus）。 */
+  keep_fragment_a?: string;
+  keep_fragment_b?: string;
 }
 
 /** 一张卡最近一轮复核记录；status 为 running/ready/failed（与建卡补卡闸门同一口径）。 */

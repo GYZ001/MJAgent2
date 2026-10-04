@@ -127,8 +127,13 @@ async def test_assess_prop_appearance_prompt_forbids_other_objects_bleeding_in(
     )
     prompt = captured["prompt"]
     assert "藏在它里面的" in prompt and "被它包住或遮住的东西" in prompt
-    assert "它们各自有自己的道具卡或分镜画面去表现" in prompt
+    assert "它自己有自己的道具卡或分镜画面去表现" in prompt
     assert "appearance_canonical" in prompt.split("不写进")[-1]
+    # 2026-10-03-v3：能指认出具体来源的痕迹，不论长期还是一次性都优先按「别的
+    # 物件/动作痕迹」处理，不被"搬不走"这个对痕迹本身无效的测试带偏（真实案例
+    # 回归：长期贴身佩戴压出的星盘印子曾被判成固有外观）。
+    assert "判断标准不是这处痕迹本身能不能被单独搬走" in prompt
+    assert "时长不改变这个判定" in prompt
 
 
 async def test_assess_prop_appearance_prompt_rejects_category_only_aliases(

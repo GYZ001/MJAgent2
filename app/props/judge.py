@@ -30,7 +30,17 @@
 新规则复核（见该模块 docstring）。``PROP_APPEARANCE_OWN_RULE_TEXT`` 是
 "外观只写物件自身"规则的正面陈述，``assess_prop_appearance``（新建卡）与
 ``app.props.card_audit_rules``（存量卡复核）共用同一份文本，避免两处规则
-表述漂移（CLAUDE.md「模型契约两侧必须对齐」的同一精神）。
+表述漂移（CLAUDE.md「模型契约两侧必须对齐」的同一精神）。``2026-10-04-v4``：
+owner 归属证据加了"卡名/别名逐字出现在子句原文里"这条数据推导路径（见
+``app.props.card_audit_cooccurrence`` 模块 docstring）。``2026-10-04-v5``：
+``split_appearance_clauses`` 改回只按句子边界（逗号/分号/句号/问号/感叹号/
+换行）切分，不再按顿号「、」切、也不再做"否定词开头 + 下一个顿号单元"的
+特判合并（见 ``_clause_spans``）——第 4 轮沙箱实测否定合并只认"否定词在句首"
+这一种写法，"表面无印花、刺绣等额外装饰"这类否定词不在句首的真实写法识别
+不到（4 张待救回卡只救回 1 张）；根因是顿号连接的本来就是同一句里的并列项，
+不该在切分这一步被当成子句边界，改成只按句子边界切分后天然不再有这个问题，
+子句粒度变粗但不丢信息——混合了"该留"与"该删"内容的粗粒度子句仍可通过
+``keep_fragment`` 机制保留需要留下的逐字片段。
 """
 from __future__ import annotations
 
@@ -41,26 +51,41 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.harness import model_gateway
 
+#: 新建卡"至少 3 项特征"的计数口径（``description_feature_count`` 专用）。
+#: 与下面 ``_CLAUSE_TOKEN_RE``（复核子句切分）是两套故意不同用途的口径，
+#: 2026-10-04-v5 起不再要求两者一致，各自管各自的事，见
+#: ``split_appearance_clauses`` docstring。
 _CLAUSE_SPLIT_RE = re.compile(r"[、，,;；\s]+")
-_CLAUSE_TOKEN_RE = re.compile(r"[^、，,;；\s]+")
+#: 复核子句切分边界：中文/英文逗号、分号、中文句号、问号、感叹号、换行——不含
+#: 顿号「、」、不含普通空格（2026-10-04-v5）。顿号连接的是同一句里的并列项，
+#: 本就不该在这一步被当成子句边界，见 ``_clause_spans``。英文句点「.」也不算
+#: 边界：外观里它是小数点（「6.7英寸」「直径约2.5cm」），切开会把数字拆成两条。
+_CLAUSE_TOKEN_RE = re.compile(r"[^，,；;。！!？?\n]+")
 MIN_SEGMENT_COUNT = 2
 MIN_DESCRIPTION_CLAUSES = 3
 MIN_APPEARANCE_FEATURES = 3
 MIN_SOURCE_OCCURRENCES = 2
 MIN_HEAD_NOUN_CHARS = 2
-PROP_CARD_RULES_VERSION = "2026-10-03-v2"
+PROP_CARD_RULES_VERSION = "2026-10-04-v5"
 
 PROP_APPEARANCE_OWN_RULE_TEXT = (
     "appearance_canonical 只写「这件道具单独摆出来、周围没有别的东西时，它自己身上\n"
     "看得到」的材质、颜色、结构、版型、以及它表面本来就有的图案花纹。描述里提到的\n"
-    "其它物件——藏在它里面的、挂在它上面的、放在它旁边的、被它包住或遮住的东西，\n"
-    "以及人物动作在它上面留下的印痕（按压出的凹痕、蹭上的痕迹等）——如果脱离这件\n"
-    "道具之后自己还能单独搬走、单独存在、有独立的呈现意义，都属于那件别的物件或\n"
-    "当时的剧情本身，它们各自有自己的道具卡或分镜画面去表现，不写进这件道具的\n"
-    "appearance_canonical；但如果是和这件道具连在一起随它一起移动、脱离这件道具\n"
-    "自己没有独立呈现意义的配件（比如穿在它上面的绳、盖子、装它的表袋、挂牌），\n"
-    "这些即使没有自己的道具卡，也要写进这件道具的 appearance_canonical，算这件\n"
-    "道具在故事里呈现的一部分，不算「别的物件」。"
+    "其它物件——藏在它里面的、挂在它上面的、放在它旁边的、被它包住或遮住的东西——\n"
+    "如果脱离这件道具之后自己还能单独搬走、单独存在、有独立的呈现意义，都属于那件\n"
+    "别的物件，它自己有自己的道具卡或分镜画面去表现，不写进这件道具的\n"
+    "appearance_canonical。人物身体、人物动作、或别的物件在这件道具上面留下的印痕（按压出的\n"
+    "凹痕、蹭上的痕迹、沾染的印记等）——判断标准不是这处痕迹本身能不能被单独搬走\n"
+    "（痕迹本来就搬不走，这个测试对痕迹无效），而是能不能指认出具体是哪一件别的\n"
+    "物件、或哪一次人物身体/动作造成的：能指认出具体来源的，不论这处痕迹是长期\n"
+    "形成的（比如长期贴身佩戴的另一件东西压出的印子）还是一次性造成的（比如一次\n"
+    "蹭上的痕迹），都优先归那件别的物件或当时的动作/剧情本身，不写进这件道具的\n"
+    "appearance_canonical，时长不改变这个判定；指认不出任何具体来源、纯粹是这件\n"
+    "物件自己长期使用形成的旧化/包浆/磨损，才算它自己的固有外观（见下一条判据）。\n"
+    "和这件道具连在一起随它一起移动、脱离这件道具自己没有独立呈现意义的配件（比如\n"
+    "穿在它上面的绳、盖子、装它的表袋、挂牌），这些即使没有自己的道具卡，也要写进\n"
+    "这件道具的 appearance_canonical，算这件道具在故事里呈现的一部分，不算「别的\n"
+    "物件」。"
 )
 
 PROP_APPEARANCE_PLOT_STATE_RULE_TEXT = (
@@ -76,25 +101,33 @@ PROP_APPEARANCE_PLOT_STATE_RULE_TEXT = (
     "仍是固有外观，要保留，只有亮屏后界面显示的具体内容才按这条删。"
 )
 
-#: 2026-10-03 新增、2026-10-03-v2 改写为两轴判据（本次改写原因：原版只问"能不能
-#: 被单独拿走"一个轴，漏判了"搬不走但是剧情事件之后才有"的内容——曾为了保住玉简
-#: 内置地图纹路，把豁免写成"搬不走就保留"，结果把长安地图上事后画的标注线、手机
-#: 只在特定剧情段才显示的亮屏内容也一并保住，这两处原本第一轮是判对的，第二轮反而
-#: 判错。两轴同时满足才算固有外观，缺一不可：
+#: 2026-10-03 新增、2026-10-03-v2 改写为两轴判据、2026-10-03-v3 再加一条"优先级"
+#: 前提（本次改写原因：v2 两轴各自独立判断时仍会互相打架——真实案例"浅灰色卫衣"
+#: 胸前被"长期贴身佩戴的旧星盘"压出的印子，模型卡在"是它身上的、搬不走"（像满足①）
+#: 与"不是剧情事件之后才有，长期放置不算事件"（像满足②）之间，判成了固有外观；
+#: 根因是①的"能不能搬走"测试对"痕迹"本身从来不成立——痕迹当然搬不走，这个测试
+#: 该问的是"痕迹"而不是"造成痕迹的东西"。v3 加一条前提明确优先级：能指认出具体
+#: 来源的痕迹，不论长期还是一次性，一律先按"别的物件/动作痕迹"处理，不进入下面
+#: 两条由"搬不走"/"是不是事件"互相打架：
 PROP_APPEARANCE_INHERENT_FEATURE_RULE_TEXT = (
-    "固有外观必须同时满足两条，缺一都不算：\n"
-    "① 它是这件物件身上的东西，不是脱离这件道具之后自己还能单独搬走、单独存在、\n"
-    "有独立呈现意义的另一件东西（放在旁边的配饰——这些算「别的物件」，要按上一条\n"
-    "规则处理）；和这件道具连在一起随它一起移动、脱离它没有独立呈现意义的配件\n"
-    "（绳、盖子、表袋、挂牌），即使搬得走，也算这件道具呈现的一部分，不算「别的\n"
-    "物件」；\n"
+    "固有外观必须同时满足两条，缺一都不算；两条之间有优先级，不能互相打架——只要\n"
+    "一处痕迹/样子能指认出具体来源（另一件东西压的、蹭的、沾染的，或人物身体/动作\n"
+    "造成的），就优先按来源判定为「别的物件/动作痕迹」（上一条规则管），不论这处\n"
+    "痕迹是长期形成的还是一次性造成的，时长不影响这个优先判定，不进入下面两条：\n"
+    "① 指认不出任何具体来源、纯粹是这件物件自己使用/放置过程中逐渐形成的，才算它\n"
+    "身上的东西；脱离这件道具后自己还能单独搬走、单独存在、有独立呈现意义的另一件\n"
+    "东西（放在旁边的配饰），算「别的物件」，按上一条规则处理；和这件道具连在一起\n"
+    "随它一起移动、脱离它没有独立呈现意义的配件（绳、盖子、表袋、挂牌），即使搬\n"
+    "得走，也算这件道具呈现的一部分，不算「别的物件」；\n"
     "② 它不是某个剧情事件之后才出现或改变的——事后画上去的标注、只在某一段剧情里\n"
-    "才会显示的屏幕/界面画面内容、泡水/摔坏/弄脏之后才有的样子，这些即使搬不走，\n"
-    "也归剧情时点状态（上一条规则管），不算固有外观。\n"
+    "才会显示的屏幕/界面画面内容、泡水/摔坏/弄脏之后才有的样子，这些即使指认不出\n"
+    "具体来源，也归剧情时点状态（上一条规则管），不算固有外观。\n"
     "两条都满足才保留：物件表面本来就有的图案花纹、印刷/刻写/内置在它身上的图文\n"
     "信息（比如玉简内置的地图纹路、一张照片本身印着的合影画面）、出厂就有的设计、\n"
     "长期使用形成的旧化/包浆/磨损（表面因摩挲发亮、边角因摩擦发白、常年使用留下的\n"
-    "浅划痕）——这些既搬不走，也不是哪次剧情事件之后才有，一直都在，要保留。"
+    "浅划痕——这些是物件自己经年使用造成的，指认不出是哪一件具体的别的东西压/蹭/\n"
+    "染出来的）——这些既指认不出单独来源，也不是哪次剧情事件之后才有，一直都在，\n"
+    "要保留。"
 )
 
 PROP_ALIAS_OWN_RULE_TEXT = (
@@ -113,101 +146,114 @@ PROP_ALIAS_OWN_RULE_TEXT = (
 )
 
 
+def _clause_spans(stripped: str) -> list[tuple[int, int]]:
+    """``split_appearance_clauses``/``rebuild_appearance_excluding`` 共用的
+    下标口径（2026-10-04-v5 改名自 ``_merged_clause_spans``：此前"先按标点
+    切分、再把否定词开头的相邻单元合并成一条"的两步走已经删除，现在只按
+    句子边界切一遍，不需要再合并）。两个函数必须共用同一套 spans，否则
+    下标会错位。
+
+    真实缺陷（2026-10-03 沙箱实测 123 张卡命中 3 次；改成"按顿号切 + 否定词
+    开头特判合并"的上一版修法后，第 4 轮实测 4 张待救回卡仍只救回 1 张）：
+    "无印花、涂鸦等额外装饰"这类共享否定的并列短语，顿号连接的本来就是
+    同一句里的并列项，不该在切分这一步被当成子句边界；上一版的"否定词开头 +
+    下一个顿号单元合并"特判只认得否定词落在子句开头这一种写法，"表面无
+    印花、刺绣等额外装饰""衣身无印花、刺绣等额外装饰"这类否定词不在句首的
+    真实写法识别不到，依旧会被切成两条独立子句，依旧有"只删后半句、留下
+    前半句"从而让字面意思反转的半删风险。根治办法是不再按顿号切分：改成只
+    按句子边界（逗号/分号/句号/问号/感叹号/换行）切分后，顿号天然不再是
+    边界，"无印花、刺绣等额外装饰"天然就是一条完整子句，不需要再识别任何
+    否定词模式去补救。子句粒度因此变粗，但 ``rebuild_appearance_excluding``
+    的 ``keep_fragment`` 机制（保留原句逐字连续片段）足以让模型在一条粗
+    粒度子句里只保留需要留下的那一小段，不会丢信息（CLAUDE.md「退场要一次
+    删干净」：否定词特判的整套逻辑和常量都已删除，不留历史包袱）。"""
+    return [(m.start(), m.end()) for m in _CLAUSE_TOKEN_RE.finditer(stripped)]
+
+
 def split_appearance_clauses(text: str) -> list[str]:
-    """把 ``appearance_canonical`` 按与 ``_description_clause_count`` 相同的
-    分隔口径切成编号子句（供 ``app.props.card_audit`` 的子句复核使用，两处
-    必须共用同一套切分逻辑，不得另写一套——CLAUDE.md「模型契约两侧必须对齐」）。
-    """
-    return [m.group(0) for m in _CLAUSE_TOKEN_RE.finditer((text or "").strip())]
+    """把 ``appearance_canonical`` 按句子边界（逗号/分号/句号/问号/感叹号/
+    换行，不含顿号、不含普通空格，见 ``_CLAUSE_TOKEN_RE``）切成编号子句，供
+    ``app.props.card_audit`` 的子句复核使用。
 
-
-def rebuild_appearance_excluding(text: str, removed_indexes: set[int]) -> str:
-    """按原文顺序删除 ``removed_indexes``（1-indexed，对应
-    ``split_appearance_clauses`` 的下标）对应的子句后重新拼接。
-
-    不新增、不改写任何字符：保留的子句之间用原文里紧跟在前一个子句后面的那段
-    分隔符本身拼接（无论它后面原来跟的子句是否被删），输出的每一个字符都来自
-    原字符串的某个位置——这是 CLAUDE.md「代码核验」对本功能的硬要求：模型只
-    负责判定删哪些子句，新外观必须是原文本身的子串拼接，不能让模型顺带改写
-    或让代码自己发明新的分隔符。
+    与 ``description_feature_count``（新建卡"至少 3 项特征"的计数口径、也供
+    ``app.props.card_audit_compute`` 判 ``feature_shortfall`` 复用，按
+    顿号/逗号/分号/空白切）是两套故意不同的口径（2026-10-04-v5 起不再要求
+    一致）：前者要给模型一条完整的、不被顿号腰斩的句子去判定删留，粒度必须
+    粗到不破坏"无印花、刺绣等额外装饰"这类并列否定短语；后者只是数"结构
+    信号密度"来判断一条描述够不够格（建卡/复核后是否特征不足），密度判据
+    天然需要更细的切分粒度才能反映"多维度描述"。两者各管各的，不是
+    CLAUDE.md「模型契约两侧必须对齐」要求对齐的同一件事——那条约束管的是
+    "模型 schema 允许的取值"与"业务校验接受的取值"两侧不能一宽一严，不要求
+    同一模块内任意两个用途不同的计数口径都相同。
     """
     stripped = (text or "").strip()
-    spans = [(m.start(), m.end()) for m in _CLAUSE_TOKEN_RE.finditer(stripped)]
+    return [stripped[s:e] for s, e in _clause_spans(stripped)]
+
+
+def rebuild_appearance_excluding(
+    text: str, removed_indexes: set[int], keep_fragments: dict[int, str] | None = None,
+) -> str:
+    """按原文顺序删除 ``removed_indexes``（1-indexed，对应
+    ``split_appearance_clauses`` 的下标——两者必须共用 ``_clause_spans``，
+    否则下标错位）对应的子句后重新拼接；``keep_fragments`` 里出现
+    的下标（必须是 ``removed_indexes`` 的子集，由调用方
+    ``app.props.card_audit_consensus`` 核验过「逐字连续子串、不等于整句、
+    两次独立判定给出的片段完全一致」才会出现在这里）不整句删除，改成只保留
+    对应的那段片段文字，其余部分仍按原顺序删除——2026-10-03-v3 新增，真实
+    案例："绿萝"子句"原生心形翠绿色叶片约三分之二边缘发黑发蔫"整句删除后，
+    "心形翠绿色叶片"这条植物固有外观信息跟着丢了，但只保留"约三分之二边缘
+    发黑发蔫"又该删（剧情时点状态）；允许模型对这类混合子句给出要保留的
+    片段，代替"整句删"或"整句留"的二元选择。
+
+    不新增、不改写任何字符：保留的子句（或其片段）之间用原文里紧跟在前一个
+    子句后面的那段分隔符本身拼接（无论它后面原来跟的子句是否被删），输出的
+    每一个字符都来自原字符串的某个位置——片段本身也是对应子句原文的子串，
+    同样满足这条约束（子句本身含有的顿号等内部符号同样是原文连续片段的
+    一部分，依旧是子串拼接）——这是 CLAUDE.md「代码核验」对本功能的硬要求：
+    模型只负责判定删哪些子句/保留哪段片段，新外观必须是原文本身的子串拼接，
+    不能让模型顺带改写或让代码自己发明新的分隔符。
+
+    末尾分隔符（2026-10-04-v5 审查发现并修复，真实数据验证暴露：B 上 123 张
+    卡实测，123 张里 53 张"什么都不删"时结尾的句末标点「。」会被静默吞掉，
+    43% 的卡一复核就丢字）：句子边界切分后，句末标点（比如收尾的"。"）落在
+    最后一条子句的 span 之外，此前的循环只在"当前子句不是本次输出的最后一项"
+    时才拼接它后面的分隔符，这对"删除尾部子句"的常见场景是对的（尾部子句被
+    删后，前一条子句不该再带一个悬空的句末标点），但如果原文真正的最后一条
+    子句本身被保留（覆盖"什么都没删"这个最常见的情况），它后面原本就有的
+    句末标点会因为"它是本次输出的最后一项"而被同一条判断误伤。修复：只有
+    当原文真正的最后一条子句确实被保留时，才把它后面直到原文末尾的那一段
+    （句末标点、或者什么都没有）原样补回去——这段文字本身就是子串，不违反
+    上面"不新增字符"的约束。
+    """
+    stripped = (text or "").strip()
+    spans = _clause_spans(stripped)
     if not spans:
         return stripped
-    kept = [i for i in range(len(spans)) if (i + 1) not in removed_indexes]
+    keep_fragments = keep_fragments or {}
+    fully_dropped = removed_indexes - set(keep_fragments)
+    kept = [i for i in range(len(spans)) if (i + 1) not in fully_dropped]
     if not kept:
         return ""
     parts: list[str] = []
     for pos, i in enumerate(kept):
         start, end = spans[i]
-        parts.append(stripped[start:end])
+        fragment = keep_fragments.get(i + 1)
+        parts.append(fragment if fragment else stripped[start:end])
         if pos < len(kept) - 1:
             next_start = spans[i + 1][0] if i + 1 < len(spans) else end
             parts.append(stripped[end:next_start])
+    if kept[-1] == len(spans) - 1:
+        parts.append(stripped[spans[-1][1]:])
     return "".join(parts)
 
 
-_NEGATION_LEAD_RE = re.compile(r"^(无|没有|未见|不含|不带|没)")
-_CLAUSE_HARD_BREAK_RE = re.compile(r"[，,;；]")
-
-
-def _clause_trailing_separators(text: str) -> list[str]:
-    """``split_appearance_clauses`` 每条子句后面紧跟的原始分隔符文本（最后一条
-    为空串）——供 ``negation_linked_clause_groups`` 判断两条相邻子句之间是被
-    「、」（顿号，并列结构内部）还是「，/,/;/；」（句子边界）隔开。"""
-    stripped = (text or "").strip()
-    spans = [(m.start(), m.end()) for m in _CLAUSE_TOKEN_RE.finditer(stripped)]
-    seps: list[str] = []
-    for i, (_start, end) in enumerate(spans):
-        next_start = spans[i + 1][0] if i + 1 < len(spans) else len(stripped)
-        seps.append(stripped[end:next_start])
-    return seps
-
-
-def negation_linked_clause_groups(text: str) -> list[frozenset[int]]:
-    """识别"无A、B"这类共享否定的两条子句组合（1-indexed，对应
-    ``split_appearance_clauses`` 的下标；每组恰好 2 条，否定子句本身 + 紧跟
-    它的下一条）。
-
-    真实缺陷（2026-10-03 沙箱实测 123 张卡命中 3 次，都恰好是 2 条子句的切分
-    残留）：``split_appearance_clauses`` 按标点切分，不理解否定词的作用范围
-    ——"无印花、涂鸦等额外装饰"会被切成「无印花」「涂鸦等额外装饰」两条独立
-    子句；模型复核时若只删除后半句、保留前半句（或反过来），
-    ``rebuild_appearance_excluding`` 原样拼接出的新外观会让字面意思反转（本来
-    "没有涂鸦"，拼完变成"有涂鸦"）。这里识别出这类相邻子句对（前一条以否定词
-    开头、与下一条之间只用「、」连接——没有被逗号/分号这类句子边界打断、下一条
-    自己也不是新的否定起句），供 ``app.props.card_audit`` 在采信模型判定之前做
-    "组内必须一致"的安全网：组内判定不一致时整组强制改判"不删"（CLAUDE.md
-    「不要给以后的生成埋雷」——宁可少删几个字保留原状，也不让半删产生语义
-    反转）。
-
-    刻意只配对"恰好下一条"、不向后无限延伸：外观文本里顿号常被当成全篇统一的
-    分隔符使用（见真实样本，整句材质/颜色/结构描述全靠顿号连接），如果否定
-    组一路延伸到下一个句子边界为止，会把否定词之后、本来互不相关的大段后续
-    描述全部卷入"只能整体保留"，反而放大了副作用面；已知真实缺陷样本都只
-    跨 2 条子句，按最小必要范围处理。
-
-    纯结构信号（否定词+顿号连接），不针对任何具体道具名或词语做特判；刻意只认
-    "无/没有/未见/不含/不带/没"这几个完整的否定词，不认单字"不"——"不规则""不
-    锈钢""不透明"这类材质/形状描述词本身就以"不"开头，若把单字"不"也算作否定
-    词前缀，会把这些合法描述错误并入否定组。
-    """
-    clauses = split_appearance_clauses(text)
-    seps = _clause_trailing_separators(text)
-    groups: list[frozenset[int]] = []
-    for i, clause in enumerate(clauses, start=1):
-        if not _NEGATION_LEAD_RE.match(clause) or i >= len(clauses):
-            continue
-        next_clause = clauses[i]
-        if _NEGATION_LEAD_RE.match(next_clause):
-            continue  # 下一条自己也是新的否定起句，不归并
-        if not _CLAUSE_HARD_BREAK_RE.search(seps[i - 1]):
-            groups.append(frozenset({i, i + 1}))
-    return groups
-
-
-def _description_clause_count(description: str) -> int:
+def description_feature_count(description: str) -> int:
+    """按顿号/逗号/分号/空白切分后的非空子句数——新建卡「至少 3 项特征」
+    的计数口径（见模块 docstring 判据 b），也供 ``app.props.card_audit_
+    compute`` 判 ``feature_shortfall`` 复用同一口径（公开函数，2026-10-04-v5
+    由 ``_description_clause_count`` 改名并跨模块导出）；与 ``split_
+    appearance_clauses``（复核子句切分）是两套故意不同的口径，见该函数
+    docstring。"""
     return len([part for part in _CLAUSE_SPLIT_RE.split(description.strip()) if part.strip()])
 
 
@@ -238,7 +284,7 @@ def is_key_prop_mention(mention: dict, *, source_text: str = "") -> bool:
     if len(segment_indexes) >= MIN_SEGMENT_COUNT:
         return True
     description = str(mention.get("description") or "")
-    if _description_clause_count(description) >= MIN_DESCRIPTION_CLAUSES:
+    if description_feature_count(description) >= MIN_DESCRIPTION_CLAUSES:
         return True
     if source_occurrences(str(mention.get("label") or ""), source_text) >= MIN_SOURCE_OCCURRENCES:
         return True
@@ -290,7 +336,7 @@ async def assess_prop_appearance(
         call_meta={"stage": "assess_prop_appearance", "prop_label": label},
     )
     appearance = response.appearance_canonical.strip()
-    if _description_clause_count(appearance) < MIN_APPEARANCE_FEATURES:
+    if description_feature_count(appearance) < MIN_APPEARANCE_FEATURES:
         appearance = f"{appearance}。{description.strip()}" if appearance else description.strip()
     aliases = [a.strip() for a in response.aliases if a.strip() and a.strip() != label]
     return {"appearance_canonical": appearance, "aliases": aliases}

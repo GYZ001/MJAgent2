@@ -34,6 +34,13 @@ from . import card_audit_rules
 DOUBT_TYPE_INCONSISTENT = "inconsistent_between_two_judgments"
 DOUBT_TYPE_OWNER_WITHOUT_CARD = "owner_without_card"
 DOUBT_TYPE_MODEL_SELF_DOUBT = "model_self_doubt"
+#: 与 ``app.props.card_audit_rules.DOUBT_TYPE_OWNER_NOT_COOCCURRING`` 同一个
+#: 字符串字面量（该模块反向引用本模块，两边各自定义，见 ``card_audit_rules``
+#: 模块 docstring 同一条约定）。
+DOUBT_TYPE_OWNER_NOT_COOCCURRING = "owner_not_cooccurring"
+#: 两次独立判定都同意删除、但给出的 ``keep_fragment`` 不一致（或只有一边给）
+#: 时的存疑类型（2026-10-03-v3 新增，见 ``merge_clause_judgments``）。
+DOUBT_TYPE_KEEP_FRAGMENT_MISMATCH = "keep_fragment_mismatch"
 
 
 def clause_doubt_key(text: str) -> str:
@@ -105,31 +112,93 @@ def _clause_doubts(
     ]
 
 
+def _resolve_keep_fragment(index: int, records_a: dict[int, dict], records_b: dict[int, dict]) -> tuple[str, bool]:
+    """``index`` 两次判定都同意删除之后，决定要不要采用某一段 ``keep_
+    fragment``（见 ``app.props.card_audit_rules._valid_keep_fragment``）：
+    两次都没给→整句删除（原样行为）；两次都给且逐字相同→采用；其它任意
+    组合（只有一边给、给了但不同、给了但没通过核验）→不采用，转存疑，不猜
+    哪一边对（CLAUDE.md「修复失败时先检查是不是拿猜测换了猜测」）。返回
+    ``(采用的片段或空串, 是否需要转存疑)``。
+
+    2026-10-04 审查发现并修复：判据必须看"是否尝试给出过" (``keep_fragment_
+    attempted``)，不能只看核验后的片段值——此前只比较 ``keep_fragment`` 字
+    符串，"没给"与"给了但未通过核验"都是空串、无法区分；一次判定给出了没能
+    通过逐字子串核验的片段、另一次完全没给 ``keep_fragment`` 时，两边的
+    ``keep_fragment`` 都是空串，命中"两次都没给→整句删除"，模型已经明确表达
+    过的保留意图被静默吞掉——与本轮要修的"混合子句丢信息"同一类伤害复发。"""
+    attempted_a = bool(records_a.get(index, {}).get("keep_fragment_attempted"))
+    attempted_b = bool(records_b.get(index, {}).get("keep_fragment_attempted"))
+    if not attempted_a and not attempted_b:
+        return "", False
+    frag_a = records_a.get(index, {}).get("keep_fragment", "")
+    frag_b = records_b.get(index, {}).get("keep_fragment", "")
+    if frag_a and frag_b and frag_a == frag_b:
+        return frag_a, False
+    return "", True
+
+
+def _fragment_mismatch_doubts(
+    indexes: set[int], records_a: dict[int, dict], records_b: dict[int, dict], clauses: list[str],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "kind": "clause", "index": i, "text": clauses[i - 1],
+            "doubt_type": DOUBT_TYPE_KEEP_FRAGMENT_MISMATCH,
+            "reason_a": records_a[i]["reason"], "reason_b": records_b[i]["reason"],
+            "keep_fragment_a": records_a[i].get("keep_fragment") or "",
+            "keep_fragment_b": records_b[i].get("keep_fragment") or "",
+        }
+        for i in sorted(indexes)
+    ]
+
+
 def merge_clause_judgments(
-    clause_count: int, raw_a: list[dict], raw_b: list[dict],
-    other_identifiers: frozenset[str], clauses: list[str],
+    clauses: list[str], raw_a: list[dict], raw_b: list[dict],
+    other_identifiers: frozenset[str], *, cooccurring_owners: frozenset[str], all_props: Sequence[Prop],
 ) -> dict[str, Any]:
-    """两次独立判定取交集：一条子句两次都判删（且都通过 owner 归属证据核验）
-    才真正删除；任何不一致或降级都转成存疑，不删。返回
-    ``{"removed_indexes", "removed_records", "missing_indexes", "doubts"}``。
-    """
+    """两次独立判定取交集：一条子句两次都判删（且都通过 owner 归属证据核验+
+    共现核验）才真正删除；任何不一致或降级都转成存疑，不删。两次都同意删除
+    但 ``keep_fragment`` 对不上的，从删除里摘出来单独转存疑（见
+    ``_resolve_keep_fragment``），不计入最终删除也不混进"两次不一致"那一类
+    存疑。``all_props`` 必传（2026-10-04-v5 去掉默认空元组，CLAUDE.md「可选
+    参数是缺陷的温床」：用哪份道具清单核验 owner 归属证据同样是所有权问题，
+    不该有静默生效的默认值）——供 owner 归属证据的第二条路径（owner 卡名/
+    别名逐字出现在子句原文里，见 ``app.props.card_audit_cooccurrence`` 模块
+    docstring）核验用；传空列表时该路径对全部候选退化为"不成立"（不影响
+    ``cooccurring_owners`` 这条已有路径）。返回 ``{"removed_indexes",
+    "removed_records", "missing_indexes", "doubts", "keep_fragments"}``——
+    ``keep_fragments`` 是 ``{下标: 采用的片段}``，只含真正被采用的那些下标，
+    供 ``app.props.judge.rebuild_appearance_excluding`` 使用。"""
     removed_a, records_a_list, missing_a, owner_doubts_a = card_audit_rules.verify_clause_removal_verdicts(
-        clause_count, raw_a, other_identifiers,
+        clauses, raw_a, other_identifiers, cooccurring_owners=cooccurring_owners, all_props=all_props,
     )
     removed_b, records_b_list, missing_b, owner_doubts_b = card_audit_rules.verify_clause_removal_verdicts(
-        clause_count, raw_b, other_identifiers,
+        clauses, raw_b, other_identifiers, cooccurring_owners=cooccurring_owners, all_props=all_props,
     )
     records_a = {r["index"]: r for r in records_a_list}
     records_b = {r["index"]: r for r in records_b_list}
-    removed_indexes = removed_a & removed_b
+    agreed = removed_a & removed_b
+    keep_fragments: dict[int, str] = {}
+    fragment_doubt_indexes: set[int] = set()
+    for i in agreed:
+        fragment, is_doubt = _resolve_keep_fragment(i, records_a, records_b)
+        if is_doubt:
+            fragment_doubt_indexes.add(i)
+        elif fragment:
+            keep_fragments[i] = fragment
+    removed_indexes = agreed - fragment_doubt_indexes
     removed_records = [
-        {**records_a[i], "reason": f"A：{records_a[i]['reason']}；B：{records_b[i]['reason']}"}
+        {
+            **records_a[i], "reason": f"A：{records_a[i]['reason']}；B：{records_b[i]['reason']}",
+            "keep_fragment": keep_fragments.get(i, ""),
+        }
         for i in sorted(removed_indexes)
     ]
     doubts = _clause_doubts(removed_a, removed_b, owner_doubts_a, owner_doubts_b, records_a, records_b, clauses)
+    doubts.extend(_fragment_mismatch_doubts(fragment_doubt_indexes, records_a, records_b, clauses))
     return {
         "removed_indexes": removed_indexes, "removed_records": removed_records,
-        "missing_indexes": missing_a | missing_b, "doubts": doubts,
+        "missing_indexes": missing_a | missing_b, "doubts": doubts, "keep_fragments": keep_fragments,
     }
 
 

@@ -15,6 +15,14 @@ False)``，或道具库页面的「按现行规则复核」按钮）。
 约定，脚本应当指向 B 的沙箱副本而不是生产库本体，由运行者负责把
 ``app.config``/``app.db`` 的 DB_PATH 指到沙箱。
 
+逐卡隔离（2026-10-04 审查发现并修复）：``audit_one_prop_card``/
+``audit_project_prop_cards`` 的 ``dry_run=True`` 路径现在对每张卡单独
+try/except（见 ``app.props.card_audit._dry_run_audit_one_quietly``）——某
+张卡模型输出被截断导致 JSON 解析失败，只会让这一张卡的结果带上
+``failed``/``fail_reason``，不会连累同批其它卡的结果一起丢失；下面
+``main()`` 的 ``failed``/``doubted`` 统计已经覆盖这类结果（看
+``r.get("failed") or r.get("error")``），本脚本不需要额外改动。
+
 用法：
     py scripts/prop_card_audit_dry_run.py --project proj_ca86b15ab7d7
     py scripts/prop_card_audit_dry_run.py --project proj_xxx --prop-name 浅灰色卫衣 --prop-name 绿萝

@@ -39,6 +39,28 @@ describe('道具卡复核存疑文案', () => {
     expect(text).toContain('不是约定的三类之一')
   })
 
+  it('owner 未共现：说明两者在分镜里从未同时出现过（2026-10-03-v3）', () => {
+    const text = doubtReasonLabel(clauseDoubt({ doubt_type: 'owner_not_cooccurring', owner: '白色陶瓷杯' }))
+    expect(text).toContain('白色陶瓷杯')
+    expect(text).toContain('从未同时出现')
+  })
+
+  it('keep_fragment 不一致：两次保留的片段都要出现（2026-10-03-v3）', () => {
+    const text = doubtReasonLabel(clauseDoubt({
+      doubt_type: 'keep_fragment_mismatch', keep_fragment_a: '心形翠绿色叶片', keep_fragment_b: '',
+    }))
+    expect(text).toContain('心形翠绿色叶片')
+    expect(text).toContain('整句删除')
+  })
+
+  it('keep_fragment 不一致：必须说明「确认删除」不会采纳任一候选片段（审查发现，界面承诺必须与实际行为一致）', () => {
+    const text = doubtReasonLabel(clauseDoubt({
+      doubt_type: 'keep_fragment_mismatch', keep_fragment_a: '心形翠绿色叶片', keep_fragment_b: '',
+    }))
+    expect(text).toContain('确认删除')
+    expect(text).toContain('不会自动采纳')
+  })
+
   it('子句存疑标注外观原文，别名存疑标注别名', () => {
     expect(doubtSubjectLabel(clauseDoubt())).toBe('外观「瓷瓶外观为青花纹样」')
     expect(doubtSubjectLabel(clauseDoubt({ kind: 'alias', alias: '椅子' }))).toBe('别名「椅子」')

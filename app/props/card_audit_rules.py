@@ -37,6 +37,31 @@
 细节与 ``app.props.judge.rebuild_appearance_excluding`` 的"只删不改写"约束
 共同构成"返回子句编号→代码核验→原文拼接"的完整链路，模型本身不直接产出新
 外观文本。
+
+2026-10-03-v3 新增两处（B 沙箱真实模型第 3 轮实测发现）：
+1. owner 归属证据加一层「共现」核验（``app.props.card_audit_cooccurrence``）：
+   owner 落在本项目确有这张卡（判据 1 已核验），还要求那张卡与本卡至少在
+   同一个分镜段/原文段里共同出现过，否则降级为 ``owner_not_cooccurring``
+   存疑——不是"项目里存在一张同品类的卡"就够，防止把归属指给一张同品类但
+   不是同一件实物的卡（真实案例见 ``DOUBT_TYPE_OWNER_NOT_COOCCURRING``）。
+2. ``keep_fragment``：混合了"本体固有外观"与"该删部分"的子句，模型可以
+   给出要保留的那段逐字连续片段，代替"整句删"或"整句留"的二元选择（核验见
+   ``_valid_keep_fragment``）；两次独立判定都给出且片段完全相同才采用，
+   否则这条子句转存疑，不采用任一方猜测（见 ``card_audit_consensus``）。
+
+2026-10-04-v4 新增 owner 归属证据的第二条路径（B 沙箱第 4 轮真实模型实测
+发现）：共现核验对"被遮住的物件"有结构盲区——分镜段 ``resources.props``
+只列本段需要出图/可见的道具，贴身佩戴、藏在另一件道具底下的东西不会被
+单独列出，真实案例"浅灰色卫衣"胸前被"长期贴身佩戴的旧星盘"压出的印子，
+两次独立判定都正确给出 owner=旧星盘，却因为星盘从未作为可见道具与卫衣
+同段出现，被共现核验拦成存疑。``app.props.card_audit_cooccurrence.
+owner_evidence_in_clause_text`` 补了一条数据推导路径：owner 卡的卡名或
+任一别名若逐字出现在被判删的这条子句原文本身里——子句自己已经把这处痕迹
+的来源写出来了，这比分镜段共现更直接——同样采信为归属证据成立，与共现
+二选一满足即可；``person_or_action`` 不受影响（那条判据本身就不需要任何
+归属证据）。对照真实案例"热牛奶"："容器为纯白色无印花直身陶瓷马克杯"这条
+子句本身并不含"白色陶瓷杯"四个字连续出现，两条路径都不成立，仍然正确地
+转存疑，不会被这条新路径误放行。
 """
 from __future__ import annotations
 
@@ -48,7 +73,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.harness import model_gateway
 from app.schemas import Prop
 
-from . import judge
+from . import card_audit_cooccurrence, judge
 
 ALLOWED_REMOVE_CATEGORIES = frozenset({"other_object_or_mark", "plot_state", "not_appearance"})
 #: ``owner`` 字段的合法哨兵值：人物身体或人物动作留下的痕迹，没有、也不该有
@@ -62,6 +87,12 @@ OWNER_PERSON_OR_ACTION = "person_or_action"
 #: ``app.props.card_audit_consensus`` 的 ``DOUBT_TYPE_*`` 同一套字符串字面量
 #: 约定（该模块反向引用本模块，不能从这里 import 它，两边各自定义同一字符串）。
 DOUBT_TYPE_INVALID_CATEGORY = "invalid_category"
+#: owner 落在 ``other_identifiers``（本项目确实有这张卡）但那张卡从未与本卡在
+#: 同一个分镜段/原文段共同出现过（见 ``app.props.card_audit_cooccurrence``）
+#: 时的存疑类型（2026-10-03-v3 新增，审查发现：真实案例"热牛奶"被以 owner=
+#: "白色陶瓷杯"删除，但那是另一场戏的另一只杯子，仅凭"项目里存在同品类卡"
+#: 删除会让"热牛奶"杯子自己的外观信息丢失）。
+DOUBT_TYPE_OWNER_NOT_COOCCURRING = "owner_not_cooccurring"
 
 
 def ambiguous_aliases_to_drop(prop: Prop, all_props: Sequence[Prop]) -> list[dict[str, str]]:
@@ -113,18 +144,80 @@ def catalog_text_for_prompt(prop: Prop, all_props: Sequence[Prop]) -> str:
     return "\n".join(lines) if lines else "（本项目没有其它道具卡）"
 
 
+def _owner_doubt(
+    index: int, owner: str, reason: str, other_identifiers: frozenset[str], cooccurring_owners: frozenset[str],
+    *, clause_text: str, all_props: Sequence[Prop],
+) -> dict[str, Any] | None:
+    """``category == "other_object_or_mark"`` 时对 ``owner`` 的核验——是否
+    落在 ``other_identifiers``（项目确有这张卡），以及归属证据是否成立：
+    是否落在 ``cooccurring_owners``（与本卡确实共现过，2026-10-03-v3）**或**
+    owner 卡的卡名/别名是否逐字出现在 ``clause_text`` 本身里（2026-10-04-v4，
+    二选一满足即可，见模块 docstring「owner 归属证据的第二条路径」）——抽成
+    独立函数只是为了让 ``verify_clause_removal_verdicts`` 留在单函数行数
+    红线内，判据本身不变。命中 ``OWNER_PERSON_OR_ACTION`` 时两层核验都不
+    适用，返回 ``None``（核验通过，不是存疑）。"""
+    if owner == OWNER_PERSON_OR_ACTION:
+        return None
+    if owner not in other_identifiers:
+        return {"index": index, "doubt_type": "owner_without_card", "reason": reason, "owner": owner}
+    if owner in cooccurring_owners:
+        return None
+    if card_audit_cooccurrence.owner_evidence_in_clause_text(owner, clause_text, all_props):
+        return None
+    return {"index": index, "doubt_type": DOUBT_TYPE_OWNER_NOT_COOCCURRING, "reason": reason, "owner": owner}
+
+
+def _valid_keep_fragment(clause_text: str, raw_fragment: Any) -> tuple[str, bool]:
+    """校验模型给出的 ``keep_fragment``（2026-10-03-v3 新增，见模块 docstring
+    「混合子句丢信息」）：必须是这条子句原文的逐字连续子串、非空、且不等于
+    整句——等于整句等价于「不删」，该用 ``remove=false`` 表达，不是这个字段
+    的用途。返回 ``(有效片段或空串, 模型是否给出过非空 keep_fragment)``——
+    两个信号分开返回是审查发现的修复（2026-10-04）：此前"没给"与"给了但不
+    合格（非逐字子串/等于整句）"统一折叠成同一个空串，调用方（``card_audit_
+    consensus._resolve_keep_fragment``）据此把"一次尝试失败、另一次压根没给"
+    误判成"两次都没给→直接整句删除"，模型已经明确表达过的保留意图被静默
+    吞掉，与本轮要修的"混合子句丢信息"同一类伤害。「给出过但不合格」仍然
+    不采信这个片段（第一个返回值仍是空串），只是"尝试过"这件事本身必须让
+    调用方看见，不能当成"没尝试"。"""
+    fragment = str(raw_fragment or "").strip()
+    if not fragment:
+        return "", False
+    if fragment == clause_text or fragment not in clause_text:
+        return "", True
+    return fragment, True
+
+
 def verify_clause_removal_verdicts(
-    clause_count: int, raw_verdicts: list[dict[str, Any]], other_identifiers: frozenset[str],
+    clauses: list[str], raw_verdicts: list[dict[str, Any]], other_identifiers: frozenset[str],
+    *, cooccurring_owners: frozenset[str], all_props: Sequence[Prop],
 ) -> tuple[set[int], list[dict[str, Any]], frozenset[int], list[dict[str, Any]]]:
-    """代码核验**单次**模型调用返回的子句判定：下标必须在 ``[1, clause_count]``
+    """代码核验**单次**模型调用返回的子句判定：下标必须在 ``[1, len(clauses)]``
     范围内、不重复；``uncertain=true`` 的子句一律不采信删除，转成
     ``model_self_doubt`` 存疑；``remove=true`` 时 ``category`` 不落在
     ``ALLOWED_REMOVE_CATEGORIES`` 里的（schema 没有收紧枚举，容忍模型措辞
     漂移），降级为 ``invalid_category`` 存疑，不静默丢弃这条判定；
     ``category == "other_object_or_mark"`` 时 ``owner`` 必须逐字命中
     ``other_identifiers`` 或等于 ``OWNER_PERSON_OR_ACTION``，否则降级为
-    ``owner_without_card`` 存疑（不删，不是不采信——这条判定仍然"被判定过"，
-    只是归属没有自己的卡落脚）。
+    ``owner_without_card`` 存疑；命中 ``other_identifiers`` 但不在
+    ``cooccurring_owners``（调用方按 ``app.props.card_audit_cooccurrence``
+    算好、与本卡确实在同一分镜段/原文段共同出现过的那一部分 owner 候选，
+    2026-10-03-v3 新增）、且 owner 卡的卡名/别名也没有逐字出现在这条子句
+    原文本身里（``all_props``，2026-10-04-v4 新增的第二条归属证据路径，
+    见模块 docstring）的，降级为 ``owner_not_cooccurring`` 存疑——两种
+    降级都不删，不是不采信：这条判定仍然"被判定过"，只是归属没有足够证据
+    落脚。``all_props`` 必传（2026-10-04-v5 去掉此前的默认空元组，CLAUDE.md
+    「可选参数是缺陷的温床」：调用方该传哪份道具清单是"用谁的数据核验这条
+    归属证据"这类所有权问题，不该有一个静默生效的默认值——没有第二条证据
+    路径可用时，调用方必须显式传空列表，让"这条路径对本次调用不成立"是
+    看得见的决定，不是漏传之后悄悄发生的事）；传空列表时第二条路径对全部
+    候选都判定"不成立"，不影响 ``cooccurring_owners`` 这条已有路径，判据
+    只会更保守（更容易转存疑），不会让已有的共现核验失效或产生错误删除。
+    ``remove=true``
+    且通过以上全部核验的子句，额外用 ``_valid_keep_
+    fragment`` 核验 ``keep_fragment``（混合子句"保留一部分、删一部分"的
+    片段，核验细节见该函数），写入 ``removed_records`` 供
+    ``app.props.card_audit_consensus.merge_clause_judgments`` 决定要不要
+    采用。
 
     返回 ``(removed_indexes, removed_records, missing_indexes, owner_doubts)``；
     两次独立调用各自先过这个函数，再由
@@ -133,6 +226,7 @@ def verify_clause_removal_verdicts(
     （模型完全没有给出判定的下标，CLAUDE.md「单次长调用会漏掉整个类别，必须
     有可见信号」），调用方应当把它当"本轮判定不完整"处理。
     """
+    clause_count = len(clauses)
     removed_indexes: set[int] = set()
     removed_records: list[dict[str, Any]] = []
     owner_doubts: list[dict[str, Any]] = []
@@ -168,13 +262,19 @@ def verify_clause_removal_verdicts(
             continue
         if category == "other_object_or_mark":
             owner = str(verdict.get("owner") or "").strip()
-            if owner != OWNER_PERSON_OR_ACTION and owner not in other_identifiers:
-                owner_doubts.append({
-                    "index": index, "doubt_type": "owner_without_card", "reason": reason, "owner": owner,
-                })
-                continue  # 归属没有自己的卡：不删，记存疑，不让这条外观信息从所有卡里消失
+            doubt = _owner_doubt(
+                index, owner, reason, other_identifiers, cooccurring_owners,
+                clause_text=clauses[index - 1], all_props=all_props,
+            )
+            if doubt is not None:
+                owner_doubts.append(doubt)
+                continue  # 归属没有自己的卡/没有足够共现证据：不删，只记存疑
         removed_indexes.add(index)
-        removed_records.append({"index": index, "category": category, "reason": reason})
+        fragment, attempted = _valid_keep_fragment(clauses[index - 1], verdict.get("keep_fragment"))
+        removed_records.append({
+            "index": index, "category": category, "reason": reason,
+            "keep_fragment": fragment, "keep_fragment_attempted": attempted,
+        })
     missing_indexes = frozenset(range(1, clause_count + 1)) - seen
     return removed_indexes, removed_records, missing_indexes, owner_doubts
 
@@ -210,6 +310,9 @@ class _ClauseVerdictIn(BaseModel):
     owner: str = ""
     uncertain: bool = False
     reason: str = ""
+    #: 2026-10-03-v3 新增：混合子句"删一部分、留一部分"时，模型给出要保留的
+    #: 那段原文片段（代码核验见 ``_valid_keep_fragment``）；整句都该删时留空。
+    keep_fragment: str = ""
 
 
 class _AliasVerdictIn(BaseModel):
@@ -223,6 +326,46 @@ class _PropCardAuditResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     clauses: list[_ClauseVerdictIn] = Field(default_factory=list)
     aliases: list[_AliasVerdictIn] = Field(default_factory=list)
+
+
+#: 容器/内容物归属那一条判据——独立成常量只是为了让 ``_audit_prompt`` 留在
+#: 单函数行数红线内（CLAUDE.md「单函数 ≤50 代码行」只数代码行，长提示词按
+#: 原文逐行计入，拆出常量不改变提示词文字本身）。
+_CONTAINER_OWNER_RULE_TEXT = (
+    "如果这件道具卡名指的是容器里的内容物、而外观子句写的是容器本身的样子（比如卡名是\n"
+    "止血丹、子句写的是装它的瓷瓶；卡名是小馄饨、子句写的是盛着它的汤碗；卡名是热牛奶、\n"
+    "子句写的是盛着它的马克杯），这种情况按\"别的物件\"判定，owner 要如实填容器的名字——\n"
+    "如果容器在本项目没有自己的卡，代码会把这类判定降级为存疑而不是直接删除，你只需要\n"
+    "按实际归属如实判定，不需要因为\"容器没有卡\"就改判保留。上面\"固有外观\"规则里已经说明\n"
+    "随道具一起移动、没有独立呈现意义的配件（绳/盖子/表袋/挂牌）不算\"别的物件\"，这里的\n"
+    "容器是另一种情况——容器本身是能单独摆出来、独立存在的东西，只是它恰好没有自己的\n"
+    "道具卡。"
+)
+_NOT_APPEARANCE_RULE_TEXT = (
+    "不属于以上几类、但读起来根本不是外观描述的子句，同样判定删除，类别填 \"not_appearance\"，\n"
+    "包括：纯剧情动作、与视觉无关的说明文字；画风质感说明（\"真人实拍质感\"\"光影精致统一\"\n"
+    "\"国漫3D动画电影质感\"之类）；构图/取景/拍摄手法要求；以及单独读起来不构成完整意思、\n"
+    "像是从上一条否定句式里被切出来的残留片段（这些子句是按标点机械切分出来的，不理解\n"
+    "\"无/没有+并列项\"这类共享否定的结构——比如上一条是\"无印花\"，紧跟着这一条却是\"涂鸦等\n"
+    "额外装饰\"，两条单独看都不完整，这种情况要把它们一起判定删除，不要只删其中一半、让\n"
+    "留下的另一半把\"没有\"读成\"有\"）；也包括只描述\"穿戴/使用时才会有的样子\"（比如系在腰后\n"
+    "的蝴蝶结、翻起露出的衣领、露出脚踝的穿法）而不是道具单独摆放时自己的外观——这类\n"
+    "描述归分镜正文表现，不归道具卡。但如果你不确定这条描述删了会不会把这件道具的版型\n"
+    "（剪裁、长度、开口方式等脱离穿戴状态也成立的结构信息）一并删掉，``uncertain`` 填\n"
+    "true 交人工复核，不要为了套用这条规则而牺牲版型信息。"
+)
+_UNCERTAIN_AND_KEEP_FRAGMENT_INSTRUCTION_TEXT = (
+    "如果某条子句你拿不准该归哪一类、该不该删、或者分不清这处描述该算这件道具本体的还是\n"
+    "算容器/配件的（主体歧义），``uncertain`` 填 true 并在 ``reason`` 里写清楚你犹豫的\n"
+    "理由供人工复核——不要猜测删除，也不要为了给出判定而硬选一个你并不确定的答案。\n"
+    "如果一条子句里混杂了\"这件道具自己固有的外观\"和\"该删的部分\"（比如\"原生心形翠绿色叶片\n"
+    "约三分之二边缘发黑发蔫\"里，\"心形翠绿色叶片\"是这件植物自己的固有外观，\"约三分之二边缘\n"
+    "发黑发蔫\"才是泡水后的剧情时点状态该删），不要整句删除：``remove`` 仍填 true、\n"
+    "``category`` 按实际该删的那部分填，并在 ``keep_fragment`` 里逐字抄写这条子句原文里\n"
+    "要保留的那一段连续文字（必须是这条子句原文本身的逐字连续片段，不能改写、不能新增字，\n"
+    "也不能等于整句——等于整句就不是\"删一部分\"了，那种情况请把 ``remove`` 填 false）；\n"
+    "整句都该删、没有需要保留的部分时，``keep_fragment`` 留空。"
+)
 
 
 def _audit_prompt(prop: Prop, clauses: list[str], owner_catalog_text: str) -> str:
@@ -242,21 +385,8 @@ def _audit_prompt(prop: Prop, clauses: list[str], owner_catalog_text: str) -> st
 - {judge.PROP_APPEARANCE_OWN_RULE_TEXT}
 - {judge.PROP_APPEARANCE_PLOT_STATE_RULE_TEXT}
 - {judge.PROP_APPEARANCE_INHERENT_FEATURE_RULE_TEXT}
-- 如果这件道具卡名指的是容器里的内容物、而外观子句写的是容器本身的样子（比如卡名是
-  止血丹、子句写的是装它的瓷瓶；卡名是小馄饨、子句写的是盛着它的汤碗；卡名是热牛奶、
-  子句写的是盛着它的马克杯），这种情况按"别的物件"判定，owner 要如实填容器的名字——
-  如果容器在本项目没有自己的卡，代码会把这类判定降级为存疑而不是直接删除，你只需要
-  按实际归属如实判定，不需要因为"容器没有卡"就改判保留。上面"固有外观"规则里已经说明
-  随道具一起移动、没有独立呈现意义的配件（绳/盖子/表袋/挂牌）不算"别的物件"，这里的
-  容器是另一种情况——容器本身是能单独摆出来、独立存在的东西，只是它恰好没有自己的
-  道具卡。
-- 不属于以上几类、但读起来根本不是外观描述的子句，同样判定删除，类别填 "not_appearance"，
-  包括：纯剧情动作、与视觉无关的说明文字；画风质感说明（"真人实拍质感""光影精致统一"
-  "国漫3D动画电影质感"之类）；构图/取景/拍摄手法要求；以及单独读起来不构成完整意思、
-  像是从上一条否定句式里被切出来的残留片段（这些子句是按标点机械切分出来的，不理解
-  "无/没有+并列项"这类共享否定的结构——比如上一条是"无印花"，紧跟着这一条却是"涂鸦等
-  额外装饰"，两条单独看都不完整，这种情况要把它们一起判定删除，不要只删其中一半、让
-  留下的另一半把"没有"读成"有"）。
+- {_CONTAINER_OWNER_RULE_TEXT}
+- {_NOT_APPEARANCE_RULE_TEXT}
 对每一条子句都要给出判定：``remove`` 为 true 时 ``category`` 必须是
 "other_object_or_mark"（别的物件本身或别的物件/动作在它上面留下的痕迹）、
 "plot_state"（剧情事件造成的时点状态，含事后才有的标注/只在某段剧情才显示的屏幕
@@ -264,9 +394,7 @@ def _audit_prompt(prop: Prop, clauses: list[str], owner_catalog_text: str) -> st
 ``category`` 是 "other_object_or_mark" 时必须同时填写 ``owner``：要么逐字抄写上面
 "本项目其它道具卡的卡名与别名"清单里的一条，要么填 "{OWNER_PERSON_OR_ACTION}"（这处
 痕迹是人物身体或人物动作留下的，不是另一件物件）。不删除的子句 ``remove`` 填 false。
-如果某条子句你拿不准该归哪一类、该不该删、或者分不清这处描述该算这件道具本体的还是
-算容器/配件的（主体歧义），``uncertain`` 填 true 并在 ``reason`` 里写清楚你犹豫的
-理由供人工复核——不要猜测删除，也不要为了给出判定而硬选一个你并不确定的答案。
+{_UNCERTAIN_AND_KEEP_FRAGMENT_INSTRUCTION_TEXT}
 
 别名判定规则：
 - {judge.PROP_ALIAS_OWN_RULE_TEXT}
@@ -274,7 +402,7 @@ def _audit_prompt(prop: Prop, clauses: list[str], owner_catalog_text: str) -> st
 ``category_only: true`` 并给出理由；不符合的不要列出或填 false。
 
 输出 JSON：{{"clauses": [{{"index": int, "remove": bool, "category": str, "owner": str,
-"uncertain": bool, "reason": str}}],
+"uncertain": bool, "reason": str, "keep_fragment": str}}],
 "aliases": [{{"alias": str, "category_only": bool, "reason": str}}]}}"""
 
 

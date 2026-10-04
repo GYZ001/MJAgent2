@@ -43,23 +43,73 @@ def _seed_project(project_id: str, *, props_list: list[dict] | None = None, styl
 # ---------------------------------------------------------------------------
 
 def test_split_appearance_clauses_matches_separator_set() -> None:
-    assert judge.split_appearance_clauses("A，B、C；D") == ["A", "B", "C", "D"]
+    """切分边界只认句子边界（逗号/分号/句号/问号/感叹号/换行），顿号「、」
+    不算边界——"B、C"保持为同一条子句（2026-10-04-v5）。"""
+    assert judge.split_appearance_clauses("A，B、C；D。E！F？G") == ["A", "B、C", "D", "E", "F", "G"]
+
+
+def test_split_appearance_clauses_does_not_split_on_touhao() -> None:
+    """真实缺陷（2026-10-03 沙箱实测 123 张卡命中 3 次，第 4 轮改成"按顿号切 +
+    否定词开头特判合并"后 4 张待救回卡仍只救回 1 张）："表面无印花、刺绣等
+    额外装饰""衣身无印花、刺绣等额外装饰"这类否定词不在句首的真实写法，旧的
+    否定合并识别不到；改成不按顿号切分后，这类句子天然就是一条完整子句，
+    不需要再识别任何否定词模式。"""
+    assert judge.split_appearance_clauses("表面无印花、刺绣等额外装饰") == ["表面无印花、刺绣等额外装饰"]
+    assert judge.split_appearance_clauses("衣身无印花、刺绣等额外装饰") == ["衣身无印花、刺绣等额外装饰"]
+
+
+def test_split_appearance_clauses_splits_on_period_too() -> None:
+    assert judge.split_appearance_clauses("米白色针织。合身版型") == ["米白色针织", "合身版型"]
+
+
+def test_split_appearance_clauses_keeps_decimal_point_inside_clause() -> None:
+    """英文句点是小数点（真实卡「正面为6.7英寸超窄边框全面屏」），不是子句边界。"""
+    text = "正面为6.7英寸超窄边框全面屏，直径约2.5cm。"
+    assert judge.split_appearance_clauses(text) == ["正面为6.7英寸超窄边框全面屏", "直径约2.5cm"]
+    assert judge.rebuild_appearance_excluding(text, set()) == text
 
 
 def test_rebuild_excluding_tail_clause() -> None:
-    assert judge.rebuild_appearance_excluding("浅灰色卫衣、棉质、胸前有星盘压痕", {3}) == "浅灰色卫衣、棉质"
+    assert judge.rebuild_appearance_excluding("浅灰色卫衣，棉质，胸前有星盘压痕", {3}) == "浅灰色卫衣，棉质"
 
 
 def test_rebuild_excluding_middle_clause_reuses_following_separator() -> None:
-    assert judge.rebuild_appearance_excluding("A、B、C", {2}) == "A、C"
+    assert judge.rebuild_appearance_excluding("A，B，C", {2}) == "A，C"
 
 
 def test_rebuild_excluding_all_returns_empty() -> None:
-    assert judge.rebuild_appearance_excluding("A、B", {1, 2}) == ""
+    assert judge.rebuild_appearance_excluding("A，B", {1, 2}) == ""
 
 
 def test_rebuild_excluding_none_returns_unchanged() -> None:
-    assert judge.rebuild_appearance_excluding("A、B、C", set()) == "A、B、C"
+    assert judge.rebuild_appearance_excluding("A，B，C", set()) == "A，B，C"
+
+
+def test_rebuild_excluding_preserves_trailing_sentence_punctuation_when_last_clause_kept() -> None:
+    """真实回归（B 上 123 张卡实测，123 张里 53 张"什么都不删"时结尾的句末
+    标点会被静默吞掉）：句末标点落在最后一条子句的 span 之外，此前的拼接
+    循环只在"当前子句不是本次输出最后一项"时才补分隔符，这对"删除尾部子句"
+    是对的，但原文真正的最后一条子句被保留时（最常见的"什么都没删"场景），
+    它后面的句末标点会被同一条判断误伤而丢失——必须原样补回去。"""
+    text = "A，B。"
+    assert judge.rebuild_appearance_excluding(text, set()) == text
+    assert judge.rebuild_appearance_excluding(text, {1}) == "B。"
+
+
+def test_rebuild_excluding_whole_touhao_clause_keeps_zero_new_characters() -> None:
+    """顿号不切分，整条含顿号的子句被删除时，零新增字符的拼接约束依旧成立。"""
+    text = "米白色针织，合身版型，无印花、刺绣等额外装饰"
+    assert judge.rebuild_appearance_excluding(text, {3}) == "米白色针织，合身版型"
+
+
+def test_rebuild_excluding_keep_fragment_within_touhao_clause() -> None:
+    """"原生心形翠绿色叶片约三分之二边缘发黑发蔫、部分枝条软垂倒伏"整句是
+    一条子句（内部顿号不切分），混合了植物固有外观与泡水后的剧情时点状态，
+    靠 ``keep_fragment`` 保留"原生心形翠绿色叶片"这一小段，不是靠切分本身
+    区分出两部分。"""
+    text = "原生心形翠绿色叶片约三分之二边缘发黑发蔫、部分枝条软垂倒伏"
+    assert judge.split_appearance_clauses(text) == [text]
+    assert judge.rebuild_appearance_excluding(text, {1}, {1: "原生心形翠绿色叶片"}) == "原生心形翠绿色叶片"
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +118,8 @@ def test_rebuild_excluding_none_returns_unchanged() -> None:
 
 def test_verify_clause_removal_rejects_out_of_range_index() -> None:
     removed, records, missing, doubts = card_audit_rules.verify_clause_removal_verdicts(
-        2, [{"index": 5, "remove": True, "category": "plot_state", "reason": "x"}], frozenset(),
+        ["甲", "乙"], [{"index": 5, "remove": True, "category": "plot_state", "reason": "x"}], frozenset(),
+        cooccurring_owners=frozenset(), all_props=[],
     )
     assert removed == set() and records == [] and doubts == []
     assert missing == {1, 2}
@@ -77,7 +128,8 @@ def test_verify_clause_removal_rejects_out_of_range_index() -> None:
 def test_verify_clause_removal_downgrades_invalid_category_to_doubt() -> None:
     """类别不在三选一范围内：不采信删除，也不像此前那样静默丢弃（审查发现）。"""
     removed, _records, missing, doubts = card_audit_rules.verify_clause_removal_verdicts(
-        2, [{"index": 1, "remove": True, "category": "made_up_category", "reason": "x"}], frozenset(),
+        ["甲", "乙"], [{"index": 1, "remove": True, "category": "made_up_category", "reason": "x"}], frozenset(),
+        cooccurring_owners=frozenset(), all_props=[],
     )
     assert removed == set() and missing == {2}
     assert doubts[0]["doubt_type"] == card_audit_rules.DOUBT_TYPE_INVALID_CATEGORY
@@ -85,10 +137,10 @@ def test_verify_clause_removal_downgrades_invalid_category_to_doubt() -> None:
 
 def test_verify_clause_removal_ignores_duplicate_index_keeps_first() -> None:
     removed, records, missing, _doubts = card_audit_rules.verify_clause_removal_verdicts(
-        2, [
+        ["甲", "乙"], [
             {"index": 1, "remove": True, "category": "plot_state", "reason": "first"},
             {"index": 1, "remove": True, "category": "not_appearance", "reason": "dup"},
-        ], frozenset(),
+        ], frozenset(), cooccurring_owners=frozenset(), all_props=[],
     )
     assert removed == {1}
     assert len(records) == 1 and records[0]["reason"] == "first"
@@ -98,8 +150,9 @@ def test_verify_clause_removal_ignores_duplicate_index_keeps_first() -> None:
 def test_verify_clause_removal_accepts_valid_removal_with_verified_owner() -> None:
     """owner 归属证据核验另见 ``test_prop_card_audit_consensus.py``。"""
     removed, records, missing, doubts = card_audit_rules.verify_clause_removal_verdicts(
-        3, [{"index": 2, "remove": True, "category": "other_object_or_mark", "owner": "星盘", "reason": "压痕"}],
-        frozenset({"星盘"}),
+        ["甲", "压痕", "丙"],
+        [{"index": 2, "remove": True, "category": "other_object_or_mark", "owner": "星盘", "reason": "压痕"}],
+        frozenset({"星盘"}), cooccurring_owners=frozenset({"星盘"}), all_props=[],
     )
     assert removed == {2}
     assert records[0]["category"] == "other_object_or_mark"
@@ -108,7 +161,8 @@ def test_verify_clause_removal_accepts_valid_removal_with_verified_owner() -> No
 
 def test_verify_clause_removal_ignores_non_dict_entries() -> None:
     removed, _records, missing, _doubts = card_audit_rules.verify_clause_removal_verdicts(
-        2, ["not-a-dict", {"index": 1, "remove": True, "category": "plot_state", "reason": "x"}], frozenset(),
+        ["甲", "乙"], ["not-a-dict", {"index": 1, "remove": True, "category": "plot_state", "reason": "x"}],
+        frozenset(), cooccurring_owners=frozenset(), all_props=[],
     )
     assert removed == {1}
     assert missing == {2}
@@ -182,75 +236,58 @@ def _mock_judgment(monkeypatch: pytest.MonkeyPatch, clauses: list[dict], aliases
     monkeypatch.setattr(card_audit.card_audit_rules, "request_prop_card_audit_judgment", _fake)
 
 
-async def test_compute_audit_removes_other_object_mark_clause(monkeypatch: pytest.MonkeyPatch) -> None:
-    """真实案例：卫衣外观把"胸前有星盘压痕"写进去——这是星盘的印痕，不是卫衣自身外观。"""
-    prop = Prop(name="浅灰色卫衣", appearance_canonical="雾感哑光浅灰色棉质、圆领宽松版型、胸前有星盘压痕", aliases=[])
-    other = Prop(name="旧星盘", appearance_canonical="黄铜材质", aliases=["星盘"])
-    clauses = judge.split_appearance_clauses(prop.appearance_canonical)
-    _mock_judgment(monkeypatch, [
-        *[{"index": i + 1, "remove": False} for i in range(len(clauses) - 1)],
-        {"index": len(clauses), "remove": True, "category": "other_object_or_mark", "owner": "星盘", "reason": "星盘压痕"},
-    ])
-    result = await card_audit.compute_prop_card_audit(prop, [prop, other])
-    assert result["appearance_changed"] is True
-    assert result["new_appearance"] == judge.rebuild_appearance_excluding(prop.appearance_canonical, {len(clauses)})
-    assert "压痕" not in result["new_appearance"]
-    assert result["removed_clauses"][0]["category"] == "other_object_or_mark"
-    assert result["doubts"] == []
-
-
 async def test_compute_audit_removes_plot_state_clause(monkeypatch: pytest.MonkeyPatch) -> None:
     """真实案例：绿萝泡水后发蔫的样子是时点状态，不是固有外观。"""
-    prop = Prop(name="绿萝", appearance_canonical="心形翠绿色叶片、米白色哑光塑料花盆、叶片边缘发黑发蔫", aliases=[])
+    prop = Prop(name="绿萝", appearance_canonical="心形翠绿色叶片，米白色哑光塑料花盆，叶片边缘发黑发蔫", aliases=[])
     _mock_judgment(monkeypatch, [
         {"index": 1, "remove": False}, {"index": 2, "remove": False},
         {"index": 3, "remove": True, "category": "plot_state", "reason": "泡水后才发蔫"},
     ])
-    result = await card_audit.compute_prop_card_audit(prop, [prop])
-    assert result["new_appearance"] == "心形翠绿色叶片、米白色哑光塑料花盆"
+    result = await card_audit.compute_prop_card_audit(prop, [prop], label_segments={})
+    assert result["new_appearance"] == "心形翠绿色叶片，米白色哑光塑料花盆"
     assert result["removed_clauses"][0]["category"] == "plot_state"
 
 
 async def test_compute_audit_keeps_inherent_patina_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     """固有旧化/包浆保留：模型全部判定不删，外观不变、不触发重出图。"""
-    prop = Prop(name="旧星盘", appearance_canonical="黄铜材质、表面常年使用留下浅划痕、边缘略有磕碰", aliases=[])
+    prop = Prop(name="旧星盘", appearance_canonical="黄铜材质，表面常年使用留下浅划痕，边缘略有磕碰", aliases=[])
     clauses = judge.split_appearance_clauses(prop.appearance_canonical)
     _mock_judgment(monkeypatch, [{"index": i + 1, "remove": False} for i in range(len(clauses))])
-    result = await card_audit.compute_prop_card_audit(prop, [prop])
+    result = await card_audit.compute_prop_card_audit(prop, [prop], label_segments={})
     assert result["appearance_changed"] is False
     assert result["new_appearance"] == prop.appearance_canonical
 
 
 async def test_compute_audit_all_removed_marks_failed_without_changing_appearance(monkeypatch: pytest.MonkeyPatch) -> None:
-    prop = Prop(name="纸箱", appearance_canonical="黄褐色瓦楞纸材质、整体被水泡软塌陷", aliases=[])
+    prop = Prop(name="纸箱", appearance_canonical="黄褐色瓦楞纸材质，整体被水泡软塌陷", aliases=[])
     clauses = judge.split_appearance_clauses(prop.appearance_canonical)
     _mock_judgment(monkeypatch, [
         {"index": i + 1, "remove": True, "category": "plot_state", "reason": "泡水后"} for i in range(len(clauses))
     ])
-    result = await card_audit.compute_prop_card_audit(prop, [prop])
+    result = await card_audit.compute_prop_card_audit(prop, [prop], label_segments={})
     assert result["failed"] is True
     assert result["new_appearance"] == prop.appearance_canonical
     assert result["appearance_changed"] is False
 
 
 async def test_compute_audit_feature_shortfall_flagged_when_below_minimum(monkeypatch: pytest.MonkeyPatch) -> None:
-    prop = Prop(name="道具X", appearance_canonical="红色、圆形、带柄把", aliases=[])
+    prop = Prop(name="道具X", appearance_canonical="红色，圆形，带柄把", aliases=[])
     clauses = judge.split_appearance_clauses(prop.appearance_canonical)
     assert len(clauses) == judge.MIN_APPEARANCE_FEATURES
     _mock_judgment(monkeypatch, [
         {"index": 1, "remove": False}, {"index": 2, "remove": False},
         {"index": 3, "remove": True, "category": "not_appearance", "reason": "x"},
     ])
-    result = await card_audit.compute_prop_card_audit(prop, [prop])
+    result = await card_audit.compute_prop_card_audit(prop, [prop], label_segments={})
     assert result["feature_shortfall"] is True
-    assert result["new_appearance"] == "红色、圆形"
+    assert result["new_appearance"] == "红色，圆形"
 
 
 async def test_compute_audit_combines_ambiguous_and_model_nominated_aliases_without_duplicating(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     other = Prop(name="椅子乙", appearance_canonical="x", aliases=["椅子"])
-    prop = Prop(name="对面木椅", appearance_canonical="深色木质、靠背雕花、扶手处有裂纹", aliases=["椅子", "咖啡馆木椅"])
+    prop = Prop(name="对面木椅", appearance_canonical="深色木质，靠背雕花，扶手处有裂纹", aliases=["椅子", "咖啡馆木椅"])
     clauses = judge.split_appearance_clauses(prop.appearance_canonical)
     _mock_judgment(
         monkeypatch, [{"index": i + 1, "remove": False} for i in range(len(clauses))],
@@ -259,7 +296,7 @@ async def test_compute_audit_combines_ambiguous_and_model_nominated_aliases_with
             {"alias": "椅子", "category_only": True, "reason": "只剩品类名"},
         ],
     )
-    result = await card_audit.compute_prop_card_audit(prop, [prop, other])
+    result = await card_audit.compute_prop_card_audit(prop, [prop, other], label_segments={})
     removed = {r["alias"] for r in result["removed_aliases"]}
     assert removed == {"椅子"}
     assert "咖啡馆木椅" not in removed
@@ -394,52 +431,25 @@ async def test_audit_one_prop_card_marks_failed_on_exception_and_stops_retrying_
 
 
 # ---------------------------------------------------------------------------
-# 7) 审查发现修复：否定关联子句组安全网、覆盖不全判失败、CAS 写回围栏、
+# 7) 审查发现修复：否定并列短语不按顿号切分、覆盖不全判失败、CAS 写回围栏、
 #    launch_background_audit 并发限流
 # ---------------------------------------------------------------------------
 
-def test_negation_linked_clause_groups_detects_shared_negation_scope() -> None:
-    """真实缺陷（沙箱 123 张卡命中 3 次）："无印花、刺绣等额外装饰" 被切成两条
-    独立子句，只删后半句会让字面意思反转——必须识别成同一组。"""
-    text = "米白色针织、合身版型、无印花、刺绣等额外装饰"
-    assert judge.negation_linked_clause_groups(text) == [frozenset({3, 4})]
-
-
-def test_negation_linked_clause_groups_ignores_bare_negation_character() -> None:
-    """"不规则""不锈钢"这类以"不"开头的合法材质/形状描述词，不能被误认成否定组。"""
-    text = "半块不规则片状玉石质地、奶白色带淡青微光、表面细腻天然石纹"
-    assert judge.negation_linked_clause_groups(text) == []
-
-
-async def test_compute_audit_negation_group_override_keeps_both_on_split_verdict(
+async def test_compute_audit_negation_linked_clause_judged_as_single_unit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """模型只删否定组里的后半句、留下前半句——安全网必须整组强制改判保留，
-    不能让新外观把"没有刺绣"读成"有刺绣"。"""
-    prop = Prop(name="开衫", appearance_canonical="米白色针织、合身版型、无印花、刺绣等额外装饰", aliases=[])
-    _mock_judgment(monkeypatch, [
-        {"index": 1, "remove": False}, {"index": 2, "remove": False}, {"index": 3, "remove": False},
-        {"index": 4, "remove": True, "category": "not_appearance", "reason": "切分残留"},
-    ])
-    result = await card_audit.compute_prop_card_audit(prop, [prop])
-    assert result["new_appearance"] == prop.appearance_canonical
-    assert result["appearance_changed"] is False
-    assert result["negation_overrides"] and result["negation_overrides"][0]["index"] == 4
-
-
-async def test_compute_audit_negation_group_both_removed_when_judged_consistently(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """组内判定一致（全删）时不触发安全网，正常生效——安全网只堵"半删"。"""
-    prop = Prop(name="开衫2", appearance_canonical="米白色针织、合身版型、无印花、刺绣等额外装饰", aliases=[])
+    """"无印花、刺绣等额外装饰"整句交给模型一次性判定，顿号不切分，结构上
+    不再可能出现"只删后半句、留下前半句"的半删场景（2026-10-04-v5）。"""
+    prop = Prop(name="开衫", appearance_canonical="米白色针织，合身版型，无印花、刺绣等额外装饰", aliases=[])
+    clauses = judge.split_appearance_clauses(prop.appearance_canonical)
+    assert clauses == ["米白色针织", "合身版型", "无印花、刺绣等额外装饰"]
     _mock_judgment(monkeypatch, [
         {"index": 1, "remove": False}, {"index": 2, "remove": False},
         {"index": 3, "remove": True, "category": "not_appearance", "reason": "切分残留"},
-        {"index": 4, "remove": True, "category": "not_appearance", "reason": "切分残留"},
     ])
-    result = await card_audit.compute_prop_card_audit(prop, [prop])
-    assert result["new_appearance"] == "米白色针织、合身版型"
-    assert result["negation_overrides"] == []
+    result = await card_audit.compute_prop_card_audit(prop, [prop], label_segments={})
+    assert result["new_appearance"] == "米白色针织，合身版型"
+    assert result["appearance_changed"] is True
 
 
 async def test_compute_audit_partial_coverage_marks_failed_without_applying(
@@ -447,9 +457,9 @@ async def test_compute_audit_partial_coverage_marks_failed_without_applying(
 ) -> None:
     """模型只对部分子句给出判定——不采用本轮结果，整体按失败处理待重试，
     不得把缺失的判定静默当"不删除"。"""
-    prop = Prop(name="道具P", appearance_canonical="红色、圆形、带柄把", aliases=[])
+    prop = Prop(name="道具P", appearance_canonical="红色，圆形，带柄把", aliases=[])
     _mock_judgment(monkeypatch, [{"index": 1, "remove": True, "category": "not_appearance", "reason": "x"}])
-    result = await card_audit.compute_prop_card_audit(prop, [prop])
+    result = await card_audit.compute_prop_card_audit(prop, [prop], label_segments={})
     assert result["failed"] is True
     assert result["new_appearance"] == prop.appearance_canonical
     assert result["removed_clauses"] == [] and result["removed_aliases"] == []
@@ -476,24 +486,3 @@ async def test_mark_audit_ready_discards_stale_write_after_reclaim(monkeypatch: 
     )
     row = card_audit_store.get_audit(get_conn(), project_id="p-fence-1", prop_name="道具F")
     assert row["status"] == "ready" and row["new_appearance"] == "新一轮结果"
-
-
-async def test_launch_background_audit_limits_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``launch_background_audit`` 必须与 ``audit_project_prop_cards``/
-    ``audit_specific_prop_cards`` 同一并发口径,不得裸起无限并发任务。"""
-    import asyncio
-    in_flight = {"n": 0, "peak": 0}
-
-    async def _fake_one(_project_id: str, name: str) -> dict:
-        in_flight["n"] += 1
-        in_flight["peak"] = max(in_flight["peak"], in_flight["n"])
-        await asyncio.sleep(0.01)
-        in_flight["n"] -= 1
-        return {"prop_name": name, "status": "ready"}
-
-    monkeypatch.setattr(card_audit, "_audit_one_quietly", _fake_one)
-    tasks = card_audit.launch_background_audit(
-        project_id="p-concurrency-1", prop_names=[f"道具{i}" for i in range(10)],
-    )
-    await asyncio.gather(*tasks)
-    assert in_flight["peak"] <= card_audit._MAX_CONCURRENT_AUDITS

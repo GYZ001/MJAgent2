@@ -29,7 +29,10 @@ change_adopted_video_delivery_manifest`` 同一结论，复核只是另一种"�
 dry-run（供 B 沙箱对全部存量卡做真实模型验证）：``audit_one_prop_card``/
 ``audit_project_prop_cards`` 的 ``dry_run=True`` 路径只调用模型 + 代码核验，
 不触碰 ``card_audit_store``、不写世界书、不重新出图——纯只读计算，可重复
-安全调用。
+安全调用。逐卡隔离（``_dry_run_audit_one_quietly``，2026-10-04 审查发现并
+修复）：某张卡模型输出被截断导致 JSON 解析失败时，只有这一张卡的结果以
+``failed``/``fail_reason`` 标记，同批其它卡的结果照常输出——此前整批
+直接 ``asyncio.gather`` 收集协程，一张卡抛异常会让整批结果全部丢失。
 """
 from __future__ import annotations
 
@@ -44,7 +47,20 @@ from app.bible_store import mutate_bible_json
 from app.db import get_conn, new_id, now
 from app.schemas import Bible, Prop
 
-from . import card_audit_consensus, card_audit_rules, card_audit_store, image, judge, store
+#: ``card_audit_rules``（没有被本文件自己的函数体直接调用）仍然必须在这里
+#: import：大量既有测试按 ``card_audit.card_audit_rules.request_prop_card_
+#: audit_judgment`` 这条路径打桩（``monkeypatch.setattr(card_audit.card_
+#: audit_rules, ...)``）——模块对象在 ``sys.modules`` 里只有一份，打桩本身
+#: 对任何引用路径都生效，但 ``card_audit.card_audit_rules`` 这个属性访问路径
+#: 必须真的存在，否则直接 ``AttributeError``（2026-10-04 拆出 ``card_audit_
+#: compute.py`` 时删掉这行导致的真实回归，已在本轮测试中复现并修复）。
+from . import card_audit_cooccurrence, card_audit_rules, card_audit_store, image, judge, store  # noqa: F401
+#: 纯计算部分（否定关联安全网/全删判定/最终拼接/两次独立判定取交集）在
+#: ``card_audit_compute.py``（2026-10-04 拆出，避免本文件连续超出 500 行文件
+#: 行数基线），这里原样重导出——``card_audit.compute_prop_card_audit`` 这个
+#: 既有调用路径（``app.props.card_audit_doubts``/全部测试文件按 ``card_audit.
+#: compute_prop_card_audit`` 调用）不受影响。
+from .card_audit_compute import compute_prop_card_audit as compute_prop_card_audit
 
 log = logging.getLogger(__name__)
 
@@ -90,132 +106,6 @@ def _set_prop_appearance_and_image(
                 return True
         return False
     return mutate_bible_json(conn, project_id, mutate)
-
-
-def _apply_negation_group_safety_net(
-    appearance: str, removed_indexes: set[int], removed_clauses: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """否定关联子句组的安全网（审查发现，CLAUDE.md「不要给以后的生成埋雷」）：
-    ``judge.split_appearance_clauses`` 按标点切分，不理解"无A、B"这类共享否定/
-    并列结构的作用范围——模型如果只删除这类组合里的一部分（残留的并列项被删、
-    否定词那条被留下，或反过来），``rebuild_appearance_excluding`` 原样拼接出
-    的新外观会让字面意思反转（"无印花"+"涂鸦等额外装饰"各自独立判定，万一只删
-    前者，"涂鸦"从"没有"变成"有"）。这里用 ``judge.negation_linked_clause_
-    groups`` 的结构信号识别这类子句组：组内判定不一致（部分删、部分留）时，
-    整组强制改判"不删"（原地修改 ``removed_indexes``/``removed_clauses``）——
-    宁可多留几个字保留原状，也不让半删产生语义反转；组内判定一致（全删或全不
-    删）不受影响，原样放行。返回被强制改判的记录，供日志/测试核查这个安全网
-    是否被触发过。"""
-    overrides: list[dict[str, Any]] = []
-    for group in judge.negation_linked_clause_groups(appearance):
-        in_removed = group & removed_indexes
-        if in_removed and in_removed != group:
-            for index in sorted(in_removed):
-                removed_indexes.discard(index)
-                overrides.append({
-                    "index": index,
-                    "reason": "否定关联子句组判定不一致，整组改判保留，避免半删反转语义",
-                })
-            removed_clauses[:] = [r for r in removed_clauses if r["index"] not in group]
-    return overrides
-
-
-def _partial_coverage_audit_result(prop: Prop, clauses: list[str], missing_indexes: frozenset[int]) -> dict[str, Any]:
-    """两次调用里只要有一次没对全部子句给出判定——不采用本轮结果，整体按
-    失败处理待重试（见 ``card_audit_rules.verify_clause_removal_verdicts``
-    的说明）。"""
-    judged = len(clauses) - len(missing_indexes)
-    return {
-        "prop_name": prop.name,
-        "old_appearance": prop.appearance_canonical,
-        "new_appearance": prop.appearance_canonical,
-        "appearance_changed": False,
-        "removed_clauses": [],
-        "removed_aliases": [],
-        "feature_shortfall": False,
-        "failed": True,
-        "fail_reason": (
-            f"模型只对 {judged}/{len(clauses)} 条外观子句给出判定"
-            f"（缺少编号：{sorted(missing_indexes)}），为安全起见本轮不采用，视为失败重试"
-        ),
-        "reimaged": False,
-        "negation_overrides": [],
-        "doubts": [],
-    }
-
-
-def _finalize_audit_result(
-    prop: Prop, clauses: list[str], removed_indexes: set[int], removed_clauses: list[dict[str, Any]],
-    removed_aliases: list[dict[str, Any]], doubts: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """子句/别名两次判定都已合并完毕后，拼出最终外观与结果 dict——从
-    ``compute_prop_card_audit`` 拆出来，保持两个函数都在单函数行数红线内。"""
-    failed = False
-    fail_reason: str | None = None
-    if clauses and removed_indexes == set(range(1, len(clauses) + 1)):
-        new_appearance = prop.appearance_canonical
-        failed = True
-        fail_reason = "模型判定全部外观子句都该删除，保留原外观不改动，待人工核查"
-    elif clauses:
-        new_appearance = judge.rebuild_appearance_excluding(prop.appearance_canonical, removed_indexes)
-    else:
-        new_appearance = prop.appearance_canonical
-
-    new_clause_count = len(judge.split_appearance_clauses(new_appearance))
-    feature_shortfall = not failed and 0 < new_clause_count < judge.MIN_APPEARANCE_FEATURES
-    appearance_changed = not failed and new_appearance != prop.appearance_canonical
-    return {
-        "prop_name": prop.name,
-        "old_appearance": prop.appearance_canonical,
-        "new_appearance": new_appearance,
-        "appearance_changed": appearance_changed,
-        "removed_clauses": removed_clauses,
-        "removed_aliases": removed_aliases,
-        "feature_shortfall": feature_shortfall,
-        "failed": failed,
-        "fail_reason": fail_reason,
-        "reimaged": False,
-        "doubts": doubts,
-    }
-
-
-async def compute_prop_card_audit(
-    prop: Prop, all_props: list[Prop], kept_doubt_keys: frozenset[str] = frozenset(),
-) -> dict[str, Any]:
-    """纯计算（两次独立模型调用 + 代码核验 + 两次取交集才真正删除），不写库、
-    不出图——供 ``audit_one_prop_card`` 的真实写入路径与 dry-run 路径共用同
-    一份判定逻辑。两次独立判定的取舍见 ``app.props.card_audit_consensus``
-    模块 docstring；``kept_doubt_keys`` 是人工已经点过「保留」的存疑键（见
-    ``card_audit_store.get_kept_doubt_keys``），dry-run 路径不读决定表，
-    始终传空集合（纯计算，供沙箱验证）。"""
-    clauses = judge.split_appearance_clauses(prop.appearance_canonical)
-    owner_catalog_text = card_audit_rules.catalog_text_for_prompt(prop, all_props)
-    raw_a, raw_b = await card_audit_consensus.run_two_independent_clause_judgments(
-        prop, clauses, owner_catalog_text,
-    )
-    other_identifiers = card_audit_rules.other_card_identifiers(prop, all_props)
-    clause_merge = card_audit_consensus.merge_clause_judgments(
-        len(clauses), raw_a["clauses"], raw_b["clauses"], other_identifiers, clauses,
-    )
-    if clauses and clause_merge["missing_indexes"]:
-        return _partial_coverage_audit_result(prop, clauses, clause_merge["missing_indexes"])
-    removed_indexes = clause_merge["removed_indexes"]
-    removed_clauses = clause_merge["removed_records"]
-    negation_overrides = _apply_negation_group_safety_net(prop.appearance_canonical, removed_indexes, removed_clauses)
-    for record in removed_clauses:
-        record["text"] = clauses[record["index"] - 1]
-
-    ambiguous_aliases = card_audit_rules.ambiguous_aliases_to_drop(prop, all_props)
-    alias_merge = card_audit_consensus.merge_alias_judgments(prop.aliases, raw_a["aliases"], raw_b["aliases"])
-    seen_aliases = {record["alias"] for record in ambiguous_aliases}
-    removed_aliases = [*ambiguous_aliases, *[r for r in alias_merge["removed"] if r["alias"] not in seen_aliases]]
-
-    doubts = card_audit_consensus.filter_doubts_against_kept_decisions(
-        [*clause_merge["doubts"], *alias_merge["doubts"]], kept_doubt_keys,
-    )
-    result = _finalize_audit_result(prop, clauses, removed_indexes, removed_clauses, removed_aliases, doubts)
-    result["negation_overrides"] = negation_overrides
-    return result
 
 
 async def _apply_audit_result(
@@ -321,38 +211,29 @@ async def _mark_audit_failed(*, row_id: str, claim_token: str, error: str) -> No
         )
 
 
-async def audit_one_prop_card(
-    project_id: str, prop_name: str, *, dry_run: bool = False,
+async def _run_claimed_prop_audit(
+    conn: sqlite3.Connection, project_id: str, bible: Bible, prop: Prop, row: dict[str, Any],
+    label_segments: dict[str, frozenset[tuple[str, int]]],
 ) -> dict[str, Any]:
-    """对一张道具卡按现行规则复核；``dry_run=True`` 时只跑模型判定 + 代码
-    核验，不抢占 ``card_audit_store``、不写世界书、不重新出图（供 B 沙箱做
-    真实模型验证，见模块 docstring）。"""
-    conn = get_conn()
-    bible = _load_bible(conn, project_id)
-    if bible is None:
-        raise ValueError(f"项目不存在或人物谱未初始化：{project_id}")
-    prop = next((p for p in bible.props if p.name == prop_name), None)
-    if prop is None:
-        raise ValueError(f"道具不存在：{prop_name}")
-    if dry_run:
-        return await compute_prop_card_audit(prop, bible.props)
-
-    rules_version = judge.PROP_CARD_RULES_VERSION
-    row, should_run = await claim_audit(project_id=project_id, prop_name=prop_name, rules_version=rules_version)
-    if not should_run:
-        return {"prop_name": prop_name, "status": row["status"], "skipped": True}
+    """``claim_audit`` 已确认 ``should_run`` 为真之后的计算 + 应用写回——从
+    ``audit_one_prop_card`` 拆出来，供它与批量入口共享的 ``_audit_one_
+    quietly``（2026-10-04 拆分，审查发现：批量复核一批 N 张卡时，公开入口
+    ``audit_one_prop_card`` 逐卡各自重新 ``_load_bible``+全表扫描分镜段，
+    一批就扫 N 次；现在批量入口只扫一次、每张卡调这个函数复用同一份结果）
+    共用，避免两份重复实现 claim 之后的 compute/apply/mark_ready 流程。"""
+    rules_version = row["rules_version"]
     kept_doubt_keys = card_audit_store.get_kept_doubt_keys(
-        conn, project_id=project_id, prop_name=prop_name, rules_version=rules_version,
+        conn, project_id=project_id, prop_name=prop.name, rules_version=rules_version,
     )
     try:
-        result = await compute_prop_card_audit(prop, bible.props, kept_doubt_keys)
+        result = await compute_prop_card_audit(prop, bible.props, kept_doubt_keys, label_segments=label_segments)
         applied = await _apply_audit_result(
             conn, project_id, prop, result,
             style=bible.world.visual_style_canonical, episode_no=prop.first_episode_no or 1,
         )
     except Exception as exc:  # noqa: BLE001 单张卡复核失败不影响其它卡
         await _mark_audit_failed(row_id=row["id"], claim_token=row["claim_token"], error=str(exc))
-        return {"prop_name": prop_name, "status": "failed", "error": str(exc)}
+        return {"prop_name": prop.name, "status": "failed", "error": str(exc)}
     if applied["failed"]:
         await _mark_audit_failed(
             row_id=row["id"], claim_token=row["claim_token"], error=applied["fail_reason"] or "复核判定全删，未采用",
@@ -362,9 +243,98 @@ async def audit_one_prop_card(
     return {**applied, "status": "ready"}
 
 
-async def _audit_one_quietly(project_id: str, prop_name: str) -> dict[str, Any]:
+async def _dry_run_audit_one_quietly(
+    prop: Prop, all_props: list[Prop], label_segments: dict[str, frozenset[tuple[str, int]]],
+) -> dict[str, Any]:
+    """dry-run 路径的单卡隔离（2026-10-04 审查发现并修复）：``compute_prop_
+    card_audit`` 本身会发真实模型调用并解析其 JSON 返回值，模型输出被截断
+    时解析会抛异常——此前 ``audit_project_prop_cards(dry_run=True)`` 用
+    ``asyncio.gather`` 直接收集全部卡的协程，一张卡抛异常会让整批结果一起
+    丢失（CLAUDE.md「退场要一次删干净」的同一精神反过来：这里是"失败要一次
+    隔离干净"，不能因为一张卡失败连累同批其它已经算好的卡）。与非 dry-run
+    路径的 ``_audit_one_quietly`` 同一取舍，只是 dry-run 不接触 ``card_
+    audit_store``，失败结果直接以 ``failed``/``fail_reason``/``error``
+    字段体现（不是 ``status``——dry-run 的成功结果本身也没有 ``status``
+    字段，这里保持同一套字段形状），供 ``scripts/prop_card_audit_dry_run.py``
+    的 stderr 摘要计入失败数。"""
     try:
-        return await audit_one_prop_card(project_id, prop_name, dry_run=False)
+        return await compute_prop_card_audit(prop, all_props, label_segments=label_segments)
+    except Exception as exc:  # noqa: BLE001 - dry-run 批量复核时单张卡失败不影响同批其它卡
+        log.exception("[PROP_CARD_AUDIT_DRY_RUN_FAILED] prop=%s", prop.name)
+        return {"prop_name": prop.name, "failed": True, "fail_reason": str(exc), "error": str(exc)}
+
+
+async def audit_one_prop_card(
+    project_id: str, prop_name: str, *, dry_run: bool = False,
+) -> dict[str, Any]:
+    """对一张道具卡按现行规则复核；``dry_run=True`` 时只跑模型判定 + 代码
+    核验，不抢占 ``card_audit_store``、不写世界书、不重新出图（供 B 沙箱做
+    真实模型验证，见模块 docstring）。
+
+    2026-10-04 审查发现并修复：非 dry-run 时，分镜段全表扫描
+    （``card_audit_cooccurrence.label_segment_keys_for_project``）移到
+    ``claim_audit`` 判定 ``should_run`` 为真之后才做——此前无条件先扫一遍，
+    对"已经 ready/仍在新鲜 running"这类直接短路返回的调用，扫描结果根本用
+    不上，纯浪费一次全表 JOIN + 逐行 JSON 解析。"""
+    conn = get_conn()
+    bible = _load_bible(conn, project_id)
+    if bible is None:
+        raise ValueError(f"项目不存在或人物谱未初始化：{project_id}")
+    prop = next((p for p in bible.props if p.name == prop_name), None)
+    if prop is None:
+        raise ValueError(f"道具不存在：{prop_name}")
+    if dry_run:
+        label_segments = card_audit_cooccurrence.label_segment_keys_for_project(conn, project_id)
+        return await _dry_run_audit_one_quietly(prop, bible.props, label_segments)
+
+    rules_version = judge.PROP_CARD_RULES_VERSION
+    row, should_run = await claim_audit(project_id=project_id, prop_name=prop_name, rules_version=rules_version)
+    if not should_run:
+        return {"prop_name": prop_name, "status": row["status"], "skipped": True}
+    label_segments = card_audit_cooccurrence.label_segment_keys_for_project(conn, project_id)
+    return await _run_claimed_prop_audit(conn, project_id, bible, prop, row, label_segments)
+
+
+def _missing_bible_audit_result(project_id: str, prop_name: str) -> dict[str, Any]:
+    """批量入口里某个名字对应的项目人物谱未初始化时的失败结果——与此前经由
+    ``audit_one_prop_card`` 内部抛 ``ValueError``、``_audit_one_quietly``
+    捕获后转成同样文案的结果一致，不是新行为（见 ``_audit_one_quietly``）。"""
+    return {"prop_name": prop_name, "status": "failed", "error": f"项目不存在或人物谱未初始化：{project_id}"}
+
+
+def _load_batch_audit_context(
+    project_id: str,
+) -> tuple[Bible | None, dict[str, frozenset[tuple[str, int]]]]:
+    """批量复核入口（``audit_project_prop_cards``/``audit_specific_prop_
+    cards``/``launch_background_audit``）共享一次 ``_load_bible`` + 全表
+    扫描分镜段，不逐卡各自重新做一遍（2026-10-04 审查发现，见
+    ``audit_one_prop_card`` 同一条说明）。``bible`` 为 ``None`` 时
+    ``label_segments`` 原样返回空字典，调用方对每个名字各自构造
+    ``_missing_bible_audit_result``。"""
+    conn = get_conn()
+    bible = _load_bible(conn, project_id)
+    label_segments = card_audit_cooccurrence.label_segment_keys_for_project(conn, project_id) if bible else {}
+    return bible, label_segments
+
+
+async def _audit_one_quietly(
+    project_id: str, prop_name: str, *, bible: Bible, label_segments: dict[str, frozenset[tuple[str, int]]],
+) -> dict[str, Any]:
+    """单张卡复核失败不影响其它卡——批量入口共用；``bible``/``label_
+    segments`` 必传，由调用方用 ``_load_batch_audit_context`` 对整批共享算
+    好一次（必传、无默认值，CLAUDE.md「Ownership Must Be Explicit」：这两
+    个参数决定"用哪个项目快照、哪份共现数据"核验，不该有一个静默回退的
+    默认值）。"""
+    conn = get_conn()
+    try:
+        prop = next((p for p in bible.props if p.name == prop_name), None)
+        if prop is None:
+            raise ValueError(f"道具不存在：{prop_name}")
+        rules_version = judge.PROP_CARD_RULES_VERSION
+        row, should_run = await claim_audit(project_id=project_id, prop_name=prop_name, rules_version=rules_version)
+        if not should_run:
+            return {"prop_name": prop_name, "status": row["status"], "skipped": True}
+        return await _run_claimed_prop_audit(conn, project_id, bible, prop, row, label_segments)
     except Exception as exc:  # noqa: BLE001 - 整项目批量复核时单张卡失败不影响其它卡
         log.exception("[PROP_CARD_AUDIT_FAILED] project=%s prop=%s", project_id, prop_name)
         return {"prop_name": prop_name, "status": "failed", "error": str(exc)}
@@ -379,15 +349,17 @@ async def audit_project_prop_cards(project_id: str, *, dry_run: bool = False) ->
     if bible is None:
         raise ValueError(f"项目不存在或人物谱未初始化：{project_id}")
     if dry_run:
+        label_segments = card_audit_cooccurrence.label_segment_keys_for_project(conn, project_id)
         results = await asyncio.gather(*[
-            compute_prop_card_audit(prop, bible.props) for prop in bible.props
+            _dry_run_audit_one_quietly(prop, bible.props, label_segments) for prop in bible.props
         ])
         return {"project_id": project_id, "dry_run": True, "results": list(results)}
+    label_segments = card_audit_cooccurrence.label_segment_keys_for_project(conn, project_id)
     semaphore = asyncio.Semaphore(_MAX_CONCURRENT_AUDITS)
 
     async def _run(name: str) -> dict[str, Any]:
         async with semaphore:
-            return await _audit_one_quietly(project_id, name)
+            return await _audit_one_quietly(project_id, name, bible=bible, label_segments=label_segments)
 
     results = await asyncio.gather(*[_run(prop.name) for prop in bible.props])
     return {"project_id": project_id, "dry_run": False, "results": list(results)}
@@ -397,11 +369,14 @@ async def audit_specific_prop_cards(project_id: str, prop_names: list[str]) -> l
     """等待一批具名道具卡复核完成（供 ``app.props.card_audit_ensure`` 的
     连播台钩子使用——与 ``card_pending_ensure.ensure_storyboard_prop_cards``
     同一"调用方等它跑完才继续派发视频"的取舍，不是后台 fire-and-forget）。"""
+    bible, label_segments = _load_batch_audit_context(project_id)
     semaphore = asyncio.Semaphore(_MAX_CONCURRENT_AUDITS)
 
     async def _run(name: str) -> dict[str, Any]:
         async with semaphore:
-            return await _audit_one_quietly(project_id, name)
+            if bible is None:
+                return _missing_bible_audit_result(project_id, name)
+            return await _audit_one_quietly(project_id, name, bible=bible, label_segments=label_segments)
 
     return list(await asyncio.gather(*[_run(name) for name in prop_names]))
 
@@ -414,12 +389,17 @@ def launch_background_audit(*, project_id: str, prop_names: list[str]) -> list["
     cards``/``audit_specific_prop_cards`` 同一口径（审查发现：此前这里是
     裸 ``create_task`` 循环，规则版本升级后一个项目几十张卡同时落后/用户点
     一次「整项目复核」会瞬间并发发起同等数量的模型调用，且放大 CAS 僵死窗口
-    被触发的概率）。"""
+    被触发的概率）。``bible``/``label_segments`` 在这里（而不是每个 ``_run``
+    内部）同步算好一次（2026-10-04 审查发现，见 ``_load_batch_audit_
+    context``）：一批 N 张卡只扫一次分镜段表，不是 N 次。"""
+    bible, label_segments = _load_batch_audit_context(project_id)
     semaphore = asyncio.Semaphore(_MAX_CONCURRENT_AUDITS)
 
     async def _run(name: str) -> dict[str, Any]:
         async with semaphore:
-            return await _audit_one_quietly(project_id, name)
+            if bible is None:
+                return _missing_bible_audit_result(project_id, name)
+            return await _audit_one_quietly(project_id, name, bible=bible, label_segments=label_segments)
 
     tasks = []
     for name in prop_names:
