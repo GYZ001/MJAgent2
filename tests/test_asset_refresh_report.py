@@ -28,7 +28,7 @@ from tests.test_review_wall_prd import _conn
 def test_entity_diff_character_newly_available_is_added() -> None:
     frozen = {"characters": [{"name": "温念", "look_revision_id": None}]}
     current = {"characters": [{"name": "温念", "look_revision_id": "portrait-1"}]}
-    diffs = drift.entity_diff(frozen, current)
+    diffs = drift.entity_diff(None, "p", 1, frozen, current, adopted_at=None)
     assert diffs == [{
         "entity_key": "character:温念", "entity_type": "character", "entity_name": "温念",
         "category": "added", "category_label": "新增参考图",
@@ -38,7 +38,7 @@ def test_entity_diff_character_newly_available_is_added() -> None:
 def test_entity_diff_scene_revision_change_is_updated() -> None:
     frozen = {"scene": {"name": "咖啡馆", "scene_revision_id": "rev1"}}
     current = {"scene": {"name": "咖啡馆", "scene_revision_id": "rev2"}}
-    diffs = drift.entity_diff(frozen, current)
+    diffs = drift.entity_diff(None, "p", 1, frozen, current, adopted_at=None)
     assert diffs == [{
         "entity_key": "scene:咖啡馆", "entity_type": "scene", "entity_name": "咖啡馆",
         "category": "updated", "category_label": "参考图已更新",
@@ -48,7 +48,7 @@ def test_entity_diff_scene_revision_change_is_updated() -> None:
 def test_entity_diff_character_no_longer_resolved_is_removed() -> None:
     frozen = {"characters": [{"name": "顾屿", "look_revision_id": "portrait-9"}]}
     current = {"characters": []}
-    diffs = drift.entity_diff(frozen, current)
+    diffs = drift.entity_diff(None, "p", 1, frozen, current, adopted_at=None)
     assert diffs == [{
         "entity_key": "character:顾屿", "entity_type": "character", "entity_name": "顾屿",
         "category": "removed", "category_label": "参考被移除",
@@ -66,7 +66,7 @@ def test_entity_diff_ignores_view_fingerprint_only_noise() -> None:
         "name": "温念", "look_revision_id": "portrait-1",
         "selected_views": [{"view_role": "face_closeup", "input_fingerprint": "fp-b"}],
     }]}
-    assert drift.entity_diff(frozen, current) == []
+    assert drift.entity_diff(None, "p", 1, frozen, current, adopted_at=None) == []
 
 
 def test_entity_diff_no_change_is_empty() -> None:
@@ -75,7 +75,7 @@ def test_entity_diff_no_change_is_empty() -> None:
         "scene": {"name": "咖啡馆", "scene_revision_id": "rev1"},
         "props": [{"label": "马克杯", "ready": True, "prop_revision_id": "pr1"}],
     }
-    assert drift.entity_diff(manifest, manifest) == []
+    assert drift.entity_diff(None, "p", 1, manifest, manifest, adopted_at=None) == []
 
 _SEGMENT = {"resources": {"characters": [], "scenes": [], "props": [{"label": "马克杯", "description": ""}]}}
 

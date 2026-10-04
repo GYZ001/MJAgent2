@@ -33,7 +33,7 @@ def _shot_video_is_stale(conn, shot_row, episode_storyboard_id: str | None) -> b
         if shot_art not in episode_parents:
             return True
     ver = conn.execute(
-        "SELECT artifact_id, image_inputs FROM shot_versions WHERE id=?", (adopted,)
+        "SELECT artifact_id, image_inputs, created_at FROM shot_versions WHERE id=?", (adopted,)
     ).fetchone()
     if not ver or not ver["artifact_id"]:
         # 无 artifact 时仍可检查资产版本 stale
@@ -173,19 +173,46 @@ def _shot_adopted_assets_stale(conn, shot_row, version_row) -> bool:
                 table="scene_reference_views", parent_column="scene_reference_id",
             ):
                 return True
-    return _props_stale(conn, manifest, project_id, episode_no)
+    return _props_stale(conn, manifest, project_id, episode_no, adopted_at=version_row["created_at"])
 
 
-def _props_stale(conn, manifest: dict, project_id: str, episode_no: int) -> bool:
+def _prop_asset_updated_after(conn, project_id: str, episode_no: int, label: str, adopted_at) -> bool:
+    """与 ``app.domain.video_ops.asset_drift._prop_asset_updated_after`` 同一
+    判据（不另起一套，见该函数 docstring 的完整理由）：冻结条目缺
+    ``prop_revision_id`` 字段时，比较道具参考图最近一次登记/重出图的时间
+    （``prop_references.created_at``）与这个采用版本的生成时间
+    （``shot_versions.created_at``）。"""
+    try:
+        # 延迟导入：与本文件其余资产类型同款的失败隔离策略（见
+        # ``_shot_adopted_assets_stale`` 开头 try/except 注释）。
+        from app.props import prop_reference_for_episode
+    except Exception:  # noqa: BLE001
+        return False
+    row = prop_reference_for_episode(conn, project_id, label, episode_no)
+    if row is None or adopted_at is None:
+        return False
+    try:
+        # 两个时间戳恰好相等时按「未变化」处理（严格大于才判更新）：与
+        # ``app.domain.video_ops.asset_drift._prop_asset_updated_after`` 同一
+        # 保守方向的选择，理由见该函数 docstring。
+        return float(row["created_at"]) > float(adopted_at)
+    except (TypeError, ValueError):
+        return False
+
+
+def _props_stale(conn, manifest: dict, project_id: str, episode_no: int, *, adopted_at) -> bool:
     """冻结 manifest 里的道具参考（ready/外观卡版本）是否已落后于当前库状态。
 
     ``prop_revision_id`` 是 2026-10-01 才加入冻结 manifest 的字段（见
     ``app.video_modes.prop_references`` 模块 docstring）：更早冻结的条目里这
-    个键根本不存在，不是显式 None——只在冻结条目确实带着这个键时才比较它，
-    否则会把"补充字段"误判成"道具变了"（2026-10-03 实测过的真实陷阱：B 库
-    里 `绿萝`/`手机`/`外套` 的 prop_references 行从未重新登记过，仅因为代码
-    升级补了新字段，旧冻结 manifest 就会被误判成 32/35 段全部过期）。``ready``
-    字段在这次升级之前就已存在，可以放心直接比较。"""
+    个键根本不存在，不是显式 None。这种情况不再当"未知=不变"直接放行——
+    2026-10-04 生产实测：《顾念长安》第 1 集同一件"浅灰色卫衣"卡被重新出图
+    （删掉星盘压痕）后，缺这个字段的旧采用版本全部被漏报成不过期——改走
+    ``_prop_asset_updated_after`` 的时间判据回退：卡的最近生效时间晚于这个
+    版本的生成时间才判 stale，早于才维持"未重新登记过就不算变化"的原有保护
+    （2026-10-03 实测：B 库里 `绿萝`/`手机`/`外套` 从未重新登记过，不能仅因
+    代码升级补了新字段就把旧版本判过期）。``ready`` 字段在这次升级之前就已
+    存在，可以放心直接比较。"""
     try:
         # 延迟导入：道具库 app.props 未就位时按"查不到就不算变化"降级，与本
         # 文件其余资产类型同款的失败隔离策略（见函数开头 try/except 注释）。
@@ -204,6 +231,9 @@ def _props_stale(conn, manifest: dict, project_id: str, episode_no: int) -> bool
         )[0]
         if bool(frozen_prop.get("ready")) != bool(current.get("ready")):
             return True
-        if "prop_revision_id" in frozen_prop and frozen_prop["prop_revision_id"] != current.get("prop_revision_id"):
+        if "prop_revision_id" in frozen_prop:
+            if frozen_prop["prop_revision_id"] != current.get("prop_revision_id"):
+                return True
+        elif _prop_asset_updated_after(conn, project_id, episode_no, label, adopted_at):
             return True
     return False

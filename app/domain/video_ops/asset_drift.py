@@ -26,6 +26,7 @@ from typing import Any
 
 from app.media_exec.enqueue import _load_shot_model
 from app.multiview import resolve_shot_asset_dependencies
+from app.props import prop_reference_for_episode
 
 _CATEGORY_LABELS = {
     "added": "新增参考图",
@@ -63,7 +64,8 @@ def _scene_revision_map(manifest: dict[str, Any] | None) -> dict[str, Any]:
 def _prop_state_map(manifest: dict[str, Any] | None) -> dict[str, tuple[bool, Any, bool]]:
     """值形状 ``(ready, prop_revision_id, has_revision_key)``——第三项标记这条
     冻结记录是否来自 2026-10-01 之后的新字段版本（见模块 docstring 的向后
-    兼容说明），缺键时第三项为 False，比较时据此跳过 revision id 这一维。"""
+    兼容说明）。缺键时第三项为 False：比较时不再当「未知=不变」直接跳过，
+    改走 ``_prop_asset_updated_after`` 的时间判据回退（见 ``_prop_diff``）。"""
     out: dict[str, tuple[bool, Any, bool]] = {}
     for p in (manifest or {}).get("props") or []:
         if not isinstance(p, dict) or not p.get("label"):
@@ -82,7 +84,30 @@ def _revision_diff(entity_type: str, name: str, frozen_present: bool, frozen_rev
     return []
 
 
-def _prop_diff(label: str, frozen: tuple[bool, Any, bool] | None, current: tuple[bool, Any, bool] | None) -> list[dict[str, Any]]:
+def _prop_asset_updated_after(conn: Any, project_id: str, episode_no: int, label: str, adopted_at: Any) -> bool:
+    """冻结道具条目缺 ``prop_revision_id`` 字段（2026-10-01 前冻结）时的回退
+    判据：道具参考图最近一次登记/重出图的时间
+    （``prop_references.created_at``——覆盖式登记，每次外观卡更新都是先删
+    旧行再插新行，见 ``app.props.store.upsert_prop_reference`` docstring）
+    是否晚于这条采用/候选版本的生成时间（``shot_versions.created_at``）。
+    晚于才判「参考图已更新」；查不到当前行或拿不到可比时间按不变处理，不
+    制造误报（2026-10-04 生产实测：ERR 漏报的 6 段里，旧记录全部缺这个
+    字段，但卫衣卡在这些视频生成之后确实被重新出过图）。两个时间戳恰好相等
+    时按「未变化」处理（严格大于才判更新）：两次 ``time.time()`` 精确相等
+    概率极低，这里选择与「查不到时间就不算变化」同一个保守方向，不是漏判。"""
+    row = prop_reference_for_episode(conn, project_id, label, episode_no)
+    if row is None or adopted_at is None:
+        return False
+    try:
+        return float(row["created_at"]) > float(adopted_at)
+    except (TypeError, ValueError):
+        return False
+
+
+def _prop_diff(
+    conn: Any, project_id: str, episode_no: int, label: str,
+    frozen: tuple[bool, Any, bool] | None, current: tuple[bool, Any, bool] | None, *, adopted_at: Any,
+) -> list[dict[str, Any]]:
     if current is None:
         return [_diff_item("prop", label, "removed")] if frozen and frozen[0] else []
     c_ready, c_rev, c_has_key = current
@@ -91,14 +116,25 @@ def _prop_diff(label: str, frozen: tuple[bool, Any, bool] | None, current: tuple
     f_ready, f_rev, f_has_key = frozen
     if f_ready != c_ready:
         return [_diff_item("prop", label, "added" if c_ready else "removed")]
-    if f_ready and c_ready and f_has_key and c_has_key and f_rev != c_rev:
+    if not (f_ready and c_ready):
+        return []
+    if f_has_key and c_has_key:
+        return [_diff_item("prop", label, "updated")] if f_rev != c_rev else []
+    if _prop_asset_updated_after(conn, project_id, episode_no, label, adopted_at):
         return [_diff_item("prop", label, "updated")]
     return []
 
 
-def entity_diff(frozen: dict[str, Any] | None, current: dict[str, Any] | None) -> list[dict[str, Any]]:
+def entity_diff(
+    conn: Any, project_id: str, episode_no: int,
+    frozen: dict[str, Any] | None, current: dict[str, Any] | None, *, adopted_at: Any,
+) -> list[dict[str, Any]]:
     """两份 reference manifest 之间，按实体给出的差异列表（见模块 docstring
-    的判据范围：只认 revision id，不认视角选型）。"""
+    的判据范围：只认 revision id，不认视角选型）。``conn``/``project_id``/
+    ``episode_no``/``adopted_at``（这份 frozen 所属版本的 ``shot_versions.
+    created_at``）只供道具缺 revision 字段时的时间判据回退使用，人物/场景
+    不需要（``look_revision_id``/``scene_revision_id`` 从多视角功能上线起
+    就存在，没有旧记录缺字段的问题）。"""
     diffs: list[dict[str, Any]] = []
     f_ch, c_ch = _character_revision_map(frozen), _character_revision_map(current)
     for name in sorted(set(f_ch) | set(c_ch)):
@@ -108,7 +144,7 @@ def entity_diff(frozen: dict[str, Any] | None, current: dict[str, Any] | None) -
         diffs.extend(_revision_diff("scene", name, name in f_sc, f_sc.get(name), name in c_sc, c_sc.get(name)))
     f_pr, c_pr = _prop_state_map(frozen), _prop_state_map(current)
     for label in sorted(set(f_pr) | set(c_pr)):
-        diffs.extend(_prop_diff(label, f_pr.get(label), c_pr.get(label)))
+        diffs.extend(_prop_diff(conn, project_id, episode_no, label, f_pr.get(label), c_pr.get(label), adopted_at=adopted_at))
     return diffs
 
 
@@ -146,12 +182,17 @@ def candidate_usable(version_row: Any) -> bool:
     return (not technical) or bool(technical.get("passed"))
 
 
-def candidate_matches_current(version_row: Any, current: dict[str, Any] | None) -> bool:
-    """候选自己冻结的参考清单是否已是当前最新（不存在任何实体级差异）。"""
+def candidate_matches_current(
+    conn: Any, project_id: str, episode_no: int, version_row: Any, current: dict[str, Any] | None,
+) -> bool:
+    """候选自己冻结的参考清单是否已是当前最新（不存在任何实体级差异）。
+    ``conn``/``project_id``/``episode_no`` 只供 ``entity_diff`` 内道具缺
+    revision 字段时的时间判据回退使用。"""
     frozen = frozen_manifest_of(version_row)
     if frozen is None:
         return False
-    return not entity_diff(frozen, current)
+    adopted_at = version_row["created_at"] if "created_at" in version_row.keys() else None
+    return not entity_diff(conn, project_id, episode_no, frozen, current, adopted_at=adopted_at)
 
 
 def episode_bible_and_screenplay(conn: Any, episode_row: Any, project_id: str) -> tuple[Any, Any]:

@@ -76,7 +76,7 @@ def stale_assets_preview(episode_id: str):
         adopted = shot.get("adopted_version_id")
         if adopted:
             ver = conn.execute(
-                "SELECT artifact_id, image_inputs FROM shot_versions WHERE id=?", (adopted,)
+                "SELECT artifact_id, image_inputs, created_at FROM shot_versions WHERE id=?", (adopted,)
             ).fetchone()
             if ver and _shot_adopted_assets_stale(conn, shot, ver):
                 reasons.append("asset_revision")

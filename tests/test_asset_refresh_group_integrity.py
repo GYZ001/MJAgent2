@@ -102,7 +102,7 @@ def test_build_groups_caches_matching_candidates_per_shot(monkeypatch) -> None:
 
     calls: list[str] = []
 
-    def fake_matching(conn, shot_id, current, *, exclude_version_id):
+    def fake_matching(conn, shot_id, current, *, exclude_version_id, project_id, episode_no):
         calls.append(shot_id)
         return []
 
@@ -114,6 +114,7 @@ def test_build_groups_caches_matching_candidates_per_shot(monkeypatch) -> None:
         "shot": shot,
         "current": {"characters": [{"name": "温念"}], "scene": None, "additional_scenes": [], "props": [{"label": "马克杯"}]},
         "diff": [diff_a, diff_b], "adopted": True, "adopted_version_id": "v1",
+        "project_id": "p", "episode_no": 1,
     }
     groups = report_mod._build_groups(None, [record])
     assert {g["entity_key"] for g in groups} == {"prop:马克杯", "character:温念"}

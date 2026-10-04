@@ -20,7 +20,10 @@ def _succeeded_candidate_rows(conn: Any, shot_id: str, *, exclude_version_id: st
     return [r for r in rows if r["id"] != exclude_version_id]
 
 
-def _matching_candidates(conn: Any, shot_id: str, current: dict[str, Any], *, exclude_version_id: str | None) -> list[dict[str, Any]]:
+def _matching_candidates(
+    conn: Any, shot_id: str, current: dict[str, Any], *,
+    exclude_version_id: str | None, project_id: str, episode_no: int,
+) -> list[dict[str, Any]]:
     """候选列表按 ``created_at`` 降序（继承 ``_succeeded_candidate_rows`` 的
     排序），前端据此把 ``candidates[0]`` 当作默认预选的最新候选——这里不能
     改排序，否则默认预选会悄悄选错。"""
@@ -28,7 +31,7 @@ def _matching_candidates(conn: Any, shot_id: str, current: dict[str, Any], *, ex
     for row in _succeeded_candidate_rows(conn, shot_id, exclude_version_id=exclude_version_id):
         if not drift.candidate_usable(row):
             continue
-        if drift.candidate_matches_current(row, current):
+        if drift.candidate_matches_current(conn, project_id, episode_no, row, current):
             out.append({
                 "version_id": row["id"], "version_no": row["version_no"], "created_at": row["created_at"],
                 "video_url": build_media_url(row["video_path"]),
@@ -45,9 +48,10 @@ def _shot_record(conn: Any, shot_row: Any, *, project_id: str, episode_no: int, 
         return {
             "shot": shot_row, "current": current, "diff": [], "adopted": False,
             "adopted_version_id": None, "adopted_version_no": None,
+            "project_id": project_id, "episode_no": episode_no,
         }
     version = conn.execute(
-        "SELECT id, image_inputs, version_no FROM shot_versions WHERE id=?", (adopted_id,),
+        "SELECT id, image_inputs, version_no, created_at FROM shot_versions WHERE id=?", (adopted_id,),
     ).fetchone()
     adopted_version_no = version["version_no"] if version else None
     frozen = drift.frozen_manifest_of(version) if version else None
@@ -62,10 +66,14 @@ def _shot_record(conn: Any, shot_row: Any, *, project_id: str, episode_no: int, 
         conn, shot_row, project_id=project_id, episode_no=episode_no, bible=bible, screenplay=screenplay,
         frozen_contract_json=frozen_contract,
     )
-    diff = drift.entity_diff(frozen, current) if frozen is not None else []
+    diff = (
+        drift.entity_diff(conn, project_id, episode_no, frozen, current, adopted_at=version["created_at"])
+        if frozen is not None else []
+    )
     return {
         "shot": shot_row, "current": current, "diff": diff, "adopted": True,
         "adopted_version_id": adopted_id, "adopted_version_no": adopted_version_no,
+        "project_id": project_id, "episode_no": episode_no,
     }
 
 
@@ -109,6 +117,7 @@ def _cached_matching_candidates(conn: Any, record: dict[str, Any]) -> list[dict[
         shot = record["shot"]
         record["_candidates"] = _matching_candidates(
             conn, shot["id"], record["current"], exclude_version_id=record["adopted_version_id"],
+            project_id=record["project_id"], episode_no=record["episode_no"],
         )
     return record["_candidates"]
 
@@ -174,7 +183,7 @@ def candidate_adopt_check(
     冻结参考清单确实已是当前最新——四条任一不满足就整组拒绝（CLAUDE.md
     「不做部分采用」）。"""
     version = conn.execute(
-        "SELECT id, shot_id, status, image_inputs, video_path, technical_validation_json "
+        "SELECT id, shot_id, status, image_inputs, video_path, technical_validation_json, created_at "
         "FROM shot_versions WHERE id=?", (version_id,),
     ).fetchone()
     if not version or version["shot_id"] != shot_row["id"]:
@@ -191,6 +200,6 @@ def candidate_adopt_check(
         conn, shot_row, project_id=project_id, episode_no=episode_no, bible=bible, screenplay=screenplay,
         frozen_contract_json=meta.get("shot_contract_json"),
     )
-    if not drift.candidate_matches_current(version, current):
+    if not drift.candidate_matches_current(conn, project_id, episode_no, version, current):
         return False, "该版本的参考资产不是当前最新，不能作为本次整组采用的目标"
     return True, ""

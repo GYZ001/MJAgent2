@@ -309,6 +309,83 @@ def test_legacy_reverse_angle_view_id_as_fingerprint_stays_stale(conn):
     assert _shot_adopted_assets_stale(conn, shot_row, ver_row) is True
 
 
+def _seed_prop_reference(conn, *, project_id, episode_no, created_at) -> None:
+    """按真实 ``prop_references`` 表结构插入一行，驱动 ``_prop_asset_updated_
+    after`` 的真实查询路径（``prop_reference_for_episode``），不手工伪造比较
+    结果——与 ``tests/test_asset_refresh_prop_revision_fallback.py`` 同一手法。"""
+    from app.props.store import ensure_tables_on_connection
+
+    ensure_tables_on_connection(conn)
+    conn.execute(
+        "INSERT INTO prop_references(id, project_id, prop_name, ep_start, ep_end, "
+        "appearance, image_path, prompt, status, qa_json, created_at) "
+        "VALUES('propref-1', ?, '马克杯', 1, NULL, 'a', '/tmp/x.png', 'p', 'ready', '{}', ?)",
+        (project_id, created_at),
+    )
+
+
+def test_props_stale_missing_revision_key_regenerated_after_video_is_stale(conn, monkeypatch):
+    """``_props_stale`` 对缺 ``prop_revision_id`` 键的冻结道具条目要走与
+    ``app.domain.video_ops.asset_drift`` 同一份时间判据回退，不是另起一套：
+    道具卡最近一次登记/重出图的时间晚于这个采用版本的生成时间，必须判
+    stale——否则生成台「过期」提示会跟参考资产面板的说法不一致（CLAUDE.md
+    「同一件事界面只有一种说法」；2026-10-04 生产实测：《顾念长安》"浅灰色
+    卫衣"卡重出图后，缺这个字段的旧采用版本曾被两边一起漏报）。"""
+    import app.multiview as multiview_mod
+    import app.video_modes.prop_references as prop_references_mod
+
+    monkeypatch.setattr(multiview_mod, "character_multiview_enabled", lambda: False)
+    monkeypatch.setattr(multiview_mod, "scene_multiview_enabled", lambda: False)
+    monkeypatch.setattr(
+        prop_references_mod, "resolve_segment_prop_manifest_entries",
+        lambda entries, *, conn, project_id, episode_no: [
+            {"label": entries[0]["label"], "ready": True, "prop_revision_id": "rev-current"},
+        ],
+    )
+    project_id, episode_id = _seed_episode(conn)
+    manifest = {
+        "characters": [], "scene": None, "additional_scenes": [],
+        "props": [{"label": "马克杯", "ready": True}],
+    }
+    _seed_shot_and_version(conn, shot_id="shot_1", episode_id=episode_id, version_id="ver_1", manifest=manifest)
+    _seed_prop_reference(conn, project_id=project_id, episode_no=2, created_at=100)
+    conn.commit()
+
+    shot_row = conn.execute("SELECT * FROM shots WHERE id='shot_1'").fetchone()
+    ver_row = conn.execute("SELECT * FROM shot_versions WHERE id='ver_1'").fetchone()
+    assert _shot_adopted_assets_stale(conn, shot_row, ver_row) is True
+
+
+def test_props_stale_missing_revision_key_untouched_before_video_stays_fresh(conn, monkeypatch):
+    """同样缺 ``prop_revision_id`` 键，但道具卡最近一次生效时间早于视频生成
+    时间（从未重新登记过的旧卡）——必须维持「不变」，不能仅因为代码升级补了
+    新字段就把一直没变过的道具判成过期（与
+    ``test_asset_refresh_prop_revision_fallback`` 同口径的对称用例）。"""
+    import app.multiview as multiview_mod
+    import app.video_modes.prop_references as prop_references_mod
+
+    monkeypatch.setattr(multiview_mod, "character_multiview_enabled", lambda: False)
+    monkeypatch.setattr(multiview_mod, "scene_multiview_enabled", lambda: False)
+    monkeypatch.setattr(
+        prop_references_mod, "resolve_segment_prop_manifest_entries",
+        lambda entries, *, conn, project_id, episode_no: [
+            {"label": entries[0]["label"], "ready": True, "prop_revision_id": "rev-current"},
+        ],
+    )
+    project_id, episode_id = _seed_episode(conn)
+    manifest = {
+        "characters": [], "scene": None, "additional_scenes": [],
+        "props": [{"label": "马克杯", "ready": True}],
+    }
+    _seed_shot_and_version(conn, shot_id="shot_1", episode_id=episode_id, version_id="ver_1", manifest=manifest)
+    _seed_prop_reference(conn, project_id=project_id, episode_no=2, created_at=0.5)
+    conn.commit()
+
+    shot_row = conn.execute("SELECT * FROM shots WHERE id='shot_1'").fetchone()
+    ver_row = conn.execute("SELECT * FROM shot_versions WHERE id='ver_1'").fetchone()
+    assert _shot_adopted_assets_stale(conn, shot_row, ver_row) is False
+
+
 def test_prop_drift_detected_even_when_character_and_scene_multiview_disabled(conn, monkeypatch):
     """两个多视角开关（``character_multiview_enabled``/``scene_multiview_
     enabled``）都被关掉时，道具漂移仍必须被判 stale——``_props_stale`` 判的
