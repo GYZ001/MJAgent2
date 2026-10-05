@@ -167,7 +167,7 @@ def _segment_prep(ctx: SegmentChainContext, state: ChainState, plan: Any, previo
     # 误导模型把它当成整部作品的开场（审查发现 1，2026-10-01）。
     mid_episode_scene_change = previous_draft is None and state.approx_previous_scene_ids is not None
     camera_history = _camera_digest_window_payload(state.camera_digest_by_segment_no, segment_no=plan.segment_no, window=ctx.camera_digest_window)
-    continuity_rules = _segment_continuity_rules(previous_segment_no=previous_segment_no, camera_history=camera_history, mid_episode_scene_change=mid_episode_scene_change)
+    continuity_rules = _segment_continuity_rules(previous_segment_no=previous_segment_no, camera_history=camera_history, mid_episode_scene_change=mid_episode_scene_change, previous_memo=previous_memo)
     staging_chain = chain_prompt_texts(ctx.beat_draft.segments, state.by_segment_no, plan.segment_no)
     staging_gate = StagingSoftGate(hard_attempts=2, segment_no=plan.segment_no)
     voice_gate = _stim_voice.StimulusVoiceSoftCheck(hard_attempts=2, segment_no=plan.segment_no)

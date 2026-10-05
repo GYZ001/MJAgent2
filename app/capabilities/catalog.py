@@ -279,6 +279,13 @@ def _register_human_only(registry) -> None:
             tags=("human", "storyboard"),
         ),
         HumanOnlySpec(
+            "human.prop_continuity_batch_rewrite", "存量分镜道具/衣物状态批量复核重写",
+            "对已生成分镜的一集按现行复核规则批量检查道具/衣物状态续接，违规段走「修订本段」语义重写并保存",
+            reason="批量会对多段发起模型重写并落库，产出面板由用户核对后决定是否接受；不向 Agent/MCP 开放为自动批量重写能力",
+            rest_routes=("POST /api/episodes/{episode_id}/prop-continuity-review/rewrite",),
+            tags=("human", "storyboard"),
+        ),
+        HumanOnlySpec(
             "human.select_upload_file",
             "选择上传小说文件",
             "用户在系统文件选择器中挑选 TXT 或 EPUB；前端换发短时效 attachment_token",

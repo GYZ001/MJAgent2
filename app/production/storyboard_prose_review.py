@@ -40,6 +40,15 @@
 写实画风启用（``is_photographic_style_prompt``），判据与 fix 形状照抄
 ``skin_blush``/``time_jump`` 的「正面陈述 + 必须逐字核验 quote」先例。
 
+2026-10-04（用户反馈《顾念长安》EP1 第 1→2 段：温念拔下插头、插座两孔空着，
+下一段又画成插头插着——新增第十一类）：``prop_state_regression``——上一段
+``continuity_memo.props`` 记录的道具/衣物位置（location）/状态（state）与默认
+或此前样子不同，本段开场却把它写回了那个默认/此前样子，且本段原文没有写出
+让它变回去的动作。与现有三类跨段判据不同：``previous_quote`` 不要求逐字
+出现在上一段 ``prompt_text``（那类状态信息未必被写进正文，但一定写进备忘），
+而是逐字核验到上一段 ``continuity_memo.props`` 对应条目的 ``location``/
+``state`` 字段文本本身——见 ``_prop_state_regression_quote_valid``。
+
 2026-10-01（第 1 集第五版 35 段真实成片逐帧复查，``storyboard_skin_blush``
 模块 docstring 同批）：``skin_blush`` 判据从"把脸红写成空间蔓延过程才算违规"
 扩大为"人脸出现任何局部颜色描述就算违规"——轻量写法（「脸颊泛起淡淡的红晕」）
@@ -156,6 +165,9 @@ PROSE_REVIEW_SETTING_KEY = "storyboard_prose_review_enabled"
 _REVIEW_ANSWER_TOKENS = 1800
 #: 要求 previous_quote 必须逐字核验到的三类——本段开场状态与上一段末镜矛盾。
 _NEEDS_PREVIOUS_QUOTE = {"screen_side", "prop_appearance", "repeated_transition_action"}
+#: previous_quote 核验对照上一段 continuity_memo.props（不是 prompt_text）的一类，
+#: 见模块 docstring 2026-10-04 changelog。
+_NEEDS_PREVIOUS_MEMO_QUOTE = {"prop_state_regression"}
 #: 只在写实画风项目出现的两类——判据本身预设真人实拍物理约束（脸红的生理蔓延
 #: 过程、摄影机的物理可达范围），动画/插画风格不受这两条约束。
 _PHOTOGRAPHIC_ONLY_KINDS = {"skin_blush", "impossible_camera_move"}
@@ -242,6 +254,18 @@ _KIND_RULES: dict[str, str] = {
         "系统统一写入的固定说明，不是对人物动作的描写。quote 填这句否定句原文；fix 给出对应的正面写法：直接描述人物实际在做什么/"
         "穿什么，不提被否定的那个动作。"
     ),
+    "prop_state_regression": (
+        "prop_state_regression（道具/衣物状态回退）：输入里的 previous_continuity_memo.props"
+        "记录了某件道具/衣物在上一段结束时的位置（location）或状态（state），本段开场却把它"
+        "写回了默认或此前的样子（例如已拔下的插头又插回插座、已扣好的外套又变回敞开），而"
+        "本段原文没有写出任何让它变回去的具体动作——即违规。prop_name 填这件道具/衣物在"
+        "previous_continuity_memo.props 里登记的 name（逐字照抄）；quote 填本段 prompt_text 里"
+        "与该状态矛盾的原文；previous_quote 必须逐字照抄 previous_continuity_memo.props 里这件"
+        "道具对应条目的 location 或 state 字段文字本身（不是上一段分镜正文）；fix 给出正面写法："
+        "把本段开场该道具/衣物的描述改成与 previous_quote 一致的状态，如果剧情确实要让它变"
+        "回去，必须先写出具体的变回动作。没有 previous_continuity_memo（本集第一段）时这类"
+        "违规结构上不可能成立，不要报告。"
+    ),
 }
 
 
@@ -252,6 +276,9 @@ class ProseViolation(BaseModel):
     shot_label: str = ""
     quote: str = ""
     previous_quote: str = ""
+    #: 只在 kind=prop_state_regression 时需要：previous_continuity_memo.props
+    #: 里登记的 name，供代码核验定位对应条目——见 _prop_state_regression_quote_valid。
+    prop_name: str = ""
     fix: str = ""
 
 
@@ -313,7 +340,7 @@ def _review_rules_text(*, photographic: bool, max_shots: int) -> str:
         "找到逐字证据时才报告，找不到就不要报告这一类，宁可少报不要编造。每条违规给出 kind（取值只能是"
         f"下面编号对应的英文名）、shot_label（这一镜的标签，例如『镜头2』）、quote（出问题的原文片段，"
         "必须逐字照抄 prompt_text 里的文字）、fix（怎么改）；screen_side、prop_appearance 与"
-        f"repeated_transition_action 三类还要给 previous_quote（逐字照抄『上一段末镜文字』里的对应原文）。\n{numbered}"
+        f"repeated_transition_action 三类还要给 previous_quote（逐字照抄『上一段末镜文字』里的对应原文）；prop_state_regression 另需给 previous_quote（逐字照抄 previous_continuity_memo.props 里对应条目的 location/state 文本本身，不是『上一段末镜文字』）与 prop_name（该道具/衣物在 previous_continuity_memo.props 里登记的 name，逐字照抄）。\n{numbered}"
     )
 
 
@@ -322,14 +349,27 @@ def _verbatim_in(quote: str, text: str) -> bool:
     return bool(condensed) and condensed in textmatch.condense(text or "")
 
 
+def _prop_state_regression_quote_valid(v: ProseViolation, previous_draft: Any | None) -> bool:
+    """prop_state_regression 的 previous_quote 核验：逐字出自上一段
+    continuity_memo.props 里 name 归一化匹配（``textmatch.condense``，容忍两次独立模型调用之间的空白/标点差异）
+    的那一条 location/state 文本本身（不是上一段 prompt_text）。"""
+    if previous_draft is None or not v.prop_name.strip():
+        return False
+    for prop in getattr(previous_draft.continuity_memo, "props", None) or []:
+        if textmatch.condense(prop.name) == textmatch.condense(v.prop_name):
+            return _verbatim_in(v.previous_quote, prop.location) or _verbatim_in(v.previous_quote, prop.state)
+    return False
+
+
 def _verified_violations(
     raw: list[ProseViolation], *, segment_no: int, draft: Any, previous_draft: Any | None,
 ) -> list[ProseViolation]:
     """模型提名、代码核验：kind 必须在 ``_KIND_RULES`` 里，quote 必须逐字核验到
     本段 prompt_text；screen_side/prop_appearance/repeated_transition_action
     额外要求 previous_quote 逐字核验到上一段 prompt_text（没有上一段时这三类
-    结构上不可能成立）。核验不过的
-    条目单独丢弃，不拖累同段其余已核验违规，可见日志见模块 docstring。"""
+    结构上不可能成立）；prop_state_regression 额外要求 previous_quote 逐字核验到
+    上一段 continuity_memo.props 对应条目（见 _prop_state_regression_quote_valid）。
+    核验不过的条目单独丢弃，不拖累同段其余已核验违规，可见日志见模块 docstring。"""
     verified: list[ProseViolation] = []
     for v in raw:
         if v.kind not in _KIND_RULES:
@@ -340,6 +380,9 @@ def _verified_violations(
             continue
         if v.kind in _NEEDS_PREVIOUS_QUOTE and not (previous_draft is not None and _verbatim_in(v.previous_quote, previous_draft.prompt_text)):
             _LOGGER.warning("[STORYBOARD_PROSE_REVIEW_UNVERIFIED] 第 %s 段 kind=%s 的 previous_quote 在上一段 prompt_text 里找不到逐字证据，丢弃：%r", segment_no, v.kind, v.previous_quote[:200])
+            continue
+        if v.kind in _NEEDS_PREVIOUS_MEMO_QUOTE and not _prop_state_regression_quote_valid(v, previous_draft):
+            _LOGGER.warning("[STORYBOARD_PROSE_REVIEW_UNVERIFIED] 第 %s 段 kind=%s 的 previous_quote 在上一段 continuity_memo.props 里找不到逐字证据，丢弃：%r", segment_no, v.kind, v.previous_quote[:200])
             continue
         verified.append(v)
     return verified

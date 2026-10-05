@@ -55,6 +55,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.production.storyboard_continuity_memo import _AiContinuityMemo, continuity_memo_rules
+from app.production.storyboard_prop_continuity import opening_shot_prop_state_rule
 from app.production.screenplay_markers import structure_rules
 
 
@@ -220,9 +221,15 @@ def _segment_continuity_rules(
     previous_segment_no: int | None,
     camera_history: list[dict[str, Any]],
     mid_episode_scene_change: bool = False,
+    previous_memo: _AiContinuityMemo | None = None,
 ) -> list[str]:
     """一镜参考的第一、二层文案（第三层——世界书外观锚点——在
     ``_generate_all_segment_prompts`` 的 shared_rules 里，逐段调用同样适用）。
+
+    2026-10-04（用户反馈《顾念长安》EP1 插座/插头驱动）：``previous_memo`` 有
+    道具/衣物状态记录时追加第三层——起幅道具状态续接正面陈述，见
+    ``app.production.storyboard_prop_continuity.opening_shot_prop_state_rule``；
+    没有上一段（``None``）时与改动前逐字一致，不生造一句空话。
 
     按 CLAUDE.md「Prompts」一节的要求写：正面陈述而非禁令，说清参考素材从
     哪来，以及确实没有时该怎么写——本集第一段没有上一段、没有镜头语言历史，
@@ -280,7 +287,8 @@ def _segment_continuity_rules(
             "camera_repetition_rationale 按本段实际情况据实填写、留空即可，"
             "不必刻意呼应任何东西。"
         )
-    return [rule_1, rule_2]
+    prop_rule = opening_shot_prop_state_rule(previous_memo)
+    return [rule_1, rule_2] + ([prop_rule] if prop_rule else [])
 
 
 def _segment_shared_rules() -> list[str]:

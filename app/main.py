@@ -29,6 +29,7 @@ from app.auth.deps import require_system_admin
 from app.auth.principal import set_current_principal
 from app.authz import require_project_owner_access
 from app.domain.storyboard_ops.identity_review import router as identity_review_router
+from app.domain.storyboard_ops.prop_continuity_review_api import router as prop_continuity_review_router
 from app.config import PROJECTS_DIR, ROOT
 from app.db import get_conn, init_db
 from app.mcp import router as mcp_router
@@ -374,6 +375,7 @@ app.include_router(payments_router)  # /api/payments/orders*：账号级自助�
 app.include_router(payments_public_router)  # /api/payments/notify/*：渠道回调，公开端点，验签是唯一防线
 app.include_router(router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(identity_review_router, dependencies=_PROJECT_OWNER_DEPS)
+app.include_router(prop_continuity_review_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(planning_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(orchestration_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(orgs_router, dependencies=_PROJECT_OWNER_DEPS)  # EP-01 第二阶段：组织/团队/角色/项目授权 REST

@@ -46,6 +46,7 @@ import pytest
 from app.harness import model_gateway
 from app.production import storyboard_prose_review as prose_review
 from app.production.storyboard_action_density import MAX_KEY_ACTIONS_PER_SHOT, key_action_definition, over_limit_remedy
+from app.production.storyboard_continuity_memo import _AiContinuityMemo, _AiPropState
 from app.production.storyboard_pack import _AiStoryboardSegmentDraft
 from app.production.storyboard_skin_blush import SEEDANCE_SKIN_BLUSH_RULE
 from app.schemas.segment_identity import SegmentDialogue
@@ -55,6 +56,11 @@ def _draft(prompt_text: str, *, dialogue: list | None = None, degraded_capabilit
     return _AiStoryboardSegmentDraft(
         prompt_text=prompt_text, shot_count=3, dialogue=dialogue or [], degraded_capabilities=degraded_capabilities or [],
     )
+
+
+def _draft_with_props(prompt_text: str, props: list[_AiPropState]) -> _AiStoryboardSegmentDraft:
+    """供 prop_state_regression 用例：previous_draft 需要带 continuity_memo.props。"""
+    return _AiStoryboardSegmentDraft(prompt_text=prompt_text, shot_count=3, continuity_memo=_AiContinuityMemo(time_of_day="白天", props=props))
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +173,64 @@ def test_repeated_transition_action_without_previous_draft_is_discarded():
     )
     verified = prose_review._verified_violations([violation], segment_no=1, draft=draft, previous_draft=None)
     assert verified == []
+
+
+# ---------------------------------------------------------------------------
+# prop_state_regression（2026-10-04，真实案例：第 1→2 段插座/插头）：
+# previous_quote 核验对照上一段 continuity_memo.props，不是 prompt_text
+# ---------------------------------------------------------------------------
+
+def test_prop_state_regression_survives_code_verification():
+    previous = _draft_with_props(
+        "镜头4：她拔下插头。",
+        [_AiPropState(name="插座与插头", location="插座在床尾墙根，插头已拔出，躺在地板上", state="已拔下，插座两孔空着")],
+    )
+    draft = _draft("镜头1：墙根插座上插着白色插头。")
+    violation = prose_review.ProseViolation(
+        kind="prop_state_regression", prop_name="插座与插头",
+        quote="墙根插座上插着白色插头", previous_quote="插座两孔空着", fix="改回插头已拔下、插座两孔空着",
+    )
+    verified = prose_review._verified_violations([violation], segment_no=2, draft=draft, previous_draft=previous)
+    assert verified == [violation]
+
+
+def test_prop_state_regression_without_previous_draft_is_discarded():
+    draft = _draft("镜头1：墙根插座上插着白色插头。")
+    violation = prose_review.ProseViolation(
+        kind="prop_state_regression", prop_name="插座与插头",
+        quote="墙根插座上插着白色插头", previous_quote="插座两孔空着", fix="x",
+    )
+    verified = prose_review._verified_violations([violation], segment_no=1, draft=draft, previous_draft=None)
+    assert verified == []
+
+
+def test_prop_state_regression_with_unknown_prop_name_is_discarded():
+    previous = _draft_with_props("镜头4：她拔下插头。", [_AiPropState(name="插座与插头", location="插座两孔空着", state="已拔下")])
+    draft = _draft("镜头1：墙根插座上插着白色插头。")
+    violation = prose_review.ProseViolation(
+        kind="prop_state_regression", prop_name="一个不存在的道具名",
+        quote="墙根插座上插着白色插头", previous_quote="插座两孔空着", fix="x",
+    )
+    verified = prose_review._verified_violations([violation], segment_no=2, draft=draft, previous_draft=previous)
+    assert verified == []
+
+
+def test_prop_state_regression_with_unverifiable_previous_quote_is_discarded():
+    previous = _draft_with_props("镜头4：她拔下插头。", [_AiPropState(name="插座与插头", location="插座两孔空着", state="已拔下")])
+    draft = _draft("镜头1：墙根插座上插着白色插头。")
+    violation = prose_review.ProseViolation(
+        kind="prop_state_regression", prop_name="插座与插头",
+        quote="墙根插座上插着白色插头", previous_quote="编造的备忘原文", fix="x",
+    )
+    verified = prose_review._verified_violations([violation], segment_no=2, draft=draft, previous_draft=previous)
+    assert verified == []
+
+
+def test_review_rules_text_includes_prop_state_regression_regardless_of_photographic():
+    text_on = prose_review._review_rules_text(photographic=True, max_shots=4)
+    text_off = prose_review._review_rules_text(photographic=False, max_shots=4)
+    assert "prop_state_regression" in text_on and "prop_state_regression" in text_off
+    assert "previous_continuity_memo.props" in text_on
 
 
 def test_repeated_transition_action_with_unverifiable_previous_quote_is_discarded():

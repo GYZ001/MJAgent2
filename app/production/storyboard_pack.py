@@ -89,7 +89,7 @@ from app.production.storyboard_dialogue_ledger import (
 from app.production.storyboard_dialogue_repeat_repair import repaired_repeated_delivery_errors
 from app.production.storyboard_narrative_arc import _segment_shared_rules
 from app.video_modes.scene_state_selection import resource_scene_state_advisories
-from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_density as _action_density, storyboard_cast_lock as _cast_lock, storyboard_prose_review as _prose_review, storyboard_prop_entrance as _prop_entrance, storyboard_prop_appearance_lock as _prop_lock, storyboard_beat_action_capacity as _beat_action_capacity
+from app.production import storyboard_beat_causality as _beat_causality, storyboard_beat_foreshadowing as _beat_foreshadowing, storyboard_action_density as _action_density, storyboard_cast_lock as _cast_lock, storyboard_prose_review as _prose_review, storyboard_prop_entrance as _prop_entrance, storyboard_prop_appearance_lock as _prop_lock, storyboard_beat_action_capacity as _beat_action_capacity, storyboard_prop_continuity as _prop_continuity
 from app.visual_styles import current_visual_style_prompt, is_photographic_style_prompt
 from app.production.storyboard_segment_ranges import (
     _PARATEXT_PLACEHOLDER_TEXT,
@@ -834,7 +834,7 @@ def _segment_content_advisories(
         continuity_memo_character_advisories(draft.continuity_memo, segment_character_ids)
     )
     # P0-A/C（2026-09-27）/P0-F（2026-09-30）：情绪转折/伏笔/道具锁定外观"是否真的被写成画面"，同一套 advisory 哲学，见各自 segment_advisories 的 docstring；2026-10-01 并入 continuity_location_advisories（layout 跨段变化，见 storyboard_continuity_advisories 模块 docstring）。
-    advisories.extend([*_beat_causality.segment_advisories(list(emotional_turns_here), draft.prompt_text), *_beat_foreshadowing.segment_advisories(list(foreshadowing_here), draft.prompt_text), *_prop_entrance.segment_advisories(list(prop_entrances_here), draft.prompt_text), *_prop_lock.segment_advisories(list(prop_locks_here), draft.prompt_text), *continuity_location_advisories])
+    advisories.extend([*_beat_causality.segment_advisories(list(emotional_turns_here), draft.prompt_text), *_beat_foreshadowing.segment_advisories(list(foreshadowing_here), draft.prompt_text), *_prop_entrance.segment_advisories(list(prop_entrances_here), draft.prompt_text), *_prop_lock.segment_advisories(list(prop_locks_here), draft.prompt_text), *continuity_location_advisories, *_prop_continuity.prop_name_advisories(draft.continuity_memo, {p.label for p in draft.resources.props}, [c.wardrobe for c in draft.continuity_memo.characters])])
     # 2026-09-29：可见角色正文里除人数锁定句外再无 @ 点名——参考图仍会照发，
     # 常见成因是闪回/回忆换了年龄却仍绑着当前定妆照（真实回归见 storyboard_cast_lock 模块）。
     advisories.extend(_cast_lock.unmentioned_visible_character_advisories(draft))

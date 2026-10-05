@@ -16,7 +16,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from app.production.storyboard_continuity_memo import _AiContinuityMemo, _AiPropState
 from app.production.storyboard_narrative_arc import (
+    _segment_continuity_rules,
     beat_sheet_narrative_arc_rules,
     palette_scene_consistency_errors,
     segment_narrative_arc_rules,
@@ -143,3 +145,30 @@ def test_segment_narrative_arc_rules_forbids_fake_transition_when_palette_unchan
 def test_segment_narrative_arc_rules_silent_on_fake_transition_when_palette_differs():
     rules = segment_narrative_arc_rules(palette_current="夕阳暖金", palette_previous="冷调灰蓝")
     assert not any("完全相同" in r and "time_of_day_basis" in r for r in rules)
+
+
+# ---------------------------------------------------------------------------
+# _segment_continuity_rules: 2026-10-04 起幅道具/衣物状态续接正面陈述
+# ---------------------------------------------------------------------------
+
+def test_continuity_rules_omit_prop_state_rule_without_previous_memo():
+    rules = _segment_continuity_rules(previous_segment_no=None, camera_history=[])
+    assert len(rules) == 2, "没有 previous_memo 时与改动前逐字一致，不生造空规则"
+
+
+def test_continuity_rules_omit_prop_state_rule_when_previous_memo_has_no_props():
+    rules = _segment_continuity_rules(
+        previous_segment_no=3, camera_history=[], previous_memo=_AiContinuityMemo(time_of_day="白天"),
+    )
+    assert len(rules) == 2
+
+
+def test_continuity_rules_append_prop_state_rule_when_previous_memo_has_props():
+    previous_memo = _AiContinuityMemo(
+        time_of_day="白天",
+        props=[_AiPropState(name="插座与插头", location="墙根", state="已拔下")],
+    )
+    rules = _segment_continuity_rules(previous_segment_no=3, camera_history=[], previous_memo=previous_memo)
+    assert len(rules) == 3
+    assert "插座与插头" in rules[2]
+    assert "previous_continuity_memo.props" in rules[2]
