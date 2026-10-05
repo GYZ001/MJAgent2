@@ -13,6 +13,25 @@ _existing_plan`` 已经在「修订本段」里做过的降级近似，本模块
 
 ``review_existing_episode_segments``：纯复核，不写库、不调用重写模型——可以
 反复跑、可以在只读连接上跑（见 ``scripts/storyboard_prop_continuity_dry_run.py``）。
+GET 预览路由调用一次后把结果存成快照（见
+``prop_continuity_snapshot_store``），供 POST 重写直接取用。
+
+## 为什么 POST 不再重新调用复核模型（2026-10-05 快照化修正）
+
+复核模型有随机性：曾经 GET 预览与 POST 重写各自独立跑一遍整集复核，POST
+收到的「确认重写段号」是针对预览那一刻的结果，但 POST 自己又重新跑一遍复核
+产生第二份结果，两份结果不保证相同——「确认集合必须是服务端此刻待重写集合
+的子集」在真实使用中必然经常失败（《顾念长安》第 1 集实测：预览判出 29 段
+违规，POST 复核时第 13 段没再被判出，整批 409，一段没改，还多花一整集复核
+的耗时，约 30 分钟）。现在 POST 只认 GET 预览落的快照（``build_review_
+snapshot_segments``/``outcomes_from_snapshot``），不再调用 ``_review_segment``
+做「确认前」的复核；只在局部修改保存成功后，仍对改过的那一段单独复核一次
+（``_minimal_patch_and_save`` 里的 ``remaining_violations`` 检查，不受本次
+修正影响）。``rewrite_flagged_segments`` 额外核对每个确认段落「当前
+prompt_text 的哈希」与快照里「预览那一刻的哈希」是否一致
+（``SegmentReviewOutcome.expected_prompt_text_hash``）——不一致说明正文在
+预览后被别的操作（单段「修订本段」、另一次批量重写）动过，快照里的违规
+清单已经不对应当前正文，跳过并给出可见原因，不会拿一份过期的清单去瞎改。
 
 ``rewrite_flagged_segments``：对调用方确认重写的段（``confirmed_segment_nos``，
 必须是待重写集合的子集；``kinds`` 可选，只处理这些类别），按「最小修改重写」
@@ -74,6 +93,7 @@ board_text_provider``）下，否则批量跑出来的判据会用错模型—�
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -98,6 +118,14 @@ VALID_PROSE_REVIEW_KINDS = frozenset(_KIND_RULES)
 _LOGGER = logging.getLogger(__name__)
 
 
+def _prompt_text_hash(prompt_text: str) -> str:
+    """快照哈希：只用于判断「POST 确认重写时的正文」与「GET 预览时的正文」
+    是否仍是同一份（检测漂移，不是安全校验），sha256 前 24 位足够，与
+    ``prop_continuity_minimal_patch.propose_minimal_patch`` 给调用的
+    ``operation_id`` 取指纹长度同一先例。"""
+    return hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()[:24]
+
+
 @dataclass
 class SegmentReviewOutcome:
     """一段的复核/重写终态，供 dry-run 脚本与 API 响应共用——``violations``
@@ -105,7 +133,11 @@ class SegmentReviewOutcome:
     只在 ``rewritten=True`` 时可能非空：重写后再核验一遍仍通过的违规，见
     模块 docstring「不是重写了就算数」。``skip_reason`` 与 ``error`` 是两类不同
     的「没有发生保存」：前者是「核验后没有一条替换可应用」这个预期内结果（不是
-    失败），后者是并发冲突/供应商错误这类真正的异常。"""
+    失败），后者是并发冲突/供应商错误这类真正的异常。``expected_prompt_text_
+    hash`` 只在从快照还原（``outcomes_from_snapshot``）时才非 None——`None`
+    表示「没有快照可比对」（直接调用 ``review_existing_episode_segments`` 的
+    只读预览路径、以及本文件既有测试直接手造的 outcomes），``rewrite_flagged_
+    segments`` 据此跳过哈希核对，不是放宽校验，是没有基准可比。"""
 
     segment_no: int
     shot_id: str
@@ -117,6 +149,7 @@ class SegmentReviewOutcome:
     remaining_violations: list[ProseViolation] = field(default_factory=list)
     continuity_memo_conflicts: list[str] = field(default_factory=list)
     rejected_replacements: list[dict[str, str]] = field(default_factory=list)
+    expected_prompt_text_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         patchable = [v for v in self.violations if is_locally_patchable(v.kind)]
@@ -196,6 +229,44 @@ async def review_existing_episode_segments(conn, *, episode: dict, bible) -> lis
     return outcomes
 
 
+def build_review_snapshot_segments(conn, episode_id: str, outcomes: list[SegmentReviewOutcome]) -> list[dict[str, Any]]:
+    """给 GET 预览产出的 ``outcomes`` 配上「预览那一刻」的 ``prompt_text``
+    哈希，组装成可以直接交给 ``prop_continuity_snapshot_store.save_snapshot``
+    落盘的结构——POST 重写只信这份快照，不重新调用复核模型，见模块
+    docstring「为什么 POST 不再重新调用复核模型」。"""
+    prompt_text_by_no = {
+        segment["segment_no"]: str(segment.get("prompt_text") or "")
+        for _row, segment in _load_stored_segments(conn, episode_id)
+    }
+    return [
+        {
+            "segment_no": outcome.segment_no, "shot_id": outcome.shot_id,
+            "prompt_text_hash": _prompt_text_hash(prompt_text_by_no.get(outcome.segment_no, "")),
+            "violations": [v.model_dump(mode="json") for v in outcome.violations],
+        }
+        for outcome in outcomes
+    ]
+
+
+def outcomes_from_snapshot(snapshot_segments: list[dict[str, Any]]) -> list[SegmentReviewOutcome]:
+    """还原快照里的 outcomes——纯内存转换，不碰数据库、不调用任何模型，供
+    POST /rewrite 使用。每项的 ``expected_prompt_text_hash`` 带上快照里记的
+    哈希，供 ``rewrite_flagged_segments`` 核对正文是否在预览后漂移。"""
+    return [
+        SegmentReviewOutcome(
+            segment_no=entry["segment_no"], shot_id=entry["shot_id"],
+            violations=[ProseViolation.model_validate(v) for v in entry.get("violations") or []],
+            expected_prompt_text_hash=entry["prompt_text_hash"],
+        )
+        for entry in snapshot_segments
+    ]
+
+
+def flagged_segment_nos(outcomes: list[SegmentReviewOutcome]) -> list[int]:
+    """有已核验违规、需要人工确认是否重写的段号，按升序排列。"""
+    return sorted(o.segment_no for o in outcomes if o.violations)
+
+
 async def _minimal_patch_and_save(
     conn, *, episode: dict, shot_id: str, segment_no: int, violations: list[ProseViolation],
     previous_draft: Any | None, photographic: bool,
@@ -250,6 +321,15 @@ async def rewrite_flagged_segments(
         for outcome in outcomes:
             if outcome.segment_no not in confirmed_segment_nos:
                 continue
+            if outcome.expected_prompt_text_hash is not None:
+                # 只在从快照还原时才有基准可比（见 SegmentReviewOutcome docstring）；
+                # 不一致说明正文在预览后被别的操作动过，快照里的违规清单已经不
+                # 对应当前正文，必须跳过，不能拿一份过期的清单去瞎改当前正文。
+                current_draft = drafts_by_no.get(outcome.segment_no)
+                current_hash = _prompt_text_hash(current_draft.prompt_text if current_draft is not None else "")
+                if current_hash != outcome.expected_prompt_text_hash:
+                    outcome.skip_reason = "分镜在预览后已变化，请重新预览"
+                    continue
             candidates = [v for v in outcome.violations if is_locally_patchable(v.kind) and (kinds is None or v.kind in kinds)]
             if not candidates:
                 outcome.skip_reason = (

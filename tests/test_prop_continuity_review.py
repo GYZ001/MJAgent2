@@ -11,6 +11,13 @@
 与「最小替换提案调用」（``propose_minimal_patch``，无 ``rules`` 但有
 ``violations``），不再用旧版的 ``"task"`` 键区分（那是整段重生成的请求体
 特征，整段重生成已退场）。
+
+2026-10-05（快照化修正第二轮）：GET 预览与 POST 重写各自独立跑一遍整集
+复核会因为复核模型的随机性互相矛盾（详见 ``prop_continuity_review`` 模块
+docstring）；``build_review_snapshot_segments``/``outcomes_from_snapshot``/
+``flagged_segment_nos`` 是这次修正新增的纯函数，``rewrite_flagged_segments``
+新增「当前 prompt_text 哈希与快照哈希不一致则跳过」这条分支（``SegmentReview
+Outcome.expected_prompt_text_hash``）。
 """
 from __future__ import annotations
 
@@ -317,3 +324,114 @@ def test_rewrite_records_error_on_one_segment_and_still_processes_the_next(fixtu
     assert 3 in attempted_segment_nos, "第 2 段失败后，第 3 段仍然要被尝试——不中断其余段落"
     assert result[0].error is not None and "模拟" in result[0].error and result[0].rewritten is False
     assert result[1].rewritten is True and result[1].error is None and result[1].remaining_violations == []
+
+
+# ---------------------------------------------------------------------------
+# 快照化：build_review_snapshot_segments / outcomes_from_snapshot /
+# flagged_segment_nos（2026-10-05 快照化修正第二轮）
+# ---------------------------------------------------------------------------
+
+def test_build_review_snapshot_segments_captures_prompt_text_hash(fixture, monkeypatch):
+    conn, episode, _payload = fixture
+
+    async def chat(messages, **kwargs):
+        request = json.loads(messages[1]["content"])
+        if request["segment_no"] == 1:
+            return kwargs["model_type"](violations=[])
+        return kwargs["model_type"](violations=[ProseViolation(
+            kind="prop_state_regression", shot_label="镜头1", prop_name="插座与插头",
+            quote="墙根插座上插着白色插头", previous_quote="插座两孔空着", fix="改回已拔下",
+        )])
+
+    monkeypatch.setattr(model_gateway, "chat_structured", chat)
+    outcomes = asyncio.run(batch.review_existing_episode_segments(conn, episode=episode, bible=_bible()))
+    snapshot_segments = batch.build_review_snapshot_segments(conn, episode["id"], outcomes)
+    assert [s["segment_no"] for s in snapshot_segments] == [1, 2]
+    assert [s["shot_id"] for s in snapshot_segments] == ["s1", "s2"]
+    seg1_text = batch.stored_segment_prompt_text(conn, episode["id"], 1)
+    seg2_text = batch.stored_segment_prompt_text(conn, episode["id"], 2)
+    assert snapshot_segments[0]["prompt_text_hash"] == batch._prompt_text_hash(seg1_text)
+    assert snapshot_segments[1]["prompt_text_hash"] == batch._prompt_text_hash(seg2_text)
+    assert snapshot_segments[0]["prompt_text_hash"] != snapshot_segments[1]["prompt_text_hash"]
+    assert snapshot_segments[0]["violations"] == []
+    assert snapshot_segments[1]["violations"][0]["kind"] == "prop_state_regression"
+
+
+def test_outcomes_from_snapshot_round_trips_violations_and_hash():
+    snapshot_segments = [
+        {"segment_no": 1, "shot_id": "s1", "prompt_text_hash": "abc", "violations": []},
+        {"segment_no": 2, "shot_id": "s2", "prompt_text_hash": "def", "violations": [{
+            "kind": "prop_state_regression", "shot_label": "镜头1", "quote": "x",
+            "previous_quote": "y", "prop_name": "z", "fix": "f",
+        }]},
+    ]
+    outcomes = batch.outcomes_from_snapshot(snapshot_segments)
+    assert [o.segment_no for o in outcomes] == [1, 2]
+    assert outcomes[0].expected_prompt_text_hash == "abc" and outcomes[0].violations == []
+    assert outcomes[1].expected_prompt_text_hash == "def"
+    assert outcomes[1].violations[0].kind == "prop_state_regression" and outcomes[1].violations[0].quote == "x"
+
+
+def test_flagged_segment_nos_returns_sorted_segments_with_violations():
+    violation = ProseViolation(kind="negated_action", quote="x", fix="y")
+    outcomes = [
+        batch.SegmentReviewOutcome(segment_no=3, shot_id="s3", violations=[]),
+        batch.SegmentReviewOutcome(segment_no=1, shot_id="s1", violations=[violation]),
+        batch.SegmentReviewOutcome(segment_no=2, shot_id="s2", violations=[]),
+    ]
+    assert batch.flagged_segment_nos(outcomes) == [1]
+
+
+# ---------------------------------------------------------------------------
+# rewrite_flagged_segments：快照哈希与当前正文不一致时跳过（2026-10-05）
+# ---------------------------------------------------------------------------
+
+def test_rewrite_skips_segment_when_prompt_text_hash_no_longer_matches_snapshot(fixture, monkeypatch):
+    """正文在预览后已经被别的操作改过（哈希不一致）：必须跳过并给出可见
+    原因，不能拿一份过期的违规清单去瞎改当前正文，也不能调用任何模型。"""
+    conn, episode, _payload = fixture
+    violation = ProseViolation(
+        kind="prop_state_regression", shot_label="镜头1", prop_name="插座与插头",
+        quote="墙根插座上插着白色插头", previous_quote="插座两孔空着", fix="改回已拔下",
+    )
+    outcome = batch.SegmentReviewOutcome(
+        segment_no=2, shot_id="s2", violations=[violation], expected_prompt_text_hash="不可能匹配的陈旧哈希",
+    )
+
+    async def must_not_be_called(*args, **kwargs):
+        raise AssertionError("正文已漂移的段不应该触发任何模型调用")
+
+    monkeypatch.setattr(model_gateway, "chat_structured", must_not_be_called)
+    result = asyncio.run(batch.rewrite_flagged_segments(
+        conn, episode=episode, bible=_bible(), outcomes=[outcome], confirmed_segment_nos={2},
+    ))
+    assert result[0].rewritten is False and result[0].artifact_id is None and result[0].error is None
+    assert result[0].skip_reason == "分镜在预览后已变化，请重新预览"
+
+
+def test_rewrite_proceeds_when_prompt_text_hash_matches_snapshot(fixture, monkeypatch):
+    """哈希一致（正文自预览后未变）时，哈希核对本身不应该挡住正常的最小
+    修改重写——回归 ``test_rewrite_saves_fixed_segment_and_keeps_old_video_
+    until_success`` 的保存效果，只是这次 outcome 带着真实的快照哈希。"""
+    conn, episode, _payload = fixture
+    violation = ProseViolation(
+        kind="prop_state_regression", shot_label="镜头1", prop_name="插座与插头",
+        quote="墙根插座上插着白色插头", previous_quote="插座两孔空着", fix="改回已拔下",
+    )
+    current_text = batch.stored_segment_prompt_text(conn, episode["id"], 2)
+    outcome = batch.SegmentReviewOutcome(
+        segment_no=2, shot_id="s2", violations=[violation],
+        expected_prompt_text_hash=batch._prompt_text_hash(current_text),
+    )
+
+    async def chat(messages, **kwargs):
+        request = json.loads(messages[1]["content"])
+        if "rules" in request:  # 局部修改后的复核调用：确认新正文不再违规
+            return kwargs["model_type"](violations=[])
+        return kwargs["model_type"](replacements=[{"quote": "墙根插座上插着白色插头", "replacement": "插座两孔空着"}])
+
+    monkeypatch.setattr(model_gateway, "chat_structured", chat)
+    result = asyncio.run(batch.rewrite_flagged_segments(
+        conn, episode=episode, bible=_bible(), outcomes=[outcome], confirmed_segment_nos={2},
+    ))
+    assert result[0].rewritten is True and result[0].error is None and result[0].skip_reason is None
