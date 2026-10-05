@@ -78,13 +78,38 @@ def _terminal_poll_failure_confirmed(db: Any, provider_task_id: str | None) -> b
     ).fetchone())
 
 
+def _terminal_create_call_confirmed_dead(db: Any, operation_id: str | None) -> bool:
+    """这条 create 调用自己的供应商任务是否已被系统判定死亡。
+
+    唯一写者是 ``release_provider_poll``（``app/media_exec/job_state.py``）：
+    它只在供应商已报终态失败、或该任务被确认不可再轮询时，才把这条
+    ``video_create`` 记录标成 ``recovery_disposition='TASK_FAILED'``——目的是
+    阻止幂等 create 复用一个已判死的任务。按 ``operation_id`` 查而不按
+    ``shot_versions.provider_task_id`` 查：``release_provider_poll`` 自己会把
+    ``provider_task_id`` 清空以便换新任务重试，若用它反查会让"证据被判定
+    流程自己清空"误判成"未终态"（2026-10-04 proj_ca86b15ab7d7 EP1 实测：10
+    个在 ``worker_start`` 依赖复核误判——该误判已修——里死掉的重试任务，
+    ``provider_task_id`` 已空，但 ``provider_calls`` 仍留着这条权威标记）。
+    """
+    op = str(operation_id or "").strip()
+    if not op:
+        return False
+    return bool(db.execute(
+        """SELECT 1 FROM provider_calls
+            WHERE kind='video_create' AND status IN ('OK','SUCCESS','SUCCEEDED')
+              AND operation_id=? AND recovery_disposition='TASK_FAILED'
+            LIMIT 1""",
+        (op,),
+    ).fetchone())
+
+
 def load_zero_cost_evidence(db: Any, job_id: str) -> dict[str, Any] | None:
     """加载判定零产出终态拒绝所需的全部字段；job 不存在时返回 None。"""
     row = db.execute(
         """SELECT j.id AS job_id, j.status AS job_status,
                   j.project_id, j.episode_id, j.shot_id,
                   j.provider_failure_disposition, j.provider_failure_retryable,
-                  j.provider_operation_id, j.updated_at,
+                  j.provider_operation_id, j.provider_create_state, j.updated_at,
                   v.id AS version_id, v.provider_task_id,
                   v.status AS version_status, v.video_path, v.cost_cny,
                   br.status AS reservation_status, br.actual_cost_cny,
@@ -109,11 +134,31 @@ def zero_cost_terminal_release_eligible(
     此前同样存在"零产出仍按预留全价结算"的 bug（生产库 30 条同类污染，已随
     该函数一并修复），这里必须能覆盖、纠正这些历史存量，否则用户只是不再被
     卡住，账上还是继续挂着假钱。
+
+    ``provider_failure_retryable`` 本身只记录"当年那次分类时系统打算换新任务
+    重试"的意图，不是"这个 job 现在还会不会再试"——2026-10-04
+    proj_ca86b15ab7d7 EP1 实测：系统已经通过 ``release_provider_poll`` 把这
+    条 create 的供应商任务判死、把 ``provider_create_state`` 复位成
+    ``not_started`` 准备换新任务，但换新任务的那次重试在到达供应商之前就被
+    一个无关的、已修复的依赖复核误判（``REVIEW_DEPENDENCY_STALE`` @
+    ``worker_start``）杀死、终态落在 ``failed``——``retryable`` 字段从未被
+    这条不相关的终态路径清理，留成了死信号。单靠这个字段会把"曾经打算重
+    试、但那次重试本身已经无可挽回地死透"误判成"可能还要花钱"，继续挡住
+    一个供应商从未真正拿到过有效创建、或已被系统自己判死的任务。因此这里
+    不再把 ``retryable`` 当绝对拒绝条件：只有当前仍有未结清的供应商创建状态
+    （``provider_create_state in {'accepted','submitting'}``，即系统自己也
+    认为可能还有一个活着的供应商任务）且没有 ``provider_calls`` 的权威判死
+    记录时，才继续按"可能还会重试、不能放行"阻塞。
     """
     disposition = str(evidence.get("provider_failure_disposition") or "")
     if not disposition:
         return False, "无匹配的技术失败终态分类"
-    if evidence.get("provider_failure_retryable"):
+    create_state = str(evidence.get("provider_create_state") or "").strip().lower()
+    no_outstanding_submission = create_state in {"", "not_started", "model_rejected"}
+    confirmed_dead_create_call = no_outstanding_submission and _terminal_create_call_confirmed_dead(
+        db, evidence.get("provider_operation_id"),
+    )
+    if evidence.get("provider_failure_retryable") and not confirmed_dead_create_call:
         return False, "该失败被标记为可自动重试，不属于终态拒绝"
     if str(evidence.get("job_status") or "") not in {"failed", "waiting_human"}:
         return False, "任务未处于终态"
@@ -121,7 +166,10 @@ def zero_cost_terminal_release_eligible(
         return False, "该版本已成功，不属于零产出场景"
     if str(evidence.get("video_path") or "").strip():
         return False, "已存在产出文件，无法证明零产出"
-    if not _terminal_poll_failure_confirmed(db, evidence.get("provider_task_id")):
+    if not (
+        _terminal_poll_failure_confirmed(db, evidence.get("provider_task_id"))
+        or confirmed_dead_create_call
+    ):
         return False, "未查到供应商轮询终态失败的调用记录，无法证明供应商已终态"
     recorded_cost = max(
         float(evidence.get("cost_cny") or 0),

@@ -62,6 +62,8 @@ def _seed_rejected_video_job(
     provider_task_id: str | None = "provider-task-1",
     log_terminal_poll_failure: bool = True,
     reservation_status: str = "reserved",
+    create_state: str = "accepted",
+    log_create_call_confirmed_dead: bool = False,
 ) -> None:
     completion_grant.ensure_video_budget_authority_tables(conn)
     conn.execute(
@@ -81,11 +83,11 @@ def _seed_rejected_video_job(
                reason_text,created_at,updated_at
            ) VALUES(
                'j1','video','s','v1','e','p',?,
-               1,'op-1','accepted',1,
+               1,'op-1',?,1,
                'technical','provider_execution_failed',?,?,
                '视频供应商执行失败，供应商原文：copyright restrictions',1,1
            )""",
-        (job_status, disposition or None, retryable),
+        (job_status, create_state, disposition or None, retryable),
     )
     conn.execute(
         """INSERT INTO budget_reservations(
@@ -103,6 +105,12 @@ def _seed_rejected_video_job(
                 f'{{"task_id": "{provider_task_id}", "shot_id": "s"}}',
                 "op-1",
             ),
+        )
+    if log_create_call_confirmed_dead:
+        conn.execute(
+            """INSERT INTO provider_calls(
+                   ts,kind,status,operation_id,recovery_disposition
+               ) VALUES(1,'video_create','OK','op-1','TASK_FAILED')"""
         )
     conn.commit()
 
@@ -233,6 +241,93 @@ def test_retryable_failure_is_not_terminal_yet() -> None:
     evidence = load_zero_cost_evidence(conn, "j1")
     eligible, _reason = zero_cost_terminal_release_eligible(conn, evidence)
     assert eligible is False
+
+
+def test_stale_retryable_flag_with_confirmed_dead_create_call_is_releasable() -> None:
+    """真实事故场景（2026-10-04 proj_ca86b15ab7d7 EP1）：``release_provider_
+    poll`` 已经判死这条 create 的供应商任务并把 ``provider_create_state``
+    复位成 ``not_started``、清空了 ``provider_task_id`` 准备换新任务重试；
+    但那次重试在到达供应商之前就被一个无关的、已修复的依赖复核误判
+    （``REVIEW_DEPENDENCY_STALE`` @ ``worker_start``）杀死，终态落在
+    ``failed``。``provider_failure_retryable`` 字段从未被这条不相关的终态
+    路径清理，留成了死信号——``provider_calls`` 里 ``video_create`` 记录自己
+    的 ``recovery_disposition='TASK_FAILED'`` 才是权威证据，且 ``provider_
+    task_id`` 已空（这是本判据必须按 ``operation_id`` 反查、不能按
+    ``provider_task_id`` 反查的原因）。此前这条会被 ``retryable`` 单条规则
+    一刀切死，是 CLAUDE.md「生产实测缺陷」要求修复的那个 bug。"""
+    conn = _database()
+    _seed_rejected_video_job(
+        conn,
+        job_status="failed",
+        disposition="automatic_retry",
+        retryable=1,
+        create_state="not_started",
+        provider_task_id=None,
+        log_terminal_poll_failure=False,
+        log_create_call_confirmed_dead=True,
+    )
+
+    evidence = load_zero_cost_evidence(conn, "j1")
+    eligible, reason = zero_cost_terminal_release_eligible(conn, evidence)
+    assert eligible is True, reason
+
+    clearance = completion_grant.provider_task_clearance_snapshot(
+        project_id="p", conn=conn,
+    )
+    assert clearance["safe_to_clear"] is True
+    assert clearance["blockers"] == []
+
+    receipts = release_zero_cost_terminal_jobs(conn, ["j1"])
+    assert receipts[0]["job_id"] == "j1"
+    reservation = conn.execute(
+        "SELECT status,actual_cost_cny FROM budget_reservations WHERE job_id='j1'"
+    ).fetchone()
+    assert dict(reservation) == {"status": "released", "actual_cost_cny": 0.0}
+
+
+def test_live_accepted_submission_still_blocks_despite_historical_dead_marker() -> None:
+    """``provider_create_state='accepted'``（供应商当前仍可能挂着一个活着的
+    任务）时，即便 ``provider_calls`` 里留着一条历史上的 ``TASK_FAILED``
+    判死标记（例如上一轮换新任务之前留下的记录），也不能放行——当前这条
+    操作可能已经换了一个真实存在、尚未问出结果的新任务，不能被历史标记
+    误判成"已终态"。"""
+    conn = _database()
+    _seed_rejected_video_job(
+        conn,
+        job_status="failed",
+        disposition="automatic_retry",
+        retryable=1,
+        create_state="accepted",
+        log_terminal_poll_failure=False,
+        log_create_call_confirmed_dead=True,
+    )
+
+    evidence = load_zero_cost_evidence(conn, "j1")
+    eligible, reason = zero_cost_terminal_release_eligible(conn, evidence)
+    assert eligible is False, reason
+
+
+def test_reset_create_state_without_dead_marker_still_blocks() -> None:
+    """仅仅把 ``provider_create_state`` 复位成 ``not_started`` 不足以放行——
+    必须同时在 ``provider_calls`` 里查到供应商已终态的权威记录（轮询
+    ``TASK_FAILED`` 或 create 调用自己被判死）。没有这条记录时，"状态已复位"
+    和"真的不知道供应商结论"（局部超时放弃）在数据上无法区分，必须 fail
+    closed 继续阻塞。"""
+    conn = _database()
+    _seed_rejected_video_job(
+        conn,
+        job_status="failed",
+        disposition="automatic_retry",
+        retryable=1,
+        create_state="not_started",
+        provider_task_id=None,
+        log_terminal_poll_failure=False,
+        log_create_call_confirmed_dead=False,
+    )
+
+    evidence = load_zero_cost_evidence(conn, "j1")
+    eligible, reason = zero_cost_terminal_release_eligible(conn, evidence)
+    assert eligible is False, reason
 
 
 def test_adopted_output_with_video_path_blocks_even_with_zero_recorded_cost() -> None:
