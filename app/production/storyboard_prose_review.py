@@ -318,9 +318,16 @@ def _verified_violations(
 
 async def _review_segment(
     *, episode_id: str, segment_no: int, draft: Any, previous_draft: Any | None, photographic: bool, max_shots: int,
-) -> list[ProseViolation]:
-    """一次独立复核调用，失败（供应商错误/格式修复耗尽）返回空列表，不让整集
-    失败——与 ``storyboard_short_drama_review._run_drop_review`` 同一取舍。"""
+) -> list[ProseViolation] | None:
+    """一次独立复核调用。调用失败（供应商错误/格式修复耗尽）返回 ``None``——
+    与「调用成功但没有违规」（返回空列表）必须区分开：``None`` 代表本段根本
+    没有完成复核，不代表本段干净（2026-10-05 存量复核修正：过去两者都返回
+    ``[]``，导致额度耗尽时的失败段在预览/快照里显示成「已复核、无违规」）。
+    调用方各自决定失败取舍——``review_segment_inline``（生成主链路）与
+    ``_seam_violations``（接缝复核）仍按『没有违规』处理、不阻断，与
+    ``storyboard_short_drama_review._run_drop_review`` 同一取舍；
+    ``review_existing_episode_segments``/``_minimal_patch_and_save``（存量
+    复核路径）必须把 ``None`` 显式标记成『复核未完成』，不得当成『没有违规』。"""
     payload: dict[str, Any] = {
         "rules": [_review_rules_text(photographic=photographic, max_shots=max_shots)],
         "segment_no": segment_no,
@@ -355,7 +362,7 @@ async def _review_segment(
         )
     except Exception:  # noqa: BLE001 -- 复核失败不许让整集失败，见模块 docstring
         _LOGGER.warning("[STORYBOARD_PROSE_REVIEW_FAILED] 第 %s 段复核调用失败，跳过本段复核", segment_no, exc_info=True)
-        return []
+        return None
     return response.violations
 
 
@@ -387,17 +394,21 @@ async def review_segment_inline(
     同一个对象，不需要回传）；否则返回修改意见文本，调用方据此重新生成一次再
     调用本函数一次。``enabled=False``（开关关闭，或调用方是不接复核的
     ``storyboard_identity_regenerate``「修订本段」）原样返回空串，不发起任何
-    复核调用。复核调用本身失败时 ``_review_segment`` 已吞成空列表并记
-    ``[STORYBOARD_PROSE_REVIEW_FAILED]``，这里按「没有违规」处理，不重写不
-    阻断。``outcomes`` 非空时追加一条本段终态记录，供 ``log_review_summary``
-    打汇总日志。"""
+    复核调用。复核调用本身失败时 ``_review_segment`` 返回 ``None`` 并已记
+    ``[STORYBOARD_PROSE_REVIEW_FAILED]``，这里显式转成空列表按「没有违规」
+    处理，不重写不阻断（与存量复核路径的取舍不同，见 ``_review_segment``
+    docstring）。``outcomes`` 非空时追加一条本段终态记录，供
+    ``log_review_summary`` 打汇总日志。"""
     if not enabled:
         return ""
     raw = await _review_segment(
         episode_id=episode_id, segment_no=segment_no, draft=draft, previous_draft=previous_draft,
         photographic=photographic, max_shots=max_shots,
     )
-    violations = _verified_violations(raw, segment_no=segment_no, draft=draft, previous_draft=previous_draft)
+    # 复核调用失败（raw is None）按既有取舍当『没有违规』处理，不重写不阻断——
+    # 失败日志已在 _review_segment 里打过 [STORYBOARD_PROSE_REVIEW_FAILED]；
+    # _verified_violations 本身不接受 None，这里显式转成空列表再传入。
+    violations = _verified_violations(raw or [], segment_no=segment_no, draft=draft, previous_draft=previous_draft)
     if violations and attempt < INLINE_MAX_ATTEMPTS - 1:
         return _revision_notes_text(violations)
     if violations:

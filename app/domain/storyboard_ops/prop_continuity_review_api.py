@@ -32,6 +32,16 @@ docstring。没有字段默认值——漏传等同于没有确认，直接走�
 （422）。``kinds`` 可选，非空时只处理这些类别的违规，取值必须是 12 类判据
 之一，否则 422（``VALID_PROSE_REVIEW_KINDS``，与 ``storyboard_prose_
 review`` 的 kind 合法性判据同一份数据）。
+
+## 复核失败的段（2026-10-05 实测驱动）
+
+某段复核模型调用失败（供应商/模型额度耗尽等）不等于『这段没有违规』——GET
+响应顶层 ``review_failed_segment_nos`` 单独列出这些段号（升序），这些段不
+出现在 ``flagged_segment_nos`` 衍生的待重写集合里，但调用方（含前端）必须
+把它们当成『没复核』展示，不能当成『已复核、干净』。POST 允许把这些段号也
+放进 ``confirmed_segment_nos``（不会因此整批 409）：``rewrite_flagged_
+segments`` 会给它一条专门的 ``skip_reason``，不发起任何模型调用，也不当成
+干净跳过。完整设计见 ``prop_continuity_review`` 模块 docstring。
 """
 from __future__ import annotations
 
@@ -43,7 +53,7 @@ from app.domain.common import _project_bible_or_placeholder
 
 from .prop_continuity_review import (
     VALID_PROSE_REVIEW_KINDS, build_review_snapshot_segments, flagged_segment_nos, outcomes_from_snapshot,
-    review_existing_episode_segments, rewrite_flagged_segments,
+    review_existing_episode_segments, review_failed_segment_nos, rewrite_flagged_segments,
 )
 from .prop_continuity_snapshot_store import is_expired, load_snapshot, save_snapshot
 
@@ -94,6 +104,9 @@ async def prop_continuity_review(episode_id: str):
     snapshot = await save_snapshot(episode_id=episode_id, segments=build_review_snapshot_segments(conn, episode_id, outcomes))
     return {
         "episode_id": episode_id, "snapshot_id": snapshot["id"], "snapshot_expires_at": snapshot["expires_at"],
+        # 复核调用失败（未完成复核）的段号——不在下面 segments 的已核验违规里，
+        # 调用方必须靠这个字段单独识别『没复核成』，不能当成『已复核、干净』。
+        "review_failed_segment_nos": review_failed_segment_nos(outcomes),
         "segments": [o.to_dict() for o in outcomes],
     }
 
@@ -110,9 +123,17 @@ async def prop_continuity_rewrite(episode_id: str, body: PropContinuityRewriteBo
             raise HTTPException(409, "预览快照已过期，请重新调用 GET 预览后再确认")
         outcomes = outcomes_from_snapshot(snapshot["segments"])
         flagged = flagged_segment_nos(outcomes)
+        review_failed = review_failed_segment_nos(outcomes)
         confirmed = set(body.confirmed_segment_nos)
-        if not confirmed.issubset(flagged):
-            raise HTTPException(409, f"确认重写的段号必须是本次快照里待重写段号的子集（快照里应重写：{flagged}），请重新预览后再确认")
+        # 复核失败段允许被确认（不代表『没有违规』，只是没复核成）：
+        # rewrite_flagged_segments 会给它专门的 skip_reason，不当成干净跳过，
+        # 也不应该因为它混在确认集合里就把整批都 409 拒绝。
+        if not confirmed.issubset(set(flagged) | set(review_failed)):
+            raise HTTPException(
+                409,
+                f"确认重写的段号必须是本次快照里待重写段号的子集（快照里应重写：{flagged}；另有复核失败未完成的段号："
+                f"{review_failed}），请重新预览后再确认",
+            )
         project = conn.execute("SELECT * FROM projects WHERE id=?", (episode["project_id"],)).fetchone()
         bible = _project_bible_or_placeholder(project)
         outcomes = await rewrite_flagged_segments(

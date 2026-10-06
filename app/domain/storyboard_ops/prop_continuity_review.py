@@ -150,6 +150,16 @@ class SegmentReviewOutcome:
     continuity_memo_conflicts: list[str] = field(default_factory=list)
     rejected_replacements: list[dict[str, str]] = field(default_factory=list)
     expected_prompt_text_hash: str | None = None
+    #: 预览复核调用本身失败（额度耗尽/供应商错误等），未完成复核——不代表
+    #: 本段没有违规，见模块 docstring 与 ``storyboard_prose_review._review_
+    #: segment``。``True`` 时 ``violations`` 恒为空、不会出现在
+    #: ``flagged_segment_nos`` 里，调用方必须靠这个字段单独识别，不能把
+    #: 「没有已核验违规」误读成「已复核确认干净」。
+    review_failed: bool = False
+    #: 最小修改重写保存成功后的『重写后复核』调用本身失败——保存已经发生、
+    #: 不回滚，但 ``remaining_violations=[]`` 在这种情况下不代表『重写后已
+    #: 干净』，只代表『没有复核成』，见 ``_minimal_patch_and_save``。
+    post_rewrite_review_failed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         patchable = [v for v in self.violations if is_locally_patchable(v.kind)]
@@ -163,6 +173,8 @@ class SegmentReviewOutcome:
             "remaining_violations": [v.model_dump(mode="json") for v in self.remaining_violations],
             "continuity_memo_conflicts": self.continuity_memo_conflicts,
             "rejected_replacements": self.rejected_replacements,
+            "review_failed": self.review_failed,
+            "post_rewrite_review_failed": self.post_rewrite_review_failed,
         }
 
 
@@ -210,8 +222,20 @@ def _board_text_provider(conn, project_id: str) -> str | None:
     return resolve_stage_text_provider(dict(project or {}).get("board_text_provider"))
 
 
+#: 复核调用失败（额度耗尽/供应商错误等）时写进 outcome.error 的中文说明——
+#: 必须让调用方一眼看出『没完成复核』和『复核完成、没有违规』是两件不同的事
+#: （CLAUDE.md「空集合不等于无需检查」），不能让界面显示成『已复核、干净』。
+_REVIEW_FAILED_ERROR_TEXT = "本段复核调用失败（供应商/模型调用异常），未完成复核，结果不代表本段没有违规；请稍后重新预览"
+
+
 async def review_existing_episode_segments(conn, *, episode: dict, bible) -> list[SegmentReviewOutcome]:
-    """只读复核：不写库、不调用重写模型——见模块 docstring。"""
+    """只读复核：不写库、不调用重写模型——见模块 docstring。复核调用失败的段
+    （``_review_segment`` 返回 ``None``）不参与核验、``violations`` 恒为空，
+    outcome 上标 ``review_failed=True`` 且 ``error`` 写明原因——不进
+    ``flagged_segment_nos``（没有已核验违规），但调用方必须能从
+    ``review_failed`` 单独识别出『这段根本没复核成』，见模块 docstring。
+    ``previous_draft`` 仍原样推进到当前段（草稿本身是真实落库的正文，复核
+    失败只影响这一段自己有没有被核验，不影响它作为下一段的『上一段』使用）。"""
     photographic = _is_photographic(bible)
     stored = _load_stored_segments(conn, episode["id"])
     outcomes: list[SegmentReviewOutcome] = []
@@ -223,8 +247,14 @@ async def review_existing_episode_segments(conn, *, episode: dict, bible) -> lis
                 episode_id=episode["id"], segment_no=segment["segment_no"], draft=draft,
                 previous_draft=previous_draft, photographic=photographic, max_shots=draft.shot_count,
             )
-            violations = _verified_violations(raw, segment_no=segment["segment_no"], draft=draft, previous_draft=previous_draft)
-            outcomes.append(SegmentReviewOutcome(segment_no=segment["segment_no"], shot_id=row["id"], violations=violations))
+            if raw is None:
+                outcomes.append(SegmentReviewOutcome(
+                    segment_no=segment["segment_no"], shot_id=row["id"],
+                    review_failed=True, error=_REVIEW_FAILED_ERROR_TEXT,
+                ))
+            else:
+                violations = _verified_violations(raw, segment_no=segment["segment_no"], draft=draft, previous_draft=previous_draft)
+                outcomes.append(SegmentReviewOutcome(segment_no=segment["segment_no"], shot_id=row["id"], violations=violations))
             previous_draft = draft
     return outcomes
 
@@ -243,6 +273,7 @@ def build_review_snapshot_segments(conn, episode_id: str, outcomes: list[Segment
             "segment_no": outcome.segment_no, "shot_id": outcome.shot_id,
             "prompt_text_hash": _prompt_text_hash(prompt_text_by_no.get(outcome.segment_no, "")),
             "violations": [v.model_dump(mode="json") for v in outcome.violations],
+            "review_failed": outcome.review_failed,
         }
         for outcome in outcomes
     ]
@@ -251,59 +282,83 @@ def build_review_snapshot_segments(conn, episode_id: str, outcomes: list[Segment
 def outcomes_from_snapshot(snapshot_segments: list[dict[str, Any]]) -> list[SegmentReviewOutcome]:
     """还原快照里的 outcomes——纯内存转换，不碰数据库、不调用任何模型，供
     POST /rewrite 使用。每项的 ``expected_prompt_text_hash`` 带上快照里记的
-    哈希，供 ``rewrite_flagged_segments`` 核对正文是否在预览后漂移。"""
+    哈希，供 ``rewrite_flagged_segments`` 核对正文是否在预览后漂移。
+    ``review_failed`` 用 ``.get(..., False)`` 兼容本次改动前落的旧快照——
+    那批快照没有这个键，按『没有失败』（即原有行为：没有违规）处理。"""
     return [
         SegmentReviewOutcome(
             segment_no=entry["segment_no"], shot_id=entry["shot_id"],
             violations=[ProseViolation.model_validate(v) for v in entry.get("violations") or []],
             expected_prompt_text_hash=entry["prompt_text_hash"],
+            review_failed=bool(entry.get("review_failed", False)),
         )
         for entry in snapshot_segments
     ]
 
 
 def flagged_segment_nos(outcomes: list[SegmentReviewOutcome]) -> list[int]:
-    """有已核验违规、需要人工确认是否重写的段号，按升序排列。"""
+    """有已核验违规、需要人工确认是否重写的段号，按升序排列。复核失败的段
+    ``violations`` 恒为空，不会出现在这里——见 ``review_failed_segment_nos``。"""
     return sorted(o.segment_no for o in outcomes if o.violations)
+
+
+def review_failed_segment_nos(outcomes: list[SegmentReviewOutcome]) -> list[int]:
+    """复核调用失败、未完成复核的段号，按升序排列——这些段既不在
+    ``flagged_segment_nos``（没有已核验违规）也不代表『没有违规』，调用方
+    （GET 响应顶层字段 ``review_failed_segment_nos``）必须能单独看到，见模块
+    docstring。"""
+    return sorted(o.segment_no for o in outcomes if o.review_failed)
 
 
 async def _minimal_patch_and_save(
     conn, *, episode: dict, shot_id: str, segment_no: int, violations: list[ProseViolation],
     previous_draft: Any | None, photographic: bool,
-) -> tuple[str | None, Any | None, list[ProseViolation], list[str], list[dict[str, str]], str | None]:
+) -> tuple[str | None, Any | None, list[ProseViolation], list[str], list[dict[str, str]], str | None, bool]:
     """最小修改重写并保存——见模块 docstring「不再调用整段重生成」。``violations``
     必须已经是调用方按 ``is_locally_patchable`` 过滤过的局部可修子集。返回
     ``(artifact_id, new_draft, remaining_violations, continuity_memo_conflicts,
-    rejected_replacements, skip_reason)``；``artifact_id is None`` 表示没有一条
-    替换核验通过，没有发生保存——``skip_reason`` 说明原因，不是异常。"""
+    rejected_replacements, skip_reason, post_rewrite_review_failed)``；
+    ``artifact_id is None`` 表示没有一条替换核验通过，没有发生保存——
+    ``skip_reason`` 说明原因，不是异常。``post_rewrite_review_failed=True``
+    表示保存已经成功但『重写后复核』调用本身失败（额度耗尽等）——这种情况下
+    ``remaining_violations`` 恒为空，但那是『没有复核成』不是『重写后已干净』，
+    调用方不得把两者混为一谈，见 ``SegmentReviewOutcome.post_rewrite_review_
+    failed`` docstring。"""
     _row, _episode, _payload, original = load_identity_workspace(conn, shot_id)
     raw = await propose_minimal_patch(episode_id=episode["id"], segment_no=segment_no, prompt_text=original["prompt_text"], violations=violations)
     accepted, rejected = validate_replacements(original["prompt_text"], raw, violations=violations)
     rejected_dicts = [r.to_dict() for r in rejected]
     if not accepted:
-        return None, None, [], [], rejected_dicts, "最小替换提案核验后没有一条可应用，未发生保存"
+        return None, None, [], [], rejected_dicts, "最小替换提案核验后没有一条可应用，未发生保存", False
     candidate = build_patch_candidate(original, accepted)
     if candidate is None:
         rejected_dicts.append({"quote": "", "replacement": "", "reason": "替换无法同步套用到台词模板（speech_template），本段不可安全局部修改"})
-        return None, None, [], [], rejected_dicts, "替换无法同步套用到台词模板，未发生保存"
+        return None, None, [], [], rejected_dicts, "替换无法同步套用到台词模板，未发生保存", False
     conflicts = continuity_memo_conflicts(original.get("continuity_memo") or {}, accepted)
     baseline = identity_contract_fingerprint(original)
     result = save_identity_candidate(conn, shot_id=shot_id, baseline=baseline, candidate=candidate)
     if result.get("unchanged"):
-        return None, None, [], conflicts, rejected_dicts, "替换结果与存量分镜一致，未发生实际变化"
+        return None, None, [], conflicts, rejected_dicts, "替换结果与存量分镜一致，未发生实际变化", False
     saved_segment = result["segment"]
     new_draft = _AiStoryboardSegmentDraft.model_validate(dict(saved_segment, beats=saved_segment.get("montage_beats") or []))
     raw_review = await _review_segment(
         episode_id=episode["id"], segment_no=segment_no, draft=new_draft,
         previous_draft=previous_draft, photographic=photographic, max_shots=new_draft.shot_count,
     )
+    if raw_review is None:
+        _LOGGER.warning(
+            "[STORYBOARD_PROP_CONTINUITY_BATCH_REWRITE_POST_REVIEW_FAILED] 第 %s 段（shot=%s）局部修改已保存，"
+            "但重写后复核调用失败，未完成复核——不代表重写后已干净",
+            segment_no, shot_id,
+        )
+        return result["artifact_id"], new_draft, [], conflicts, rejected_dicts, None, True
     remaining = _verified_violations(raw_review, segment_no=segment_no, draft=new_draft, previous_draft=previous_draft)
     if remaining:
         _LOGGER.warning(
             "[STORYBOARD_PROP_CONTINUITY_BATCH_REWRITE_STILL_FLAGGED] 第 %s 段（shot=%s）局部修改后仍有 %d 条已核验违规：%s",
             segment_no, shot_id, len(remaining), "；".join(f"[{v.kind}] {v.fix[:60]}" for v in remaining),
         )
-    return result["artifact_id"], new_draft, remaining, conflicts, rejected_dicts, None
+    return result["artifact_id"], new_draft, remaining, conflicts, rejected_dicts, None, False
 
 
 async def rewrite_flagged_segments(
@@ -321,6 +376,12 @@ async def rewrite_flagged_segments(
         for outcome in outcomes:
             if outcome.segment_no not in confirmed_segment_nos:
                 continue
+            if outcome.review_failed:
+                # 预览时这段复核调用本身就没成功，没有可用的已核验违规清单——
+                # 不是『这段没有违规』，必须给出专门的 skip_reason，不能落进
+                # 下面『没有可应用的局部修改』那条通用文案，见模块 docstring。
+                outcome.skip_reason = "本段预览时复核调用失败，没有可用的违规清单，请重新预览"
+                continue
             if outcome.expected_prompt_text_hash is not None:
                 # 只在从快照还原时才有基准可比（见 SegmentReviewOutcome docstring）；
                 # 不一致说明正文在预览后被别的操作动过，快照里的违规清单已经不
@@ -337,7 +398,7 @@ async def rewrite_flagged_segments(
                 )
                 continue
             try:
-                artifact_id, new_draft, remaining, conflicts, rejected, skip_reason = await _minimal_patch_and_save(
+                artifact_id, new_draft, remaining, conflicts, rejected, skip_reason, post_rewrite_review_failed = await _minimal_patch_and_save(
                     conn, episode=episode, shot_id=outcome.shot_id, segment_no=outcome.segment_no,
                     violations=candidates, previous_draft=drafts_by_no.get(outcome.segment_no - 1), photographic=photographic,
                 )
@@ -349,6 +410,7 @@ async def rewrite_flagged_segments(
                 outcome.artifact_id = artifact_id
                 outcome.rewritten = True
                 outcome.remaining_violations = remaining
+                outcome.post_rewrite_review_failed = post_rewrite_review_failed
                 drafts_by_no[outcome.segment_no] = new_draft
             except Exception as exc:  # noqa: BLE001 -- 单段失败（含供应商/模型调用层异常）不中断其余段落，见模块 docstring
                 outcome.error = str(exc)

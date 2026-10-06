@@ -387,9 +387,10 @@ async def test_violation_on_last_attempt_writes_degraded_and_stops(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_review_call_failure_does_not_rewrite_or_block(monkeypatch, caplog):
-    """复核调用失败（供应商错误）时 _review_segment 已吞成空列表并记
-    [STORYBOARD_PROSE_REVIEW_FAILED]；review_segment_inline 按「没有违规」
-    处理，不重写不阻断。"""
+    """复核调用失败（供应商错误）时 _review_segment 记
+    [STORYBOARD_PROSE_REVIEW_FAILED] 并返回 None（「未完成复核」，区别于
+    「复核成功、没有违规」的空列表）；生成主链路的 review_segment_inline 把
+    None 按「没有违规」处理，不重写不阻断。"""
     draft = _draft("镜头1：她没有往里走。")
 
     async def failing(*args, **kwargs):

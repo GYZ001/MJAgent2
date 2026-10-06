@@ -116,7 +116,15 @@ def main() -> int:
     print(json.dumps({"episode_id": args.episode, "dry_run": True, "segments": results}, ensure_ascii=False, indent=2))
     flagged = sum(1 for r in results if r["violations"])
     patchable_ok = sum(1 for r in results if r["patch_preview"].get("accepted"))
-    print(f"# 共 {len(results)} 段：{flagged} 段有已核验违规，{patchable_ok} 段有可应用的局部替换；其余段落需人工修订或没有违规", file=sys.stderr)
+    # 复核调用失败（额度耗尽/供应商错误等）的段没有完成复核，不代表没有违规，
+    # 必须单独计数、单独打印——不能混进「没有违规」那一档，见
+    # app.domain.storyboard_ops.prop_continuity_review 模块 docstring。
+    review_failed = sum(1 for r in results if r.get("review_failed"))
+    print(
+        f"# 共 {len(results)} 段：{flagged} 段有已核验违规，{patchable_ok} 段有可应用的局部替换，"
+        f"{review_failed} 段复核调用失败未完成复核；其余段落需人工修订或没有违规",
+        file=sys.stderr,
+    )
     return 0
 
 

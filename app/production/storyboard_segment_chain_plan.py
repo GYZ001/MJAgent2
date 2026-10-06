@@ -234,11 +234,15 @@ async def _run_chains_parallel(ctx: SegmentChainContext, chains: list[list[Any]]
 
 
 async def _seam_violations(ctx: SegmentChainContext, draft: Any, previous_draft: Any, segment_no: int) -> list[Any]:
+    """接缝复核调用失败（``_review_segment`` 返回 ``None``）按既有取舍当『没有
+    接缝违规』处理，不触发链首重写、不阻断——与 ``review_segment_inline`` 同一
+    取舍（见 ``storyboard_prose_review._review_segment`` docstring），只是这里
+    显式转换，不依赖 ``_verified_violations`` 接受 ``None``。"""
     raw = await _prose_review._review_segment(
         episode_id=ctx.episode_id, segment_no=segment_no, draft=draft, previous_draft=previous_draft,
         photographic=ctx.visual_style_is_photographic, max_shots=ctx.max_shots,
     )
-    return _prose_review._verified_violations(raw, segment_no=segment_no, draft=draft, previous_draft=previous_draft)
+    return _prose_review._verified_violations(raw or [], segment_no=segment_no, draft=draft, previous_draft=previous_draft)
 
 
 def _seam_dialogue_repeat_errors(ctx: SegmentChainContext, merged: dict[int, Any], head_no: int) -> list[str]:
