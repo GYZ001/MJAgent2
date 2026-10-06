@@ -30,8 +30,189 @@ resources_order`` 字段带到最终参考图 dict，供 ``ref_pack_priority`` �
 """
 from __future__ import annotations
 
+import difflib
+import logging
+import re
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
+
+_TRAILING_ANNOTATION = re.compile(r"[（(][^（()）]*[）)]$")
+
+# 续接服装文本反推道具卡（2026-10-05，《顾念长安》proj_ca86b15ab7d7 第1集真实
+# 回归）：21/35 段里 continuity_memo.characters[].wardrobe 写了具体服装外观，
+# 但模型没有把对应的服装道具卡 label 写进 resources.props，装配时这些服装
+# 的参考图根本没进参考图池，视频模型只能自由发挥换装。wardrobe 是模型早已
+# 写出的"提名"，这里只做"代码核验它是否逐字点名了一张世界书里真实存在的
+# 道具卡"——不新增任何模型调用/字段，不改 schema。
+#
+# 歧义判据按"文字位置是否被争抢"，不按"一句话命中几张卡"：一句续接服装经常
+# 同时点名好几件衣物（外套+长裙），这是正常情况要全部采纳，不是歧义；真正
+# 该拦的是两张不同卡靠文本里同一段字符命中（例如"顾屿外套"与"温念厚外套"都
+# 只靠同一个"外套"二字命中），这种"抢位置"才不猜，见 infer_wardrobe_prop_
+# labels 与 _matched_text_positions。
+MIN_WARDROBE_PROP_COVERAGE = 0.8
+MIN_WARDROBE_PROP_IDENTIFIER_LEN = 4
+
+
+def _strip_trailing_annotation(label: str) -> str:
+    """只剥末尾括号注释（例："浅蓝色碎花长裙（裙摆）"→"浅蓝色碎花长裙"）；
+    剥完变成空字符串时原样返回整条 label（没有可用的"剥干净"结果）。"""
+    stripped = _TRAILING_ANNOTATION.sub("", label).strip()
+    return stripped if stripped else label
+
+
+def _identity_id_core(identity_id: str) -> str:
+    """identity_id 去掉 ``bible:``/``entity:`` 前缀后的主体——与
+    ``app.production.storyboard_continuity_memo._identity_id_core``、
+    ``storyboard_reference_repair._entry_names``、``storyboard_dialects.
+    reference_mention_errors`` 里 ``identity_id.split(":", 1)`` 同一种归一。
+    本仓库对这一行的既有做法是各处各自复制，不跨模块 import 私有函数。"""
+    return identity_id.split(":", 1)[-1].strip() if identity_id else identity_id
+
+
+def _char_coverage(identifier: str, text: str) -> float:
+    """identifier 在 text 里的多段连续匹配总长度 ÷ len(identifier)；只计入
+    长度>=2 的匹配块（排除单字偶然命中）。``difflib.SequenceMatcher`` 保证
+    同一 identifier 内的匹配块互不重叠，结果恒在 [0, 1]。"""
+    if not identifier:
+        return 0.0
+    matcher = difflib.SequenceMatcher(a=identifier, b=text, autojunk=False)
+    covered = sum(block.size for block in matcher.get_matching_blocks() if block.size >= 2)
+    return covered / len(identifier)
+
+
+def _matched_text_positions(identifier: str, text: str) -> frozenset[int]:
+    """identifier 在 text 里命中的字符下标集合（只计入长度>=2 的匹配块，口径
+    与 ``_char_coverage`` 一致），供 ``infer_wardrobe_prop_labels`` 判定两张
+    卡是否在"抢同一段文字"。"""
+    if not identifier:
+        return frozenset()
+    matcher = difflib.SequenceMatcher(a=identifier, b=text, autojunk=False)
+    positions: set[int] = set()
+    for block in matcher.get_matching_blocks():
+        if block.size >= 2:
+            positions.update(range(block.b, block.b + block.size))
+    return frozenset(positions)
+
+
+def _visible_wardrobe_texts(resources: dict[str, Any], continuity_memo: dict[str, Any]) -> list[str]:
+    """本段出镜人物（非 voice_only、非"旁白"——与
+    ``app.multiview._storyboard_pack_asset_dependencies`` 对人物可见性的既有
+    判据同一口径）各自的 ``continuity_memo.wardrobe`` 原文，空文本不收。
+
+    identity_id 比对按去前缀后的主体值：模型在 continuity_memo.characters 里
+    偶尔省略 resources.characters 已解析出的 bible:/entity: 前缀（真实回归，
+    见 ``app.production.storyboard_continuity_memo.
+    continuity_memo_character_advisories`` docstring），精确字符串比对会把这个
+    本来在场的可见人物误判成不在场，静默漏发服装卡——与本函数要修的缺陷同一
+    根因，不能再犯一遍。"""
+    visible_cores = {
+        _identity_id_core(str(c.get("identity_id") or ""))
+        for c in (resources.get("characters") or [])
+        if c.get("visibility") != "voice_only" and str(c.get("identity_id") or "") != "旁白"
+    }
+    return [
+        str(c.get("wardrobe") or "").strip()
+        for c in (continuity_memo.get("characters") or [])
+        if _identity_id_core(str(c.get("identity_id") or "")) in visible_cores
+        and str(c.get("wardrobe") or "").strip()
+    ]
+
+
+def _declared_prop_names(prop_entries: list[dict[str, Any]], bible_props: list[Any]) -> set[str]:
+    """``resources.props`` 已声明的 label（剥过括号的变体也纳入）如果逐字
+    等于某张世界书道具卡的 name 或某个 alias，这张卡的 name 进排除集——
+    避免对模型已经显式声明过的卡重复推导。"""
+    declared_labels: set[str] = set()
+    for entry in prop_entries or []:
+        label = str(entry.get("label") or "").strip()
+        if label:
+            declared_labels.add(label)
+            declared_labels.add(_strip_trailing_annotation(label))
+    excluded: set[str] = set()
+    for prop in bible_props or []:
+        identifiers = {prop.name, *prop.aliases}
+        if identifiers & declared_labels:
+            excluded.add(prop.name)
+    return excluded
+
+
+def _best_match_for_prop(prop: Any, text: str) -> tuple[float, frozenset[int]]:
+    """prop 的 name/alias 里取覆盖率最高的识别串，返回其覆盖率与命中位置；
+    短于 ``MIN_WARDROBE_PROP_IDENTIFIER_LEN`` 的识别串不参与比较。"""
+    best_ratio: float = 0.0
+    best_positions: frozenset[int] = frozenset()
+    for ident in [prop.name, *prop.aliases]:
+        if len(ident) < MIN_WARDROBE_PROP_IDENTIFIER_LEN:
+            continue
+        ratio = _char_coverage(ident, text)
+        if ratio > best_ratio:
+            best_ratio, best_positions = ratio, _matched_text_positions(ident, text)
+    return best_ratio, best_positions
+
+
+def infer_wardrobe_prop_labels(
+    *, bible_props: list[Any], wardrobe_texts: list[str], already_declared: set[str],
+) -> list[str]:
+    """对每句出镜人物续接服装文本，在世界书道具卡（跳过已声明的）里找覆盖率
+    >=0.8 且识别串(name/alias)长度>=4 的命中。一句续接服装经常同时点名好几件
+    衣物（外套+长裙），这不是歧义；真正的结构性歧义是两张不同卡命中了文本里
+    同一段字符（例如"顾屿外套"与"温念厚外套"都靠同一个"外套"二字命中）——
+    这种情况下两张都不要，只记可见日志，不猜哪张对。跨文本去重保序返回命中
+    的卡 name 列表。"""
+    matched_names: list[str] = []
+    seen: set[str] = set()
+    for text in wardrobe_texts:
+        hits: dict[str, frozenset[int]] = {}
+        for prop in bible_props or []:
+            if prop.name in already_declared:
+                continue
+            ratio, positions = _best_match_for_prop(prop, text)
+            if ratio >= MIN_WARDROBE_PROP_COVERAGE:
+                hits[prop.name] = positions
+        ambiguous = {
+            name for name, positions in hits.items()
+            if any(name != other and positions & other_positions for other, other_positions in hits.items())
+        }
+        if ambiguous:
+            log.warning(
+                "[STORYBOARD_WARDROBE_PROP_AMBIGUOUS][未拦截] 续接服装文本「%s」同一段文字被多张道具卡争抢 %s，均不采用，需人工核查",
+                text[:60], sorted(ambiguous),
+            )
+        for name, positions in hits.items():
+            if name in ambiguous:
+                continue
+            if name not in seen:
+                seen.add(name)
+                matched_names.append(name)
+    return matched_names
+
+
+def storyboard_pack_prop_entries(
+    *, segment: dict[str, Any], bible: Any, conn: Any, project_id: str, episode_no: int,
+) -> list[dict[str, Any]]:
+    """``resources.props``（模型已声明的道具）之后追加续接服装文本反推出的
+    道具卡（续接服装是模型早已写出的"提名"，这里只是代码核验它是否指向一张
+    真实存在的世界书道具卡），整份列表交给未改动签名的
+    ``resolve_segment_prop_manifest_entries`` 统一做 ready 判定与排序打标。
+    超限截断时模型声明项排在推导项之前，优先保留（见
+    ``app.video_modes.reference_assemble._apply_prop_composite_overflow``）。
+    """
+    resources = segment.get("resources") or {}
+    continuity_memo = segment.get("continuity_memo") or {}
+    declared = list(resources.get("props") or [])
+    bible_props = list(getattr(bible, "props", None) or [])
+    excluded = _declared_prop_names(declared, bible_props)
+    wardrobe_texts = _visible_wardrobe_texts(resources, continuity_memo)
+    inferred_names = infer_wardrobe_prop_labels(
+        bible_props=bible_props, wardrobe_texts=wardrobe_texts, already_declared=excluded,
+    )
+    merged = [*declared, *({"label": name, "description": ""} for name in inferred_names)]
+    return resolve_segment_prop_manifest_entries(
+        merged, conn=conn, project_id=project_id, episode_no=episode_no,
+    )
 
 
 def _prop_reference_lookup(conn, project_id: str, name: str, episode_no: int) -> Any:
@@ -66,11 +247,21 @@ def resolve_segment_prop_manifest_entries(
     id，供 ``app.multiview.manifest_revisions_match`` 据此判定冻结参考图清单
     是否因为外观卡换图而过期；没查到行（``row`` 为 None）时为 None，与
     ``ready=False`` 同义。
+
+    label 带末尾括号注释（如"浅蓝色碎花长裙（裙摆）"）按整条原文查不到卡时，
+    剥掉括号重试一次——世界书卡名没有括号，``app.production.storyboard_prop_
+    label_validation.prop_label_bracket_note_errors`` 只在生成期拦截新写法，
+    存量已落库的带括号 label 靠这里的回退兜底查到卡（2026-10-05）。输出的
+    ``label`` 键仍是原始声明文本，不改显示。
     """
     out: list[dict[str, Any]] = []
     for index, entry in enumerate(prop_entries or []):
         label = str(entry.get("label") or "").strip()
         row = _prop_reference_lookup(conn, project_id, label, episode_no) if label else None
+        if row is None and label:
+            stripped = _strip_trailing_annotation(label)
+            if stripped != label:
+                row = _prop_reference_lookup(conn, project_id, stripped, episode_no)
         ready = False
         image_path = ""
         if row and str(row["status"] or "") == "ready":

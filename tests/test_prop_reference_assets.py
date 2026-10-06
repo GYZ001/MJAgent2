@@ -93,6 +93,46 @@ def test_resolve_segment_prop_manifest_entries_not_ready_when_file_missing(monke
     assert out[0]["ready"] is False
 
 
+def test_resolve_segment_prop_manifest_entries_strips_bracket_note_as_fallback(monkeypatch, tmp_path) -> None:
+    """2026-10-05：label 带末尾括号注释（分镜段原文"浅蓝色碎花长裙（裙摆）"）
+    按整条原文查不到卡时，剥掉括号重试一次用卡名查——世界书卡名本身没有括号。
+    输出的 label 键仍是原始带括号文本，不改显示。"""
+    image = tmp_path / "skirt.jpg"
+    image.write_bytes(b"jpeg")
+    calls: list[str] = []
+
+    def _lookup(conn, project_id, name, episode_no):
+        calls.append(name)
+        if name == "浅蓝色碎花长裙":
+            return {"id": "prop_skirt_rev1", "status": "ready", "image_path": str(image)}
+        return None
+
+    monkeypatch.setattr(prop_references, "_prop_reference_lookup", _lookup)
+    out = resolve_segment_prop_manifest_entries(
+        [{"label": "浅蓝色碎花长裙（裙摆）"}], conn=object(), project_id="proj-1", episode_no=3,
+    )
+    assert out[0]["label"] == "浅蓝色碎花长裙（裙摆）"
+    assert out[0]["ready"] is True
+    assert out[0]["image_path"] == str(image)
+    assert calls == ["浅蓝色碎花长裙（裙摆）", "浅蓝色碎花长裙"]
+
+
+def test_resolve_segment_prop_manifest_entries_no_bracket_label_only_looks_up_once(monkeypatch) -> None:
+    """标签不含括号时，剥括号后与原文相同，不应触发第二次查询（见
+    ``_strip_trailing_annotation`` 的"剥完不变就不算剥了"语义）。"""
+    calls: list[str] = []
+
+    def _lookup(conn, project_id, name, episode_no):
+        calls.append(name)
+        return None
+
+    monkeypatch.setattr(prop_references, "_prop_reference_lookup", _lookup)
+    resolve_segment_prop_manifest_entries(
+        [{"label": "旧猫包"}], conn=object(), project_id="proj-1", episode_no=3,
+    )
+    assert calls == ["旧猫包"]
+
+
 def test_prop_library_anchors_only_ready_entries_with_real_file(tmp_path) -> None:
     image = tmp_path / "cat_bag.jpg"
     image.write_bytes(b"jpeg")

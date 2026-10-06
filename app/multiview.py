@@ -554,9 +554,9 @@ def _storyboard_pack_asset_dependencies(
     scene_out = scene_outs[0] if scene_outs else None
     additional_scenes = scene_outs[1:]
 
-    from app.video_modes.prop_references import resolve_segment_prop_manifest_entries
-    props_out = resolve_segment_prop_manifest_entries(
-        resources.get("props") or [], conn=conn, project_id=project_id, episode_no=episode_no,
+    from app.video_modes.prop_references import storyboard_pack_prop_entries
+    props_out = storyboard_pack_prop_entries(
+        segment=segment, bible=bible, conn=conn, project_id=project_id, episode_no=episode_no,
     )
     return build_reference_manifest(
         episode_no=episode_no, shot_id=shot_id, characters=characters_out, scene=scene_out,
