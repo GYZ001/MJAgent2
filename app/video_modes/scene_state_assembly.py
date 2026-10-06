@@ -17,6 +17,7 @@ from collections.abc import Callable
 from typing import Any
 
 from app.scene_reverse.segment_views import augment_scene_entry_with_reverse_angle, mentioned_reverse_scene_names
+from app.video_modes.scene_state_prop_states import character_display_names_from_bible
 from app.video_modes.scene_state_selection import resolve_scene_reference_entry
 from app.video_modes.scene_state_views import resolve_scene_state_view_for_shot
 
@@ -51,6 +52,7 @@ def resolve_scene_entry_with_state(
                 conn=conn, episode_id=shot_row["episode_id"], shot_no=int(shot_row["shot_no"]),
                 scene_reference_id=scene_reference_id, establishing_image_path=image_path,
                 visual_style=bible.world.visual_style_canonical, props=bible.props,
+                character_display_names=character_display_names_from_bible(bible),
             )
     if state_row is not None:
         return _state_override(state_row, entry, purposes)

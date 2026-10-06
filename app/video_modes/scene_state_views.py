@@ -60,13 +60,15 @@ def state_key_for(scene_reference_id: str, start_shot_no: int, description: str)
 
 def scene_state_input_fingerprint(
     *, scene_reference_id: str, establishing_image_path: str, description: str, visual_style: str,
-    prop_appearance_notes: str,
+    prop_appearance_notes: str, prop_state_notes: str,
 ) -> str:
     """状态图「这张图该长什么样」的期望指纹——生成（``scene_state_ensure.
     claim_or_get``）与扫描/装配（本模块）必须调用同一份计算。种子图路径变了
     （场景卡重新生成拿到新文件）、画风/描述变了，或者本段命中的道具卡外观文字
     变了（``prop_appearance_notes``，见 ``prop_appearance_notes_for_description``），
-    指纹都要跟着变，否则旧状态图会被当成仍然正确而永远不重出。"""
+    或者上一段同场景的道具位置/状态文字变了（``prop_state_notes``，见
+    ``app.video_modes.scene_state_prop_states``），指纹都要跟着变，否则旧状态图
+    会被当成仍然正确而永远不重出。"""
     fields: dict[str, str] = {
         "scene_reference_id": scene_reference_id,
         "establishing_image_path": establishing_image_path,
@@ -78,6 +80,10 @@ def scene_state_input_fingerprint(
         # 只在命中道具卡时写进 material：没命中的状态图提示词与引入本字段前
         # 逐字相同，指纹也必须逐字相同，存量图不该因此被判过期（见 PROMPT_VERSION 注释）。
         fields["prop_appearance_notes"] = prop_appearance_notes
+    if prop_state_notes:
+        # 同上同一纪律：没有可取的上一段道具位置/状态时这段文字是空字符串，
+        # 不写进 material，存量状态图的指纹不受本次新增维度影响。
+        fields["prop_state_notes"] = prop_state_notes
     material = json.dumps(fields, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
 
@@ -124,16 +130,24 @@ def _longest_nonoverlapping_props(spans: list[tuple[int, int, Any]]) -> list[Any
     return ordered
 
 
+def matched_props_in_text(text: str, props: list[Any]) -> list[Any]:
+    """文本里逐字出现的道具卡，按最长不重叠匹配、原文出现顺序去重后返回卡
+    对象列表；没有命中返回空列表。供 ``prop_appearance_notes_for_description``
+    与 ``app.video_modes.scene_state_prop_states`` 共用同一份匹配判据——两处
+    都是「文本里点到了哪张卡」，不应各写一遍容易漂移的扫描逻辑。"""
+    text = text or ""
+    if not text or not props:
+        return []
+    return _longest_nonoverlapping_props(_prop_name_occurrences(text, props))
+
+
 def prop_appearance_notes_for_description(description: str, props: list[Any]) -> str:
     """状态描述原文里逐字出现的道具卡，各追加一句正面陈述，告诉图像模型外观
     按卡画、位置与状态仍按描述走（2026-10-05，《顾念长安》EP1 真实故障：场景
     状态图把「绿萝」画成酒红陶盆、「鞋柜」画成高木柜，压过了道具卡外观）。
     文本里没提到的道具不提——判据从这段描述本身推导，不是维护一张道具名单。
     """
-    text = description or ""
-    if not text or not props:
-        return ""
-    matched = _longest_nonoverlapping_props(_prop_name_occurrences(text, props))
+    matched = matched_props_in_text(description, props)
     sentences = [
         f"画面里的「{prop.name}」外观（颜色、材质、款式）按道具卡画："
         f"{prop.appearance_canonical}；它此刻的位置与状态按上面的描述。"
@@ -157,6 +171,19 @@ def _segment_from_shot_row(row: Any) -> dict[str, Any] | None:
         return None
     segment = data.get("storyboard_pack_segment")
     return segment if isinstance(segment, dict) else None
+
+
+def segment_props_for_shot_row(row: Any) -> list[dict[str, Any]]:
+    """本段 ``continuity_memo.props[]``（见 ``app.production.storyboard_
+    continuity_memo._AiPropState``：``name``/``form``/``location``/``state``）；
+    没有分镜段、没有备忘或解析失败返回空列表——供
+    ``app.video_modes.scene_state_prop_states`` 取"上一段结束时道具在哪、是
+    什么状态"用。"""
+    segment = _segment_from_shot_row(row)
+    if not segment:
+        return []
+    memo = segment.get("continuity_memo") or {}
+    return [p for p in (memo.get("props") or []) if isinstance(p, dict)]
 
 
 def scene_entries_for_shot(row: Any) -> list[dict[str, Any]]:
@@ -274,6 +301,13 @@ def scan_episode_scene_state_needs(
     ready_ids = ready_scene_card_ids(conn, all_scene_ids)
     runs = group_scene_state_runs(shot_rows, ready_scene_reference_ids=ready_ids)
     visual_style = bible.world.visual_style_canonical
+    # 函数内导入：app.video_modes.scene_state_prop_states 依赖本模块的
+    # scene_entries_for_shot/segment_props_for_shot_row/matched_props_in_text，
+    # 模块级互相 import 会形成循环（本模块是数据层，新模块是建在它之上的
+    # 派生功能），推到调用时才解析即可破环，不影响任何行为。
+    from app.video_modes.scene_state_prop_states import character_display_names_from_bible, prop_state_notes_for_run
+
+    character_display_names = character_display_names_from_bible(bible)
     items: list[dict[str, Any]] = []
     for run in runs:
         card = conn.execute(
@@ -283,9 +317,15 @@ def scan_episode_scene_state_needs(
             continue
         establishing_path = str(card["image_path"] or "")
         prop_notes = prop_appearance_notes_for_description(run["description"], bible.props)
+        prop_state_notes = prop_state_notes_for_run(
+            shot_rows=shot_rows, description=run["description"], start_shot_no=run["start_shot_no"],
+            scene_reference_id=run["scene_reference_id"], props=bible.props,
+            character_display_names=character_display_names,
+        )
         fingerprint = scene_state_input_fingerprint(
             scene_reference_id=run["scene_reference_id"], establishing_image_path=establishing_path,
             description=run["description"], visual_style=visual_style, prop_appearance_notes=prop_notes,
+            prop_state_notes=prop_state_notes,
         )
         state = scene_state_view_status(
             conn, scene_reference_id=run["scene_reference_id"], episode_id=episode_id,
@@ -296,7 +336,7 @@ def scan_episode_scene_state_needs(
             "scene_reference_id": run["scene_reference_id"], "scene_name": str(card["scene_name"] or ""),
             "state_key": run["state_key"], "description": run["description"], "shot_nos": list(run["shot_nos"]),
             "establishing_image_path": establishing_path, "fingerprint": fingerprint,
-            "prop_appearance_notes": prop_notes,
+            "prop_appearance_notes": prop_notes, "prop_state_notes": prop_state_notes,
             "status": state["status"], "image_path": state["image_path"], "error": state["error"],
         })
     return items
@@ -304,14 +344,15 @@ def scan_episode_scene_state_needs(
 
 def resolve_scene_state_view_for_shot(
     *, conn: Any, episode_id: str, shot_no: int, scene_reference_id: str,
-    establishing_image_path: str, visual_style: str, props: list[Any],
+    establishing_image_path: str, visual_style: str, props: list[Any], character_display_names: set[str],
 ) -> dict[str, Any] | None:
     """装配期（``app.video_modes.scene_state_assembly``）只读查询：本段所属的
     状态段串若有 ready 且指纹匹配的状态图，返回该行；否则 ``None``，调用方据此
     保持现有省略行为。``conn`` 必填：装配期身处调用方自己的事务连接里。``props``
     是本集 Bible 的道具卡列表（``bible.props``），用来算与扫描/生成同一份的
     ``prop_appearance_notes``；必传——漏传会让装配期算出不带道具外观的指纹，与
-    扫描/生成侧对不上，状态图永远判不中。"""
+    扫描/生成侧对不上，状态图永远判不中。``character_display_names`` 同理必传，
+    供 ``scene_state_prop_states`` 过滤"在人手里/穿在身上"的道具条目。"""
     ready_ids = ready_scene_card_ids(conn, {scene_reference_id})
     if scene_reference_id not in ready_ids:
         return None
@@ -320,10 +361,18 @@ def resolve_scene_state_view_for_shot(
     run = find_run_for_shot(runs, scene_reference_id, shot_no)
     if run is None:
         return None
+    # 函数内导入：理由同 scan_episode_scene_state_needs 上方那处。
+    from app.video_modes.scene_state_prop_states import prop_state_notes_for_run
+
     prop_notes = prop_appearance_notes_for_description(run["description"], props)
+    prop_state_notes = prop_state_notes_for_run(
+        shot_rows=shot_rows, description=run["description"], start_shot_no=run["start_shot_no"],
+        scene_reference_id=scene_reference_id, props=props, character_display_names=character_display_names,
+    )
     fingerprint = scene_state_input_fingerprint(
         scene_reference_id=scene_reference_id, establishing_image_path=establishing_image_path,
         description=run["description"], visual_style=visual_style, prop_appearance_notes=prop_notes,
+        prop_state_notes=prop_state_notes,
     )
     view = get_scene_state_view(conn, scene_reference_id=scene_reference_id, episode_id=episode_id, state_key=run["state_key"])
     if not view or view.get("status") != "ready" or view.get("input_fingerprint") != fingerprint:

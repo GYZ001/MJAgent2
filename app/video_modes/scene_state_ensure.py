@@ -57,18 +57,25 @@ _BACKGROUND_ENSURE_TASKS: set[asyncio.Task[None]] = set()
 
 def scene_state_prompt(
     visual_style: str, scene_name: str, description: str, aspect_ratio: str,
-    prop_appearance_notes: str = "",
+    prop_appearance_notes: str = "", prop_state_notes: str = "",
 ) -> str:
     """``prop_appearance_notes``（2026-10-05，见 ``scene_state_views.
     prop_appearance_notes_for_description``）是本段状态描述里逐字命中的道具卡
     外观陈述：状态图是在场景卡主图上做图生图编辑，图像模型会连道具的颜色/
     材质也一并照抄主图（《顾念长安》EP1 真实故障：绿萝花盆被画成酒红陶盆、
-    鞋柜画成高木柜），这句话把道具外观的最终话语权明确交还给道具卡。"""
+    鞋柜画成高木柜），这句话把道具外观的最终话语权明确交还给道具卡。
+
+    ``prop_state_notes``（同日第二处真实故障：插座拔出的插头四轮重抽都被画回
+    插座里，见 ``app.video_modes.scene_state_prop_states`` 模块文档）是上一段
+    备忘里记录的"这件道具此刻在哪、什么状态"，本句把它直接画进状态图，不再
+    只靠分镜正文的文字去对抗视频模型"回到默认状态"的倾向。"""
     notes_clause = f"{prop_appearance_notes} " if prop_appearance_notes else ""
+    state_notes_clause = f"{prop_state_notes} " if prop_state_notes else ""
     return (
         f"{scene_visual_style_lock(visual_style)}。这是一次基于参考图的状态编辑任务，不是重新构图：同一个"
         f"空间「{scene_name}」、同一机位与构图，墙面、门窗、家具的位置与参考图保持一致，只把画面状态改为："
-        f"{description}。{notes_clause}画面中没有任何人物，不出现文字、字幕、水印、logo。{canvas_phrase(aspect_ratio)}。"
+        f"{description}。{notes_clause}{state_notes_clause}画面中没有任何人物，不出现文字、字幕、水印、logo。"
+        f"{canvas_phrase(aspect_ratio)}。"
     )
 
 
@@ -176,7 +183,7 @@ async def _generate_one_state(
         return
     prompt = scene_state_prompt(
         visual_style, spec["scene_name"], spec["description"], aspect_ratio,
-        spec.get("prop_appearance_notes", ""),
+        spec.get("prop_appearance_notes", ""), spec.get("prop_state_notes", ""),
     )
     try:
         size = config.SCENE_REF_SIZES.get(aspect_ratio, config.REF_IMAGE_SIZE)

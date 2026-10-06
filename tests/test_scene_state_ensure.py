@@ -283,11 +283,11 @@ def test_scene_state_input_fingerprint_changes_with_establishing_image_path():
     被当成仍然正确而永远不重出。"""
     fp_a = scene_state_input_fingerprint(
         scene_reference_id="scene_1", establishing_image_path="/a.jpg", description="满地积水", visual_style="写实",
-        prop_appearance_notes="",
+        prop_appearance_notes="", prop_state_notes="",
     )
     fp_b = scene_state_input_fingerprint(
         scene_reference_id="scene_1", establishing_image_path="/b.jpg", description="满地积水", visual_style="写实",
-        prop_appearance_notes="",
+        prop_appearance_notes="", prop_state_notes="",
     )
     assert fp_a != fp_b
 
@@ -340,7 +340,7 @@ def test_pending_scene_state_gate_failed_does_not_block(tmp_path, monkeypatch):
     fp = scene_state_input_fingerprint(
         scene_reference_id="scene_ensure_1",
         establishing_image_path=str((tmp_path / "est.jpg")), description="满地积水，鞋柜歪倒", visual_style="写实",
-        prop_appearance_notes="",
+        prop_appearance_notes="", prop_state_notes="",
     )
     _seed_state_row(
         id="scstate_failed", project_id=project_id, episode_id=episode_id, scene_reference_id="scene_ensure_1",

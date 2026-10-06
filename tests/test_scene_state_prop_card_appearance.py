@@ -130,8 +130,8 @@ def test_fingerprint_changes_when_prop_card_appearance_changes():
         "scene_reference_id": "scene_1", "establishing_image_path": "/a.jpg",
         "description": _FLOOD_DESC, "visual_style": "写实",
     }
-    fp_old = scene_state_input_fingerprint(**common, prop_appearance_notes=old_notes)
-    fp_new = scene_state_input_fingerprint(**common, prop_appearance_notes=new_notes)
+    fp_old = scene_state_input_fingerprint(**common, prop_appearance_notes=old_notes, prop_state_notes="")
+    fp_new = scene_state_input_fingerprint(**common, prop_appearance_notes=new_notes, prop_state_notes="")
 
     assert fp_old != fp_new
 
@@ -146,8 +146,8 @@ def test_fingerprint_unchanged_when_prop_notes_identical():
         "scene_reference_id": "scene_1", "establishing_image_path": "/a.jpg",
         "description": _FLOOD_DESC, "visual_style": "写实",
     }
-    assert scene_state_input_fingerprint(**common, prop_appearance_notes=notes) == \
-        scene_state_input_fingerprint(**common, prop_appearance_notes=notes)
+    assert scene_state_input_fingerprint(**common, prop_appearance_notes=notes, prop_state_notes="") == \
+        scene_state_input_fingerprint(**common, prop_appearance_notes=notes, prop_state_notes="")
 
 
 def test_fingerprint_of_state_without_prop_mention_is_unchanged_from_before_rule():
@@ -168,8 +168,8 @@ def test_fingerprint_of_state_without_prop_mention_is_unchanged_from_before_rule
         {**common, "version": PROMPT_VERSION}, ensure_ascii=False, sort_keys=True,
     ).encode("utf-8")).hexdigest()[:32]
     assert PROMPT_VERSION == "v1"
-    assert scene_state_input_fingerprint(**common, prop_appearance_notes="") == before
-    with_notes = scene_state_input_fingerprint(**common, prop_appearance_notes="画面里的「绿萝」外观按道具卡画。")
+    assert scene_state_input_fingerprint(**common, prop_appearance_notes="", prop_state_notes="") == before
+    with_notes = scene_state_input_fingerprint(**common, prop_appearance_notes="画面里的「绿萝」外观按道具卡画。", prop_state_notes="")
     assert with_notes != before
 
 
