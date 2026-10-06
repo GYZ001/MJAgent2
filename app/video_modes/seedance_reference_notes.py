@@ -29,8 +29,17 @@ import re
 from typing import Any
 
 from app.scene_reverse import evidence as reverse_evidence
+from app.video_modes.prop_references import unique_owners_for_labels
 
 REFERENCE_PROMPT_NOTE_MARKER = "参考图说明："
+
+# 续接服装原文抓取（2026-10-05，《顾念长安》EP1 第15段真实故障）：固定格式见
+# app.production.storyboard_continuity_memo.ensure_wardrobe_continuity_in_prompt
+# 写入的「续接服装：@名字 ……。」整行，这里只认这个代码生成的固定格式做抓取，
+# 不跨模块 import 该函数的私有正则（本仓既有做法是各处各自复制一份，见
+# app.video_modes.prop_references._identity_id_core 同类注释）。同一人物多行
+# 时，forward 遍历天然按原文出现顺序覆盖字典，取到的就是最后一行。
+_WARDROBE_LINE = re.compile(r"续接服装：@(?P<name>[^\s@]+) (?P<text>[^\n]*?)。")
 REFERENCE_SINGLE_INSTANCE_NOTE = (
     "参考图只用来锁定身份与环境外观；每个具名角色在画面里只出现一次。"
 )
@@ -198,15 +207,48 @@ def _scene_purpose_zh(ref: dict[str, Any], *, scene_count: int, prop_labels: lis
     return base + _prop_card_authority_clause(prop_labels)
 
 
+def _wearer_clause(label: str, wearer: str | None) -> str:
+    """补一句"这件物件是谁的"的正面陈述（只标归属；此刻穿着还是搭在手臂上、
+    拿在手里以正文为准）；没有唯一归属（0 个或 >=2 个人物的续接服装原文都
+    命中这个 label）时返回空串，不写进说明——
+    宁缺不错，不兜底猜（2026-10-05，《顾念长安》EP1 第15段真实故障：场景里
+    唯一一张外套参考图被视频模型分给了没穿它的男主角）。"""
+    return f"；「{label}」是{wearer}的，本段怎么穿戴或拿着以正文为准" if wearer else ""
+
+
+def _composite_member_descriptor(label: str, wearer: str | None) -> str:
+    """拼图成员列表里单个成员的措辞：能唯一确定穿着者时在 label 后用括号点名，
+    否则只写 label 本身——与 ``_wearer_clause`` 同一份穿着者数据，只是插入
+    位置不同（拼图列表项内 vs 单张道具末尾追加整句）。"""
+    return f"{label}（{wearer}的）" if wearer else label
+
+
+def _prop_purpose_zh(ref: dict[str, Any], wearer_by_label: dict[str, str]) -> tuple[str, list[str]]:
+    """单张道具/道具拼图的用途说明，在原有措辞后按 ``wearer_by_label``（见
+    ``app.video_modes.prop_references.unique_owners_for_labels``）补穿着者
+    陈述；拼图对能唯一确定穿着者的成员同样标出，标法与单张道具一致。"""
+    if ref.get("view_role") == "prop_composite":
+        labels = [str(name).strip() for name in (ref.get("composite_member_labels") or []) if str(name).strip()]
+        who = "、".join(_composite_member_descriptor(label, wearer_by_label.get(label)) for label in labels)
+        return _TYPE_PURPOSE_ZH["prop_composite"].format(who=who), _related_names(ref)
+    label = str(ref.get("entity_name") or "").strip()
+    related = _related_names(ref)
+    who = "、".join(related)
+    base = _TYPE_PURPOSE_ZH["prop" if who else "prop_no_name"].format(who=who)
+    return base + _wearer_clause(label, wearer_by_label.get(label)), related
+
+
 def _reference_purpose_zh(
-    ref: dict[str, Any], *, scene_count: int = 1, prop_labels: list[str] | None = None,
+    ref: dict[str, Any], *,
+    scene_count: int = 1, prop_labels: list[str] | None = None, wearer_by_label: dict[str, str] | None = None,
 ) -> tuple[str, list[str]]:
     """返回 (这张参考图的中文用途说明, 它绑定的具名人物/场景列表)。
 
     ``scene_count``：本次打包的场景类参考图总数，只有两张及以上（主视角 +
     被点名的反打视角）才需要写清各自是哪个场景、哪个方向。``prop_labels``：
     本段同时作为参考图发出的道具标签，只影响场景类说明（见 ``_scene_purpose_
-    zh``）。
+    zh``）。``wearer_by_label``：能唯一确定穿着者的道具 label 到人物名的映射，
+    只影响道具类说明（见 ``_prop_purpose_zh``）。
     """
     ref_type = str(ref.get("type") or "reference")
     related = _related_names(ref)
@@ -215,13 +257,8 @@ def _reference_purpose_zh(
         return _plot_key_frame_purpose_zh(ref, who), related
     if ref_type == "character":
         template = _TYPE_PURPOSE_ZH[_character_purpose_key(bool(who), ref.get("costume_mode"), ref.get("view_role"))]
-    elif ref_type == "prop" and ref.get("view_role") == "prop_composite":
-        template = _TYPE_PURPOSE_ZH["prop_composite"]
-        who = "、".join(
-            str(name).strip() for name in (ref.get("composite_member_labels") or []) if str(name).strip()
-        )
     elif ref_type == "prop":
-        template = _TYPE_PURPOSE_ZH["prop" if who else "prop_no_name"]
+        return _prop_purpose_zh(ref, wearer_by_label or {})
     elif ref_type == "scene":
         return _scene_purpose_zh(ref, scene_count=scene_count, prop_labels=prop_labels or []), related
     else:
@@ -273,13 +310,29 @@ def _replace_at_mentions_with_picture_numbers(
     return _sub_at_mentions(body, sorted(plain_names, key=len, reverse=True), named_indices, r"(?![\w])")
 
 
-def _compose_purposes(packed_refs: list[dict[str, Any]]) -> tuple[list[str], dict[str, int]]:
+def _continuity_wardrobe_by_name(prompt_body: str) -> dict[str, str]:
+    """从正文（替换 @图片N 之前的原文）提取每个人物最新一行「续接服装：
+    @名字 ……。」原文，供 ``unique_owners_for_labels`` 判定道具卡此刻穿在
+    谁身上；没有这一行的人物不进字典。forward 遍历天然按原文出现顺序覆盖，
+    同一人物多行时取到的就是最后一行。"""
+    wardrobe_by_name: dict[str, str] = {}
+    for match in _WARDROBE_LINE.finditer(prompt_body):
+        wardrobe_by_name[match.group("name")] = match.group("text")
+    return wardrobe_by_name
+
+
+def _compose_purposes(
+    packed_refs: list[dict[str, Any]], wardrobe_by_name: dict[str, str],
+) -> tuple[list[str], dict[str, int]]:
     purposes: list[str] = []
     named_indices: dict[str, int] = {}
     scene_count = sum(1 for ref in packed_refs if str(ref.get("type") or "") == "scene")
     prop_labels = _segment_prop_labels(packed_refs)
+    wearer_by_label = unique_owners_for_labels(prop_labels, wardrobe_by_name)
     for idx, ref in enumerate(packed_refs, 1):
-        purpose, related = _reference_purpose_zh(ref, scene_count=scene_count, prop_labels=prop_labels)
+        purpose, related = _reference_purpose_zh(
+            ref, scene_count=scene_count, prop_labels=prop_labels, wearer_by_label=wearer_by_label,
+        )
         purposes.append(f"图片{idx}：{purpose}")
         for name in related:
             named_indices.setdefault(name, idx)
@@ -313,7 +366,7 @@ def build_seedance_reference_prompt_notes(
     if REFERENCE_PROMPT_NOTE_MARKER in prompt_text:
         return prompt_text
     prompt_body, prompt_args = _split_video_args(prompt_text, duration_s, aspect_ratio=aspect_ratio)
-    purposes, named_indices = _compose_purposes(packed_refs)
+    purposes, named_indices = _compose_purposes(packed_refs, _continuity_wardrobe_by_name(prompt_body))
     if not purposes:
         return _demote_residual_reverse_mentions(prompt_text)
     prompt_body = _demote_residual_reverse_mentions(_replace_at_mentions_with_picture_numbers(prompt_body, named_indices))

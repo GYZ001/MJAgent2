@@ -190,6 +190,63 @@ def infer_wardrobe_prop_labels(
     return matched_names
 
 
+def label_matches_wardrobe_text(label: str, text: str) -> bool:
+    """label（道具卡名/别名）是否可判定为 text（某人物一句续接服装原文）描述
+    的那件：先剥掉 label 末尾括号注释（如"浅蓝色碎花长裙（裙摆）"→"浅蓝色碎花
+    长裙"，与 ``resolve_segment_prop_manifest_entries`` 查卡时的回退同一剥法——
+    世界书卡名本身没有括号，带注释的真实 label 整条去比对覆盖率必然被注释字符
+    拉低，本该唯一确定的穿着者会被漏判，2026-10-05 第19轮审片实测），再逐字
+    出现在 text 里（不限长度），或长度>=``MIN_WARDROBE_PROP_IDENTIFIER_LEN``
+    且覆盖率>=``MIN_WARDROBE_PROP_COVERAGE``——与 ``infer_wardrobe_prop_labels``
+    同一判据，供 ``app.video_modes.seedance_reference_notes`` 判定"这件卡此刻
+    穿在谁身上"复用，不新开第二套门槛。"""
+    if not label or not text:
+        return False
+    candidate = _strip_trailing_annotation(label)
+    if candidate in text:
+        return True
+    return (
+        len(candidate) >= MIN_WARDROBE_PROP_IDENTIFIER_LEN
+        and _char_coverage(candidate, text) >= MIN_WARDROBE_PROP_COVERAGE
+    )
+
+
+def _labels_matched_in_text(labels: list[str], text: str) -> set[str]:
+    """本段参考图实际用到的 label 集合里，text（某人物一句续接服装原文）命中
+    了哪些；不区分这件此刻是穿着还是搭在手臂上、拎在手里——续接服装原文写到
+    它，它就是这个人物的东西（归属），怎么穿戴/拿着由正文决定，不靠维护一张
+    「携带动词」表去猜（CLAUDE.md「禁止黑白名单与枚举穷举」）。重叠卡名取最长——一个 label 的命中字符位置被另一个更长 label 的
+    命中位置完全覆盖时，短的不计入（例如服装文字写"顾屿外套"，"外套"卡不能
+    因为子串命中就被判给他，真正该采信的是更长、更具体的那个 label）。"""
+    hits: dict[str, frozenset[int]] = {
+        label: _matched_text_positions(_strip_trailing_annotation(label), text)
+        for label in labels
+        if label_matches_wardrobe_text(label, text)
+    }
+    return {
+        label for label, positions in hits.items()
+        if not (positions and any(
+            other != label and len(other) > len(label) and positions <= other_positions
+            for other, other_positions in hits.items()
+        ))
+    }
+
+
+def unique_owners_for_labels(labels: list[str], wardrobe_by_name: dict[str, str]) -> dict[str, str]:
+    """{label: 归属人物}，只含本段能从续接服装原文唯一确定归属的 label——
+    0 个或 >=2 个人物的原文都命中同一 label 时（如两人穿了同款同名的衣物，
+    或没有任何人的续接服装文本点到它）不收，宁缺不错，不猜是谁的
+    （2026-10-05，《顾念长安》EP1 第15段真实故障：视频模型把场景里唯一一张
+    外套参考图分给了没穿它的男主角，根因是参考说明没写清这件衣物此刻穿在
+    谁身上）。只标归属不断言「穿着」：原文可能写的是搭在手臂上（第22/24段），
+    此刻怎么穿戴/拿着交给正文。"""
+    wearers: dict[str, list[str]] = {label: [] for label in labels}
+    for name, text in wardrobe_by_name.items():
+        for label in _labels_matched_in_text(labels, text):
+            wearers[label].append(name)
+    return {label: names[0] for label, names in wearers.items() if len(names) == 1}
+
+
 def storyboard_pack_prop_entries(
     *, segment: dict[str, Any], bible: Any, conn: Any, project_id: str, episode_no: int,
 ) -> list[dict[str, Any]]:
