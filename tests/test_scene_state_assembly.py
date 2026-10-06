@@ -107,7 +107,7 @@ def _expected_fingerprint(establishing_path: str) -> str:
 
     return scene_state_input_fingerprint(
         scene_reference_id="scene_ref_a", establishing_image_path=establishing_path,
-        description="满地积水", visual_style="写实",
+        description="满地积水", visual_style="写实", prop_appearance_notes="",
     )
 
 

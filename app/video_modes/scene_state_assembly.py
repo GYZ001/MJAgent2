@@ -50,7 +50,7 @@ def resolve_scene_entry_with_state(
             state_row = resolve_scene_state_view_for_shot(
                 conn=conn, episode_id=shot_row["episode_id"], shot_no=int(shot_row["shot_no"]),
                 scene_reference_id=scene_reference_id, establishing_image_path=image_path,
-                visual_style=bible.world.visual_style_canonical,
+                visual_style=bible.world.visual_style_canonical, props=bible.props,
             )
     if state_row is not None:
         return _state_override(state_row, entry, purposes)

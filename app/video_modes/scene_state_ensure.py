@@ -55,11 +55,20 @@ _MAX_CONCURRENT_STATES = 3
 _BACKGROUND_ENSURE_TASKS: set[asyncio.Task[None]] = set()
 
 
-def scene_state_prompt(visual_style: str, scene_name: str, description: str, aspect_ratio: str) -> str:
+def scene_state_prompt(
+    visual_style: str, scene_name: str, description: str, aspect_ratio: str,
+    prop_appearance_notes: str = "",
+) -> str:
+    """``prop_appearance_notes``（2026-10-05，见 ``scene_state_views.
+    prop_appearance_notes_for_description``）是本段状态描述里逐字命中的道具卡
+    外观陈述：状态图是在场景卡主图上做图生图编辑，图像模型会连道具的颜色/
+    材质也一并照抄主图（《顾念长安》EP1 真实故障：绿萝花盆被画成酒红陶盆、
+    鞋柜画成高木柜），这句话把道具外观的最终话语权明确交还给道具卡。"""
+    notes_clause = f"{prop_appearance_notes} " if prop_appearance_notes else ""
     return (
         f"{scene_visual_style_lock(visual_style)}。这是一次基于参考图的状态编辑任务，不是重新构图：同一个"
         f"空间「{scene_name}」、同一机位与构图，墙面、门窗、家具的位置与参考图保持一致，只把画面状态改为："
-        f"{description}。画面中没有任何人物，不出现文字、字幕、水印、logo。{canvas_phrase(aspect_ratio)}。"
+        f"{description}。{notes_clause}画面中没有任何人物，不出现文字、字幕、水印、logo。{canvas_phrase(aspect_ratio)}。"
     )
 
 
@@ -165,7 +174,10 @@ async def _generate_one_state(
         # （CLAUDE.md「不得兜底填充」）。
         await _mark_failed(row_id=row["id"], error="场景状态描述为空，无法生成状态图")
         return
-    prompt = scene_state_prompt(visual_style, spec["scene_name"], spec["description"], aspect_ratio)
+    prompt = scene_state_prompt(
+        visual_style, spec["scene_name"], spec["description"], aspect_ratio,
+        spec.get("prop_appearance_notes", ""),
+    )
     try:
         size = config.SCENE_REF_SIZES.get(aspect_ratio, config.REF_IMAGE_SIZE)
         seed = [hiagent.data_url_from_file(establishing_path)]

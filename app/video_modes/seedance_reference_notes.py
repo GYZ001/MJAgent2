@@ -122,6 +122,38 @@ def _plot_key_frame_purpose_zh(ref: dict[str, Any], who: str) -> str:
     return purpose
 
 
+def _segment_prop_labels(packed_refs: list[dict[str, Any]]) -> list[str]:
+    """本段实际作为参考图发给视频模型的道具标签（含进了道具拼图的成员），
+    保序去重。供场景/场景状态图的用途说明点名"这些道具的外观另有图为准"——
+    标签直接来自本次真正打包发出的参考图（``prop_library_anchors``/
+    ``prop_composite_pack`` 写进 ``entity_name``/``composite_member_labels``
+    的那两处），不是另猜一套名单。"""
+    labels: list[str] = []
+    for ref in packed_refs or []:
+        if str(ref.get("type") or "") != "prop":
+            continue
+        if ref.get("view_role") == "prop_composite":
+            labels.extend(
+                str(name).strip() for name in (ref.get("composite_member_labels") or []) if str(name).strip()
+            )
+        else:
+            label = str(ref.get("entity_name") or "").strip()
+            if label:
+                labels.append(label)
+    return list(dict.fromkeys(labels))
+
+
+def _prop_card_authority_clause(prop_labels: list[str]) -> str:
+    """场景类参考图的用途说明追加一句正面陈述：本段同时发了道具参考图时，
+    场景图/场景状态图不再是这些道具外观的依据，外观另有图为准（2026-10-05，
+    《顾念长安》EP1 真实故障：场景状态图连道具的颜色、款式都被视频模型照场
+    景图画，压过了同时发出的道具卡）。没有道具参考图时不提，不凭空追加。"""
+    if not prop_labels:
+        return ""
+    names = "、".join(f"「{label}」" for label in prop_labels)
+    return f"；其中{names}的外观以对应的道具参考图为准，这张图只决定它们在哪里、此刻处于什么状态"
+
+
 def _scene_multi_purpose_zh(ref: dict[str, Any]) -> str:
     """两张及以上场景参考图时的用途说明：写清各自是哪个场景、哪个方向——
     只有一张时维持 ``_TYPE_PURPOSE_ZH["scene"]`` 逐字不变的既有文案（冻结
@@ -151,11 +183,30 @@ def _character_purpose_key(has_name: bool, costume_mode: Any, view_role: Any = N
     return "character_neutral_no_name" if neutral else "character_no_name"
 
 
-def _reference_purpose_zh(ref: dict[str, Any], *, scene_count: int = 1) -> tuple[str, list[str]]:
+def _scene_purpose_zh(ref: dict[str, Any], *, scene_count: int, prop_labels: list[str]) -> str:
+    """场景/场景状态图的用途说明；统一在末尾追加道具卡外观优先权的那句（本段
+    同时发了道具参考图时才有，见 ``_prop_card_authority_clause``）——状态图、
+    多场景、单场景三条分支的措辞主体都不变，只是共用同一条追加规则。"""
+    if ref.get("view_role") == "scene_state":
+        # 状态图不受「只有一张场景图才用通用文案」限制：无论本次打包的场景图
+        # 是一张（状态图替代主图）还是两张（+ 反打），都要点名哪张图是状态图。
+        base = _TYPE_PURPOSE_ZH["scene_state"].format(who=str(ref.get("entity_name") or "").strip())
+    elif scene_count > 1:
+        base = _scene_multi_purpose_zh(ref)
+    else:
+        base = _TYPE_PURPOSE_ZH["scene"]
+    return base + _prop_card_authority_clause(prop_labels)
+
+
+def _reference_purpose_zh(
+    ref: dict[str, Any], *, scene_count: int = 1, prop_labels: list[str] | None = None,
+) -> tuple[str, list[str]]:
     """返回 (这张参考图的中文用途说明, 它绑定的具名人物/场景列表)。
 
     ``scene_count``：本次打包的场景类参考图总数，只有两张及以上（主视角 +
-    被点名的反打视角）才需要写清各自是哪个场景、哪个方向。
+    被点名的反打视角）才需要写清各自是哪个场景、哪个方向。``prop_labels``：
+    本段同时作为参考图发出的道具标签，只影响场景类说明（见 ``_scene_purpose_
+    zh``）。
     """
     ref_type = str(ref.get("type") or "reference")
     related = _related_names(ref)
@@ -171,13 +222,8 @@ def _reference_purpose_zh(ref: dict[str, Any], *, scene_count: int = 1) -> tuple
         )
     elif ref_type == "prop":
         template = _TYPE_PURPOSE_ZH["prop" if who else "prop_no_name"]
-    elif ref_type == "scene" and ref.get("view_role") == "scene_state":
-        # 状态图不受「只有一张场景图才用通用文案」限制：无论本次打包的场景图
-        # 是一张（状态图替代主图）还是两张（+ 反打），都要点名哪张图是状态图。
-        template = _TYPE_PURPOSE_ZH["scene_state"]
-        who = str(ref.get("entity_name") or "").strip()
-    elif ref_type == "scene" and scene_count > 1:
-        return _scene_multi_purpose_zh(ref), related
+    elif ref_type == "scene":
+        return _scene_purpose_zh(ref, scene_count=scene_count, prop_labels=prop_labels or []), related
     else:
         template = _TYPE_PURPOSE_ZH.get(ref_type, f"{ref_type}参考")
     return template.format(who=who), related
@@ -231,8 +277,9 @@ def _compose_purposes(packed_refs: list[dict[str, Any]]) -> tuple[list[str], dic
     purposes: list[str] = []
     named_indices: dict[str, int] = {}
     scene_count = sum(1 for ref in packed_refs if str(ref.get("type") or "") == "scene")
+    prop_labels = _segment_prop_labels(packed_refs)
     for idx, ref in enumerate(packed_refs, 1):
-        purpose, related = _reference_purpose_zh(ref, scene_count=scene_count)
+        purpose, related = _reference_purpose_zh(ref, scene_count=scene_count, prop_labels=prop_labels)
         purposes.append(f"图片{idx}：{purpose}")
         for name in related:
             named_indices.setdefault(name, idx)
