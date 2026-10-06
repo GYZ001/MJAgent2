@@ -28,11 +28,32 @@ text`` 统一 ``.format()`` 填入，本模块只存模板字符串本身。
 写实/非写实画风无关，不进 ``_PHOTOGRAPHIC_ONLY_KINDS``）；``previous_quote``
 核验机制与 ``screen_side`` 同一套（逐字核验到上一段 ``prompt_text``），不
 单独写一份核验函数。
+
+2026-10-05（新增第十三类 ``layer_reveal_unspecified``，真人短剧《顾念长安》
+第 1 集第 1 段连续四轮重抽同错驱动）：道具卡「浅蓝色碎花长裙」是圆领短袖
+A字裙（卡图与外观文字都是短袖），分镜正文写「米白色针织开衫从一侧肩头滑下
+半截」「左手把滑落的米白色开衫拉回肩头」——外层衣物滑落露出肩部的那一刻，
+正文没有交代里层衣物在这个部位是什么样（短袖袖口盖着肩头），视频生成模型
+按『衣服滑落＝露肩』的常见画面去补，把本来有短袖的里层衣物画成细吊带/
+无袖抹胸、整片裸肩。既有十二类都没有一类管「外层衣物滑落/敞开/脱下露出
+里层，但没写里层那个部位的样子」，新增。不按画风分支（衣物层次写法与写实/
+非写实画风无关，不进 ``_PHOTOGRAPHIC_ONLY_KINDS``）；不要求 ``previous_
+quote``（同一处描述都在本段 ``prompt_text`` 内部，与 ``prop_duplication``
+同一取舍，不进 ``_NEEDS_PREVIOUS_QUOTE``）。fix 要求里层衣物的款式（领口/
+袖型/长度）逐字取自输入里本段这个人物的续接服装/服装道具外观——``prompt_
+text`` 末尾本来就有 ``ensure_wardrobe_continuity_in_prompt``（见
+``storyboard_continuity_memo``）写入的「续接服装：@人物 ……。」整行，且这一步
+跑在 ``storyboard_segment_chains._segment_validate`` 里，排在
+``review_segment_inline`` 之前（见 ``_generate_segment_attempt`` 调用顺序），
+复核模型拿到的 ``prompt_text`` 本来就带这行文字，不需要在复核 payload 里
+另开一个字段重复传——模型据此逐字取用，不凭空编一套新款式。
+``_LOCALLY_PATCHABLE_KINDS`` 判 True：fix 只是在滑落那句里补一小句里层衣物
+样子，纯文本替换。
 """
 from __future__ import annotations
 
-#: 十二类判据的正面陈述，单源用于「喂给模型的提示词」与「核验 kind 合法性」
-#: 两处（见 ``storyboard_prose_review`` 模块 docstring「判据只认十二类，取值
+#: 十三类判据的正面陈述，单源用于「喂给模型的提示词」与「核验 kind 合法性」
+#: 两处（见 ``storyboard_prose_review`` 模块 docstring「判据只认十三类，取值
 #: 集合单源」）。``{max_actions}`` 由 ``storyboard_prose_review._review_rules_
 #: text`` 用 ``storyboard_action_density.MAX_KEY_ACTIONS_PER_SHOT`` 填入。
 KIND_RULES: dict[str, str] = {
@@ -139,5 +160,18 @@ KIND_RULES: dict[str, str] = {
         "松开攥着的拳头、把手伸过桌面），并写出此刻的神情。与 repeated_transition_action 的区别："
         "那一类是上一段已经完成的转换过程在本段又被重新演了一遍（同一动作演两次）；这一类是本段"
         "起幅状态与上一段末镜状态本身对不上、中间没有写过渡动作（状态断档，不是重复演）。"
+    ),
+    "layer_reveal_unspecified": (
+        "layer_reveal_unspecified（外层滑落未写里层）：镜头描述里写到人物的外层衣物（外套、"
+        "开衫、大衣、围巾等）从身体某个部位滑落、敞开、被拉开或脱下，使里层衣物或身体部位露出"
+        "来，而写这个动作的同一句或紧接着的一句没有写出露出的那个部位上里层衣物是什么样（例如"
+        "肩头露出的是短袖袖口还是吊带）——即违规，视频生成模型会按『衣服滑落＝裸露』这类常见"
+        "画面去补，把本来有袖、有领口的里层衣物画成无袖、吊带或抹胸。正文同一处已经写明露出"
+        "部位里层衣物样子的，不算违规；外层衣物只是整体穿着描述、没有滑落/敞开/脱下这类动作"
+        "的，不适用。quote 填外层衣物滑落/敞开/脱下的那句原文；fix 给出正面写法：在这句里补上"
+        "露出部位里层衣物的样子——款式（领口、袖型、长度）必须逐字取自输入里本段这个人物的"
+        "续接服装/服装道具外观，不要自己编一套新款式，例如『米白色针织开衫从一侧肩头滑下半截，"
+        "露出里面浅蓝碎花长裙的圆领与短袖袖口，袖口仍盖住肩头』；不改动作本身，不新增或删除"
+        "镜头。"
     ),
 }

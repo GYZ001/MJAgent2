@@ -85,7 +85,14 @@ action`` 方向相反但容易混淆：那一类是上一段已完成的转换�
 500 行，Python 文件上限守着不许再加，新判据与搬移腾出的行数一起落地；新模块
 docstring 不重复这里的历史，只写拆分本身的理由。
 
-## 判据只认十二类，取值集合单源
+2026-10-05（同日，新增第十三类 ``layer_reveal_unspecified``，真人短剧《顾念
+长安》第 1 集第 1 段连续四轮重抽同错驱动——外层衣物滑落露出里层的部位没写
+里层样子，视频模型按常见画面补成裸露/吊带）：完整背景、与既有类别的区别、
+``_LOCALLY_PATCHABLE_KINDS`` 取舍全部写在 ``storyboard_prose_review_rules``
+模块 docstring，不在这里重复——本模块已经把 ``_KIND_RULES`` 字典搬过去，新
+判据的历史记录跟着字典一起放在那边才是单源。
+
+## 判据只认十三类，取值集合单源
 
 ``_KIND_RULES`` 既是喂给复核模型的判据正面陈述，也是代码核验 ``kind`` 合法性的
 唯一依据（``v.kind in _KIND_RULES``）——CLAUDE.md「模型契约两侧必须对齐」：schema
@@ -246,7 +253,7 @@ def _previous_shot_text(previous_draft: Any | None) -> str:
 
 
 def _review_rules_text(*, photographic: bool, max_shots: int) -> str:
-    """十二类判据的完整正面陈述；``skin_blush``/``impossible_camera_move`` 只在
+    """十三类判据的完整正面陈述；``skin_blush``/``impossible_camera_move`` 只在
     写实画风项目出现（见模块 docstring、``_PHOTOGRAPHIC_ONLY_KINDS``），非写实
     项目这两条规则连提示词都不会收到。"""
     kinds = [k for k in _KIND_RULES if k not in _PHOTOGRAPHIC_ONLY_KINDS or photographic]

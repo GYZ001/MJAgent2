@@ -29,7 +29,7 @@ segment_nos`` 必须是这份快照里「有已核验违规」段号集合的**�
 不一致（分镜在预览后被别的操作改过）会被跳过并给出可见原因，不会拿一份
 过期的违规清单去瞎改当前正文——完整设计见 ``prop_continuity_review`` 模块
 docstring。没有字段默认值——漏传等同于没有确认，直接走标准请求校验
-（422）。``kinds`` 可选，非空时只处理这些类别的违规，取值必须是 12 类判据
+（422）。``kinds`` 可选，非空时只处理这些类别的违规，取值必须是 13 类判据
 之一，否则 422（``VALID_PROSE_REVIEW_KINDS``，与 ``storyboard_prose_
 review`` 的 kind 合法性判据同一份数据）。
 
@@ -78,7 +78,7 @@ class PropContinuityRewriteBody(BaseModel):
             return value
         invalid = sorted(set(value) - VALID_PROSE_REVIEW_KINDS)
         if invalid:
-            raise ValueError(f"不支持的违规类别：{invalid}；合法取值见 12 类判据（storyboard_prose_review._KIND_RULES）")
+            raise ValueError(f"不支持的违规类别：{invalid}；合法取值见 13 类判据（storyboard_prose_review._KIND_RULES）")
         return value
 
 

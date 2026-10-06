@@ -17,15 +17,18 @@
 ## 哪些类别适合局部替换，哪些需要人工修订本段
 
 ``_LOCALLY_PATCHABLE_KINDS`` 对 ``storyboard_prose_review._KIND_RULES`` 的
-12 类逐一给出判断（见各条内联理由）；判据是「这一类违规的 fix 建议是否只需要
+13 类逐一给出判断（见各条内联理由）；判据是「这一类违规的 fix 建议是否只需要
 替换/补写一两句话，还是需要新增或拆分镜头、调整台词占位符位置这类结构性改动」
 ——后者局部替换无法安全完成，存量模式下不自动改，只在复核结果里原样保留供人工
 走单段「修订本段」处理。模块加载时 assert 两份取值集合完全相等
 （``test_storyboard_prop_continuity_minimal_patch.py`` 同步守着），防止
-``storyboard_prose_review`` 新增第十三类时这里漏判，默认把漏判的类别当「不可
+``storyboard_prose_review`` 新增第十四类时这里漏判，默认把漏判的类别当「不可
 局部改」（更安全的一侧，不是更宽松的一侧）。2026-10-05 新增第十二类
 ``opening_pose_break`` 时已照此流程同步补齐（判 True：fix 是起幅直接承接上一段
-末镜状态、必要时补写一句过渡动作，纯文本替换）。
+末镜状态、必要时补写一句过渡动作，纯文本替换）；同日新增第十三类
+``layer_reveal_unspecified`` 同样判 True（fix 是在外层衣物滑落那句里补一小句
+里层衣物样子，纯文本替换，见 ``storyboard_prose_review_rules`` 模块
+docstring）。
 
 ## 代码核验：quote 必须逐字、唯一、与已核验违规重叠、互不重叠
 
@@ -67,7 +70,7 @@ from app import textmatch
 from app.harness import model_gateway
 from app.production.storyboard_prose_review import ProseViolation, _KIND_RULES
 
-#: 12 类判据逐一判断能否用「替换一两句话」解决，理由见模块 docstring。
+#: 13 类判据逐一判断能否用「替换一两句话」解决，理由见模块 docstring。
 #: True＝可局部替换修复；False＝需要调整镜头结构/台词占位符位置，存量模式下
 #: 不自动改，只报告需要人工修订本段。
 _LOCALLY_PATCHABLE_KINDS: dict[str, bool] = {
@@ -98,6 +101,9 @@ _LOCALLY_PATCHABLE_KINDS: dict[str, bool] = {
     # fix 是起幅直接承接上一段末镜的姿态/神情，必要时补写一句明确的过渡动作，
     # 纯文本替换。
     "opening_pose_break": True,
+    # fix 是在外层衣物滑落/敞开/脱下那句里补一小句露出部位的里层衣物样子，
+    # 纯文本替换。
+    "layer_reveal_unspecified": True,
 }
 
 assert set(_LOCALLY_PATCHABLE_KINDS) == set(_KIND_RULES), (
