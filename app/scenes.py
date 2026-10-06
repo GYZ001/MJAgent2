@@ -37,7 +37,8 @@ from app.production.scene_discovery_assess import assess_new_scene as assess_new
 from app.production.scene_granularity import ROLE_TRANSITIONAL, anchor_discovery_sources, resolve_existing_anchor_name
 from app.refs import _safe_name, scene_visual_style_lock
 from app.scene_contract import split_legacy_scene_setting
-from app.schemas import Bible, Scene, extract_json
+from app.props.text_match import prop_notes_for_text
+from app.schemas import Bible, Prop, Scene, extract_json
 from app.validators import match_scene_name
 
 log = logging.getLogger(__name__)
@@ -170,9 +171,9 @@ def scene_ref_prompt(
     visual_style: str,
     scene_canonical: str,
     *,
-    scene_name: str = "", aspect_ratio: str,
+    scene_name: str = "", aspect_ratio: str, prop_notes: str,
 ) -> str:
-    """场景定场图生成词：纯环境、无人物，作为跨集复用的场景锚点。``aspect_ratio`` 为项目画幅。"""
+    """场景定场图生成词：纯环境、无人物，跨集复用场景锚点。aspect_ratio 为画幅；prop_notes 必传，道具卡外观陈述。"""
     location_identity = (
         f"规范地点名称：{scene_name.strip()}。"
         "地点名是独立且最高优先级的场景语义输入：必须逐项识别名称中的建筑功能、"
@@ -189,6 +190,7 @@ def scene_ref_prompt(
         style_constraint,
         f"场景定场图（纯环境、画面中不出现任何人物）："
         f"{location_identity}{generation_canonical}",
+        prop_notes,
         functional_constraints,
         f"{canvas_phrase(aspect_ratio)}，构图完整的环境定场镜头，空间纵深清晰，光影与色调统一，电影质感，高清",
         "画面必须无人物；不得生成任何文字、字幕、招牌字、角标、水印或 logo",
@@ -531,7 +533,7 @@ async def generate_scene_refs(
         async with semaphore:
             await _generate_one_scene_reference(
                 project_id, sc, style, project, bible_version, only_scene,
-                operation_started_at, bible_merge_lock,
+                operation_started_at, bible_merge_lock, bible.props,
             )
 
     results = await asyncio.gather(
@@ -572,7 +574,7 @@ async def _generate_one_scene_reference(
     bible_version: int,
     only_scene,
     operation_started_at: float | None,
-    bible_merge_lock: asyncio.Lock,
+    bible_merge_lock: asyncio.Lock, props: list[Prop],
 ) -> None:
     """Run one scene's full reference-image pipeline; raises on failure.
 
@@ -580,7 +582,7 @@ async def _generate_one_scene_reference(
     ``generate_scene_refs``.  ``get_conn()`` keys connections by
     ``asyncio.current_task()`` (see ``app.db``), so calling it fresh here --
     never inheriting the caller's ``conn`` via closure -- gives this scene
-    its own isolated SQLite connection, isolated from concurrent siblings.
+    its own isolated SQLite connection, isolated from concurrent siblings. ``props`` (bible.props) is required.
     """
     conn = get_conn()
     pending_state = (sc.pending_state_canonical or "").strip()
@@ -590,7 +592,7 @@ async def _generate_one_scene_reference(
         if current_state_row and int(current_state_row["ep_start"] or 1) < int(pending_ep_start):
             evolved = await _refresh_scene_on_state_change(
                 project_id, sc.name, int(pending_ep_start), pending_state, style, bible_version,
-                aspect_ratio=project["aspect_ratio"], change_meta={
+                aspect_ratio=project["aspect_ratio"], notes=prop_notes_for_text(pending_state, props), change_meta={
                     "change_type": "approved_scene_state_change",
                     "reason": "待审场景状态变化批准后付费重绘",
                     "persistence": "persistent",
@@ -622,10 +624,10 @@ async def _generate_one_scene_reference(
                 conn.commit()
             return
     sc.ref_image_path = None
-    base_prompt = (
-        (sc.scene_prompt_override or "").strip()
-        or scene_ref_prompt(style, sc.scene_canonical, scene_name=sc.name, aspect_ratio=project["aspect_ratio"])
-    )
+    override = (sc.scene_prompt_override or "").strip()
+    base_prompt = override or scene_ref_prompt(
+        style, sc.scene_canonical, scene_name=sc.name, aspect_ratio=project["aspect_ratio"],
+        prop_notes=prop_notes_for_text(sc.scene_canonical, props))
     last_error: Exception | None = None
     retry_prompt: str | None = None
     retry_seed: str | None = None
@@ -920,9 +922,9 @@ def _append_scene_alias(conn, project_id: str, scene_name: str, alias: str) -> b
     return False
 
 
-async def _generate_and_register_scene(project_id: str, name: str, scene_canonical: str,
-                                       style: str, *, ep_start: int, bible_version: int) -> str | None:
-    """为新场景出一张定场图并登记到 scene_references（适用集 ep_start~ 至今）。出图失败返回 None。"""
+async def _generate_and_register_scene(project_id: str, name: str, scene_canonical: str, style: str,
+                                       *, ep_start: int, bible_version: int, notes: str) -> str | None:
+    """为新场景出一张定场图并登记到 scene_references（适用集 ep_start~ 至今）。出图失败返回 None。notes 必传，是调用方算好的道具卡外观陈述。"""
     conn = get_conn()
     # 同场景参考：若该场景已有更早分段的图（同一地点跨集演化），以它做 i2i 锚点保持一致；全新场景则为 None → 纯文生图。
     prior = same_scene_anchor(conn, project_id, name)
@@ -930,7 +932,8 @@ async def _generate_and_register_scene(project_id: str, name: str, scene_canonic
     project = conn.execute(
         "SELECT bible_artifact_id, aspect_ratio FROM projects WHERE id=?", (project_id,)
     ).fetchone()
-    base_prompt = scene_ref_prompt(style, scene_canonical, scene_name=name, aspect_ratio=(project["aspect_ratio"] if project else "9:16"))
+    aspect_ratio = project["aspect_ratio"] if project else "9:16"
+    base_prompt = scene_ref_prompt(style, scene_canonical, scene_name=name, aspect_ratio=aspect_ratio, prop_notes=notes)
     prior_row = conn.execute(
         "SELECT artifact_id FROM scene_references WHERE project_id=? AND scene_name=? ORDER BY ep_start DESC LIMIT 1",
         (project_id, name),
@@ -956,7 +959,7 @@ async def _generate_and_register_scene(project_id: str, name: str, scene_canonic
         try:
             item = await _generate_scene_image(
                 prompt,
-                anchor_url, aspect_ratio=(project["aspect_ratio"] if project else "9:16"),
+                anchor_url, aspect_ratio=aspect_ratio,
                 call_meta={
                     "asset_kind": "scene_reference",
                     "scene_name": name,
@@ -981,7 +984,7 @@ async def _generate_and_register_scene(project_id: str, name: str, scene_canonic
         except Exception:  # noqa: BLE001 技术失败不伪装成 QA 问题
             if attempt == 1:
                 try:
-                    retry_prompt = await _provider_visual_scene_retry_prompt(style, scene_canonical, aspect_ratio=(project["aspect_ratio"] if project else "9:16"))
+                    retry_prompt = await _provider_visual_scene_retry_prompt(style, scene_canonical, aspect_ratio=aspect_ratio)
                 except Exception:  # noqa: BLE001 改写失败时不扩大重试
                     retry_prompt = None
                     break
@@ -1266,12 +1269,10 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
                         "SELECT bible_version, aspect_ratio FROM projects WHERE id=?", (project_id,),
                     ).fetchone()
                     refreshed = await _refresh_scene_on_state_change(
-                        project_id,
-                        name,
-                        episode_no,
-                        meta["new_scene_canonical"],
+                        project_id, name, episode_no, meta["new_scene_canonical"],
                         current_bible.world.visual_style_canonical,
                         int(project_state["bible_version"] or 0), aspect_ratio=project_state["aspect_ratio"],
+                        notes=prop_notes_for_text(meta["new_scene_canonical"], current_bible.props),
                         change_meta={
                             "change_dimensions": meta.get("change_dimensions") or [],
                             "persistence": meta.get("persistence") or "persistent",
@@ -1614,15 +1615,15 @@ shot_only / 未永久变化请 changed=false。new_scene_canonical 须 30~80 字
 async def _refresh_scene_on_state_change(
     project_id: str, name: str, episode_no: int,
     new_canonical: str, style: str, bible_version: int,
-    *, change_meta: dict | None = None, aspect_ratio: str,
+    *, change_meta: dict | None = None, aspect_ratio: str, notes: str,
 ) -> dict | None:
-    """永久场景状态变化：临时生成完整多视角包，整包 QA 通过后原子切换。"""
+    """永久场景状态变化：临时生成完整多视角包，整包 QA 通过后原子切换。notes 必传，是调用方算好的道具卡外观陈述。"""
     conn = get_conn()
     cur = _open_scene_ref(conn, project_id, name)
     if not cur or cur["ep_start"] >= episode_no:
         return None
 
-    base_prompt = scene_ref_prompt(style, new_canonical, scene_name=name, aspect_ratio=aspect_ratio)
+    base_prompt = scene_ref_prompt(style, new_canonical, scene_name=name, aspect_ratio=aspect_ratio, prop_notes=notes)
     prior = cur["image_path"] if cur["image_path"] and Path(cur["image_path"]).exists() else None
     anchor_url = hiagent.data_url_from_file(prior) if prior else None
     dest = str(Path(scene_ref_path(project_id, name, episode_no)).with_name(

@@ -314,7 +314,11 @@ def test_scene_prompts_follow_project_aspect_ratio() -> None:
     landscape = scene_view_prompt(style, "老旧修表铺", "establishing", aspect_ratio="16:9")
     assert "9:16 竖屏，环境为主" in portrait and "横屏" not in portrait
     assert "16:9 横屏，环境为主" in landscape and "竖屏" not in landscape
-    assert "9:16 竖屏，构图完整的环境定场镜头" in scene_ref_prompt(style, "老旧修表铺", scene_name="修表铺", aspect_ratio="9:16")
-    assert "16:9 横屏，构图完整的环境定场镜头" in scene_ref_prompt(style, "老旧修表铺", scene_name="修表铺", aspect_ratio="16:9")
+    assert "9:16 竖屏，构图完整的环境定场镜头" in scene_ref_prompt(
+        style, "老旧修表铺", scene_name="修表铺", aspect_ratio="9:16", prop_notes="",
+    )
+    assert "16:9 横屏，构图完整的环境定场镜头" in scene_ref_prompt(
+        style, "老旧修表铺", scene_name="修表铺", aspect_ratio="16:9", prop_notes="",
+    )
     with pytest.raises(ValueError):
         canvas_phrase("4:3")

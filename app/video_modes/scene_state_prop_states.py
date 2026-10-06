@@ -41,8 +41,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.props.text_match import matched_props_in_text
 from app.video_modes.scene_state_views import (
-    matched_props_in_text,
     scene_entries_for_shot,
     segment_props_for_shot_row,
 )

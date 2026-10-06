@@ -15,7 +15,9 @@ from app.domain.projects.evidence import _present_refs_error
 from app.evidence import repository as evidence_repository
 from app.media_urls import build_media_url
 from app.planning import chapter_preview
-from app.schemas import EpisodeScreenplay
+from app.props.text_match import prop_notes_for_text
+from app.scenes import scene_ref_prompt
+from app.schemas import EpisodeScreenplay, Prop
 
 
 def _project_task_timings(conn, project: dict) -> dict[str, dict[str, float | None]]:
@@ -207,6 +209,18 @@ def _attach_picker_episodes(
     payload["episode_next"] = dict(next_row) if next_row is not None else None
 
 
+def _effective_scene_prompt(style: str, scene: dict, props: list[Prop], aspect_ratio: str) -> str:
+    """``scene_prompt_effective`` 展示值：override 优先，否则按 scene_canonical 重算，
+    与 ``app.scenes.scene_ref_prompt`` 真实生成同一份道具卡外观陈述（``prop_notes_for_text``），
+    保证这里展示的「实际生成合同」与真正发给供应商的提示词逐字一致。"""
+    override = (scene.get("scene_prompt_override") or "").strip()
+    canonical = scene.get("scene_canonical", "")
+    return override or scene_ref_prompt(
+        style, canonical, scene_name=scene.get("name", ""), aspect_ratio=aspect_ratio,
+        prop_notes=prop_notes_for_text(canonical, props),
+    )
+
+
 @router.get("/projects/{project_id}")
 def project_detail(
     project_id: str,
@@ -264,19 +278,15 @@ def project_detail(
                 style, c.get("appearance_canonical", ""), override or None,
             )
         # 场景图素材库：为每个规范场景挂上落盘图 url + QA + 有效生成词，供「场景图」菜单页展示。
-        from app.scenes import scene_ref_prompt
+        props_list = [Prop.model_validate(x) for x in p["bible"].get("props", [])]
         for s in p["bible"].get("scenes", []):
             spath = s.get("ref_image_path")
             if spath and os.path.exists(spath):
                 s["ref_image_url"] = build_media_url(spath, version=int(os.path.getmtime(spath)))
             else:
                 s["ref_image_url"] = None
-            soverride = (s.get("scene_prompt_override") or "").strip()
-            s["scene_prompt_effective"] = soverride or scene_ref_prompt(
-                style,
-                s.get("scene_canonical", ""),
-                scene_name=s.get("name", ""), aspect_ratio=p.get("aspect_ratio") or "9:16",
-            )
+            aspect_ratio = p.get("aspect_ratio") or "9:16"
+            s["scene_prompt_effective"] = _effective_scene_prompt(style, s, props_list, aspect_ratio)
     p["key_timeline"] = (
         json.loads(p["key_timeline"]) if p["key_timeline"] and (full or view == "bible") else []
     )

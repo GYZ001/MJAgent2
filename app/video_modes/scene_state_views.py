@@ -34,6 +34,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from app.props.text_match import matched_props_in_text
 from app.video_modes.scene_state_views_store import get_scene_state_view
 
 # 2026-10-05 状态图提示词新增道具卡外观陈述（见 prop_appearance_notes_for_
@@ -86,59 +87,6 @@ def scene_state_input_fingerprint(
         fields["prop_state_notes"] = prop_state_notes
     material = json.dumps(fields, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
-
-
-def _prop_name_occurrences(description: str, props: list[Any]) -> list[tuple[int, int, Any]]:
-    """文本里逐字出现的道具卡名/别名候选区间：``(起点, 终点, 卡)``。同一张卡
-    的正名与别名都命中时会产生多个候选，交给调用方按最长匹配取舍——判据从
-    文本本身推导，不维护任何名单（CLAUDE.md「禁止黑白名单与枚举穷举」）。"""
-    spans: list[tuple[int, int, Any]] = []
-    for prop in props or []:
-        names = {str(getattr(prop, "name", "") or "").strip()}
-        names.update(str(a).strip() for a in (getattr(prop, "aliases", None) or []))
-        for name in names:
-            if not name:
-                continue
-            start = 0
-            while True:
-                idx = description.find(name, start)
-                if idx < 0:
-                    break
-                spans.append((idx, idx + len(name), prop))
-                start = idx + 1
-    return spans
-
-
-def _longest_nonoverlapping_props(spans: list[tuple[int, int, Any]]) -> list[Any]:
-    """重叠匹配取最长：按命中长度降序贪心选择不重叠的区间（描述里写「顾屿
-    外套」时不再把「外套」卡也套上），再按原文出现顺序去重同一张卡的多次
-    命中（同一张卡只讲一次外观）。"""
-    chosen: list[tuple[int, int]] = []
-    picked: list[tuple[int, Any]] = []
-    for start, end, prop in sorted(spans, key=lambda s: -(s[1] - s[0])):
-        if any(start < o_end and end > o_start for o_start, o_end in chosen):
-            continue
-        chosen.append((start, end))
-        picked.append((start, prop))
-    seen: set[int] = set()
-    ordered: list[Any] = []
-    for _start, prop in sorted(picked, key=lambda p: p[0]):
-        if id(prop) in seen:
-            continue
-        seen.add(id(prop))
-        ordered.append(prop)
-    return ordered
-
-
-def matched_props_in_text(text: str, props: list[Any]) -> list[Any]:
-    """文本里逐字出现的道具卡，按最长不重叠匹配、原文出现顺序去重后返回卡
-    对象列表；没有命中返回空列表。供 ``prop_appearance_notes_for_description``
-    与 ``app.video_modes.scene_state_prop_states`` 共用同一份匹配判据——两处
-    都是「文本里点到了哪张卡」，不应各写一遍容易漂移的扫描逻辑。"""
-    text = text or ""
-    if not text or not props:
-        return []
-    return _longest_nonoverlapping_props(_prop_name_occurrences(text, props))
 
 
 def prop_appearance_notes_for_description(description: str, props: list[Any]) -> str:
