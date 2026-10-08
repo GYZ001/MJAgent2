@@ -108,7 +108,7 @@ export default function Studio() {
         setPendingAttachment({ fileKey, token: attachmentToken })
       }
       setImportStage('creating')
-      const res = await api.importProject({
+      const res = await api.importNovelResilient({
         attachment_token: attachmentToken,
         name: projectName,
         style_name: styleName || undefined, ...projectSettings,

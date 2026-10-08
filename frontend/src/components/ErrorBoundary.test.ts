@@ -28,7 +28,7 @@ describe('分包加载失败识别', () => {
 
   it('不把普通渲染异常误判为分包失败', () => {
     expect(isChunkLoadError(new TypeError("Cannot read properties of undefined (reading 'shots')"))).toBe(false)
-    expect(isChunkLoadError(new Error('无法连接本机后端服务，请等待服务恢复后重试'))).toBe(false)
+    expect(isChunkLoadError(new Error('网络连接中断，请检查网络后重试'))).toBe(false)
     expect(isChunkLoadError(null)).toBe(false)
   })
 })

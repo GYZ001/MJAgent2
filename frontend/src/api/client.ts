@@ -59,7 +59,7 @@ function normalizeNetworkError(error: unknown): Error {
   ) {
     return new ApiError(
       0,
-      "无法连接本机后端服务，请等待服务恢复后重试",
+      "网络连接中断，请检查网络后重试",
       "BACKEND_UNAVAILABLE",
       "网络错误",
     );

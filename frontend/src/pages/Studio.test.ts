@@ -17,8 +17,8 @@ describe('导入面板复用统一画风弹窗，并把选定结果带进创建�
     expect(source).toMatch(/useVisualStyleDialog\(null\)/)
   })
 
-  it('确认导入时把选定的 style_name 带进 importProject 请求体', () => {
-    expect(source).toMatch(/api\.importProject\(\{[\s\S]{0,200}style_name: styleName \|\| undefined/)
+  it('确认导入时把选定的 style_name 带进 importNovelResilient 请求体', () => {
+    expect(source).toMatch(/api\.importNovelResilient\(\{[\s\S]{0,200}style_name: styleName \|\| undefined/)
   })
 })
 
@@ -34,7 +34,7 @@ describe('新建项目表单三项设置随请求一起提交，默认值取短�
     expect(source).toMatch(/useState<NewProjectSettingsValue>\(DEFAULT_NEW_PROJECT_SETTINGS\)/)
   })
 
-  it('提交时把三项设置展开进 importProject 请求体，不遗漏', () => {
+  it('提交时把三项设置展开进 importNovelResilient 请求体，不遗漏', () => {
     expect(source).toMatch(/style_name: styleName \|\| undefined, \.\.\.projectSettings,/)
   })
 

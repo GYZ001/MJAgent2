@@ -16,6 +16,7 @@
 //   video.ts     — 视频生成域（ShotVideoGenerationPlan / ReviewWallContext）。
 //   delivery.ts  — 成片与交付域（MixStatus / DeliveryReadiness / DeliveryPackageRecord）。
 //   projects.ts  — 项目/分集聚合域（Project / Episode / ChapterContent）。
+//   importNovelResilient.ts — 小说导入的网络容错重放，封装 importProject。
 //   system/      — 观测台与系统管理域（任务队列/调用日志/系统设置/模型中心/
 //                  总览/账号管理/链路追踪）。
 //
@@ -30,6 +31,7 @@ import * as storyboardApi from "./storyboard";
 import * as videoApi from "./video";
 import * as deliveryApi from "./delivery";
 import * as projectsApi from "./projects";
+import { importNovelResilient } from "./importNovelResilient";
 import * as projectSettingsApi from "./projectSettings";
 import * as seriesApi from "./series";
 import * as systemApi from "./system";
@@ -50,6 +52,7 @@ export * from "./storyboard";
 export * from "./video";
 export * from "./delivery";
 export * from "./projects";
+export * from "./importNovelResilient";
 export * from "./projectSettings";
 export * from "./series";
 export * from "./system";
@@ -158,6 +161,7 @@ export const api = {
   getEpisode: projectsApi.getEpisode,
   getChapter: projectsApi.getChapter,
   importProject: projectsApi.importProject,
+  importNovelResilient,
   uploadNovelAttachment: projectsApi.uploadNovelAttachment,
   deleteProject: projectsApi.deleteProject,
   listDeletedProjects: projectsApi.listDeletedProjects,

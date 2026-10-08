@@ -59,7 +59,7 @@ describe("api session recovery", () => {
 
     await expect(api.get("/projects")).rejects.toMatchObject({
       code: "BACKEND_UNAVAILABLE",
-      message: "无法连接本机后端服务，请等待服务恢复后重试",
+      message: "网络连接中断，请检查网络后重试",
     });
   });
 
@@ -123,7 +123,7 @@ describe("api session recovery", () => {
     const { api } = await import("./api");
     await expect(api.download("/delivery/packages/pkg-1/report")).rejects.toMatchObject({
       code: "BACKEND_UNAVAILABLE",
-      message: "无法连接本机后端服务，请等待服务恢复后重试",
+      message: "网络连接中断，请检查网络后重试",
     });
   });
 
