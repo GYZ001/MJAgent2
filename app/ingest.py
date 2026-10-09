@@ -122,6 +122,47 @@ def _chapter_ordinal(title: str) -> int | None:
     return _parse_chapter_number(matches[-1].group(1)) if matches else None
 
 
+def _find_recovery_split(lines: list[str], expected: int) -> tuple[int | None, str, str, str]:
+    """在 ``lines[1:]`` 里找「补 ``expected`` 号缺失标题」的切点。
+
+    返回 ``(split_at, normalized_title, right_first_line, prefix)``：
+    ``normalized_title`` 去装饰供 ``title`` 字段用；``right_first_line`` 保留
+    原文、不去装饰，供正文首行用——装饰串（如末尾的 ` ---`）是原文的一
+    部分，只有标题字段需要干净，正文不能因此丢字。粘连分支（候选行是
+    「核心前有其他内容」粘在一起）里，核心前的内容要和
+    ``app.novel.structure._inline_heading_candidates`` 的判据一致地分真假：
+    不含任何字母（``str.isalpha()`` 为假，汉字同样算字母）是标题自身的
+    装饰/编号，整行原样留在正文首行、不挪给上一单元——否则第二次切（幂
+    等性要求）会把 `第227章 … ---` 这整行当独占行标题重新识别，标题带上
+    `---`；含字母才是上一单元的正文残片，挪到左半边末尾，``right_first_line``
+    只留核心到行尾。补「章」字分支（候选行本就没有装饰，是缺字不是粘连）
+    两者相同，也没有残片。
+    """
+    for line_index, line in enumerate(lines[1:], start=1):
+        candidate = line.strip()
+        recognized = list(CHAPTER_ORDINAL_RE.finditer(candidate))
+        if recognized and _parse_chapter_number(recognized[-1].group(1)) == expected:
+            core_start = recognized[-1].start()
+            raw_tail = candidate[core_start:]
+            title_candidate = _TRAILING_DECOR_RE.sub("", raw_tail).strip()
+            raw_prefix = candidate[:core_start]
+            if len(title_candidate) <= 80:
+                if any(ch.isalpha() for ch in raw_prefix):
+                    return line_index, title_candidate, raw_tail, raw_prefix.strip()
+                return line_index, title_candidate, candidate, ""
+        match = re.match(rf"^第([{_CHAPTER_NUMERALS}]+)", candidate)
+        if not match or _parse_chapter_number(match.group(1)) != expected:
+            continue
+        remainder = candidate[match.end():].strip()
+        if not remainder or remainder[0] in "章卷回节" or len(remainder) > 48:
+            continue
+        if remainder[0] in "步拜层阵剑声拳刀峰海关息日次色":
+            continue
+        normalized_title = f"{match.group(0)}章{remainder}"
+        return line_index, normalized_title, normalized_title, ""
+    return None, "", "", ""
+
+
 def _recover_missing_unit_headings(chapters: list[dict]) -> list[dict]:
     """Recover standalone headings such as ``第五十三标题`` using ordinal context.
 
@@ -142,41 +183,15 @@ def _recover_missing_unit_headings(chapters: list[dict]) -> list[dict]:
                 break
             expected = current_ordinal + 1
             lines = str(current.get("content") or "").splitlines()
-            split_at = None
-            normalized_title = ""
-            # 行首残片：候选行若是「残片+标题」粘在一起（见 app.novel.structure
-            # 模块 docstring 的粘连标题案例），残片不属于这个新单元，必须留在
-            # 左半边（上一单元）末尾，不能连同标题一起丢弃或整行当标题——那
-            # 会让新单元标题带上一截不相关的上一章正文。
-            prefix = ""
-            for line_index, line in enumerate(lines[1:], start=1):
-                candidate = line.strip()
-                recognized = list(CHAPTER_ORDINAL_RE.finditer(candidate))
-                if recognized and _parse_chapter_number(recognized[-1].group(1)) == expected:
-                    core_start = recognized[-1].start()
-                    title_candidate = _TRAILING_DECOR_RE.sub("", candidate[core_start:]).strip()
-                    if len(title_candidate) <= 80:
-                        split_at = line_index
-                        normalized_title = title_candidate
-                        prefix = candidate[:core_start].strip()
-                        break
-                match = re.match(rf"^第([{_CHAPTER_NUMERALS}]+)", candidate)
-                if not match or _parse_chapter_number(match.group(1)) != expected:
-                    continue
-                remainder = candidate[match.end():].strip()
-                if not remainder or remainder[0] in "章卷回节" or len(remainder) > 48:
-                    continue
-                if remainder[0] in "步拜层阵剑声拳刀峰海关息日次色":
-                    continue
-                split_at = line_index
-                normalized_title = f"{match.group(0)}章{remainder}"
-                break
+            split_at, normalized_title, right_first_line, prefix = _find_recovery_split(
+                lines, expected,
+            )
             if split_at is None:
                 break
             left_lines = lines[:split_at] + ([prefix] if prefix else [])
             left, _ = clean_text("\n".join(left_lines))
             right_lines = lines[split_at:]
-            right_lines[0] = normalized_title
+            right_lines[0] = right_first_line
             right, _ = clean_text("\n".join(right_lines))
             if len(left) < STUB_CHAPTER_MAX_CHARS or len(right) < STUB_CHAPTER_MAX_CHARS:
                 break
@@ -254,16 +269,46 @@ def dedupe_stub_chapters(
     return kept, removed
 
 
+def _merge_heading_only_matches(
+    text: str, matches: list[tuple[int, int, str]],
+) -> list[dict]:
+    """标题与下一个标题之间没有正文时，不丢弃这一行——原始上传文件不落盘，
+    丢的是原文，丢了就永久找不回来，切章器不能有丢字路径。这条守卫原意是
+    去掉目录式重复标题（标题后紧跟下一个标题，中间空无一字），改为把这一
+    行并入下一章开头：下一章 content 从这个无正文标题的 start 算起，标题
+    仍取下一章自己的；连续多个无正文标题依次累积（``pending_start`` 一直
+    指向最早的那一个）。若无正文标题落在全文末尾（后面没有下一个标题），
+    并入上一章末尾；整篇文档只有这一个标题且没有任何正文时没有"上一章"
+    可并，退化为单独成章，避免整本书丢光。
+    """
+    chapters: list[dict] = []
+    pending_start: int | None = None
+    for i, (start, m_end, title) in enumerate(matches):
+        is_last = i + 1 == len(matches)
+        end = matches[i + 1][0] if not is_last else len(text)
+        remainder = text[m_end:end].strip()
+        effective_start = pending_start if pending_start is not None else start
+        if not remainder and not is_last:
+            pending_start = effective_start
+            continue
+        if not remainder and is_last and chapters:
+            tail = text[effective_start:end].strip()
+            chapters[-1]["content"] = f"{chapters[-1]['content']}\n\n{tail}".strip()
+            return chapters
+        chapters.append({
+            "idx": len(chapters) + 1,
+            "title": title,
+            "content": text[effective_start:end].strip(),
+        })
+        pending_start = None
+    return chapters
+
+
 def _split_chapters_with_removed(text: str) -> tuple[list[dict], list[dict]]:
     matches = _find_heading_matches(text)
     chapters: list[dict] = []
     if matches:
-        for i, (start, m_end, title) in enumerate(matches):
-            end = matches[i + 1][0] if i + 1 < len(matches) else len(text)
-            body = text[start:end].strip()
-            remainder = text[m_end:end].strip()
-            if remainder:
-                chapters.append({"idx": len(chapters) + 1, "title": title, "content": body})
+        chapters = _merge_heading_only_matches(text, matches)
         chapters = _preamble_chapters(text, text[: matches[0][0]].strip()) + chapters
     if not chapters:
         for i in range(0, len(text), FALLBACK_CHUNK_CHARS):

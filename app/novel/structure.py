@@ -166,6 +166,97 @@ def _heading_ordinal_unit(title: str) -> tuple[int | None, str | None]:
     return _parse_chapter_number(matches[-1].group(1)), matches[-1].group(2)
 
 
+# 独占一行标题要用含「节」的完整单位词表取 (序号, 单位)，不能复用
+# _INLINE_CHAPTER_CORE_RE（那个词表故意不含「节」，见其注释），否则「第二
+# 节晚自习结束。」会解析成 (None, None)，_structural_units 的过滤形同虚设。
+_HEADING_UNIT_RE = re.compile(
+    rf"第{_INLINE_WS}([{_CHAPTER_NUMERALS}]+){_INLINE_WS}([章卷回节集部幕篇])"
+)
+
+
+def _keyword_ordinal_unit(title: str) -> tuple[int | None, str | None]:
+    matches = list(_HEADING_UNIT_RE.finditer(title))
+    if not matches:
+        return None, None
+    return _parse_chapter_number(matches[-1].group(1)), matches[-1].group(2)
+
+
+def _is_ascending_run(values: list[int], start_values: tuple[int, ...]) -> bool:
+    return bool(values) and values[0] in start_values and values == list(range(values[0], values[0] + len(values)))
+
+
+def _unit_nested_in_every_segment(
+    main_positions: list[int], items: list[tuple[int, int]],
+) -> bool:
+    """嵌套小节判据：每个「相邻两主单位标题之间」的段里，候选序号恰好 1..k。
+
+    候选落在段外（第一个主单位前/最后一个后/主单位不足 2 个构不成段）判负。
+    """
+    bounds = sorted(main_positions)
+    segments = list(zip(bounds[:-1], bounds[1:]))
+    buckets: list[list[int]] = [[] for _ in segments]
+    for start, ordinal in items:
+        index = next((i for i, (lo, hi) in enumerate(segments) if lo < start < hi), None)
+        if index is None:
+            return False
+        buckets[index].append(ordinal)
+    return all(_is_ascending_run(bucket, (1,)) for bucket in buckets if bucket)
+
+
+def _structural_units(keyword_matches: list[tuple[int, int, str]]) -> set[str] | None:
+    """正面定义：带序号标题里，非主单位必须整书构成一致结构才算真标题。
+
+    案例（《刚准备高考》）：全书主单位是「章」，但 189 处独占一行的叙述句
+    「第二节晚自习结束。」也符合 CHAPTER_RE 的「第N节」词表，被当成假标题，
+    还连带把紧邻的真标题 `--- 第481章 少女情怀 ---` 挤掉（两者之间没有正
+    文，被 ``if remainder:`` 判定空章丢弃）。主单位 D＝出现最多的单位，自
+    己总是结构单位。其余单位 U 要么 (a) 在每个含 U 的 D 段（相邻两个 D 标
+    题之间）里序号恰好 1,2,…,k（嵌套小节，如每章的"第一节/第二节"），要么
+    (b) 全书 U 的序号整体是一条 0/1 起的连续序列（卷/部这类跨章上级单位）。
+    两者都不满足就判定 U 不是结构单位，按整本书全有或全无（不逐条判）：
+    误拒的代价只是小节并入所在章，误收的代价是丢真标题/切错。没有 D（没
+    有任何带序号标题）时不做这项校验，返回 ``None`` 放行一切。
+    """
+    ordinal_matches = [
+        (start, ordinal, unit)
+        for start, _end, title in keyword_matches
+        for ordinal, unit in (_keyword_ordinal_unit(title),)
+        if ordinal is not None and unit is not None
+    ]
+    if not ordinal_matches:
+        return None
+    counts: dict[str, int] = {}
+    for _start, _ordinal, unit in ordinal_matches:
+        counts[unit] = counts.get(unit, 0) + 1
+    majority = max(counts, key=lambda u: counts[u])
+    main_positions = [s for s, _o, u in ordinal_matches if u == majority]
+    structural = {majority}
+    for unit in counts:
+        if unit == majority:
+            continue
+        items = [(s, o) for s, o, u in ordinal_matches if u == unit]
+        whole_ordinals = [o for _s, o in items]
+        if _is_ascending_run(whole_ordinals, (0, 1)) or _unit_nested_in_every_segment(
+            main_positions, items,
+        ):
+            structural.add(unit)
+    return structural
+
+
+def _filter_structural_keyword_matches(
+    keyword_matches: list[tuple[int, int, str]],
+) -> list[tuple[int, int, str]]:
+    structural_units = _structural_units(keyword_matches)
+    if structural_units is None:
+        return keyword_matches
+    kept = []
+    for match in keyword_matches:
+        _ordinal, unit = _keyword_ordinal_unit(match[2])
+        if unit is None or unit in structural_units:
+            kept.append(match)
+    return kept
+
+
 def _accept_inline_matches(
     anchor_matches: list[tuple[int, int, str]],
     candidates: list[_InlineCandidate],
@@ -242,22 +333,23 @@ def _find_heading_matches(text: str) -> list[tuple[int, int, str]]:
     """Return ``(start, end, title)`` for every recognized chapter heading.
 
     Three signal families qualify a heading. (1) ``CHAPTER_RE`` matches a
-    whole line (ordinal/keyword vocabulary) — unconditionally accepted, the
-    structural anchor everything else is checked against. (2) a short line
-    sandwiched between decorative separator lines (``SEPARATOR_TITLE_RE``)
-    — custom part names with no ordinal at all. (3) an ordinal core sits on
-    a line that also carries some other prefix — this covers both a pure
-    decoration/numbering prefix (``--- 259.``) and a genuine prose fragment
-    glued from the previous chapter's last line; both shapes go through the
-    same ordinal-continuity check (``_accept_inline_matches``) before being
-    accepted, then ``_finalize_inline_matches`` decides whether the prefix
-    is kept (decoration, or a repeating volume-name prefix) or left for the
-    previous chapter (a one-off prose fragment). Signals (2)-(3) are dropped
-    wherever their span already sits inside an earlier-listed match.
+    whole line — the structural anchor everything else is checked against,
+    except a non-majority ordinal unit (e.g. 节 in a 章-numbered book) is
+    dropped book-wide unless ``_structural_units`` confirms it forms a real
+    structural pattern (see its docstring for the data-loss case this
+    guards against). (2) a short line sandwiched between decorative
+    separator lines (``SEPARATOR_TITLE_RE``) — custom part names with no
+    ordinal at all. (3) an ordinal core sits on a line with some other
+    prefix — covers both a pure decoration/numbering prefix and a genuine
+    prose fragment glued from the previous chapter; both go through the
+    same ordinal-continuity check (``_accept_inline_matches``), then
+    ``_finalize_inline_matches`` decides whether the prefix is kept or left
+    for the previous chapter. Signals (2)-(3) are dropped wherever their
+    span already sits inside an earlier-listed match.
     """
-    keyword_matches = [
+    keyword_matches = _filter_structural_keyword_matches([
         (m.start(), m.end(), m.group(1).strip()) for m in CHAPTER_RE.finditer(text)
-    ]
+    ])
     covered = [(start, end) for start, end, _ in keyword_matches]
     accepted = _accept_inline_matches(
         keyword_matches, _inline_heading_candidates(text), covered,
