@@ -36,6 +36,25 @@ CHAPTER_ID_RE = re.compile(
 # 从标题里取「第 N 章」的序号；标题保持原文逐字（含空白），序号解析自己容忍空白。
 CHAPTER_ORDINAL_RE = re.compile(rf"第{_INLINE_WS}([{_CHAPTER_NUMERALS}]+){_INLINE_WS}章")
 
+# 行内标题核心：标题标号可能不独占一行，而是跟同一行里的其他内容挤在一
+# 起——两种形态结构上完全相同（同一行、核心前有前缀），真假与切法都交给
+# 调用方（见 ``_accept_inline_matches``/``_finalize_inline_matches``）：
+#   1）前缀是上一章末行残片，如《魂穿刘关张，诸侯们被整麻了》里的
+#      `怎么斩华第2章我斩华雄？`："怎么斩华"是残片，"第2章我斩华雄？"是标题；
+#   2）前缀是纯装饰/编号，如 `--- 259.第258章 标题 ---`；
+# 这里的正则只负责标出「核心在行内的位置」。捕获组 1 是序号数字（供
+# ``_parse_chapter_number`` 解析），捕获组 2 是单位字（供同单位连续性比较，
+# 见 ``_heading_ordinal_unit``）。词表故意比 _CHAPTER_CORE 少一个「节」：
+# 独占一行时「第N节」极少歧义，但允许它出现在行中/行首任意位置扫描时就不
+# 再安全——实测《高考体》回归样本里「第二节课」「第三节晚自习」这类描述
+# 上课节次的日常叙述出现 508 次，且因故事反复按顺序交代一天的课次，天然
+# 形成 1,2,3,4 的局部连续序列，会被序号连续性误判成真标题，炸出 254 个不
+# 存在的假章节。这本书的真实章节标题全部用「章」，零例用「节」，两者在
+# 「行内扫描」场景下没有安全的共存方式。
+_INLINE_CHAPTER_CORE_RE = re.compile(
+    rf"第{_INLINE_WS}([{_CHAPTER_NUMERALS}]+){_INLINE_WS}([章卷回集部幕篇])"
+)
+
 # 装饰性分隔线上下夹住的短行也是标题——不少连载体作品（尤其中篇/剧本体）不用
 # 「第X章」词表，只靠分隔线标出每一部分。字符集刻意与 app.ingest.SEPARATOR_ONLY_RE
 # 不同（═━─＝，而非 -_=~*）：后者的字符会在 clean_text 里被当广告分隔线整行
@@ -95,21 +114,156 @@ def _parse_chapter_number(value: str) -> int | None:
     return total + section + number
 
 
+_InlineCandidate = tuple[int, int, int, str, str, int, str, bool]
+
+
+# 行首纯装饰/编号前缀后面跟的分隔符串（如末尾的 ` ---`）同样是装饰，title
+# 里不保留。字符集故意比 app.ingest.SEPARATOR_ONLY_RE 宽（含 ASCII 连字符
+# 与常见全角分隔符变体），只在已确认「整行是装饰前缀+标题」之后才使用，
+# 不会误伤正常标题末尾的汉字标点。
+_TRAILING_DECOR_RE = re.compile(r"[\s\-_=~*－—～·]+$")
+
+
+def _inline_heading_candidates(text: str) -> list[_InlineCandidate]:
+    """逐行找出「序号核心出现在行中」的候选，含误报，不做真假判定、不判切法。
+
+    每行只取最后一个核心出现的位置（防止正文里援引更早的「第N章」抢占行
+    尾）。返回 ``(core_start, line_start, line_end, prefix, title, ordinal,
+    unit, is_decorative)``：``title`` 是核心到行尾、去掉末尾装饰分隔符、
+    strip 后要求非空且 <=40 字（与 CHAPTER_RE 的标题上限一致）；
+    ``is_decorative`` 是核心前的 ``prefix`` 是否不含任何汉字/字母
+    （``str.isalpha()`` 对汉字同样为真）。真假判定交给
+    ``_accept_inline_matches``，装饰/粘连/卷名前缀三种切法交给
+    ``_finalize_inline_matches``。
+    """
+    candidates: list[_InlineCandidate] = []
+    offset = 0
+    for line in text.split("\n"):
+        line_start, line_end = offset, offset + len(line)
+        offset = line_end + 1
+        last_match = None
+        for m in _INLINE_CHAPTER_CORE_RE.finditer(line):
+            last_match = m
+        if last_match is None:
+            continue
+        prefix = line[:last_match.start()]
+        title = _TRAILING_DECOR_RE.sub("", line[last_match.start():]).strip()
+        ordinal = _parse_chapter_number(last_match.group(1))
+        if not title or len(title) > 40 or ordinal is None:
+            continue
+        is_decorative = not any(ch.isalpha() for ch in prefix)
+        candidates.append((
+            line_start + last_match.start(), line_start, line_end,
+            prefix, title, ordinal, last_match.group(2), is_decorative,
+        ))
+    return candidates
+
+
+def _heading_ordinal_unit(title: str) -> tuple[int | None, str | None]:
+    matches = list(_INLINE_CHAPTER_CORE_RE.finditer(title))
+    if not matches:
+        return None, None
+    return _parse_chapter_number(matches[-1].group(1)), matches[-1].group(2)
+
+
+def _accept_inline_matches(
+    anchor_matches: list[tuple[int, int, str]],
+    candidates: list[_InlineCandidate],
+    covered: list[tuple[int, int]],
+) -> list[_InlineCandidate]:
+    """序号连续性过滤，装饰前缀候选与粘连候选走同一条判据——不再对装饰
+    前缀无条件采信：独占一行的对白「"第二回合开始！"」前缀只有引号，不含
+    字母，若无条件采信会被当成标题整行吃掉。候选只有在与前/后邻居序号相
+    差恰好 1、且前后邻居都不与它同序号时才采信；同序号说明真标题就在旁
+    边，它只是正文提及（例如正文援引"第3章"而真标题"第3章"就在紧邻处）。
+    续性只在同一单位（章/卷/回/…）之间比较：取紧邻的前一个/后一个候选，
+    单位不同就视为不连续/不同序号——不跨单位去远处找同单位邻居，因为那
+    等于悄悄跳过中间的真实结构，可能把本不连续的两处说成连续（例如"第一
+    卷"后紧跟粘连的"第2章"不该算连续）。独占一行标题（``anchor_matches``）
+    本身就是结构证据，不受此过滤，只参与邻居比较；候选若已被某个独占行
+    标题覆盖（``covered``），说明只是同一标题被两种信号重复发现，跳过。
+    """
+    anchors = [
+        (start, *_heading_ordinal_unit(title)) for start, _end, title in anchor_matches
+    ]
+    inline = [c for c in candidates if not any(s <= c[0] < e for s, e in covered)]
+    entries = sorted(
+        [(start, ordinal, unit, None) for start, ordinal, unit in anchors if ordinal is not None]
+        + [(c[0], c[5], c[6], c) for c in inline],
+        key=lambda item: item[0],
+    )
+    accepted: list[_InlineCandidate] = []
+    for i, (_start, ordinal, unit, payload) in enumerate(entries):
+        if payload is None:
+            continue
+        prev_e = entries[i - 1] if i > 0 else None
+        next_e = entries[i + 1] if i + 1 < len(entries) else None
+        prev_ordinal = prev_e[1] if prev_e and prev_e[2] == unit else None
+        next_ordinal = next_e[1] if next_e and next_e[2] == unit else None
+        continuous = prev_ordinal == ordinal - 1 or next_ordinal == ordinal + 1
+        same_neighbor = prev_ordinal == ordinal or next_ordinal == ordinal
+        if continuous and not same_neighbor:
+            accepted.append(payload)
+    return accepted
+
+
+def _finalize_inline_matches(accepted: list[_InlineCandidate]) -> list[tuple[int, int, str]]:
+    """把通过连续性过滤的候选按切法落成 ``(start, end, title)``。
+
+    装饰前缀（不含字母）：整行是标题，start 取行首，前缀直接丢弃——``title``
+    已经是核心到行尾（见 ``_inline_heading_candidates``），不含前缀。粘连前缀
+    （含汉字/字母）默认只把核心到行尾当标题、前缀留给上一章当残片；但前缀
+    若与「本次采信名单」里紧邻的前一个或后一个候选前缀完全相同，说明它是
+    卷名一类反复出现、属于标题自身的部分——卷名会连续出现在同卷每一章
+    标题前，必然在已采信的顺序里前后相邻。这里特意不用"全书范围内这个
+    前缀出现了几次"：实测《魂穿刘关张》回归样本里"是""好""遵命""谢陛下"这类
+    极短的对话收尾词在近 700 章的长篇里会碰巧重复出现十几次，但从不会恰好
+    出现在紧邻的下一章或上一章标题前——按"全书计数 >=2"会把这些无关的
+    残片误判成卷名，炸出一批标题带残留对话的假阳性；按"紧邻候选前缀相同"
+    判断，两个相隔几百章的残片不会相邻，天然被排除。重复前缀的候选 start
+    同样取行首、标题改成「前缀+核心到行尾」整段，不往上一章挪字。
+    """
+    matches: list[tuple[int, int, str]] = []
+    for i, (core_start, line_start, line_end, prefix, title, _ord, _unit, is_decorative) in enumerate(accepted):
+        stripped_prefix = prefix.strip()
+        prev_prefix = accepted[i - 1][3].strip() if i > 0 else None
+        next_prefix = accepted[i + 1][3].strip() if i + 1 < len(accepted) else None
+        is_volume_prefix = bool(stripped_prefix) and stripped_prefix in (prev_prefix, next_prefix)
+        if is_decorative:
+            matches.append((line_start, line_end, title))
+        elif is_volume_prefix:
+            matches.append((line_start, line_end, (prefix + title).strip()))
+        else:
+            matches.append((core_start, line_end, title))
+    return matches
+
+
 def _find_heading_matches(text: str) -> list[tuple[int, int, str]]:
     """Return ``(start, end, title)`` for every recognized chapter heading.
 
-    Two independent, positive signals qualify a line as a heading: (1) it
-    matches the ordinal/keyword vocabulary in ``CHAPTER_RE``, or (2) it is a
-    short line sandwiched directly between two decorative separator lines
-    (``SEPARATOR_TITLE_RE``) — this recognizes titles with no ordinal/keyword
-    structure at all (custom part names in serialized fiction). Signal (2) is
-    dropped wherever its captured title already sits inside a signal-(1)
-    match, so a keyword heading is never double-counted.
+    Three signal families qualify a heading. (1) ``CHAPTER_RE`` matches a
+    whole line (ordinal/keyword vocabulary) — unconditionally accepted, the
+    structural anchor everything else is checked against. (2) a short line
+    sandwiched between decorative separator lines (``SEPARATOR_TITLE_RE``)
+    — custom part names with no ordinal at all. (3) an ordinal core sits on
+    a line that also carries some other prefix — this covers both a pure
+    decoration/numbering prefix (``--- 259.``) and a genuine prose fragment
+    glued from the previous chapter's last line; both shapes go through the
+    same ordinal-continuity check (``_accept_inline_matches``) before being
+    accepted, then ``_finalize_inline_matches`` decides whether the prefix
+    is kept (decoration, or a repeating volume-name prefix) or left for the
+    previous chapter (a one-off prose fragment). Signals (2)-(3) are dropped
+    wherever their span already sits inside an earlier-listed match.
     """
     keyword_matches = [
         (m.start(), m.end(), m.group(1).strip()) for m in CHAPTER_RE.finditer(text)
     ]
     covered = [(start, end) for start, end, _ in keyword_matches]
+    accepted = _accept_inline_matches(
+        keyword_matches, _inline_heading_candidates(text), covered,
+    )
+    inline_matches = _finalize_inline_matches(accepted)
+    covered = covered + [(start, end) for start, end, _ in inline_matches]
     separator_matches: list[tuple[int, int, str]] = []
     for m in SEPARATOR_TITLE_RE.finditer(text):
         title = m.group(1).strip()
@@ -119,7 +273,10 @@ def _find_heading_matches(text: str) -> list[tuple[int, int, str]]:
         if any(start <= title_start and title_end <= end for start, end in covered):
             continue
         separator_matches.append((m.start(), m.end(), title))
-    return sorted(keyword_matches + separator_matches, key=lambda item: item[0])
+    return sorted(
+        keyword_matches + separator_matches + inline_matches,
+        key=lambda item: item[0],
+    )
 
 
 def _sequential_numerals(labels: list[str]) -> bool:

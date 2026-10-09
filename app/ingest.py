@@ -19,6 +19,7 @@ from app.novel.structure import (
     _parse_chapter_number,
     _preamble_chapters,
     _split_oversized_chapters,
+    _TRAILING_DECOR_RE,
 )
 
 _RTF_SIGNATURE_RE = re.compile(r"^\s*\{\\rtf\d", re.IGNORECASE)
@@ -143,17 +144,22 @@ def _recover_missing_unit_headings(chapters: list[dict]) -> list[dict]:
             lines = str(current.get("content") or "").splitlines()
             split_at = None
             normalized_title = ""
+            # 行首残片：候选行若是「残片+标题」粘在一起（见 app.novel.structure
+            # 模块 docstring 的粘连标题案例），残片不属于这个新单元，必须留在
+            # 左半边（上一单元）末尾，不能连同标题一起丢弃或整行当标题——那
+            # 会让新单元标题带上一截不相关的上一章正文。
+            prefix = ""
             for line_index, line in enumerate(lines[1:], start=1):
                 candidate = line.strip()
                 recognized = list(CHAPTER_ORDINAL_RE.finditer(candidate))
-                if (
-                    recognized
-                    and _parse_chapter_number(recognized[-1].group(1)) == expected
-                    and len(candidate) <= 80
-                ):
-                    split_at = line_index
-                    normalized_title = candidate
-                    break
+                if recognized and _parse_chapter_number(recognized[-1].group(1)) == expected:
+                    core_start = recognized[-1].start()
+                    title_candidate = _TRAILING_DECOR_RE.sub("", candidate[core_start:]).strip()
+                    if len(title_candidate) <= 80:
+                        split_at = line_index
+                        normalized_title = title_candidate
+                        prefix = candidate[:core_start].strip()
+                        break
                 match = re.match(rf"^第([{_CHAPTER_NUMERALS}]+)", candidate)
                 if not match or _parse_chapter_number(match.group(1)) != expected:
                     continue
@@ -167,7 +173,8 @@ def _recover_missing_unit_headings(chapters: list[dict]) -> list[dict]:
                 break
             if split_at is None:
                 break
-            left, _ = clean_text("\n".join(lines[:split_at]))
+            left_lines = lines[:split_at] + ([prefix] if prefix else [])
+            left, _ = clean_text("\n".join(left_lines))
             right_lines = lines[split_at:]
             right_lines[0] = normalized_title
             right, _ = clean_text("\n".join(right_lines))

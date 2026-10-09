@@ -61,7 +61,43 @@ def test_ingest_recovers_standalone_heading_missing_chapter_unit() -> None:
     ]
 
 
-def test_ingest_recovers_embedded_heading_with_volume_prefix() -> None:
+def test_ingest_recovers_embedded_heading_repeated_volume_prefix_keeps_prefix() -> None:
+    """卷名前缀在同卷每一章前逐字重复，属于标题自身，不是上一章残片。
+
+    「六卷名动九山真仙路」在 916、917 两章标题前各出现一次——残片是不同
+    正文句子的尾巴，几乎不可能逐字重复；卷名则会在同卷每一章前逐字重复。
+    这条判据从「本次采信结果里这个前缀出现了几次」这个数据本身推导（见
+    ``app.novel.structure._finalize_inline_matches``），不靠词表猜它是不是
+    卷名。两章标题都应保留前缀、整行当标题，不往上一章挪字。
+    """
+    body = "孟浩辨认药草，古书随之翻过一页。" * 12
+    result = ingest_novel(
+        (
+            f"第九百一十五章 登峰造极\n{body}\n"
+            "六卷名动九山真仙路第916章步步生莲！\n"
+            f"{body}\n"
+            "六卷名动九山真仙路第917章节节攀升\n"
+            f"{body}"
+        ).encode()
+    )
+
+    assert result["chapter_count"] == 3
+    titles = [c["title"] for c in result["chapters"]]
+    assert titles[1] == "六卷名动九山真仙路第916章步步生莲！"
+    assert titles[2] == "六卷名动九山真仙路第917章节节攀升"
+    # 前缀保留在两条标题里，没有被挪到任何一章的正文末尾。
+    assert "六卷名动九山真仙路" not in result["chapters"][0]["content"]
+    assert "六卷名动九山真仙路" not in result["chapters"][1]["content"][len(titles[1]):]
+
+
+def test_ingest_recovers_embedded_heading_single_occurrence_prefix_is_fragment() -> None:
+    """同一个前缀只出现一次时，结构上无法区分「卷名」与「上一章残片」，
+    按粘连残片处理：标题只取核心到行尾，前缀留给上一章当正文结尾。
+
+    与上一条测试的唯一区别是「六卷名动九山真仙路」这里只在 916 章前出现
+    了一次（917 恢复成独立标题行，不再重复带这个前缀），所以不满足「同一
+    前缀 >= 2 次」的卷名判据，预期行为随之翻转。
+    """
     body = "孟浩辨认药草，古书随之翻过一页。" * 12
     result = ingest_novel(
         (
@@ -73,7 +109,11 @@ def test_ingest_recovers_embedded_heading_with_volume_prefix() -> None:
     )
 
     assert result["chapter_count"] == 3
-    assert result["chapters"][1]["title"] == "六卷名动九山真仙路第916章步步生莲！"
+    titles = [c["title"] for c in result["chapters"]]
+    assert titles[1] == "第916章步步生莲！"
+    assert "六卷名动九山真仙路" not in titles[1]
+    # 前缀落在上一章（915）正文末尾，没有被丢弃也没有污染 916 章标题。
+    assert result["chapters"][0]["content"].endswith("六卷名动九山真仙路")
 
 
 def test_ingest_does_not_treat_numbered_action_as_missing_heading() -> None:
