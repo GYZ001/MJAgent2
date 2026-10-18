@@ -86,6 +86,8 @@
 - 检查未定义引用、异步错误、边界条件和资源释放；
 - 报告实际完成项、未完成项和已知限制。
 
+**验证与部署通过后，必须在本次任务结束前提交并推送 Git（用户于 2026-10-18 强制要求）。** 只提交本次任务的改动，按关注点分组并显式列出路径；随后推送到远端当前任务分支。推送后核对远端分支指向的提交与本地一致，最终回复必须报告提交编号和远端分支。完成部署后要继续完成这一步，无需用户再次提醒；若提交或推送失败，必须说明失败原因和未上传范围，不得声称交付完成。
+
 禁止声称已经测试，除非确实执行了测试命令并获得结果。
 
 **子代理禁止跑全量测试。** `pytest -q`、`pytest tests/ -q` 这类无过滤形式，以及 `scripts/verify.py`（它会把全部 Git 改动文件一起跑 ruff），子代理一律不许用；只跑与自己改动直接相关的定向测试（`-k` 过滤或点名测试文件）。全量由主会话在所有代理收工后、开一个干净的 `/tmp` worktree 统一跑。三条独立理由，任何一条都足够：
@@ -155,6 +157,7 @@
 - **删除或覆盖前先看目标**，列清单确认「保留项一个都不在里面」再执行。
 - **破坏性操作要有原子性**：新产出确认成功之后才替换旧的，中途失败旧的必须原封不动。
 - **不得用 `pkill -f "uvicorn app.main"`**——它会匹配到自己的命令行把 shell 一起杀掉。按 PID kill 再 `setsid` 重启。
-- **生产在计算服务器 B，不在本机（2026-09-02 起）。** 域名 automanju.com → A 的 nginx → 反向 SSH 隧道 `127.0.0.1:18230` → B 的 uvicorn（systemd `mjagent2-backend`）。本机（A）的 :8230 只绑 127.0.0.1，是调试实例；本机的 `data/`、`projects/` 是切换时的过期快照。用户报错、看 `logs/backend.log`、查 `error_logs`、跑迁移都要 `ssh mjb`（经隧道到 B，起始目录是 /root，先 `cd /root/MJAgent2`）。改完要让用户看到必须跑 `scripts/deploy_to_b.sh`；03:30 北京时间的定时器会自动把 origin/main 发到 B（并 `git reset --hard`，所以在 B 上热修必须当天在 A 提交推远端）。回归/驱动脚本只在 A 跑——它们打 127.0.0.1:8230，在 B 上就是生产库。完整 runbook：`docs/deploy-two-servers.md`。
-- **改完代码必须手工重启后端才生效**（本机调试实例是无托管的孤儿进程；B 上是 `systemctl restart mjagent2-backend`，`deploy_to_b.sh` 会做）；重启前先查在途任务，重启后核对进程启动时间晚于所有改动文件的 mtime。
-- **前端不要跑 `npm run build` 当自检**，要验就 `npx tsc --noEmit` + `npx vitest run`。后端 `SpaStaticFiles` 每次请求都读盘服务 `frontend/dist`，所以写进 dist 的那一刻就是发布到该实例（本机=调试实例；B 上的 dist 由 `deploy_to_b.sh`/凌晨定时器同步）——和后端「必须重启才生效」不对称，于是构建这个人人顺手跑的动作带上了发布副作用。2026-08-30 实测：agent 自检构建把前端发到 18:06，后端进程还停在 14:50，用户拿到新前端配旧后端，小说导入预检直接挂掉。vite 的 outDir 现已指向 `frontend/dist-staging`（构建无副作用），发布走 `py scripts/publish_frontend.py`：它校验产物完整性、拦住「后端启动时间早于最新 `app/**/*.py`」的版本偏斜（并给出重启命令），再原子替换。`tests/test_frontend_publish_gate.py` 守着 outDir 不被改回 `dist`。
+- **后续生产统一直接部署在本机 A（用户于 2026-10-18 确认）。** 当前入口是 automanju.com → 本机 nginx → `127.0.0.1:8230` → 本机 uvicorn，仓库为 `/root/MJAgent2`。本机的 `data/`、`projects/` 和 `logs/` 是当前生产数据与日志，排查用户报错、查询 `error_logs`、执行迁移和发布都在本机完成。`ssh mjb`、`scripts/deploy_to_b.sh`、向 B 发布的定时器及 `docs/deploy-two-servers.md` 属于原双机部署资料；后续修复按本机部署流程执行。
+- **改完代码必须重启本机后端才生效。** 当前后端由本机 systemd 的 `mjagent2-backend` 托管，使用 `systemctl restart mjagent2-backend`。重启前先只读检查在途运行、任务与整集合成，确认空闲后重启；重启后核对服务健康，且进程启动时间晚于所有改动文件的 mtime。
+- **测试与回归使用隔离沙箱。** `127.0.0.1:8230` 已是生产入口；运行默认访问该端口的回归/驱动脚本前必须核对其读写范围，生产验证优先使用只读请求。
+- **前端不要跑 `npm run build` 当自检**，要验就 `npx tsc --noEmit` + `npx vitest run`。后端 `SpaStaticFiles` 每次请求都读盘服务 `frontend/dist`，所以写进 dist 的那一刻就是发布到本机生产实例。2026-08-30 实测：agent 自检构建把前端发到 18:06，后端进程还停在 14:50，用户拿到新前端配旧后端，小说导入预检直接挂掉。vite 的 outDir 现已指向 `frontend/dist-staging`（构建无副作用）；完成验证后，本机发布走 `.venv/bin/python scripts/publish_frontend.py`，已有构建产物时加 `--no-build`：它校验产物完整性、拦住「后端启动时间早于最新 `app/**/*.py`」的版本偏斜，再原子替换。`tests/test_frontend_publish_gate.py` 守着 outDir 不被改回 `dist`。
