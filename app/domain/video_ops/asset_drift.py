@@ -24,6 +24,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from fastapi import HTTPException
+from pydantic import ValidationError
+
 from app.media_exec.enqueue import _load_shot_model
 from app.multiview import resolve_shot_asset_dependencies
 from app.props import prop_reference_for_episode
@@ -195,6 +198,19 @@ def candidate_matches_current(
     return not entity_diff(conn, project_id, episode_no, frozen, current, adopted_at=adopted_at)
 
 
+def _bible_state_error(*, missing: bool) -> HTTPException:
+    """世界书不可核对时给出业务状态，原始解析异常通过异常链留在日志。"""
+    return HTTPException(409, {
+        "code": "ASSET_REFRESH_BIBLE_NOT_READY" if missing else "ASSET_REFRESH_BIBLE_INVALID",
+        "message": (
+            "项目尚未建立世界书，暂无法核对参考资产；请前往世界书补齐设定后重试。"
+            if missing else
+            "世界书数据不完整或已损坏，暂无法核对参考资产；请将错误编号反馈给管理员，恢复数据后重试。"
+        ),
+        "recommended_action": "open_bible" if missing else "contact_support",
+    })
+
+
 def episode_bible_and_screenplay(conn: Any, episode_row: Any, project_id: str) -> tuple[Any, Any]:
     """本集 bible/screenplay，供全集逐镜复用，避免每镜各查一次。"""
     # 函数内导入：与 app.media_exec.authority._review_shot_manifest_equal
@@ -209,8 +225,18 @@ def episode_bible_and_screenplay(conn: Any, episode_row: Any, project_id: str) -
     project = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
     if project is None:
         raise ValueError("项目不存在")
+    raw = (project["bible_json"] or "").strip()
+    if not raw:
+        raise _bible_state_error(missing=True)
+    try:
+        payload = json.loads(raw)
+        if payload == {}:
+            raise _bible_state_error(missing=True)
+        project_bible = Bible.model_validate(payload)
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise _bible_state_error(missing=False) from exc
     bible = bible_for_episode(
-        project_id, Bible.model_validate(json.loads(project["bible_json"] or "{}")),
+        project_id, project_bible,
         episode_row["episode_no"],
     )
     screenplay = resolve_downstream_screenplay(str(episode_row["id"]), conn=conn).screenplay

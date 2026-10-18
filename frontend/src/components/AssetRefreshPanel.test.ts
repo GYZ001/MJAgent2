@@ -8,13 +8,14 @@ const { mockReport, mockRegenerate, mockAdopt } = vi.hoisted(() => ({
   mockAdopt: vi.fn(async () => ({ episode_id: "e1", entity_key: "prop:马克杯", adopted: [{ shot_id: "s2", version_id: "v2" }] })),
 }));
 
-vi.mock("../api", () => ({
-  api: {
+vi.mock("../api", async () => {
+  const { ApiError } = await import("../api/client");
+  return { ApiError, api: {
     getAssetRefreshReport: mockReport,
     regenerateAssetRefresh: mockRegenerate,
     adoptAssetRefreshGroup: mockAdopt,
-  },
-}));
+  } };
+});
 
 // eslint-disable-next-line import/first -- mock 必须先注册，import 必须在其后
 import AssetRefreshPanel from "./AssetRefreshPanel";
@@ -111,11 +112,12 @@ function reportWithMultipleCandidates() {
 async function renderPanel() {
   const onToast = vi.fn();
   const onRefresh = vi.fn(async () => undefined);
+  const onOpenBible = vi.fn();
   let view!: TestRenderer.ReactTestRenderer;
   await act(async () => {
-    view = TestRenderer.create(createElement(AssetRefreshPanel, { episodeId: "e1", onToast, onRefresh }));
+    view = TestRenderer.create(createElement(AssetRefreshPanel, { episodeId: "e1", onToast, onRefresh, onOpenBible }));
   });
-  return { view, onToast, onRefresh };
+  return { view, onToast, onRefresh, onOpenBible };
 }
 
 describe("参考资产已更新面板", () => {
@@ -224,4 +226,5 @@ describe("参考资产已更新面板", () => {
     );
     act(() => view.unmount());
   });
+
 });

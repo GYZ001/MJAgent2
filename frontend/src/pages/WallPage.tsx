@@ -443,7 +443,7 @@ export default function WallPage() {
         )}
       </section>
 
-      <AssetRefreshPanel episodeId={ep.id} onToast={toast} onRefresh={refreshAll} /><div className="workspace-gap" />
+      <AssetRefreshPanel episodeId={ep.id} onToast={toast} onRefresh={refreshAll} onOpenBible={() => go('bible', projectId)} /><div className="workspace-gap" />
 
       {!shots.length ? (
         <div className="empty">

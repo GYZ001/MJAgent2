@@ -151,10 +151,16 @@ def episode_asset_refresh_groups(conn: Any, episode_row: Any) -> dict[str, Any]:
     """本集按实体成组的参考资产更新报告（只读）。"""
     episode_id = str(episode_row["id"])
     project_id, episode_no = episode_row["project_id"], episode_row["episode_no"]
-    bible, screenplay = drift.episode_bible_and_screenplay(conn, episode_row, project_id)
     shots = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
     ).fetchall()
+    if not any(row["adopted_version_id"] for row in shots):
+        return {
+            "episode_id": episode_id, "groups": [],
+            "needs_regen_shot_count": 0, "needs_regen_seconds": 0,
+            "bible": None, "screenplay": None,
+        }
+    bible, screenplay = drift.episode_bible_and_screenplay(conn, episode_row, project_id)
     records = [
         _shot_record(conn, row, project_id=project_id, episode_no=episode_no, bible=bible, screenplay=screenplay)
         for row in shots

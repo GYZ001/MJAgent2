@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { api } from '../api'
+import { useEffect, useRef, useState } from 'react'
+import { api, ApiError } from '../api'
 import type { AssetRefreshGroup, AssetRefreshReport } from '../api/assetRefresh'
 
 /** 「参考资产已更新」面板（2026-10-03）：人物定妆照/场景图/道具卡在本集已
@@ -33,27 +33,51 @@ export default function AssetRefreshPanel({
   episodeId,
   onToast,
   onRefresh,
+  onOpenBible,
 }: {
   episodeId: string
   onToast: (message: string, isErr?: boolean) => void
   onRefresh: () => unknown
+  onOpenBible: () => void
 }) {
   const [report, setReport] = useState<AssetRefreshReport | null>(null)
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [selected, setSelected] = useState<SelectionMap>({})
+  const [loadError, setLoadError] = useState<{ message: string; openBible: boolean } | null>(null)
+  const scopeRef = useRef(0)
+  const requestRef = useRef(0)
 
   const load = async () => {
+    const scope = scopeRef.current
+    const request = ++requestRef.current
+    const isCurrent = () => scope === scopeRef.current && request === requestRef.current
+    setLoadError(null)
     try {
-      setReport(await api.getAssetRefreshReport(episodeId))
+      const next = await api.getAssetRefreshReport(episodeId)
+      if (isCurrent()) setReport(next)
     } catch (error) {
-      onToast(error instanceof Error ? error.message : String(error), true)
+      if (!isCurrent()) return
+      const detail = error instanceof ApiError ? error.detail : null
+      setReport(null)
+      setLoadError({
+        message: error instanceof Error ? error.message : String(error),
+        openBible: typeof detail === 'object' && detail !== null
+          && 'recommended_action' in detail && detail.recommended_action === 'open_bible',
+      })
     }
   }
 
-  useEffect(() => { void load() }, [episodeId])
+  useEffect(() => {
+    ++scopeRef.current
+    setReport(null)
+    setSelected({})
+    setBusyKey(null)
+    void load()
+    return () => { ++scopeRef.current }
+  }, [episodeId])
 
   useEffect(() => {
-    if (!report) return
+    if (!report || report.episode_id !== episodeId) return
     setSelected(prev => {
       const next: SelectionMap = {}
       for (const group of report.groups) {
@@ -67,25 +91,38 @@ export default function AssetRefreshPanel({
       }
       return next
     })
-  }, [report])
+  }, [report, episodeId])
 
-  if (!report || report.groups.length === 0) return null
+  if (loadError) return (
+    <section className="card asset-refresh-panel" role="alert" aria-label="参考资产核对暂不可用">
+      <b>暂无法核对参考资产</b>
+      <p className="hint">{loadError.message}</p>
+      <div className="asset-refresh-actions">
+        {loadError.openBible && <button className="btn" type="button" onClick={onOpenBible}>前往世界书</button>}
+        <button className="btn" type="button" onClick={() => { void load() }}>重试</button>
+      </div>
+    </section>
+  )
+  if (!report || report.episode_id !== episodeId || report.groups.length === 0) return null
 
   const regenerateGroup = async (group: AssetRefreshGroup) => {
+    const scope = scopeRef.current
     setBusyKey(group.entity_key)
     try {
       const result = await api.regenerateAssetRefresh(episodeId, [group.entity_key], newIdemKey(`asset-refresh:${episodeId}`))
+      if (scope !== scopeRef.current) return
       onToast(result.errors.length ? `${result.message}：${result.errors.map(e => `段 ${e.shot_id} 被拦住`).join('；')}` : result.message, result.errors.length > 0)
       await load()
-      await onRefresh()
+      if (scope === scopeRef.current) await onRefresh()
     } catch (error) {
-      onToast(error instanceof Error ? error.message : String(error), true)
+      if (scope === scopeRef.current) onToast(error instanceof Error ? error.message : String(error), true)
     } finally {
-      setBusyKey(null)
+      if (scope === scopeRef.current) setBusyKey(null)
     }
   }
 
   const adoptGroup = async (group: AssetRefreshGroup) => {
+    const scope = scopeRef.current
     const versions = selected[group.entity_key] || {}
     const needed = group.members.filter(m => m.status === 'has_candidate')
     if (group.needs_regen_shot_ids.length > 0) {
@@ -102,13 +139,14 @@ export default function AssetRefreshPanel({
         episodeId, group.entity_key, versions, `按最新参考统一采用「${group.entity_name}」`,
         newIdemKey(`asset-refresh-adopt:${episodeId}`),
       )
+      if (scope !== scopeRef.current) return
       onToast(`已一次性替换 ${result.adopted.length} 段的采用视频；旧版本保留可回退`)
       await load()
-      await onRefresh()
+      if (scope === scopeRef.current) await onRefresh()
     } catch (error) {
-      onToast(error instanceof Error ? error.message : String(error), true)
+      if (scope === scopeRef.current) onToast(error instanceof Error ? error.message : String(error), true)
     } finally {
-      setBusyKey(null)
+      if (scope === scopeRef.current) setBusyKey(null)
     }
   }
 

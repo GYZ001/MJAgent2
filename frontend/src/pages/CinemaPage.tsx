@@ -444,7 +444,7 @@ export default function CinemaPage() {
       {/* 已有 ep 后台轮询失败不再被早退 QueryState 吞掉，见 StaleRefreshBanner 注释 */}
       <StaleRefreshBanner error={error} onRetry={() => void refreshEpisode()} objectName="成片台" />
 
-      <AssetRefreshPanel episodeId={ep.id} onToast={toast} onRefresh={refreshEpisode} />
+      <AssetRefreshPanel episodeId={ep.id} onToast={toast} onRefresh={refreshEpisode} onOpenBible={() => go('bible', projectId)} />
 
       {mix ? (
         <>
