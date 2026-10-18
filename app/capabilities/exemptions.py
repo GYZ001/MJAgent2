@@ -157,9 +157,9 @@ EXEMPT_ROUTE_PERMISSIONS: dict[str, _RouteExemption] = {
         _WRITE,
     ),
     "POST /api/projects/{project_id}/props/{name}/regenerate": _RouteExemption(
-        "物件库人工重生成单件道具参考图；页面评审入口，不向 Agent/MCP 开放",
-        _GENERATE,
+        "物件库人工重生成单件道具参考图；页面评审入口，不向 Agent/MCP 开放", _GENERATE,
     ),
+    "POST /api/projects/{project_id}/props/build-retry": _RouteExemption("物件库人工重试失败补建；只接受当前项目分镜中实际缺图的道具", _GENERATE),
     "POST /api/projects/{project_id}/props/audit": _RouteExemption("物件库人工发起整项目道具卡复核；文本调用不计费，页面入口，不向 Agent/MCP 开放", _GENERATE),
     "POST /api/projects/{project_id}/props/audit/confirm": _RouteExemption("人工确认删除一条复核存疑；按卡名+原文定位后走与自动删除同一条核验，页面入口", _GENERATE),
     "POST /api/projects/{project_id}/props/audit/keep": _RouteExemption("人工保留一条复核存疑（否定模型的怀疑）；只落决定记录，不改动道具卡内容", _DECIDE),

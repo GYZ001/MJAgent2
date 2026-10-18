@@ -14,6 +14,8 @@ from app.domain.common import _media_url, _project_or_404, router
 from app.props import props_for_project, regenerate_prop_reference
 from app.props.card_audit import audits_for_project, launch_background_audit_for_project
 from app.props.card_audit_doubts import confirm_doubt, keep_doubt
+from app.props.card_pending_ensure import launch_background_ensure
+from app.props.card_pending_recovery import builds_for_project, retry_failed_build
 
 
 class PropAuditDoubtBody(BaseModel):
@@ -21,6 +23,11 @@ class PropAuditDoubtBody(BaseModel):
     避免道具名里的特殊字符（空格、斜杠等）在 URL 路径段里被误解析。"""
     prop_name: str = Field(min_length=1)
     doubt_key: str = Field(min_length=1)
+
+
+class PropBuildRetryBody(BaseModel):
+    episode_id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
 
 
 @router.get("/projects/{project_id}/props")
@@ -32,7 +39,22 @@ async def list_props(project_id: str):
         {**item, "image_url": _media_url(item.get("image_path"))}
         for item in props_for_project(conn, project_id)
     ]
-    return {"project_id": project_id, "items": items}
+    return {"project_id": project_id, "items": items, "builds": builds_for_project(conn, project_id)}
+
+
+@router.post("/projects/{project_id}/props/build-retry")
+async def retry_prop_build(project_id: str, body: PropBuildRetryBody):
+    """修复模型配置后显式重试失败补建；目标必须属于本项目的实际分镜。"""
+    _project_or_404(project_id)
+    try:
+        shot_ids = await retry_failed_build(project_id, body.episode_id, body.label)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if shot_ids:
+        launch_background_ensure(
+            project_id=project_id, episode_id=body.episode_id, shot_ids=shot_ids, labels=frozenset({body.label}),
+        )
+    return {"accepted": bool(shot_ids), "label": body.label}
 
 
 @router.post("/projects/{project_id}/props/{name}/regenerate")

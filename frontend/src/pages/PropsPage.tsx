@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, type PropAuditRecord, type PropItem } from '../api'
+import { api, type PropAuditRecord, type PropBuildRecord, type PropItem } from '../api'
 import { useNav, useProject } from '../App'
 import PrepSubnav from '../components/PrepSubnav'
 import PropAuditDoubts from '../components/PropAuditDoubts'
+import PropBuildStatus from '../components/PropBuildStatus'
 import QueryState from '../components/QueryState'; import StaleRefreshBanner from '../components/StaleRefreshBanner'
 import SearchField from '../components/SearchField'
 import { SINGLE_ROW_ASSET_PAGE, useFillPageSize } from '../hooks/useFillPageSize'
@@ -47,6 +48,7 @@ export default function PropsPage() {
   // 只需要项目名与状态，用最轻的 episodes 投影（不带世界书 JSON）。
   const { data: p, refresh, error, status, loading } = useProject(projectId!, undefined, 'episodes')
   const [items, setItems] = useState<PropItem[] | null>(null)
+  const [builds, setBuilds] = useState<PropBuildRecord[]>([])
   const [listError, setListError] = useState<string | null>(null)
   const [busyName, setBusyName] = useState<string | null>(null)
   const [auditByName, setAuditByName] = useState<Record<string, PropAuditRecord>>({})
@@ -73,12 +75,18 @@ export default function PropsPage() {
     try {
       const res = await api.listProps(projectId)
       setItems(res.items)
+      setBuilds(res.builds ?? [])
       setListError(null)
     } catch (e) {
       setListError(e instanceof Error ? e.message : String(e))
     }
   }, [projectId])
   useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    if (!builds.some(build => build.status === 'running' || build.status === 'queued')) return
+    const timer = window.setInterval(() => void load(), 5000)
+    return () => window.clearInterval(timer)
+  }, [builds, load])
 
   const loadAudits = useCallback(async () => {
     if (!projectId) return
@@ -157,6 +165,7 @@ export default function PropsPage() {
       </header>
       {/* 已有 p 后台轮询失败不再被早退 QueryState 吞掉，见 StaleRefreshBanner 注释 */}
       <StaleRefreshBanner error={error} onRetry={refresh} objectName="物件库" />
+      <PropBuildStatus projectId={projectId!} builds={builds} onRefresh={load} toast={toast} />
 
       <section className="card scene-library">
         <h3>道具参考图

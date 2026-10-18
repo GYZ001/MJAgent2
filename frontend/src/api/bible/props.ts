@@ -13,10 +13,25 @@ export interface PropItem {
 export interface PropListResponse {
   project_id: string;
   items: PropItem[];
+  builds?: PropBuildRecord[];
+}
+
+export interface PropBuildRecord {
+  label: string;
+  status: string;
+  attempts: number;
+  error: string | null;
+  episodes: { id: string; episode_no: number }[];
 }
 
 export function listProps(projectId: string): Promise<PropListResponse> {
   return request("GET", `/projects/${encodeURIComponent(projectId)}/props`);
+}
+
+export function retryPropBuild(projectId: string, episodeId: string, label: string): Promise<{ accepted: boolean }> {
+  return mutate("POST", `/projects/${encodeURIComponent(projectId)}/props/build-retry`, {
+    episode_id: episodeId, label,
+  });
 }
 
 export function regenerateProp(projectId: string, name: string): Promise<PropItem> {

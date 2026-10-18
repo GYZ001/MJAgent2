@@ -5,8 +5,8 @@ docstring；本文件只记与它不同的地方。
 与场景状态图的关键差异：道具卡一旦建成是永久性的（外观锚定不会因为别的段
 进度而改变），没有"指纹是否仍匹配当前期望"这层概念，所以状态机只有
 queued/running/ready/failed 四态，没有 fingerprint/stale。失败有重试上限
-（``MAX_BUILD_ATTEMPTS``，CLAUDE.md「额度」纪律），超限后不再阻塞生成——退回
-本功能上线前"该 label 没有卡"的既有降级行为，不会永久卡住视频生成命令。
+（``MAX_BUILD_ATTEMPTS``，CLAUDE.md「额度」纪律）；失败时展示原因并保留生成
+闸门，由物件库的显式重试入口恢复，不能把重试耗尽当作参考图已就绪。
 
 **状态写入必须用独立连接**：``claim_or_get``/``_mark_ready``/``_mark_failed``
 走 ``app.db.run_write_transaction``，不在调用方 ``get_conn()`` 的连接上
@@ -45,10 +45,12 @@ from app.db import get_conn, new_id, now
 from app.evidence.txn_guard import rollback_uncommitted_on_error
 from app.props.card_match import match_existing_prop_card
 from app.props.card_pending_scan import (
+    _prop_has_ready_reference,
     candidate_labels_without_card,
     label_shot_occurrences,
     load_episode_shot_rows,
 )
+from app.props.card_pending_recovery import failed_build_message
 from app.props.card_pending_store import (
     ensure_tables_on_connection,
     get_pending,
@@ -57,7 +59,7 @@ from app.props.card_pending_store import (
     update_ready,
     update_running,
 )
-from app.props.service import bind_existing_prop_alias, register_prop_card_for_label
+from app.props.service import bind_existing_prop_alias, regenerate_prop_reference, register_prop_card_for_label
 
 log = logging.getLogger(__name__)
 
@@ -70,8 +72,8 @@ _BACKGROUND_ENSURE_TASKS: set[asyncio.Task[None]] = set()
 
 def _is_blocking(row: dict[str, Any] | None) -> bool:
     """这个 label 本轮还要不要拦住生成：``ready`` 不拦；``running``（未超时）
-    说明已有人在建，拦着等；``failed`` 只在重试额度未用尽时才继续拦，用尽后
-    放行（退回"无卡"的既有降级）；没有记录（从未尝试过）要拦。"""
+    说明已有人在建，拦着等；``failed`` 要展示失败并等待显式重试；没有记录
+    （从未尝试过）要拦。重试次数决定是否继续调用模型，不决定资产是否就绪。"""
     if row is None:
         return True
     status = row["status"]
@@ -80,7 +82,7 @@ def _is_blocking(row: dict[str, Any] | None) -> bool:
     if status == "running":
         return True  # 未超时=有人在建；僵死=下一次 ensure 会重新抢占，两种都先拦
     if status == "failed":
-        return int(row["attempts"] or 0) < MAX_BUILD_ATTEMPTS
+        return True
     return True
 
 
@@ -179,13 +181,15 @@ async def _build_one_label(
         )
     try:
         conn = get_conn()
-        card = match_existing_prop_card(
-            label, evidence_text, cards,
-            cards_with_prior_evidence=frozenset(),
-        )
+        card = _card_for_build(label, evidence_text, cards)
         if card is not None:
             bind_existing_prop_alias(conn, project_id, card.name, label)
             conn.commit()
+            if not _prop_has_ready_reference(conn, project_id, card.name, episode_no):
+                result = await regenerate_prop_reference(project_id, card.name)
+                if result["status"] != "ready":
+                    await _mark_failed(row_id=row["id"], error="出图失败，无参考图")
+                    return
             await _mark_ready(row_id=row["id"], resolved_name=card.name)
             return
         result = await register_prop_card_for_label(
@@ -199,6 +203,14 @@ async def _build_one_label(
         await _mark_ready(row_id=row["id"], resolved_name=resolved_name)
     except Exception as exc:  # noqa: BLE001 单个道具建卡失败不打断其它道具/不向上抛出
         await _mark_failed(row_id=row["id"], error=str(exc))
+
+
+def _card_for_build(label: str, evidence_text: str, cards: list[Any]) -> Any | None:
+    """分镜明确引用既有卡名/别名时直接复用；其它写法仍须核验原文证据。"""
+    exact = [card for card in cards if label in {card.name, *card.aliases}]
+    if len(exact) == 1:
+        return exact[0]
+    return match_existing_prop_card(label, evidence_text, cards, cards_with_prior_evidence=frozenset())
 
 
 def _load_bible_for_ensure(conn: Any, project_id: str) -> Any | None:
@@ -240,6 +252,7 @@ def _filter_candidates_for_shots(
 
 async def ensure_storyboard_prop_cards(
     *, project_id: str, episode_id: str, shot_ids: list[str] | None = None,
+    labels: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """补齐一集（或 ``shot_ids`` 指定的若干段）里缺卡的道具。候选判定始终按
     整集计算，``shot_ids`` 只过滤最终要并发建卡的目标集合（与
@@ -256,9 +269,12 @@ async def ensure_storyboard_prop_cards(
         candidates = candidate_labels_without_card(conn, project_id, episode_no, shot_rows)
         target_shot_nos = _target_shot_nos(shot_rows, shot_ids)
         scoped = _filter_candidates_for_shots(candidates, target_shot_nos)
+        if labels is not None:
+            scoped = {label: info for label, info in scoped.items() if label in labels}
         buildable = {
             label: info for label, info in scoped.items()
-            if _is_blocking(get_pending(conn, project_id=project_id, label=label))
+            if _is_blocking(row := get_pending(conn, project_id=project_id, label=label))
+            and (row is None or row["status"] != "failed")
         }
         if buildable:
             style = bible.world.visual_style_canonical
@@ -281,18 +297,21 @@ async def ensure_storyboard_prop_cards(
         return {"candidates": sorted(scoped), "attempted": sorted(buildable)}
 
 
-async def _run_ensure_quietly(*, project_id: str, episode_id: str, shot_ids: list[str] | None) -> None:
+async def _run_ensure_quietly(
+    *, project_id: str, episode_id: str, shot_ids: list[str] | None, labels: frozenset[str] | None,
+) -> None:
     try:
-        await ensure_storyboard_prop_cards(project_id=project_id, episode_id=episode_id, shot_ids=shot_ids)
+        await ensure_storyboard_prop_cards(project_id=project_id, episode_id=episode_id, shot_ids=shot_ids, labels=labels)
     except Exception:  # noqa: BLE001 - 后台受理任务，失败只记日志
         log.exception("[PROP_STORYBOARD_CARD_ENSURE_BACKGROUND_FAILED] episode_id=%s", episode_id)
 
 
 def launch_background_ensure(
     *, project_id: str, episode_id: str, shot_ids: list[str] | None = None,
+    labels: frozenset[str] | None = None,
 ) -> "asyncio.Task[None]":
     task = asyncio.create_task(
-        _run_ensure_quietly(project_id=project_id, episode_id=episode_id, shot_ids=shot_ids),
+        _run_ensure_quietly(project_id=project_id, episode_id=episode_id, shot_ids=shot_ids, labels=labels),
     )
     _BACKGROUND_ENSURE_TASKS.add(task)
     task.add_done_callback(_BACKGROUND_ENSURE_TASKS.discard)
@@ -307,7 +326,8 @@ async def pending_prop_card_gate(
     启动后台补卡并返回提示文案；全部不拦后，再检查这些段用到的既有道具卡
     是否按现行规则复核版本落后（``app.props.card_audit_ensure``，2026-10-03
     新增，触发点②），落后同样拦住并后台发起复核。全部不拦（已建成/复核已是
-    最新版本/重试额度用尽）时返回 ``None``，不阻塞生成。"""
+    最新版本）时返回 ``None``，不阻塞生成。补建失败不自动重放，提示用户
+    修复原因后到物件库显式重试。"""
     conn = get_conn()
     resolved = _episode_text_and_no(conn, episode_id)
     if resolved is None:
@@ -324,6 +344,9 @@ async def pending_prop_card_gate(
     pending = [label for label, row in pending_rows.items() if _is_blocking(row)]
     scope = "本段" if shot_ids else "本集"
     if pending:
+        failed_rows = {label: pending_rows[label] for label in pending if pending_rows[label] and pending_rows[label]["status"] == "failed"}
+        if failed_rows:
+            return failed_build_message(scope, failed_rows)
         if any(_needs_new_launch(pending_rows[label]) for label in pending):
             launch_background_ensure(project_id=project_id, episode_id=episode_id, shot_ids=shot_ids)
         return f"{scope}涉及的 {len(pending)} 件道具正在补建参考图（约 1 分钟），生成好后再点「生成」"

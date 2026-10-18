@@ -230,7 +230,7 @@ def test_ensure_builds_new_card_for_qualifying_label(monkeypatch) -> None:
     assert "白色陶瓷杯" in names
 
 
-def test_ensure_binds_alias_when_card_match_hits_existing_card(monkeypatch) -> None:
+def test_ensure_binds_alias_when_card_match_hits_existing_card(monkeypatch, tmp_path) -> None:
     from app.props import judge, service
 
     # 命中既有卡就该走别名登记、不再发模型调用——用会报错的桩钉住这条路径。
@@ -240,6 +240,12 @@ def test_ensure_binds_alias_when_card_match_hits_existing_card(monkeypatch) -> N
         "name": "行李箱", "appearance_canonical": "灰色硬壳行李箱", "aliases": [],
     }])
     _seed_episode("proj_build_2", "ep_build_2", 1)
+    from app.props.store import upsert_prop_reference
+    path = tmp_path / "prop.png"
+    path.write_bytes(b"reference")
+    upsert_prop_reference(get_conn(), "proj_build_2", "行李箱", 1,
+                          appearance="灰色硬壳行李箱", image_path=str(path), prompt="", status="ready", qa={})
+    get_conn().commit()
     _seed_shot("ep_build_2", 1, [{"label": "旧行李箱", "description": "行李箱边角有磨损"}])
     _seed_shot("ep_build_2", 2, [{"label": "旧行李箱", "description": "行李箱轮子掉了一个"}])
 
@@ -304,7 +310,7 @@ def test_pending_gate_blocks_until_ready_then_releases(monkeypatch) -> None:
     assert message2 is None
 
 
-def test_pending_gate_does_not_block_forever_after_quota_exhausted() -> None:
+def test_pending_gate_reports_failure_after_quota_exhausted() -> None:
     _seed_project("proj_gate_2")
     _seed_episode("proj_gate_2", "ep_gate_2", 1)
     _seed_shot("ep_gate_2", 1, [{"label": "白色陶瓷杯", "description": "a"}])
@@ -317,7 +323,7 @@ def test_pending_gate_does_not_block_forever_after_quota_exhausted() -> None:
     )
     conn.commit()
     message = asyncio.run(ensure_mod.pending_prop_card_gate("proj_gate_2", "ep_gate_2"))
-    assert message is None, "重试额度用尽后不得永久阻塞生成（退回无卡的既有降级）"
+    assert message is not None and "补建失败" in message and "重试补建" in message
 
 
 def _seed_gate_project_with_running_row(project_id: str, episode_id: str, *, stamp: float) -> None:
@@ -429,15 +435,9 @@ def test_combined_evidence_includes_matching_source_sentence() -> None:
     assert "原文：桌上那只白色陶瓷杯还温着" in text
 
 
-# ---------------------------------------------------------------------------
-# 6) 对已采纳视频交付零影响
-# ---------------------------------------------------------------------------
 
 def _commit_shot_video_artifact(conn, *, shot_id: str, version_id: str, path) -> str:
-    """提交一条最简 shot_video artifact，供交付清单测试使用。不借用
-    ``tests/test_identity_revision_retention.py`` 的同名函数——该文件是另一
-    个并行工作流的在途改动范围（见本次派单「并发」约束），其签名/位置随时
-    可能变化；本测试文件就近自带一份独立副本。"""
+    """提交最简 shot_video artifact，供交付清单测试使用。"""
     from app.evidence import repository
     from app.harness.types import Evaluation, EvidenceArtifact
 
