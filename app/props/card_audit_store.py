@@ -101,13 +101,19 @@ _ensured_paths: set[str] = set()
 
 
 def ensure_tables_on_connection(conn: sqlite3.Connection) -> None:
-    """轻量、同连接、无副作用的建表兜底，安全用于调用方已持有事务的场景。"""
+    """同连接建表并升级旧表，不提交调用方事务；迁移随调用方一起回滚。"""
     for statement in _CREATE_STATEMENTS:
         conn.execute(statement)
+    # CREATE TABLE IF NOT EXISTS 不会给存量表补列；两个后加字段也必须迁移，
+    # 否则抢占/结果写回永远失败，生成闸门却一直提示「正在复核」。
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(prop_card_rule_audits)")}
+    for name in ("claim_token", "doubts_json"):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE prop_card_rule_audits ADD COLUMN {name} TEXT")
 
 
 def ensure_schema() -> None:
-    """幂等建表；按当前 ``db.DB_PATH`` 记忆已建，避免每次调用都重跑 DDL。"""
+    """幂等建表/迁移；按当前 ``db.DB_PATH`` 记忆已完成，避免每次重跑 DDL。"""
     key = str(db.DB_PATH)
     if key in _ensured_paths:
         return
